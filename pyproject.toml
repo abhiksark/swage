@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "swage-compiler"
+dynamic = ["version"]
+description = "Python-embedded MLIR/LLVM GPU compiler for variable-sized dense segments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Abhik Sarkar", email = "abhiksark@gmail.com" }]
+keywords = ["mlir", "llvm", "gpu", "compiler", "cuda", "ragged", "segments"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Repository = "https://github.com/abhiksark/swage"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "lit"]
+docs = ["mkdocs", "mkdocs-material"]
+
+[tool.hatch.version]
+path = "python/swage/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/swage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.ruff]
+line-length = 80
+target-version = "py310"
+extend-exclude = ["build", "test/lit.cfg.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "D"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
