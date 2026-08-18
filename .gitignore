@@ -1,0 +1,31 @@
+# Build trees
+build/
+build-*/
+*.o
+*.a
+*.so
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# Tool caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Docs output
+site/
+
+# Swage artifacts
+.swage-cache/
