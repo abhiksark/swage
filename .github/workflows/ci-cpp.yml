@@ -52,23 +52,28 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q ninja-build ccache
 
-      - name: Build pinned LLVM/MLIR (cache miss only)
+      - name: Fetch Python binding requirements (cache miss only)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
           ./scripts/fetch_llvm.sh
-          SWAGE_LLVM_BUILD_TYPE=Release SWAGE_LLVM_PYTHON_BINDINGS=ON \
-            ./scripts/build_llvm.sh
+          mkdir -p "$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}"
           cp "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}/mlir/python/requirements.txt" \
              "$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/python-requirements.txt"
-          rm -rf "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}" \
-                 "$SWAGE_LLVM_HOME/build-${{ steps.pin.outputs.tag }}" \
-                 "$SWAGE_LLVM_HOME"/*.tar.xz
 
       - name: Install Python binding test dependencies
         run: >
           python -m pip install
           -r /home/runner/.swage/llvm/install-${{ steps.pin.outputs.tag }}/python-requirements.txt
           pytest lit
+
+      - name: Build pinned LLVM/MLIR (cache miss only)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          SWAGE_LLVM_BUILD_TYPE=Release SWAGE_LLVM_PYTHON_BINDINGS=ON \
+            ./scripts/build_llvm.sh
+          rm -rf "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}" \
+                 "$SWAGE_LLVM_HOME/build-${{ steps.pin.outputs.tag }}" \
+                 "$SWAGE_LLVM_HOME"/*.tar.xz
 
       - name: Build Swage and run lit suite
         run: SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh
