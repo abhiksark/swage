@@ -18,9 +18,15 @@ semantic versioning (`0.x` — anything may change).
   `scripts/fetch_llvm.sh` / `build_llvm.sh` / `build_swage.sh`.
 - Python package `swage-compiler` (import `swage`) with
   `python -m swage.env` environment diagnostics.
+- Native build-tree `mlir_swage` package with generated `swage` bindings,
+  dialect registration, and the `check-swage-python` integration target.
+- Bindings-enabled `ci-cpp` coverage that runs the native integration target
+  after the lit suite and installs MLIR Python requirements on cold and warm
+  LLVM cache paths.
 - Project documentation (README, DESIGN, ROADMAP, concept docs, ADRs
-  0001–0007), community health files, issue forms, and CPU CI.
+  0001–0009), community health files, issue forms, and CPU CI.
 
 ### Notes
 
-- No Python kernel compiles or executes yet; see the README status table.
+- No Python kernel compiles or executes yet. The frontend remains deferred to
+  Issue #4; see the README status table.

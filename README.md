@@ -81,6 +81,7 @@ warp or CTA. See
 | `swage` MLIR dialect (`!swage.segment<T>`, `segment_id`, `make_segment`, `extent`) | **Works today** — parses, prints, verifies; lit-tested |
 | Pinned out-of-tree LLVM/MLIR build (`llvmorg-22.1.8`) + `swage-opt` | **Works today** |
 | `python -m swage.env` environment diagnostics | **Works today** |
+| Native `mlir_swage` bindings package | **Works today** from the build tree; integration-tested |
 | Python AST → Swage MLIR frontend (fixed-block subset) | In progress |
 | Fixed vector add through LLVM NVPTX to a real GPU result | In progress |
 | Segment lowering (segmented sum/max, ragged softmax) | Planned |
@@ -105,6 +106,11 @@ segment-local kernel.
 make setup
 make test
 ```
+
+The native bindings require the pinned LLVM/MLIR install with its Python
+bindings enabled. Run `ninja -C build check-swage-python` after the native
+build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. The Python
+frontend remains deferred to Issue #4, so no Python kernel compiles or runs.
 
 See [docs/quickstart.md](docs/quickstart.md). A GPU is not required to
 build, test, or contribute.

@@ -5,17 +5,18 @@
 
 ## Context
 
-The frontend constructs Swage MLIR directly through the MLIR Python
-bindings (ADR-0001); textual IR is a debug format. That makes issue #5 —
-registering the `swage` dialect in the bindings — the gate for all of M2.
+The planned frontend constructs Swage MLIR directly through the MLIR Python
+bindings (ADR-0001); textual IR is a debug format. Issue #5 registers the
+`swage` dialect in those bindings, but it does not complete M2 or implement
+the frontend. Issue #4 remains the deferred frontend follow-up.
 Two designs needed a decision with alternatives:
 
 1. How the dialect's Python package relates to MLIR's. A thin package
    that layers onto whatever `mlir` package the environment supplies,
    versus a self-contained package that embeds the pinned MLIR core.
-2. Where the bindings are tested. The CI LLVM cache is currently built
-   with `MLIR_ENABLE_BINDINGS_PYTHON=OFF` (the `nopy` cache key), so CI
-   cannot exercise bindings at all without a cache rebuild.
+2. Where the bindings are tested. The native CI path must build the pinned
+   LLVM/MLIR with Python bindings and run an integration test from the
+   Swage build tree.
 
 ## Decision
 
@@ -49,11 +50,12 @@ installed pin:
   round-trips the text against the lit suite's expectations; a negative
   path asserting a verifier failure surfaces as a Python exception. A
   `check-swage-python` target runs them with the correct `PYTHONPATH`.
-- `ci-cpp` builds the LLVM cache with bindings ON: Python pinned via
-  `actions/setup-python`, MLIR's `python/requirements.txt` installed on
-  cache miss, and the cache key extended with the Python minor version
-  (the extension is ABI-specific) and bumped to `v2`. pytest runs after
-  the lit suite. `ci-python` keeps no LLVM dependency.
+- `ci-cpp` builds the LLVM cache with bindings ON: Python is pinned via
+  `actions/setup-python`, a cache miss copies MLIR's
+  `python/requirements.txt` into the cached install tree, and every cold or
+  warm job installs that file plus `pytest` and `lit`. The cache key includes
+  the Python minor version because the extension is ABI-specific; pytest runs
+  after the lit suite. `ci-python` keeps no LLVM dependency.
 
 Out of scope until a consumer exists: wheel packaging of `mlir_swage`,
 a public `swage.ir` API, injection into the upstream `mlir.dialects`
@@ -64,6 +66,11 @@ namespace, and Windows/macOS bindings builds.
 - The M2 emitter (#4) imports `mlir_swage` from the build tree via
   `PYTHONPATH`; how the pip package `swage-compiler` ships or locates
   the native package is a packaging decision deferred to the wheel ADR.
+- Contributors run `ninja -C build check-swage-python`, which sets
+  `PYTHONPATH=build/python_packages`. An install built with bindings off must
+  be rebuilt with `SWAGE_LLVM_PYTHON_BINDINGS=ON`, then Swage must be
+  reconfigured with `-DSWAGE_PYTHON_BINDINGS=ON`; an incompatible install
+  fails configuration instead of silently skipping bindings.
 - One LLVM cache serves lit and pytest. The flip costs one full CI
   LLVM rebuild (~3.5 h, as measured on the `nopy` cache) and grows the
   cache by the Python package; afterwards runs return to minutes.

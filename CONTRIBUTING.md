@@ -32,12 +32,29 @@ The LLVM pin lives in `cmake/llvm-version.txt`; never change it in a
 feature PR (see ADR-0004). If you already have a matching MLIR install,
 point `MLIR_DIR`/`LLVM_DIR` at it and skip the LLVM build.
 
+The native `mlir_swage` bindings use the same pinned LLVM/MLIR install and
+are enabled by default. After the native build, run:
+
+```bash
+ninja -C build check-swage-python
+```
+
+This target provides the build-tree `PYTHONPATH` for `mlir_swage`. If the
+install was built with `SWAGE_LLVM_PYTHON_BINDINGS=OFF`, rebuild it with that
+variable set to `ON`, then reconfigure Swage with
+`-DSWAGE_PYTHON_BINDINGS=ON`. CMake rejects an enabled binding build against
+an MLIR install without Python bindings.
+
 ## Contributor paths
 
 - **Documentation** — fix inaccuracies first, clarity second. Docs claiming
   more than the tests show are bugs.
 - **Python frontend** — `python/swage/`; pytest + ruff; Google style,
-  80 columns; see `python/AGENTS.md`.
+  80 columns; see `python/AGENTS.md`. The frontend remains deferred to
+  Issue #4.
+- **Native bindings:** `python/mlir_swage/`; run `check-swage-python` after
+  a bindings-enabled native build. This package is build-tree-only until
+  wheel packaging is designed.
 - **MLIR dialect** — `include/swage/`, `lib/`; ODS + verifiers + lit tests;
   see `lib/AGENTS.md` and `test/AGENTS.md`.
 - **GPU backend** — arrives with M3+; watch issues labeled `area:runtime`.

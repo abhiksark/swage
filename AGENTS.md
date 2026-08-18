@@ -46,6 +46,9 @@ ruff check .
 ./scripts/build_swage.sh          # configure + build + check-swage
 ninja -C build check-swage        # lit suite only, after a build exists
 
+# Native Python bindings (requires bindings-enabled pinned LLVM/MLIR)
+ninja -C build check-swage-python
+
 # Environment diagnostics
 python -m swage.env
 ```
@@ -65,3 +68,12 @@ python -m swage.env
 Every completed task reports: files changed; whether semantic behavior
 changed; tests run / passed / skipped; GPU architecture used (if any);
 known limitations; follow-up issue.
+
+## Native Python bindings
+
+`mlir_swage` is imported from `build/python_packages`, not from the
+`swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
+build-tree `PYTHONPATH`. The bindings require an MLIR install built with
+Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
+is an error. The Python frontend is deferred to Issue #4, and no Python
+kernel compiles or executes.
