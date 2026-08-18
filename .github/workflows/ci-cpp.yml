@@ -1,0 +1,63 @@
+name: ci-cpp
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cpp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    # First run on a new LLVM pin builds LLVM from source (~3h); afterwards
+    # the install tree is cached and the job takes minutes.
+    timeout-minutes: 350
+    env:
+      SWAGE_LLVM_HOME: /home/runner/.swage/llvm
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Read LLVM pin
+        id: pin
+        run: echo "tag=$(cat cmake/llvm-version.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache LLVM install tree
+        id: llvm-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /home/runner/.swage/llvm/install-${{ steps.pin.outputs.tag }}
+          key: llvm-${{ runner.os }}-${{ steps.pin.outputs.tag }}-release-nopy-v1
+
+      - name: Free runner disk space (LLVM build only)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup || true
+          df -h /
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ninja-build ccache
+          pip install lit
+
+      - name: Build pinned LLVM/MLIR (cache miss only)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          ./scripts/fetch_llvm.sh
+          SWAGE_LLVM_BUILD_TYPE=Release SWAGE_LLVM_PYTHON_BINDINGS=OFF \
+            ./scripts/build_llvm.sh
+          rm -rf "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}" \
+                 "$SWAGE_LLVM_HOME/build-${{ steps.pin.outputs.tag }}" \
+                 "$SWAGE_LLVM_HOME"/*.tar.xz
+
+      - name: Build Swage and run lit suite
+        run: SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh
