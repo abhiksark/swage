@@ -1,0 +1,42 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions and environment
+      description: >
+        Paste the output of `python -m swage.env` (or fill in manually:
+        Swage version/commit, LLVM revision, Python, PyTorch, GPU and
+        compute capability).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Smallest code or IR that triggers the problem, plus the exact command.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include full error output, and IR dumps if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or IR dumps
+      description: Optional; `SWAGE_DUMP_*` output once available, stack traces, etc.
+      render: text

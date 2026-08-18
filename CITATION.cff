@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use Swage in your research, please cite it as below."
+title: "Swage: turning variable-sized dense segments into efficient GPU tile tasks"
+type: software
+authors:
+  - family-names: Sarkar
+    given-names: Abhik
+repository-code: "https://github.com/abhiksark/swage"
+license: MIT
+abstract: >-
+  Swage is an experimental Python-embedded GPU compiler built on MLIR and
+  LLVM. Programmers define segment-local computations in a Triton-like
+  Python DSL; Swage lowers those semantics into cost-aware fixed-tile task
+  graphs and generates NVIDIA GPU code through MLIR, LLVM, and NVPTX.

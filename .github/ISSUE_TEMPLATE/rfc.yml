@@ -1,0 +1,50 @@
+name: RFC
+description: Propose a significant design or architecture change
+labels: ["type:rfc"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: ir-impact
+    attributes:
+      label: IR impact
+      description: New/changed ops, types, dialects; verifier implications.
+    validations:
+      required: true
+  - type: textarea
+    id: api-impact
+    attributes:
+      label: Python API impact
+    validations:
+      required: true
+  - type: textarea
+    id: lowering-impact
+    attributes:
+      label: Lowering impact
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing plan
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration plan
+      description: What breaks, and how existing users/IR move over.
