@@ -7,9 +7,9 @@
 
 #include "swage/Dialect/Swage/IR/SwageTypes.h"
 
-#include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;

@@ -7,10 +7,10 @@
 
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 
-#include "swage/Dialect/Swage/IR/SwageDialect.h"
-#include "swage/Dialect/Swage/IR/SwageTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
+#include "swage/Dialect/Swage/IR/SwageDialect.h"
+#include "swage/Dialect/Swage/IR/SwageTypes.h"
 
 #define GET_OP_CLASSES
 #include "swage/Dialect/Swage/IR/SwageOps.cpp.inc"
