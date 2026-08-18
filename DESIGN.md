@@ -61,9 +61,14 @@ not the JIT construction path.
 ## The `swage` dialect (semantic level)
 
 Implemented today: `!swage.segment<T>` plus `swage.segment_id`,
-`swage.make_segment`, `swage.extent`. Next: region-based `swage.map`,
-`swage.reduce`, `swage.map_store`, `swage.yield`, using standard `arith` /
-`math` operations inside regions.
+`swage.make_segment`, `swage.extent`, and the region-based `swage.map`,
+`swage.reduce` (kinds `sum`/`max`/`min`), `swage.map_store`, and
+`swage.yield`. Regions are isolated from above: outer values enter only
+through explicit `captures(...)`; scalar math inside regions uses standard
+`arith` / `math` operations. `swage.map_store` is the only effectful
+operation (declared write on its output). Empty-segment behavior,
+reduction identities, and the aliasing obligation are specified in
+[ADR-0008](docs/adr/ADR-0008-region-ops-isolation-and-kinds.md).
 
 Design rules (enforced by verifiers as the dialect grows):
 
