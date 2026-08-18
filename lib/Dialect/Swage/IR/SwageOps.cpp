@@ -69,6 +69,14 @@ LogicalResult ReduceOp::verifyRegions() {
                            getResult().getType());
 }
 
+LogicalResult MapStoreOp::verifyRegions() {
+  auto segmentType = llvm::cast<SegmentType>(getSegment().getType());
+  auto outputType = llvm::cast<MemRefType>(getOutput().getType());
+  return verifySwageRegion(getOperation(), getBody(),
+                           segmentType.getElementType(), getCaptures(),
+                           outputType.getElementType());
+}
+
 #include "swage/Dialect/Swage/IR/SwageEnums.cpp.inc"
 
 #define GET_ATTRDEF_CLASSES

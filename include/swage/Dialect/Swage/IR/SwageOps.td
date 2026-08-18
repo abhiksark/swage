@@ -167,8 +167,43 @@ def Swage_ReduceOp : Swage_Op<"reduce", [IsolatedFromAbove,
   let hasRegionVerifier = 1;
 }
 
+def Swage_MapStoreOp : Swage_Op<"map_store", [IsolatedFromAbove]> {
+  let summary = "Write a per-element region's results to the segment's "
+                "range of an output buffer";
+  let description = [{
+    For every element of the segment, applies the region (captures appended
+    to the block arguments, ADR-0008) and writes the yielded value to the
+    segment's own index range in `output`; writing outside that range is
+    inexpressible. The declared write effect on `output` keeps the
+    operation alive under dead-code elimination. The output buffer must not
+    alias the segment's values buffer (a runtime obligation). Over an empty
+    segment nothing is written.
+
+    Example:
+
+    ```mlir
+    swage.map_store %seg, %out : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%x: f32):
+      swage.yield %x : f32
+    }
+    ```
+  }];
+  let arguments = (ins Swage_SegmentType:$segment,
+                       Arg<MemRefRankOf<[AnyInteger, AnyFloat], [1]>,
+                           "output buffer", [MemWrite]>:$output,
+                       Variadic<Swage_ScalarType>:$captures);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $segment `,` $output
+    (`captures` `(` $captures^ `:` type($captures) `)`)?
+    attr-dict `:` qualified(type($segment)) `,` type($output) $body
+  }];
+  let hasRegionVerifier = 1;
+}
+
 def Swage_YieldOp : Swage_Op<"yield", [Pure, Terminator,
-                                       ParentOneOf<["MapOp", "ReduceOp"]>]> {
+                                       ParentOneOf<["MapOp", "ReduceOp",
+                                                    "MapStoreOp"]>]> {
   let summary = "Yield the per-element result of a Swage region";
   let description = [{
     Terminates the region of a Swage region-based operation, producing the
