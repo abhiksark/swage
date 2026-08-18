@@ -1,0 +1,33 @@
+site_name: Swage
+site_description: Turn variable-sized dense segments into efficient GPU tile tasks
+repo_url: https://github.com/abhiksark/swage
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - tables
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts:
+      - Segments, Tasks, and Tiles: concepts/segments-tiles-tasks.md
+  - Architecture:
+      - Compiler pipeline: architecture/compiler-pipeline.md
+  - ADRs:
+      - "ADR-0001: Python AST directly to MLIR": adr/ADR-0001-python-ast-directly-to-mlir.md
+      - "ADR-0002: Segment/Task/Tile terminology": adr/ADR-0002-segment-task-tile-terminology.md
+      - "ADR-0003: Two dialects": adr/ADR-0003-two-dialects.md
+      - "ADR-0004: LLVM pin": adr/ADR-0004-llvm-pin.md
+      - "ADR-0005: No prototype, PyTorch oracle": adr/ADR-0005-no-prototype-pytorch-oracle.md
+      - "ADR-0006: PTX via LLVM NVPTX": adr/ADR-0006-ptx-via-llvm-nvptx.md
+      - "ADR-0007: Distribution naming": adr/ADR-0007-distribution-naming.md
