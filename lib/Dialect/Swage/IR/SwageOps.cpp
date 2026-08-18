@@ -8,10 +8,12 @@
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageTypes.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 #define GET_OP_CLASSES
 #include "swage/Dialect/Swage/IR/SwageOps.cpp.inc"
@@ -58,6 +60,25 @@ LogicalResult MapOp::verifyRegions() {
   return verifySwageRegion(getOperation(), getBody(),
                            segmentType.getElementType(), getCaptures(),
                            resultType.getElementType());
+}
+
+LogicalResult ReduceOp::verifyRegions() {
+  auto segmentType = llvm::cast<SegmentType>(getSegment().getType());
+  return verifySwageRegion(getOperation(), getBody(),
+                           segmentType.getElementType(), getCaptures(),
+                           getResult().getType());
+}
+
+#include "swage/Dialect/Swage/IR/SwageEnums.cpp.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "swage/Dialect/Swage/IR/SwageAttributes.cpp.inc"
+
+void SwageDialect::registerAttributes() {
+  addAttributes<
+#define GET_ATTRDEF_LIST
+#include "swage/Dialect/Swage/IR/SwageAttributes.cpp.inc"
+      >();
 }
 
 LogicalResult MakeSegmentOp::verify() {

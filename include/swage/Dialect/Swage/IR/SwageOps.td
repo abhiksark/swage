@@ -11,6 +11,7 @@
 include "swage/Dialect/Swage/IR/SwageTypes.td"
 include "mlir/IR/CommonAttrConstraints.td"
 include "mlir/IR/CommonTypeConstraints.td"
+include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def Swage_SegmentIdOp : Swage_Op<"segment_id", [Pure]> {
@@ -81,6 +82,24 @@ def Swage_ExtentOp : Swage_Op<"extent", [Pure]> {
 
 def Swage_ScalarType : AnyTypeOf<[AnyInteger, AnyFloat]>;
 
+def Swage_ReductionKindSum : I32EnumAttrCase<"Sum", 0, "sum">;
+def Swage_ReductionKindMax : I32EnumAttrCase<"Max", 1, "max">;
+def Swage_ReductionKindMin : I32EnumAttrCase<"Min", 2, "min">;
+
+def Swage_ReductionKind
+    : I32EnumAttr<"ReductionKind",
+                  "combining function of a swage.reduce",
+                  [Swage_ReductionKindSum, Swage_ReductionKindMax,
+                   Swage_ReductionKindMin]> {
+  let cppNamespace = "::mlir::swage";
+  let genSpecializedAttr = 0;
+}
+
+def Swage_ReductionKindAttr
+    : EnumAttr<Swage_Dialect, Swage_ReductionKind, "reduction_kind"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def Swage_MapOp : Swage_Op<"map", [IsolatedFromAbove,
                                    RecursiveMemoryEffects]> {
   let summary = "Apply a per-element region across a segment";
@@ -114,8 +133,42 @@ def Swage_MapOp : Swage_Op<"map", [IsolatedFromAbove,
   let hasRegionVerifier = 1;
 }
 
+def Swage_ReduceOp : Swage_Op<"reduce", [IsolatedFromAbove,
+                                         RecursiveMemoryEffects]> {
+  let summary = "Reduce a segment to a scalar with a combining kind";
+  let description = [{
+    Applies the region to every element (with captures appended to the
+    block arguments, ADR-0008) and combines the yielded values with `kind`.
+    The result type equals the yield type. Over an empty segment the result
+    is the identity of `kind`: `sum` -> 0, `max` -> negative infinity or the
+    minimum integer, `min` -> positive infinity or the maximum integer.
+    Every admitted kind is associative and commutative with a known
+    identity; that gate is what licenses split reductions later.
+
+    Example:
+
+    ```mlir
+    %max = swage.reduce %seg kind<max> : !swage.segment<f32> -> f32 {
+    ^bb0(%x: f32):
+      swage.yield %x : f32
+    }
+    ```
+  }];
+  let arguments = (ins Swage_SegmentType:$segment,
+                       Variadic<Swage_ScalarType>:$captures,
+                       Swage_ReductionKindAttr:$kind);
+  let results = (outs Swage_ScalarType:$result);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $segment (`captures` `(` $captures^ `:` type($captures) `)`)?
+    `kind` `` $kind attr-dict `:` qualified(type($segment))
+    `->` type($result) $body
+  }];
+  let hasRegionVerifier = 1;
+}
+
 def Swage_YieldOp : Swage_Op<"yield", [Pure, Terminator,
-                                       ParentOneOf<["MapOp"]>]> {
+                                       ParentOneOf<["MapOp", "ReduceOp"]>]> {
   let summary = "Yield the per-element result of a Swage region";
   let description = [{
     Terminates the region of a Swage region-based operation, producing the
