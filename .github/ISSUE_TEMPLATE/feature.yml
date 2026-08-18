@@ -1,0 +1,33 @@
+name: Feature request
+description: A capability Swage should have
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: The concrete computation or use case driving this request.
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Why the current model is insufficient
+    validations:
+      required: true
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Proposed semantics
+      description: What the Python API and/or IR would look like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Possible alternatives
+  - type: textarea
+    id: correctness
+    attributes:
+      label: Correctness implications
+      description: Edge cases, numerical behavior, aliasing, empty segments…

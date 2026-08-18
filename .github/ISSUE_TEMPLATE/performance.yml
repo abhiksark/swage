@@ -1,0 +1,48 @@
+name: Performance report
+description: Swage is slower than it should be (or a benchmark result to share)
+labels: ["type:performance"]
+body:
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and software versions
+      description: GPU, compute capability, driver, CUDA, PyTorch, Swage commit, LLVM revision.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: distribution
+    attributes:
+      label: Input distribution
+      description: Number of segments, total elements, min/median/p95/max lengths, or the generator used.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Raw measurements
+      description: Warmup/measure counts and raw numbers, not just a summary.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline compared against
+      description: What you compared with and how it was configured.
+    validations:
+      required: true
+  - type: checkboxes
+    id: correctness
+    attributes:
+      label: Correctness
+      options:
+        - label: I verified the outputs are correct before timing
+          required: true
