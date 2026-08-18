@@ -33,7 +33,8 @@ feature PR (see ADR-0004). If you already have a matching MLIR install,
 point `MLIR_DIR`/`LLVM_DIR` at it and skip the LLVM build.
 
 The native `mlir_swage` bindings use the same pinned LLVM/MLIR install and
-are enabled by default. After the native build, run:
+are enabled by default when that install has MLIR Python bindings enabled.
+After the native build, run:
 
 ```bash
 ninja -C build check-swage-python

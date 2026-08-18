@@ -109,8 +109,9 @@ make test
 
 The native bindings require the pinned LLVM/MLIR install with its Python
 bindings enabled. Run `ninja -C build check-swage-python` after the native
-build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. The Python
-frontend remains deferred to Issue #4, so no Python kernel compiles or runs.
+build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. The in-progress
+Python frontend is tracked separately in Issue #4, so no Python kernel
+compiles or runs.
 
 See [docs/quickstart.md](docs/quickstart.md). A GPU is not required to
 build, test, or contribute.
