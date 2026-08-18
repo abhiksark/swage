@@ -79,4 +79,50 @@ def Swage_ExtentOp : Swage_Op<"extent", [Pure]> {
   let assemblyFormat = "$segment attr-dict `:` qualified(type($segment))";
 }
 
+def Swage_ScalarType : AnyTypeOf<[AnyInteger, AnyFloat]>;
+
+def Swage_MapOp : Swage_Op<"map", [IsolatedFromAbove,
+                                   RecursiveMemoryEffects]> {
+  let summary = "Apply a per-element region across a segment";
+  let description = [{
+    Produces a new symbolic segment by applying the region to every element
+    of the operand segment. The region is isolated from above: outer SSA
+    values enter only through `captures`, whose values append to the entry
+    block arguments after the element argument, in order. The yield type
+    defines the result segment's element type. Over an empty segment the
+    result is an empty segment (ADR-0008).
+
+    Example:
+
+    ```mlir
+    %exps = swage.map %seg : !swage.segment<f32> -> !swage.segment<f32> {
+    ^bb0(%x: f32):
+      %e = math.exp %x : f32
+      swage.yield %e : f32
+    }
+    ```
+  }];
+  let arguments = (ins Swage_SegmentType:$segment,
+                       Variadic<Swage_ScalarType>:$captures);
+  let results = (outs Swage_SegmentType:$result);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $segment (`captures` `(` $captures^ `:` type($captures) `)`)?
+    attr-dict `:` qualified(type($segment)) `->` qualified(type($result))
+    $body
+  }];
+  let hasRegionVerifier = 1;
+}
+
+def Swage_YieldOp : Swage_Op<"yield", [Pure, Terminator,
+                                       ParentOneOf<["MapOp"]>]> {
+  let summary = "Yield the per-element result of a Swage region";
+  let description = [{
+    Terminates the region of a Swage region-based operation, producing the
+    per-element result value.
+  }];
+  let arguments = (ins Swage_ScalarType:$value);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
 #endif // SWAGE_DIALECT_SWAGE_IR_SWAGEOPS
