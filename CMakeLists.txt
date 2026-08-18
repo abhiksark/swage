@@ -33,5 +33,6 @@ add_definitions(${LLVM_DEFINITIONS})
 
 add_subdirectory(include/swage/Dialect/Swage/IR)
 add_subdirectory(lib/Dialect/Swage/IR)
+add_subdirectory(lib/CAPI)
 add_subdirectory(tools/swage-opt)
 add_subdirectory(test)
