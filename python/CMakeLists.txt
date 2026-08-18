@@ -56,3 +56,11 @@ add_mlir_python_modules(SwagePythonModules
   COMMON_CAPI_LINK_LIBS
     SwagePythonCAPI
 )
+
+add_custom_target(check-swage-python
+  COMMAND ${CMAKE_COMMAND} -E env
+    "PYTHONPATH=${MLIR_BINARY_DIR}/python_packages"
+    "${Python3_EXECUTABLE}" -m pytest -q
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  DEPENDS SwagePythonModules
+)
