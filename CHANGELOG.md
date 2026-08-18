@@ -8,6 +8,9 @@ semantic versioning (`0.x` — anything may change).
 
 ### Added
 
+- Region-based semantic ops `swage.map`, `swage.reduce`
+  (kinds `sum`/`max`/`min`), `swage.map_store`, and `swage.yield`, with
+  isolated regions, explicit captures, and the verifier set from ADR-0008.
 - `swage` MLIR dialect: `!swage.segment<T>` type and `swage.segment_id`,
   `swage.make_segment`, `swage.extent` operations, with verifiers.
 - `swage-opt` optimizer driver; lit/FileCheck test suite (`check-swage`).

@@ -16,6 +16,11 @@
 
 #include "swage/Dialect/Swage/IR/SwageTypes.h"
 
+#include "swage/Dialect/Swage/IR/SwageEnums.h.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "swage/Dialect/Swage/IR/SwageAttributes.h.inc"
+
 #define GET_OP_CLASSES
 #include "swage/Dialect/Swage/IR/SwageOps.h.inc"
 

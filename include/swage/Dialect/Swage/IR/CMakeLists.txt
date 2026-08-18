@@ -1,3 +1,10 @@
 add_mlir_dialect(SwageOps swage)
 add_mlir_doc(SwageDialect SwageDialect swage/ -gen-dialect-doc)
 add_mlir_doc(SwageOps SwageOps swage/ -gen-op-doc)
+
+set(LLVM_TARGET_DEFINITIONS SwageOps.td)
+mlir_tablegen(SwageEnums.h.inc -gen-enum-decls)
+mlir_tablegen(SwageEnums.cpp.inc -gen-enum-defs)
+mlir_tablegen(SwageAttributes.h.inc -gen-attrdef-decls -attrdefs-dialect=swage)
+mlir_tablegen(SwageAttributes.cpp.inc -gen-attrdef-defs -attrdefs-dialect=swage)
+add_mlir_generic_tablegen_target(MLIRSwageAttributesIncGen)

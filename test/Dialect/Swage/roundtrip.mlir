@@ -20,3 +20,25 @@ func.func @integer_segment(%values: memref<?xi32>, %offsets: memref<?xi64>, %sid
   %seg = swage.make_segment %values, %offsets, %sid : memref<?xi32>, memref<?xi64>, index -> !swage.segment<i32>
   return %seg : !swage.segment<i32>
 }
+
+// CHECK-LABEL: func.func @half_precision_segments
+func.func @half_precision_segments(%v16: memref<?xf16>, %vbf: memref<?xbf16>, %offsets: memref<?xi32>, %sid: index) -> (index, index) {
+  // CHECK: swage.make_segment %{{.*}}, %{{.*}}, %{{.*}} : memref<?xf16>, memref<?xi32>, index -> !swage.segment<f16>
+  %s16 = swage.make_segment %v16, %offsets, %sid : memref<?xf16>, memref<?xi32>, index -> !swage.segment<f16>
+  // CHECK: swage.make_segment %{{.*}}, %{{.*}}, %{{.*}} : memref<?xbf16>, memref<?xi32>, index -> !swage.segment<bf16>
+  %sbf = swage.make_segment %vbf, %offsets, %sid : memref<?xbf16>, memref<?xi32>, index -> !swage.segment<bf16>
+  %e16 = swage.extent %s16 : !swage.segment<f16>
+  %ebf = swage.extent %sbf : !swage.segment<bf16>
+  return %e16, %ebf : index, index
+}
+
+// CHECK-LABEL: func.func @bf16_map
+func.func @bf16_map(%s: !swage.segment<bf16>) -> !swage.segment<bf16> {
+  // CHECK: swage.map %{{.*}} : !swage.segment<bf16> -> !swage.segment<bf16>
+  %r = swage.map %s : !swage.segment<bf16> -> !swage.segment<bf16> {
+  ^bb0(%x: bf16):
+    %y = arith.negf %x : bf16
+    swage.yield %y : bf16
+  }
+  return %r : !swage.segment<bf16>
+}

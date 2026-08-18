@@ -19,5 +19,6 @@ void SwageDialect::initialize() {
 #define GET_OP_LIST
 #include "swage/Dialect/Swage/IR/SwageOps.cpp.inc"
       >();
+  registerAttributes();
   registerTypes();
 }

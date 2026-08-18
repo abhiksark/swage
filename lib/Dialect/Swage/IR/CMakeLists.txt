@@ -8,6 +8,7 @@ add_mlir_dialect_library(MLIRSwage
 
   DEPENDS
   MLIRSwageOpsIncGen
+  MLIRSwageAttributesIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR
