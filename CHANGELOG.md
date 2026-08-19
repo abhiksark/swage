@@ -2,7 +2,7 @@
 
 All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-semantic versioning (`0.x` — anything may change).
+semantic versioning (`0.x`; anything may change).
 
 ## [Unreleased]
 
@@ -29,11 +29,26 @@ semantic versioning (`0.x` — anything may change).
 - Bindings-enabled `ci-cpp` coverage that runs the native integration target
   after the lit suite and installs MLIR Python requirements on cold and warm
   LLVM cache paths.
+- Deterministic in-process lowering of the canonical fixed vector add through
+  GPU and NVVM dialects to exact-target LLVM NVPTX output.
+- Keyword-only asynchronous `kernel.launch()` on the current PyTorch CUDA
+  stream, with strict M3 ABI, device, bounds, block, and grid validation.
+- Lazy `ctypes` CUDA Driver integration for context lookup, module loading,
+  function lookup, launch, and stable driver diagnostics without a CUDA
+  toolkit or link-time CUDA SDK dependency.
+- Digest-validated PTX caching with complete specialization keys, atomic
+  user-only writes, process-local reuse for dirty builds, per-context loaded
+  module reuse, and opt-in MLIR/PTX dumps.
+- Trusted dispatch and weekly GPU qualification for vector-add correctness,
+  non-default streams, argument lifetime, and cache reuse. Pull-request code
+  never runs on the self-hosted GPU runner.
 - Project documentation (README, DESIGN, ROADMAP, concept docs, ADRs
-  0001–0009), community health files, issue forms, and CPU CI.
+  0001–0012), community health files, issue forms, and CPU CI.
 
 ### Notes
 
-- The Python frontend emits MLIR only. Tensor inference reads metadata and
-  discards arguments; no Python kernel executes, and no PTX lowering, GPU
-  launch, or runtime result exists.
+- `emit_mlir()` remains compile-only and direct kernel calls remain
+  unavailable. The M3 `launch()` path executes only the canonical
+  one-dimensional fixed vector add with f32 pointers and an i32 length.
+- The pip package remains GPU-free at import time. Execution requires Linux,
+  CUDA-enabled PyTorch, `libcuda`, and the build-tree `mlir_swage` bindings.

@@ -7,16 +7,16 @@ variable-sized dense segment programs into fixed-tile GPU tasks.
 
 ## Required reading
 
-- `README.md` — current status; what works vs. what is planned
-- `DESIGN.md` — architecture and invariants
-- `ROADMAP.md` — phase gates and their status
-- `docs/concepts/segments-tiles-tasks.md` — the Segment/Task/Tile model
-- `docs/architecture/compiler-pipeline.md` — the lowering pipeline
+- `README.md`: current status; what works vs. what is planned
+- `DESIGN.md`: architecture and invariants
+- `ROADMAP.md`: phase gates and their status
+- `docs/concepts/segments-tiles-tasks.md`: the Segment/Task/Tile model
+- `docs/architecture/compiler-pipeline.md`: the lowering pipeline
 
 ## Non-negotiable rules
 
 - Preserve semantic correctness before performance.
-- Do not claim planned features are implemented — in code, docs, or
+- Do not claim planned features are implemented, in code, docs, or
   reports. Tests and executable examples are the source of truth.
 - Do not add Triton as a dependency or copy Triton implementation code.
 - Do not introduce a second production IR between Python and MLIR
@@ -49,6 +49,10 @@ ninja -C build check-swage        # lit suite only, after a build exists
 # Native Python bindings (requires bindings-enabled pinned LLVM/MLIR)
 ninja -C build check-swage-python
 
+# Real CUDA runtime tests (requires a CUDA-enabled PyTorch installation)
+PYTHONPATH=build/python_packages python -m pytest -q \
+    python/tests/mlir/test_runtime.py
+
 # Environment diagnostics
 python -m swage.env
 ```
@@ -75,5 +79,6 @@ known limitations; follow-up issue.
 `swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
 build-tree `PYTHONPATH`. The bindings require an MLIR install built with
 Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
-is an error. The M2 Python frontend emits MLIR from explicit descriptors or
-PyTorch metadata, but no Python kernel executes.
+is an error. `emit_mlir()` remains compile-only. M3 execution is available
+only through keyword-only `launch()` for the canonical fixed vector add, with
+strict CUDA tensor, ABI, block, and grid validation.

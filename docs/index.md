@@ -3,19 +3,22 @@
 **Turn variable-sized dense segments into efficient GPU tile tasks.**
 
 Swage is an experimental Python-embedded GPU compiler built on MLIR and
-LLVM. You write a segment-local kernel in Python; Swage lowers it into
-fixed-size GPU tile tasks and generates PTX through MLIR, LLVM, and NVPTX.
+LLVM. You write a segment-local kernel in Python; Swage is designed to lower
+it into fixed-size GPU tile tasks and generate PTX through MLIR, LLVM, and
+NVPTX.
 
 !!! warning "Pre-alpha"
-    The MLIR dialect, pinned LLVM build, and compile-only Python AST emitter
-    work today. No Python kernel executes yet. The README status table is the
-    single source of truth for what works.
+    The MLIR dialect, pinned LLVM build, Python AST emitter, and M3 fixed
+    vector-add execution path work today. General segment lowering and
+    schedule selection remain planned. The README status table is the single
+    source of truth for what works.
 
 Start with:
 
-- [Quickstart](quickstart.md) — build and test on a machine with no GPU
-- [Segments, Tasks, and Tiles](concepts/segments-tiles-tasks.md) — the
+- [Quickstart](quickstart.md) - build without a GPU or run the M3 CUDA
+  walkthrough
+- [Segments, Tasks, and Tiles](concepts/segments-tiles-tasks.md) - the
   three-level model everything else builds on
-- [Compiler pipeline](architecture/compiler-pipeline.md) — from
-  `@sw.jit` to PTX
-- The ADRs — why the architecture is the way it is
+- [Compiler pipeline](architecture/compiler-pipeline.md) - from
+  `@sw.jit` to PTX and launch
+- The ADRs explain why the architecture is structured this way.

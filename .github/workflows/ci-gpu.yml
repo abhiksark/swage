@@ -54,6 +54,15 @@ jobs:
           PYTHONPATH=build/python_packages \
             python -m pytest -q python/tests/mlir/test_runtime.py
 
+      - name: Run the documented fixed vector-add walkthrough
+        run: |
+          SWAGE_DUMP_DIR="$RUNNER_TEMP/swage-example-dumps" \
+          SWAGE_DUMP_MLIR=1 SWAGE_DUMP_PTX=1 \
+          PYTHONPATH=build/python_packages \
+            python examples/fixed_vector_add.py
+          test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.mlir' -print -quit)"
+          test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.ptx' -print -quit)"
+
       - name: Test persistent cache reuse in a new process
         run: |
           test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"

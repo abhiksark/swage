@@ -8,7 +8,7 @@ between Python and LLVM: MLIR (ADR-0001).
 Python @sw.jit kernel
         ↓   inspect.getsource → textwrap.dedent → ast.parse     ✅ (M2 subset)
 Restricted Python AST
-        ↓   AST visitor building ops via MLIR Python bindings   ✅ (compile only)
+        ↓   AST visitor building ops via MLIR Python bindings   ✅
 Swage semantic MLIR (dialect: swage)                            ✅ (initial ops)
         ↓   verified module boundary                             ✅ (fixed vector add)
 Live mlir_swage.ir.Module                                        (M2 endpoint)
@@ -18,7 +18,9 @@ Live mlir_swage.ir.Module                                        (M2 endpoint)
         │     ↓   GPU to NVVM/LLVM lowering                      ✅
         │   LLVM IR → LLVM NVPTX → PTX                           ✅
         │     ↓
-        │   CUDA Driver launch on current PyTorch stream          ⏳
+        │   validated cache + CUDA Driver launch                  ✅
+        │     ↓
+        │   current PyTorch CUDA stream                           ✅
         │
         └── General segment path
               ↓   canonicalization and fusion                    ⏳
@@ -42,12 +44,12 @@ Compile-time values remain in `constexprs`. It preserves Python source
 locations and returns verifiable deterministic MLIR without textual
 round-tripping.
 
-The boundary is compile only. PyTorch inference reads layout, dtype, rank,
-device type, and contiguity, then discards the arguments. It does not read
-data pointers or contents, execute kernel calls or direct symbolic language
-operations, launch a GPU kernel, or return a runtime result. An internal
-native entry point now lowers the returned canonical module to PTX without
-changing `emit_mlir()`.
+The `emit_mlir()` boundary is compile-only. PyTorch inference reads layout,
+dtype, rank, device type, and contiguity, then discards the arguments. It does
+not read data pointers or contents, execute kernel calls or direct symbolic
+language operations, launch a GPU kernel, or return a runtime result. The M3
+runtime uses a separate explicit `launch()` boundary without changing
+`emit_mlir()`.
 The following constraints remain in force:
 
 - `constexpr` arguments remain separate from runtime arguments.
@@ -55,13 +57,35 @@ The following constraints remain in force:
   source-located errors.
 - No Torch FX or MLIR text round-tripping appears on the emission path.
 
+## Fixed vector-add execution (M3 complete)
+
+`kernel.launch(arguments=..., constexprs=..., grid=...)` validates the exact
+M3 subset before marshalling three f32 device pointers and one i32 length.
+The supported kernel uses axis-zero `program_id`, one vector whose width
+equals `BLOCK`, masked f32 loads and stores, and addition. Every vector lane
+becomes one x-thread. Unsupported axes, shapes, operations, ABI types, blocks,
+or grids fail closed.
+
+The internal compiler clones the semantic module, lowers it through upstream
+GPU, NVVM, and LLVM infrastructure, attaches the active device's exact `sm_*`
+target, and emits PTX in-process through LLVM NVPTX. There is no NVRTC,
+subprocess compiler, textual round-trip, or CUDA toolkit dependency.
+
+The runtime verifies disk-cache metadata and content digests before loading
+PTX through `libcuda`. Loaded modules are reused per CUDA context. Launch is
+asynchronous on `torch.cuda.current_stream()` and calls `record_stream()` for
+each tensor after submission. It never copies, casts, changes devices,
+creates a CUDA context, synchronizes, or falls back. The trusted GPU workflow
+qualifies correctness, non-default streams, argument lifetime, and cache
+reuse on `main`.
+
 ## Semantic level (M0–M1 complete)
 
 The `swage` dialect models segment-local computation. Today:
 `!swage.segment<T>`, `swage.segment_id`, `swage.make_segment`,
 `swage.extent`, and the region-based `swage.map`, `swage.reduce`,
 `swage.map_store`, and `swage.yield` operations. Ordinary arithmetic uses
-`arith`/`math` ops *inside* regions — a dynamic-length segment is never
+`arith`/`math` ops *inside* regions; a dynamic-length segment is never
 materialized as a runtime-sized SSA vector; reductions and maps stay
 symbolic until tiling.
 
@@ -79,7 +103,7 @@ where runtime decisions are needed, the compiler emits planner code.
 Standard MLIR lowering: tiles into `vector`/`scf`/`memref`, GPU structure
 via `gpu`/`nvgpu`, NVIDIA intrinsics via `nvvm`, then LLVM IR and the
 NVPTX backend emit PTX. The runtime loads PTX with the CUDA Driver API
-and launches on `torch.cuda.current_stream()` — sharing PyTorch's CUDA
+and launches on `torch.cuda.current_stream()`, sharing PyTorch's CUDA
 context, never copying tensors, changing dtypes, or falling back silently.
 
 ## What Swage deliberately does not own
@@ -87,4 +111,4 @@ context, never copying tensors, changing dtypes, or falling back silently.
 Generic arithmetic, loops, buffers, and LLVM IR belong to upstream
 dialects and LLVM. Swage owns segment semantics, fusion, cost inference,
 task decomposition, schedule selection, partial-reduction and merge
-construction, and queue generation — nothing else.
+construction, and queue generation, and nothing else.
