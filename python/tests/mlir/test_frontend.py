@@ -38,6 +38,43 @@ def oversized_axis_kernel():  # noqa: D103
     _ = sl.program_id(2147483648)
 
 
+@sw.jit
+def address_compare_left_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    _ = (x_ptr + offsets) < n
+
+
+@sw.jit
+def address_compare_right_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    _ = offsets < (x_ptr + offsets)
+
+
+@sw.jit
+def address_load_mask_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    _ = sl.load(
+        x_ptr + offsets,
+        mask=x_ptr + offsets,
+        other=0.0,
+    )
+
+
+@sw.jit
+def address_store_value_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    sl.store(x_ptr + offsets, x_ptr + offsets, mask=mask)
+
+
+@sw.jit
+def address_store_mask_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    value = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    sl.store(x_ptr + offsets, value, mask=x_ptr + offsets)
+
+
 SIGNATURE = {
     "x_ptr": sl.pointer(sl.float32),
     "y_ptr": sl.pointer(sl.float32),
@@ -351,6 +388,40 @@ def test_malformed_supported_inputs_have_stable_diagnostics(
     message = str(caught.value)
     assert message.startswith(f"{__file__}:")
     assert message.endswith(f"{kernel_name}: {reason}")
+
+
+@pytest.mark.parametrize(
+    ("kernel", "reason"),
+    [
+        (
+            address_compare_left_kernel,
+            "comparison requires index offsets and i32",
+        ),
+        (
+            address_compare_right_kernel,
+            "comparison requires index offsets and i32",
+        ),
+        (address_load_mask_kernel, "sl.load mask must be a vector"),
+        (
+            address_store_value_kernel,
+            "sl.store requires float values and a mask",
+        ),
+        (
+            address_store_mask_kernel,
+            "sl.store requires float values and a mask",
+        ),
+    ],
+)
+def test_addresses_in_value_positions_have_stable_diagnostics(kernel, reason):
+    """Reject transient addresses before reading value-only type facts."""
+    with pytest.raises(sw.CompilationError, match=reason):
+        kernel.emit_mlir(
+            signature={
+                "x_ptr": sl.pointer(sl.float32),
+                "n": sl.int32,
+            },
+            constexprs={"BLOCK": 8},
+        )
 
 
 def test_internal_mlir_verification_error_is_source_located(monkeypatch):

@@ -62,6 +62,18 @@ class _Kernel:
             )
         self.function = parsed.body[0]
         functools.update_wrapper(self, function)
+        for decorator in self.function.decorator_list:
+            is_jit = (
+                isinstance(decorator, ast.Name) and decorator.id == "jit"
+            ) or (
+                isinstance(decorator, ast.Attribute)
+                and decorator.attr == "jit"
+            )
+            if not is_jit:
+                self._raise(
+                    decorator,
+                    "only @swage.jit may decorate a kernel",
+                )
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError(
@@ -166,14 +178,26 @@ class _Kernel:
                 f"unsupported type for parameter '{name}'",
             )
 
-        if "BLOCK" in constexpr_names:
-            block = constexprs["BLOCK"]
-            if type(block) is not int or block <= 0:
+        for name in parameters:
+            if name not in constexpr_names:
+                continue
+            value = constexprs[name]
+            if name == "BLOCK" and (type(value) is not int or value <= 0):
                 self._raise(
                     self.function,
                     "constexpr 'BLOCK' must be a positive integer",
                 )
-            if block > (1 << 63) - 1:
+            if type(value) is not int:
+                self._raise(
+                    self.function,
+                    f"constexpr '{name}' must be an integer",
+                )
+            if not -(1 << 63) <= value <= (1 << 63) - 1:
+                if name != "BLOCK":
+                    self._raise(
+                        self.function,
+                        f"constexpr '{name}' must fit signed 64-bit",
+                    )
                 self._raise(
                     self.function,
                     "constexpr 'BLOCK' must fit a signed 64-bit MLIR "
@@ -412,10 +436,17 @@ class _Emitter:
     def _compare(self, node):
         if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Lt):
             self._error(node, "only a single '<' comparison is supported")
-        left = self._expression(node.left)
-        right = self._expression(node.comparators[0])
+        reason = "comparison requires index offsets and i32"
+        left = self._require_value(
+            self._expression(node.left), node.left, reason
+        )
+        right = self._require_value(
+            self._expression(node.comparators[0]),
+            node.comparators[0],
+            reason,
+        )
         if left.kind != "index_vector" or right.kind not in {"i32", "index"}:
-            self._error(node, "comparison requires index offsets and i32")
+            self._error(node, reason)
         location = self._location(node)
         if right.kind == "i32":
             right = _Value(
@@ -504,7 +535,11 @@ class _Emitter:
                 "sl.load expects address, mask=..., and other=...",
             )
         address = self._expression(node.args[0])
-        mask = self._expression(keywords["mask"])
+        mask = self._require_value(
+            self._expression(keywords["mask"]),
+            keywords["mask"],
+            "sl.load mask must be a vector",
+        )
         other_node = keywords["other"]
         if not isinstance(address, _Address):
             self._error(node.args[0], "sl.load requires pointer + offsets")
@@ -539,8 +574,13 @@ class _Emitter:
         if len(node.args) != 2 or set(keywords) != {"mask"}:
             self._error(node, "sl.store expects address, value, and mask=...")
         address = self._expression(node.args[0])
-        value = self._expression(node.args[1])
-        mask = self._expression(keywords["mask"])
+        reason = "sl.store requires float values and a mask"
+        value = self._require_value(
+            self._expression(node.args[1]), node.args[1], reason
+        )
+        mask = self._require_value(
+            self._expression(keywords["mask"]), keywords["mask"], reason
+        )
         if not isinstance(address, _Address):
             self._error(node.args[0], "sl.store requires pointer + offsets")
         if value.kind != "f32_vector" or mask.kind != "bool_vector":
@@ -571,6 +611,11 @@ class _Emitter:
             self.index, value, loc=self._location(node)
         ).result
         return _Value(result, "index")
+
+    def _require_value(self, value, node, reason):
+        if not isinstance(value, _Value):
+            self._error(node, reason)
+        return value
 
     def _index_vector_type(self, node):
         if self.block is None:
