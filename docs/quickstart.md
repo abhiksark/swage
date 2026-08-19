@@ -45,6 +45,44 @@ Useful overrides for `build_llvm.sh`: `SWAGE_LLVM_BUILD_TYPE=Release`
 `SWAGE_LLVM_PYTHON_BINDINGS=OFF` (skip the MLIR Python bindings),
 `SWAGE_LLVM_HOME=/elsewhere` (move the ~25 GB out of `$HOME`).
 
+## Native Python bindings
+
+The `mlir_swage` package is a native build artifact, not part of the pip
+package. It requires the pinned LLVM/MLIR install with
+`MLIR_ENABLE_BINDINGS_PYTHON=ON`, which `build_llvm.sh` enables by default.
+After building Swage, run the dedicated target:
+
+```bash
+ninja -C build check-swage-python
+```
+
+The target sets `PYTHONPATH=build/python_packages` and runs the integration
+tests. To run one directly, use the same build-tree path:
+
+```bash
+PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
+```
+
+If the LLVM install or existing CMake build was configured with bindings off,
+rebuild the pinned LLVM/MLIR with bindings on and reconfigure Swage with
+`-DSWAGE_PYTHON_BINDINGS=ON`. CMake reports an error if the selected MLIR
+install lacks Python bindings.
+
+```bash
+SWAGE_LLVM_PYTHON_BINDINGS=ON ./scripts/build_llvm.sh
+cmake -G Ninja -S . -B build \
+    -DMLIR_DIR=/path/to/lib/cmake/mlir \
+    -DLLVM_DIR=/path/to/lib/cmake/llvm \
+    -DSWAGE_PYTHON_BINDINGS=ON
+```
+
+In `ci-cpp`, a cold LLVM cache fetches and stores MLIR's Python requirements
+before the native build. Cold and warm cache jobs install that stored file
+plus `pytest` and `lit`; no Python environment is restored from the cache.
+
+The bindings construct and verify semantic MLIR only. The Python frontend is
+deferred to Issue #4, so no Python kernel compiles or executes.
+
 ## Trying the dialect
 
 ```bash

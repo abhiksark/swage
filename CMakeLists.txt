@@ -33,5 +33,31 @@ add_definitions(${LLVM_DEFINITIONS})
 
 add_subdirectory(include/swage/Dialect/Swage/IR)
 add_subdirectory(lib/Dialect/Swage/IR)
+add_subdirectory(lib/CAPI)
 add_subdirectory(tools/swage-opt)
 add_subdirectory(test)
+
+# Python bindings: default to whatever the MLIR install supports; an
+# explicit ON against a non-bindings install is an error, never a skip.
+set(SWAGE_PYTHON_BINDINGS "${MLIR_ENABLE_BINDINGS_PYTHON}" CACHE STRING
+    "Build the mlir_swage Python bindings")
+if(SWAGE_PYTHON_BINDINGS)
+  if(NOT MLIR_ENABLE_BINDINGS_PYTHON)
+    message(FATAL_ERROR
+      "SWAGE_PYTHON_BINDINGS=ON but the MLIR at ${MLIR_DIR} was built "
+      "without MLIR_ENABLE_BINDINGS_PYTHON. Rebuild the pin with "
+      "SWAGE_LLVM_PYTHON_BINDINGS=ON (scripts/build_llvm.sh).")
+  endif()
+  message(STATUS "Swage Python bindings: ON (package mlir_swage)")
+  include(MLIRDetectPythonEnv)
+  mlir_configure_python_dev_packages()
+  set(MLIR_PYTHON_PACKAGE_PREFIX "mlir_swage" CACHE STRING "" FORCE)
+  set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "mlir_swage" CACHE STRING "" FORCE)
+  set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/mlir_swage"
+      CACHE STRING "" FORCE)
+  # No type stubs at this stage (ADR-0009); they return with wheels.
+  set(MLIR_PYTHON_STUBGEN_ENABLED OFF CACHE BOOL "" FORCE)
+  add_subdirectory(python)
+else()
+  message(STATUS "Swage Python bindings: OFF")
+endif()

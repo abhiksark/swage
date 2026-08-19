@@ -84,6 +84,19 @@ Design rules (enforced by verifiers as the dialect grows):
 - Cross-segment effects must be explicit; a segment program may not
   silently touch another segment's output range.
 
+## Python bindings
+
+Python constructs Swage IR through the self-contained `mlir_swage`
+package: the pinned MLIR core Python sources, the standard-dialect
+wrappers regions compose with (`builtin`, `func`, `arith`, `math`), and
+the generated `swage` op bindings, all built from the one pinned LLVM
+(ADR-0009). The package never imports an external `mlir` distribution,
+so bindings can never skew against the pin. During development it is
+imported from the build tree; wheel packaging is deferred. Bindings are
+optional at configure time (`SWAGE_PYTHON_BINDINGS`), and requesting
+them against an MLIR install built without bindings is a configure
+error, never a silent skip.
+
 ## The `swage_plan` dialect (planning level — not yet started)
 
 Introduced only after the semantic dialect and one fixed GPU lowering work

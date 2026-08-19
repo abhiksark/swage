@@ -16,3 +16,8 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
   comment (see existing files).
 - Tests live in `tests/python/`; every behavior change lands with a test.
   Frontend diagnostics get negative tests (bad kernels, clear errors).
+- Native binding tests live in `python/tests/mlir/` and run through
+  `ninja -C build check-swage-python`, which sets the build-tree
+  `PYTHONPATH` for `mlir_swage`.
+- `mlir_swage` is not a wheel or public `swage.ir` API. Keep frontend work
+  deferred to Issue #4; no Python kernel compiles or executes yet.

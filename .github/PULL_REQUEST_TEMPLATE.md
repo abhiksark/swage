@@ -19,6 +19,7 @@ skipped / not run. -->
 - [ ] `python -m pytest tests/python -q`
 - [ ] `ruff check .`
 - [ ] `ninja -C build check-swage` (or: not applicable because …)
+- [ ] `ninja -C build check-swage-python` (or: native bindings not affected)
 
 ## Environment
 
@@ -35,4 +36,6 @@ must not claim more than the tests in this PR show. -->
 
 ## Known limitations / follow-ups
 
-<!-- What this PR deliberately does not do; follow-up issues filed. -->
+<!-- What this PR deliberately does not do; follow-up issues filed. Native
+bindings do not make the Python frontend complete; use Issue #4 where that
+frontend remains deferred. -->
