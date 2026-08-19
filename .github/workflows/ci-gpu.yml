@@ -17,14 +17,14 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, swage-gpu]
     timeout-minutes: 120
-    env:
-      SWAGE_CACHE_DIR: >-
-        ${{ runner.temp }}/swage-cache-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Use the runner LLVM install
-        run: echo "SWAGE_LLVM_HOME=$HOME/.swage/llvm" >> "$GITHUB_ENV"
+      - name: Configure trusted runner paths
+        run: |
+          echo "SWAGE_LLVM_HOME=$HOME/.swage/llvm" >> "$GITHUB_ENV"
+          cache_dir="$RUNNER_TEMP/swage-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "SWAGE_CACHE_DIR=$cache_dir" >> "$GITHUB_ENV"
 
       - name: Require CUDA and the trusted runner toolchain
         run: |
