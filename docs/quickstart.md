@@ -80,9 +80,9 @@ In `ci-cpp`, a cold LLVM cache fetches and stores MLIR's Python requirements
 before the native build. Cold and warm cache jobs install that stored file
 plus `pytest` and `lit`; no Python environment is restored from the cache.
 
-The bindings construct and verify semantic MLIR. M2 also provides a
-compile-only fixed-block frontend. It requires explicit type facts rather
-than inferring tensor metadata:
+The bindings construct and verify semantic MLIR. The M2 compile-only slice
+emits MLIR only for the explicit-signature fixed-block vector-add AST form.
+It requires explicit type facts rather than inferring tensor metadata:
 
 ```python
 import swage as sw

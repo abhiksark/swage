@@ -8,9 +8,9 @@ logical segment*; Swage decides how that segment becomes fixed-size GPU
 tile tasks and generates NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
 > **Status: pre-alpha foundation.** The `swage` MLIR dialect, pinned
-> LLVM/MLIR build, `swage-opt`, native bindings, and a compile-only
-> fixed-block Python frontend work today. **No Python kernel executes** and
-> no PTX, lowering, launch, or runtime result exists. See
+> LLVM/MLIR build, `swage-opt`, native bindings, and the explicit-signature
+> fixed-block vector-add AST-emission slice work today. **No Python kernel
+> executes** and no PTX, lowering, launch, or runtime result exists. See
 > [Current status](#current-status) for the exact line.
 
 ## The programming model
