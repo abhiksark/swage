@@ -9,7 +9,7 @@ passes with tests; nothing below claims more than the tests show.
 | M0 — MLIR project foundation | LLVM pin, out-of-tree CMake, `swage` dialect skeleton, `swage-opt`, lit, CPU CI, community health | `swage-opt` round-trips Swage IR; lit + pytest green | **Complete** |
 | M1 — Swage dialect | Region-based `map`/`reduce`/`map_store`/`yield`, full verifier set | Positive and negative dialect tests | **Complete** |
 | M2 — Python AST → MLIR | `@sw.jit` frontend, `constexpr`, source locations, diagnostics | Vector-add kernel emits deterministic MLIR; no dataclass IR | **Complete** |
-| M3 — Fixed vector add via NVPTX | GPU lowering, PTX emission, driver launch, JIT cache | Python vector add returns correct CUDA results on PyTorch tensors | Not started |
+| M3 — Fixed vector add via NVPTX | GPU lowering, PTX emission, driver launch, JIT cache | Python vector add returns correct CUDA results on PyTorch tensors | **In progress** — deterministic fixed-block PTX exists; launch and cache do not |
 | M4 — Segmented sum | One-CTA-per-segment lowering, empty segments, offset validation | Matches PyTorch oracle | Not started |
 | M5 — Ragged softmax parity | Fusion, captures, stable softmax, multi-stage execution | Matches PyTorch across adversarial distributions | Not started |
 | M6 — SwagePlan task dialect | Task IR, runtime classification, policy variants | One semantic kernel lowers into distinct legal schedules | Not started |

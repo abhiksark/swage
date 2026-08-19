@@ -50,7 +50,7 @@ gpu + nvgpu
         ↓
 nvvm + llvm dialect
         ↓
-LLVM IR → LLVM NVPTX → PTX → CUDA Driver API → current PyTorch stream
+LLVM IR → LLVM NVPTX → PTX → CUDA Driver API (M3 pending) → PyTorch stream
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The
@@ -70,8 +70,9 @@ and is imported only for inference.
 Inference reads metadata only. It does not inspect data pointers or contents,
 retain arguments, infer lengths, validate cross-tensor relationships, or
 cache specializations. Kernel calls and direct symbolic language operations
-do not execute, and no lowering, PTX emission, launch, or runtime result
-exists (ADR-0011).
+do not execute. The M3 backend can lower the canonical fixed vector add and
+emit deterministic PTX internally, but no launch or runtime result exists
+(ADR-0011, ADR-0012).
 
 ## The `swage` dialect (semantic level)
 

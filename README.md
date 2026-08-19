@@ -9,9 +9,9 @@ tile tasks and generates NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
 > **Status: pre-alpha foundation.** The `swage` MLIR dialect, pinned
 > LLVM/MLIR build, `swage-opt`, native bindings, and the fixed-block
-> vector-add AST-emission slice with PyTorch metadata inference work today.
-> **No Python kernel
-> executes** and no PTX, lowering, launch, or runtime result exists. See
+> vector-add AST-emission and deterministic NVPTX code-generation slices work
+> today. **No Python kernel executes** and no launch or runtime result exists.
+> The PTX compiler is internal while M3 launch work remains in progress. See
 > [Current status](#current-status) for the exact line.
 
 ## The programming model
@@ -57,8 +57,9 @@ The explicit `signature=` form remains available without PyTorch.
 `emit_mlir` requires the build-tree-only `mlir_swage` bindings. It produces
 a live `mlir_swage.ir.Module`; it reads metadata only and does not execute or
 retain the supplied arguments. Calling a decorated kernel, direct symbolic
-language operations, and every PTX, lowering, launch, or runtime path remain
-unavailable.
+language operations, launch, and runtime execution remain unavailable. Fixed
+vector-add lowering and PTX emission are internal runtime building blocks,
+not public APIs.
 
 The research target is the segment API: one segment-local program, from
 which the compiler derives packing, bucketing, partitioning, partial
@@ -93,7 +94,7 @@ Fixed-size tile operations   (tiles: warp/CTA-shaped physical units)
         ▼
 gpu / nvvm / LLVM IR
         ▼
-LLVM NVPTX  →  PTX  →  CUDA Driver API  →  current PyTorch CUDA stream
+LLVM NVPTX  →  PTX  →  CUDA Driver API (M3 pending)  →  current PyTorch stream
 ```
 
 The three-level vocabulary is load-bearing: a **segment** is a logical,
@@ -111,7 +112,8 @@ warp or CTA. See
 | `python -m swage.env` environment diagnostics | **Works today** |
 | Native `mlir_swage` bindings package | **Works today** from the build tree; integration-tested |
 | Python AST → verified live `mlir_swage.ir.Module` (fixed-block vector add, inferred or explicit signature) | **Works today, compile only** |
-| Fixed vector add through LLVM NVPTX to a real GPU result | Not started |
+| Fixed vector add lowering through LLVM NVPTX to deterministic PTX | **Works today, internal**; native-tested for exact targets |
+| CUDA Driver launch, cache, and real GPU result | **In progress**; no launch API or runtime result yet |
 | Segment lowering (segmented sum/max, ragged softmax) | Planned |
 | SwagePlan task dialect; warp/CTA/split-CTA/persistent policies | Research target |
 
@@ -138,8 +140,9 @@ make test
 The native bindings require the pinned LLVM/MLIR install with its Python
 bindings enabled. Run `ninja -C build check-swage-python` after the native
 build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. This M2 frontend
-slice emits MLIR only: no Python kernel executes and no GPU result is
-produced.
+slice remains compile-only: no Python kernel executes and no GPU result is
+produced. M3's internal codegen can lower that fixed vector-add module to
+deterministic PTX; launch is still pending.
 
 See [docs/quickstart.md](docs/quickstart.md). A GPU is not required to
 build, test, or contribute.

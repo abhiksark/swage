@@ -12,20 +12,23 @@ Restricted Python AST
 Swage semantic MLIR (dialect: swage)                            ✅ (initial ops)
         ↓   verified module boundary                             ✅ (fixed vector add)
 Live mlir_swage.ir.Module                                        (M2 endpoint)
-        ↓   canonicalization and fusion                          ⏳
-SwagePlan task IR (dialect: swage_plan)                         🔬 (ADR-0003)
-        ↓   task decomposition, policy selection
-Fixed-size tile operations
-        ↓
-arith + math + scf + memref + vector                            (standard MLIR)
-        ↓
-gpu + nvgpu
-        ↓
-nvvm + llvm dialect
-        ↓
-LLVM IR → LLVM NVPTX → PTX                                      (ADR-0006)
-        ↓
-CUDA Driver API launch on the current PyTorch stream
+        ├── M3 fixed vector-add path
+        │     ↓   validate canonical kernel                      ✅
+        │   gpu + scf + llvm dialect                             ✅
+        │     ↓   GPU to NVVM/LLVM lowering                      ✅
+        │   LLVM IR → LLVM NVPTX → PTX                           ✅
+        │     ↓
+        │   CUDA Driver launch on current PyTorch stream          ⏳
+        │
+        └── General segment path
+              ↓   canonicalization and fusion                    ⏳
+            SwagePlan task IR (dialect: swage_plan)              🔬 (ADR-0003)
+              ↓   task decomposition, policy selection
+            Fixed-size tile operations
+              ↓
+            arith + math + scf + memref + vector                 (standard MLIR)
+              ↓
+            gpu + nvgpu → nvvm + llvm → LLVM NVPTX → PTX         (ADR-0006)
 ```
 
 ## Frontend (M2 complete)
@@ -42,7 +45,9 @@ round-tripping.
 The boundary is compile only. PyTorch inference reads layout, dtype, rank,
 device type, and contiguity, then discards the arguments. It does not read
 data pointers or contents, execute kernel calls or direct symbolic language
-operations, lower to PTX, launch a GPU kernel, or return a runtime result.
+operations, launch a GPU kernel, or return a runtime result. An internal
+native entry point now lowers the returned canonical module to PTX without
+changing `emit_mlir()`.
 The following constraints remain in force:
 
 - `constexpr` arguments remain separate from runtime arguments.
