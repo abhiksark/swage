@@ -183,8 +183,21 @@ def test_pytorch_metadata_failures_have_an_installation_hint(monkeypatch):
     "value",
     [True, -(1 << 31) - 1, 1 << 31, 1.5, object()],
 )
-def test_inferred_scalars_reject_unsupported_values(value):
+def test_inferred_scalars_reject_unsupported_values(value, monkeypatch):
     """Accept only non-boolean Python integers in the signed i32 range."""
+    class Tensor:
+        pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(
+            Tensor=Tensor,
+            float32=object(),
+            strided=object(),
+        ),
+    )
+
     @sw.jit
     def kernel(runtime_value):
         return
