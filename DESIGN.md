@@ -9,10 +9,10 @@ in `docs/adr/`.
 Fixed GPU tiles work extremely well for regular workloads. Variable-sized,
 internally dense segments (ragged softmax rows, jagged batches, graph
 neighborhoods) create padding waste and load imbalance. Existing systems
-expose pieces of the solution — manual bucketing, hand-written persistent
-kernels, per-shape specialization. Swage's research question is whether one
-segment-local program can automatically produce competitive warp, CTA,
-split-CTA, and persistent schedules as the runtime segment-length
+expose pieces of the solution, including manual bucketing, hand-written
+persistent kernels, and per-shape specialization. Swage's research question
+is whether one segment-local program can automatically produce competitive
+warp, CTA, split-CTA, and persistent schedules as the runtime segment-length
 distribution changes.
 
 ## Vocabulary
@@ -20,13 +20,13 @@ distribution changes.
 Three terms, never conflated (full treatment in
 [docs/concepts/segments-tiles-tasks.md](docs/concepts/segments-tiles-tasks.md)):
 
-- **Segment** — a logical, runtime-sized, internally dense data object:
+- **Segment**: a logical, runtime-sized, internally dense data object:
   `segment i = values[offsets[i] : offsets[i+1]]`. Part of the semantic
   model.
-- **Task** — a schedulable unit of execution: one short segment, several
+- **Task**: a schedulable unit of execution: one short segment, several
   packed short segments, a chunk of a long segment, a partial reduction, a
   merge, a store stage. Part of the planning model.
-- **Tile** — a fixed-size physical unit (`tile<32xf32>`, `tile<128xf32>`)
+- **Tile**: a fixed-size physical unit (`tile<32xf32>`, `tile<128xf32>`)
   processed by a warp or CTA. Part of the hardware-lowering model.
 
 The **logical grid** is the semantic domain written in Python. The
@@ -37,20 +37,21 @@ segment programs plus runtime extents into tasks and fixed tiles.
 
 ```text
 Python @sw.jit kernel
-        ↓  inspect.getsource → ast.parse (restricted subset, M2 compile-only)
+        ↓  inspect.getsource → ast.parse (restricted subset, M2 emission)
 Swage semantic MLIR            (dialect: swage)
-        ↓  canonicalization and fusion
-SwagePlan task IR              (dialect: swage_plan — not yet started)
-        ↓  task decomposition and policy selection
-Fixed-size tile operations
-        ↓
-arith + math + scf + memref + vector
-        ↓
-gpu + nvgpu
-        ↓
-nvvm + llvm dialect
-        ↓
-LLVM IR → LLVM NVPTX → PTX → CUDA Driver API (M3 pending) → PyTorch stream
+        ├── M3 fixed vector add
+        │     ↓  canonical validation and lane-to-thread conversion
+        │   gpu + scf + nvvm + llvm
+        │     ↓
+        │   LLVM IR → LLVM NVPTX → PTX → CUDA Driver API
+        │     ↓
+        │   current PyTorch stream
+        │
+        └── General segment path (planned)
+              ↓  canonicalization and fusion
+            SwagePlan task IR (dialect: swage_plan)
+              ↓  task decomposition and policy selection
+            Fixed-size tile operations → gpu + nvgpu → nvvm + llvm
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The
@@ -58,21 +59,28 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python frontend boundary
+## Current Python and M3 execution boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
 the native bindings. Callers must provide exactly one of `signature=` or
 `arguments=`; providing both or neither is invalid. From `arguments=`, the
 frontend infers rank-one f32 pointers and i32 scalars. PyTorch stays optional
-and is imported only for inference.
+for explicit descriptors and is imported lazily for inference or launch.
 
-Inference reads metadata only. It does not inspect data pointers or contents,
-retain arguments, infer lengths, validate cross-tensor relationships, or
-cache specializations. Kernel calls and direct symbolic language operations
-do not execute. The M3 backend can lower the canonical fixed vector add and
-emit deterministic PTX internally, but no launch or runtime result exists
-(ADR-0011, ADR-0012).
+Inference reads metadata only. `emit_mlir()` does not inspect data pointers or
+contents, retain arguments, infer lengths, validate cross-tensor
+relationships, or cache specializations. Direct kernel calls and direct
+symbolic language operations do not execute.
+
+M3 adds an explicit keyword-only `launch()` boundary for the canonical fixed
+vector add. It accepts three contiguous rank-one f32 CUDA tensors, one
+nonnegative i32 `n`, a device-legal `BLOCK`, axis-zero `program_id`, and the
+exact one-dimensional grid. Validation completes before data pointers are
+marshalled. The backend lowers through standard GPU, NVVM, and LLVM paths,
+emits PTX for the active device's exact compute capability, and launches on
+the current PyTorch stream (ADR-0011, ADR-0012). Unsupported kernels and ABI
+shapes fail closed.
 
 ## The `swage` dialect (semantic level)
 
@@ -95,7 +103,7 @@ Design rules (enforced by verifiers as the dialect grows):
   types. `!swage.segment<f32>` carries the element type only.
 - No GPU thread or block indices in semantic IR. `swage.segment_id` is a
   logical-grid coordinate.
-- No custom Swage operations for ordinary scalar arithmetic — regions use
+- No custom Swage operations for ordinary scalar arithmetic; regions use
   `arith` and `math`.
 - Cross-segment effects must be explicit; a segment program may not
   silently touch another segment's output range.
@@ -113,7 +121,7 @@ optional at configure time (`SWAGE_PYTHON_BINDINGS`), and requesting
 them against an MLIR install built without bindings is a configure
 error, never a silent skip.
 
-## The `swage_plan` dialect (planning level — not yet started)
+## The `swage_plan` dialect (planning level, not yet started)
 
 Introduced only after the semantic dialect and one fixed GPU lowering work
 end to end (ADR-0003). It will model tasks, policies (`warp`, `packed_warp`,
@@ -129,12 +137,23 @@ The runtime reuses PyTorch's CUDA context and stream: device pointers via
 `tensor.data_ptr()`, launches on `torch.cuda.current_stream()`, module
 loading through the CUDA Driver API, PTX emitted by LLVM NVPTX (no NVRTC on
 the production path, ADR-0006). No silent copies, dtype changes, CPU
-fallback, or backend fallback.
+fallback, or backend fallback. Launch is asynchronous, records each tensor on
+the stream after submission, and never creates a context, changes devices, or
+synchronizes.
+
+Persistent cache keys include normalized source, kernel name, ordered ABI
+descriptors, constexpr values, exact compute capability, code-generation
+options, clean Swage revision, dialect version, and LLVM version. Cache files
+are digest-validated and written atomically with user-only permissions.
+Symlinked, world-writable, incomplete, or corrupt entries are rejected before
+module loading. Dirty or unidentified builds retain only process-local reuse.
+Loaded modules are cached per CUDA context and never retain tensors or data
+pointers.
 
 ## Testing strategy
 
-- Python: pytest for compile-only frontend emission and source diagnostics;
-  JIT specialization and runtime validation follow with their implementations.
+- Python: pytest for frontend emission, source diagnostics, launch validation,
+  specialization keys, cache integrity, and CUDA Driver ABI marshalling.
 - MLIR: lit + FileCheck for parse/print round trips, verifier failures,
   and lowering; checks target semantic invariants, not incidental
   formatting.
@@ -143,6 +162,9 @@ fallback, or backend fallback.
   oracle comparison. With no Python prototype in this repository
   (ADR-0005), PyTorch reference implementations are the initial oracle;
   a CPU reference lowering joins it with the first segment lowerings.
+- GPU: a trusted main-only self-hosted workflow checks fixed vector-add
+  correctness, non-default streams, argument lifetime, and cache reuse on a
+  real NVIDIA device. Pull requests never execute on that runner.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.
