@@ -21,19 +21,26 @@ NVPTX translation. The target is the active device's exact `sm_*` compute
 capability. PTX is emitted in-process through the pinned LLVM NVPTX backend,
 without NVRTC, subprocesses, textual round-tripping, or a CUDA toolkit.
 
-When implemented, execution will be exposed only through keyword-only
-`kernel.launch(arguments=..., constexprs=..., grid=...)`. It will be
-asynchronous, return `None`, and launch on the current PyTorch CUDA stream.
-Launch will require contiguous rank-one f32 CUDA tensors on the same current
-device, `0 <= n <= tensor.numel()` for every pointer, a device-legal `BLOCK`,
-and `grid == (ceildiv(n, BLOCK),)`. `n == 0` with `grid=(0,)` will be a
-validated no-op.
+Execution is exposed only through keyword-only
+`kernel.launch(arguments=..., constexprs=..., grid=...)`. It is asynchronous,
+returns `None`, and launches on the current PyTorch CUDA stream. Launch
+requires contiguous rank-one f32 CUDA tensors on the same current device,
+`0 <= n <= tensor.numel()` for every pointer, a device-legal `BLOCK`, and
+`grid == (ceildiv(n, BLOCK),)`. `n == 0` with `grid=(0,)` is a validated
+no-op.
 
-The runtime will never copy, cast, synchronize, switch devices, create a CUDA
-context, or fall back. It will record the current stream on every tensor after
-launch. PyTorch, `mlir_swage`, and `libcuda` will remain lazy dependencies;
-`emit_mlir()` will remain compile-only and direct kernel calls will remain
-unavailable.
+The runtime never copies, casts, synchronizes, switches devices, creates a
+CUDA context, or falls back. It records the current stream on every tensor
+after launch. PyTorch, `mlir_swage`, and `libcuda` remain lazy dependencies;
+`emit_mlir()` remains compile-only and direct kernel calls remain unavailable.
+
+PTX cache entries are keyed by normalized kernel source, kernel name, ordered
+ABI descriptors, constexpr values, target architecture, code-generation
+options, Swage revision, dialect version, and LLVM version. Persistent reuse
+is disabled for dirty or unidentified builds. Verified PTX is cached on disk,
+and loaded modules are cached in-process per CUDA context. Writes are atomic
+and user-only; symlinked, world-writable, incomplete, or digest-mismatched
+entries are rejected.
 
 ## Consequences
 

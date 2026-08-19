@@ -211,11 +211,11 @@ def test_inferred_scalars_reject_unsupported_values(value, monkeypatch):
         )
 
 
-def test_calling_a_decorated_kernel_reports_execution_unavailable():
-    """Keep compile-only kernels non-executing until M3."""
+def test_calling_a_decorated_kernel_points_to_launch():
+    """Keep direct calls unavailable after adding the explicit launch API."""
     @sw.jit
     def kernel():
         return
 
-    with pytest.raises(RuntimeError, match="execution is unavailable until M3"):
+    with pytest.raises(RuntimeError, match=r"use kernel\.launch\(\)"):
         kernel()

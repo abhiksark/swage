@@ -77,7 +77,19 @@ class _Kernel:
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError(
-            f"Swage kernel '{self.__name__}' execution is unavailable until M3"
+            f"Swage kernel '{self.__name__}' is not directly callable; "
+            "use kernel.launch()"
+        )
+
+    def launch(self, *, arguments, constexprs, grid):
+        """Asynchronously launch the M3 fixed vector-add subset."""
+        from ._runtime import launch
+
+        return launch(
+            self,
+            arguments=arguments,
+            constexprs=constexprs,
+            grid=grid,
         )
 
     def emit_mlir(self, *, signature=None, arguments=None, constexprs):
