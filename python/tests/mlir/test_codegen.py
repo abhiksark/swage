@@ -46,6 +46,7 @@ def test_compiles_fixed_vector_add_to_deterministic_ptx():
     assert "swage." not in lowered
     assert "vector." not in lowered
     assert "llvm.func @add_kernel" in lowered
+    assert '#nvvm.target<chip = "sm_80">' in lowered
     assert ".target sm_80" in ptx
     assert ".entry add_kernel" in ptx
     assert "ld.global.b32" in ptx

@@ -22,6 +22,7 @@
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -97,13 +98,17 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (failed(manager.run(*module)))
     return failure();
 
-  llvm::raw_string_ostream loweredStream(lowered);
-  module->print(loweredStream, OpPrintingFlags());
-  loweredStream.flush();
-
   auto gpuModules = module->getOps<gpu::GPUModuleOp>();
   if (std::distance(gpuModules.begin(), gpuModules.end()) != 1)
     return source.emitError("lowering did not produce exactly one GPU module");
+  gpu::GPUModuleOp gpuModule = *gpuModules.begin();
+  gpuModule.setTargetsAttr(ArrayAttr::get(
+      context,
+      {NVVM::NVVMTargetAttr::get(context, 2, "nvptx64-nvidia-cuda", target)}));
+
+  llvm::raw_string_ostream loweredStream(lowered);
+  module->print(loweredStream, OpPrintingFlags());
+  loweredStream.flush();
 
   static llvm::once_flag initializeNVPTXOnce;
   llvm::call_once(initializeNVPTXOnce, []() {
@@ -114,7 +119,6 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   });
 
   constexpr llvm::StringLiteral triple = "nvptx64-nvidia-cuda";
-  gpu::GPUModuleOp gpuModule = *gpuModules.begin();
   llvm::LLVMContext llvmContext;
   std::unique_ptr<llvm::Module> llvmModule = translateModuleToLLVMIR(
       gpuModule.getOperation(), llvmContext, gpuModule.getName());
