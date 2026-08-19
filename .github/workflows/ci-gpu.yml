@@ -60,7 +60,8 @@ jobs:
           SWAGE_DUMP_MLIR=1 SWAGE_DUMP_PTX=1 \
           PYTHONPATH=build/python_packages \
             python examples/fixed_vector_add.py
-          test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -print -quit)"
+          test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.mlir' -print -quit)"
+          test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.ptx' -print -quit)"
 
       - name: Test persistent cache reuse in a new process
         run: |
