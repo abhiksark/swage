@@ -16,6 +16,14 @@ func.func @negative_axis() {
 
 // -----
 
+func.func @negative_program_axis() {
+  // expected-error @below {{attribute 'axis' failed to satisfy constraint}}
+  %pid = swage.program_id -1
+  return
+}
+
+// -----
+
 func.func @offsets_not_integer(%values: memref<?xf32>, %offsets: memref<?xf32>, %sid: index) {
   // expected-error @below {{operand #1 must be}}
   %seg = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xf32>, index -> !swage.segment<f32>

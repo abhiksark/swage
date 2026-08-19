@@ -26,6 +26,7 @@ def test_builds_and_round_trips_every_swage_operation():
             )
         with ir.InsertionPoint(kernel.add_entry_block()):
             values_arg, offsets_arg, output, scale = kernel.arguments
+            swage.ProgramIdOp(index, 0)
             segment_id = swage.SegmentIdOp(index, 0).result
             input_segment = swage.MakeSegmentOp(
                 segment, values_arg, offsets_arg, segment_id
@@ -76,6 +77,28 @@ def test_builds_and_round_trips_every_swage_operation():
         assert module.operation.verify()
         reparsed = ir.Module.parse(str(module))
         assert reparsed.operation.verify()
+
+
+def test_embeds_memref_and_vector_dialects():
+    """Build upstream memref and vector operations from the pinned package."""
+    from mlir_swage.dialects import memref, vector
+
+    with ir.Context() as context, ir.Location.unknown():
+        swage.register_dialects(context)
+        f32 = ir.F32Type.get()
+        buffer = ir.MemRefType.get([4], f32)
+        tile = ir.VectorType.get([4], f32)
+        module = builtin.ModuleOp()
+
+        with ir.InsertionPoint(module.body):
+            kernel = func.FuncOp("kernel", ([], []))
+        with ir.InsertionPoint(kernel.add_entry_block()):
+            memref.AllocOp(buffer, [], [])
+            scalar = arith.ConstantOp(f32, 0.0)
+            vector.BroadcastOp(tile, scalar.result)
+            func.ReturnOp([])
+
+        assert module.operation.verify()
 
 
 def test_rejects_make_segment_element_type_mismatch():

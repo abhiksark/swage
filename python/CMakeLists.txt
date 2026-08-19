@@ -25,6 +25,8 @@ declare_mlir_python_extension(SwagePythonSources.NanobindExtension
     MLIRCAPIFunc
     MLIRCAPIArith
     MLIRCAPIMath
+    MLIRCAPIMemRef
+    MLIRCAPIVector
     MLIRCAPITransforms
     SwageCAPI
 )
@@ -41,6 +43,8 @@ add_mlir_python_common_capi_library(SwagePythonCAPI
     MLIRPythonSources.Dialects.func
     MLIRPythonSources.Dialects.arith
     MLIRPythonSources.Dialects.math
+    MLIRPythonSources.Dialects.memref
+    MLIRPythonSources.Dialects.vector
 )
 
 add_mlir_python_modules(SwagePythonModules
@@ -53,6 +57,8 @@ add_mlir_python_modules(SwagePythonModules
     MLIRPythonSources.Dialects.func
     MLIRPythonSources.Dialects.arith
     MLIRPythonSources.Dialects.math
+    MLIRPythonSources.Dialects.memref
+    MLIRPythonSources.Dialects.vector
   COMMON_CAPI_LINK_LIBS
     SwagePythonCAPI
 )
