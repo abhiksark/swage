@@ -1,5 +1,6 @@
 set(LIBS
   MLIRSwage
+  MLIRSwageFixedBlockToGPU
   MLIROptLib
   MLIRRegisterAllPasses
   MLIRFuncDialect
@@ -7,6 +8,9 @@ set(LIBS
   MLIRMathDialect
   MLIRSCFDialect
   MLIRMemRefDialect
+  MLIRVectorDialect
+  MLIRGPUDialect
+  MLIRLLVMDialect
 )
 add_llvm_executable(swage-opt swage-opt.cpp)
 

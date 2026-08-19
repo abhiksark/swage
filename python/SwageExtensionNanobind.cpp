@@ -4,6 +4,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swage-c/Codegen.h"
 #include "swage-c/Dialects.h"
 
 #include "mlir-c/Dialect/Arith.h"
@@ -11,10 +12,45 @@
 #include "mlir-c/Dialect/Math.h"
 #include "mlir-c/Dialect/MemRef.h"
 #include "mlir-c/Dialect/Vector.h"
+#include "mlir/Bindings/Python/Diagnostics.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 
+#include <string>
+#include <utility>
+
 namespace nb = nanobind;
+
+namespace {
+
+std::pair<std::string, std::string> compilePTX(nb::object moduleObject,
+                                               std::string kernelName,
+                                               int64_t blockSize,
+                                               std::string target) {
+  std::optional<nb::object> capsule =
+      nb::detail::mlirApiObjectToCapsule(moduleObject);
+  if (!capsule)
+    throw nb::type_error("module must be an mlir_swage.ir.Module");
+  MlirModule module = mlirPythonCapsuleToModule(capsule->ptr());
+  if (mlirModuleIsNull(module))
+    throw nb::type_error("module must be an mlir_swage.ir.Module");
+
+  std::string lowered;
+  std::string ptx;
+  auto store = [](MlirStringRef value, void *output) {
+    static_cast<std::string *>(output)->assign(value.data, value.length);
+  };
+  mlir::python::CollectDiagnosticsToStringScope diagnostics(
+      mlirModuleGetContext(module));
+  if (mlirLogicalResultIsFailure(swageCompileFixedBlockToPTX(
+          module, mlirStringRefCreate(kernelName.data(), kernelName.size()),
+          blockSize, mlirStringRefCreate(target.data(), target.size()), store,
+          &lowered, store, &ptx)))
+    throw nb::value_error(diagnostics.takeMessage().c_str());
+  return {std::move(lowered), std::move(ptx)};
+}
+
+} // namespace
 
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
@@ -33,4 +69,7 @@ NB_MODULE(_swageDialectsNanobind, m) {
         }
       },
       nb::arg("context"), nb::arg("load") = true);
+
+  swageM.def("_compile_ptx", &compilePTX, nb::arg("module"),
+             nb::arg("kernel_name"), nb::arg("block_size"), nb::arg("target"));
 }
