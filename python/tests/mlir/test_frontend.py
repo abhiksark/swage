@@ -1,11 +1,14 @@
 # python/tests/mlir/test_frontend.py
 """Native binding tests for the compile-only Python AST frontend."""
 
+import gc
 import inspect
+import weakref
 
 import pytest
 import swage as sw
 import swage.language as sl
+import torch
 from mlir_swage import ir
 
 
@@ -90,6 +93,16 @@ def _emit(kernel=add_kernel, signature=SIGNATURE, constexprs=None):
     return kernel.emit_mlir(signature=signature, constexprs=constexprs)
 
 
+def _arguments(device="cpu"):
+    """Create metadata inputs for the standard vector-add kernel."""
+    return {
+        "x_ptr": torch.empty(8, device=device),
+        "y_ptr": torch.empty(8, device=device),
+        "output_ptr": torch.empty(8, device=device),
+        "n": 8,
+    }
+
+
 def test_vector_add_emits_a_deterministic_live_module():
     """Build the required vector-add structure without textual round trips."""
     first = _emit()
@@ -105,6 +118,106 @@ def test_vector_add_emits_a_deterministic_live_module():
     assert first_asm.count("vector.gather") == 2
     assert "arith.addf" in first_asm
     assert "vector.scatter" in first_asm
+
+
+def test_inferred_and_explicit_signatures_emit_identical_mlir():
+    """Route inferred descriptors through the existing emitter unchanged."""
+    explicit = _emit().operation.get_asm(enable_debug_info=False)
+    first = add_kernel.emit_mlir(
+        arguments=_arguments(), constexprs={"BLOCK": 128}
+    )
+    second = add_kernel.emit_mlir(
+        arguments=_arguments(), constexprs={"BLOCK": 128}
+    )
+
+    assert first.operation.verify()
+    assert first.operation.get_asm(enable_debug_info=False) == explicit
+    assert second.operation.get_asm(enable_debug_info=False) == explicit
+
+
+def test_tensor_inference_never_reads_data_pointers(monkeypatch):
+    """Infer from metadata without entering the future runtime boundary."""
+    def fail_data_ptr(self):
+        raise AssertionError("data_ptr must not be called")
+
+    monkeypatch.setattr(torch.Tensor, "data_ptr", fail_data_ptr)
+
+    module = add_kernel.emit_mlir(
+        arguments=_arguments(), constexprs={"BLOCK": 128}
+    )
+    assert module.operation.verify()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-(1 << 31), (1 << 31) - 1],
+)
+def test_inferred_i32_boundaries_are_accepted(value):
+    """Accept both signed i32 scalar endpoints."""
+    arguments = _arguments()
+    arguments["n"] = value
+    module = add_kernel.emit_mlir(
+        arguments=arguments, constexprs={"BLOCK": 128}
+    )
+    assert module.operation.verify()
+
+
+@pytest.mark.parametrize(
+    ("tensor", "reason"),
+    [
+        (torch.empty(8, dtype=torch.float64), "dtype torch.float64"),
+        (torch.empty(2, 4), "rank 2"),
+        (torch.empty(16)[::2], "non-contiguous"),
+        (
+            torch.empty(8).to_sparse(),
+            "layout torch.sparse_coo",
+        ),
+        (torch.empty(8, device="meta"), "device type 'meta'"),
+    ],
+)
+def test_unsupported_tensor_metadata_has_stable_diagnostics(tensor, reason):
+    """Reject tensor metadata outside the compile-only pointer contract."""
+    with pytest.raises(sw.CompilationError) as caught:
+        add_kernel.emit_mlir(
+            arguments={**_arguments(), "x_ptr": tensor},
+            constexprs={"BLOCK": 128},
+        )
+
+    assert str(caught.value).endswith(
+        f"add_kernel: unsupported argument for parameter 'x_ptr': {reason}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_cuda_tensor_metadata_is_accepted():
+    """Accept CUDA tensors as metadata providers without launching work."""
+    module = add_kernel.emit_mlir(
+        arguments=_arguments("cuda"), constexprs={"BLOCK": 128}
+    )
+    assert module.operation.verify()
+
+
+def test_inferred_emission_does_not_retain_arguments():
+    """Discard metadata providers before returning the live module."""
+    def emit_with_local_tensor():
+        tensor = torch.empty(8)
+        reference = weakref.ref(tensor)
+        module = add_kernel.emit_mlir(
+            arguments={
+                "x_ptr": tensor,
+                "y_ptr": tensor,
+                "output_ptr": tensor,
+                "n": 8,
+            },
+            constexprs={"BLOCK": 128},
+        )
+        return module, reference
+
+    module, reference = emit_with_local_tensor()
+    gc.collect()
+
+    assert module.operation.verify()
+    assert reference() is None
 
 
 def test_vector_add_preserves_kernel_and_python_source_locations():

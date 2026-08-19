@@ -52,8 +52,8 @@ an MLIR install without Python bindings.
   more than the tests show are bugs.
 - **Python frontend** — `python/swage/`; pytest + ruff; Google style,
   80 columns; see `python/AGENTS.md`. M2 emits a live MLIR module for the
-  explicit-signature fixed-block vector-add subset only. It does not infer
-  tensor metadata or execute kernels; Issue #4 tracks the remaining work.
+  fixed-block vector-add subset from explicit descriptors or supported
+  PyTorch metadata. It does not execute kernels.
 - **Native bindings:** `python/mlir_swage/`; run `check-swage-python` after
   a bindings-enabled native build. This package is build-tree-only until
   wheel packaging is designed.

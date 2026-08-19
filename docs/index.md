@@ -7,9 +7,9 @@ LLVM. You write a segment-local kernel in Python; Swage lowers it into
 fixed-size GPU tile tasks and generates PTX through MLIR, LLVM, and NVPTX.
 
 !!! warning "Pre-alpha"
-    The MLIR dialect, pinned LLVM build, and test infrastructure work
-    today. No Python kernel compiles or executes yet. The README status
-    table is the single source of truth for what works.
+    The MLIR dialect, pinned LLVM build, and compile-only Python AST emitter
+    work today. No Python kernel executes yet. The README status table is the
+    single source of truth for what works.
 
 Start with:
 

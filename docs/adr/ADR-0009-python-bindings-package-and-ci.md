@@ -6,9 +6,9 @@
 ## Context
 
 The planned frontend constructs Swage MLIR directly through the MLIR Python
-bindings (ADR-0001); textual IR is a debug format. Issue #5 registers the
-`swage` dialect in those bindings, but it does not complete M2 or implement
-the frontend. Issue #4 remains the deferred frontend follow-up.
+bindings (ADR-0001); textual IR is a debug format. At the time of this
+decision, Issue #5 registered the `swage` dialect in those bindings and
+Issue #4 remained the frontend follow-up.
 Two designs needed a decision with alternatives:
 
 1. How the dialect's Python package relates to MLIR's. A thin package

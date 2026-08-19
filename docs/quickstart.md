@@ -81,12 +81,17 @@ before the native build. Cold and warm cache jobs install that stored file
 plus `pytest` and `lit`; no Python environment is restored from the cache.
 
 The bindings construct and verify semantic MLIR. The M2 compile-only slice
-emits MLIR only for the explicit-signature fixed-block vector-add AST form.
-It requires explicit type facts rather than inferring tensor metadata:
+emits MLIR for the fixed-block vector-add AST form. Install the optional
+metadata provider when using `arguments=`:
+
+```bash
+pip install -e ".[pytorch]"
+```
 
 ```python
 import swage as sw
 import swage.language as sl
+import torch
 
 
 @sw.jit
@@ -99,6 +104,28 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+length = 1024
+x = torch.empty(length)
+y = torch.empty(length)
+output = torch.empty(length)
+module = add_kernel.emit_mlir(
+    arguments={
+        "x_ptr": x,
+        "y_ptr": y,
+        "output_ptr": output,
+        "n": length,
+    },
+    constexprs={"BLOCK": 128},
+)
+assert module.operation.verify()
+```
+
+Run it with `PYTHONPATH=build/python_packages` after the bindings build.
+`module` is a live `mlir_swage.ir.Module`, not a compiled kernel. Inference
+reads tensor metadata only and does not retain the values. The PyTorch-free
+alternative uses explicit descriptors:
+
+```python
 module = add_kernel.emit_mlir(
     signature={
         "x_ptr": sl.pointer(sl.float32),
@@ -108,14 +135,10 @@ module = add_kernel.emit_mlir(
     },
     constexprs={"BLOCK": 128},
 )
-assert module.operation.verify()
 ```
 
-Run it with `PYTHONPATH=build/python_packages` after the bindings build.
-`module` is a live `mlir_swage.ir.Module`, not a compiled kernel. No Python
-kernel or direct symbolic operation executes, no tensor metadata is inferred,
-and no PTX emission, GPU launch, or runtime result occurs. Issue #4 tracks
-the remaining frontend work.
+No Python kernel or direct symbolic operation executes, and no PTX emission,
+GPU launch, or runtime result occurs.
 
 ## Trying the dialect
 

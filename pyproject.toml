@@ -25,6 +25,7 @@ Repository = "https://github.com/abhiksark/swage"
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "lit"]
 docs = ["mkdocs", "mkdocs-material"]
+pytorch = ["torch>=2.6"]
 
 [tool.hatch.version]
 path = "python/swage/__init__.py"
