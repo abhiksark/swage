@@ -2,6 +2,14 @@
 
 // Parse -> print -> parse round trip of the core segment operations.
 
+// CHECK-LABEL: func.func @program_id_roundtrip
+func.func @program_id_roundtrip() -> index {
+  // CHECK: %[[PID:.*]] = swage.program_id 0
+  %pid = swage.program_id 0
+  // CHECK: return %[[PID]] : index
+  return %pid : index
+}
+
 // CHECK-LABEL: func.func @segment_roundtrip
 func.func @segment_roundtrip(%values: memref<?xf32>, %offsets: memref<?xi32>) -> index {
   // CHECK: %[[SID:.*]] = swage.segment_id 0

@@ -80,8 +80,42 @@ In `ci-cpp`, a cold LLVM cache fetches and stores MLIR's Python requirements
 before the native build. Cold and warm cache jobs install that stored file
 plus `pytest` and `lit`; no Python environment is restored from the cache.
 
-The bindings construct and verify semantic MLIR only. The Python frontend is
-deferred to Issue #4, so no Python kernel compiles or executes.
+The bindings construct and verify semantic MLIR. The M2 compile-only slice
+emits MLIR only for the explicit-signature fixed-block vector-add AST form.
+It requires explicit type facts rather than inferring tensor metadata:
+
+```python
+import swage as sw
+import swage.language as sl
+
+
+@sw.jit
+def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+module = add_kernel.emit_mlir(
+    signature={
+        "x_ptr": sl.pointer(sl.float32),
+        "y_ptr": sl.pointer(sl.float32),
+        "output_ptr": sl.pointer(sl.float32),
+        "n": sl.int32,
+    },
+    constexprs={"BLOCK": 128},
+)
+assert module.operation.verify()
+```
+
+Run it with `PYTHONPATH=build/python_packages` after the bindings build.
+`module` is a live `mlir_swage.ir.Module`, not a compiled kernel. No Python
+kernel or direct symbolic operation executes, no tensor metadata is inferred,
+and no PTX emission, GPU launch, or runtime result occurs. Issue #4 tracks
+the remaining frontend work.
 
 ## Trying the dialect
 

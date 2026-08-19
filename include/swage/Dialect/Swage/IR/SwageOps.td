@@ -14,6 +14,24 @@ include "mlir/IR/CommonTypeConstraints.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+def Swage_ProgramIdOp : Swage_Op<"program_id", [Pure]> {
+  let summary = "Id of the current logical fixed-block program along an axis";
+  let description = [{
+    Returns the coordinate of the current logical fixed-block program along
+    the given axis. This is a logical program coordinate, not a GPU thread or
+    block id.
+
+    Example:
+
+    ```mlir
+    %pid = swage.program_id 0
+    ```
+  }];
+  let arguments = (ins ConfinedAttr<I32Attr, [IntNonNegative]>:$axis);
+  let results = (outs Index:$result);
+  let assemblyFormat = "$axis attr-dict";
+}
+
 def Swage_SegmentIdOp : Swage_Op<"segment_id", [Pure]> {
   let summary = "Id of the current logical segment along an axis";
   let description = [{
