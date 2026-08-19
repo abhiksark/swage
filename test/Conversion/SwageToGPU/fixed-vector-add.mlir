@@ -40,3 +40,5 @@ module {
 // CHECK: arith.addf
 // CHECK: llvm.store
 // CHECK: gpu.return
+// CHECK-NOT: swage.
+// CHECK-NOT: vector.

@@ -94,7 +94,7 @@ Fixed-size tile operations   (tiles: warp/CTA-shaped physical units)
         ▼
 gpu / nvvm / LLVM IR
         ▼
-LLVM NVPTX  →  PTX  →  CUDA Driver API  →  current PyTorch CUDA stream
+LLVM NVPTX  →  PTX  →  CUDA Driver API (M3 pending)  →  current PyTorch stream
 ```
 
 The three-level vocabulary is load-bearing: a **segment** is a logical,

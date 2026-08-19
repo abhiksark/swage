@@ -152,6 +152,8 @@ MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,

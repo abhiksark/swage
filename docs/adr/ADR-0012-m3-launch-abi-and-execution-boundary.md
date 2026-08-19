@@ -21,17 +21,19 @@ NVPTX translation. The target is the active device's exact `sm_*` compute
 capability. PTX is emitted in-process through the pinned LLVM NVPTX backend,
 without NVRTC, subprocesses, textual round-tripping, or a CUDA toolkit.
 
-Execution is exposed only through keyword-only `kernel.launch(arguments=...,
-constexprs=..., grid=...)`. It is asynchronous, returns `None`, and launches
-on the current PyTorch CUDA stream. Launch requires contiguous rank-one f32
-CUDA tensors on the same current device, `0 <= n <= tensor.numel()` for every
-pointer, a device-legal `BLOCK`, and
-`grid == (ceildiv(n, BLOCK),)`. `n == 0` with `grid=(0,)` is a validated no-op.
+When implemented, execution will be exposed only through keyword-only
+`kernel.launch(arguments=..., constexprs=..., grid=...)`. It will be
+asynchronous, return `None`, and launch on the current PyTorch CUDA stream.
+Launch will require contiguous rank-one f32 CUDA tensors on the same current
+device, `0 <= n <= tensor.numel()` for every pointer, a device-legal `BLOCK`,
+and `grid == (ceildiv(n, BLOCK),)`. `n == 0` with `grid=(0,)` will be a
+validated no-op.
 
-The runtime never copies, casts, synchronizes, switches devices, creates a
-CUDA context, or falls back. It records the current stream on every tensor
-after launch. PyTorch, `mlir_swage`, and `libcuda` remain lazy dependencies;
-`emit_mlir()` remains compile-only and direct kernel calls remain unavailable.
+The runtime will never copy, cast, synchronize, switch devices, create a CUDA
+context, or fall back. It will record the current stream on every tensor after
+launch. PyTorch, `mlir_swage`, and `libcuda` will remain lazy dependencies;
+`emit_mlir()` will remain compile-only and direct kernel calls will remain
+unavailable.
 
 ## Consequences
 

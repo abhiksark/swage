@@ -50,7 +50,7 @@ gpu + nvgpu
         ↓
 nvvm + llvm dialect
         ↓
-LLVM IR → LLVM NVPTX → PTX → CUDA Driver API → current PyTorch stream
+LLVM IR → LLVM NVPTX → PTX → CUDA Driver API (M3 pending) → PyTorch stream
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The

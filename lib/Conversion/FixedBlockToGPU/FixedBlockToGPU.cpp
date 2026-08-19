@@ -28,7 +28,8 @@ namespace {
 LogicalResult verifyPointerType(Type type) {
   auto memref = dyn_cast<MemRefType>(type);
   return success(memref && memref.getRank() == 1 &&
-                 memref.getElementType().isF32());
+                 memref.getElementType().isF32() &&
+                 memref.getLayout().isIdentity());
 }
 
 LogicalResult verifyVectorWidth(Operation *op, int64_t blockSize) {
@@ -90,7 +91,8 @@ LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
       failed(verifyPointerType(type.getInput(2))) ||
       !type.getInput(3).isInteger(32))
     return function.emitError(
-        "fixed vector add requires three rank-one f32 memrefs and one i32");
+        "fixed vector add requires three rank-one identity-layout f32 memrefs "
+        "and one i32");
   if (!llvm::all_of(type.getInputs().take_front(3), [](Type input) {
         return cast<MemRefType>(input).getMemorySpaceAsInt() == 0;
       }))
