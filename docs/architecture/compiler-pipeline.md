@@ -6,10 +6,12 @@ between Python and LLVM: MLIR (ADR-0001).
 
 ```text
 Python @sw.jit kernel
-        ↓   inspect.getsource → textwrap.dedent → ast.parse     ⏳
+        ↓   inspect.getsource → textwrap.dedent → ast.parse     ✅ (M2 subset)
 Restricted Python AST
-        ↓   AST visitor building ops via MLIR Python bindings   ⏳
+        ↓   AST visitor building ops via MLIR Python bindings   ✅ (compile only)
 Swage semantic MLIR (dialect: swage)                            ✅ (initial ops)
+        ↓   verified module boundary                             ✅ (fixed vector add)
+Live mlir_swage.ir.Module                                        (M2 endpoint)
         ↓   canonicalization and fusion                          ⏳
 SwagePlan task IR (dialect: swage_plan)                         🔬 (ADR-0003)
         ↓   task decomposition, policy selection
@@ -26,20 +28,26 @@ LLVM IR → LLVM NVPTX → PTX                                      (ADR-0006)
 CUDA Driver API launch on the current PyTorch stream
 ```
 
-## Frontend (planned, M2)
+## Frontend (M2 in progress)
 
-The `@sw.jit` decorator captures the function source, parses a
-deliberately restricted Python subset, and drives an AST visitor that
-constructs Swage MLIR directly. Requirements that shape it:
+The shipped slice captures source with `@sw.jit`, parses a deliberately
+restricted Python subset, and emits a live `mlir_swage.ir.Module` directly
+through MLIR Python bindings. It accepts the README fixed-block vector-add
+form when the caller supplies explicit pointer and scalar types in
+`signature` and compile-time values in `constexprs`. It preserves Python
+source locations and returns verifiable deterministic MLIR without textual
+round-tripping.
 
-- Python source locations preserved into MLIR; diagnostics carry function
-  name and line number.
-- `constexpr` arguments separated from runtime arguments; pointer element
-  types inferred from PyTorch tensors.
-- Arbitrary Python calls and unsupported control flow rejected with clear
-  errors; kernel bodies are never executed as normal Python.
-- No Torch FX; no MLIR text round-tripping on the JIT path (textual MLIR
-  is for debugging, tests, and reproducers).
+The boundary is compile only. It does not infer PyTorch tensor metadata,
+execute kernel calls or direct symbolic language operations, lower to PTX,
+launch a GPU kernel, or return a runtime result. The remaining frontend work
+stays in Issue #4. Later M2 work must retain these constraints while
+extending the subset:
+
+- `constexpr` arguments remain separate from runtime arguments.
+- Arbitrary Python calls and unsupported control flow remain rejected with
+  source-located errors.
+- No Torch FX or MLIR text round-tripping appears on the emission path.
 
 ## Semantic level (partially exists, M0–M1)
 

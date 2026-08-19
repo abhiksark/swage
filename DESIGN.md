@@ -37,7 +37,7 @@ segment programs plus runtime extents into tasks and fixed tiles.
 
 ```text
 Python @sw.jit kernel
-        ↓  inspect.getsource → ast.parse (restricted subset)
+        ↓  inspect.getsource → ast.parse (restricted subset, M2 compile-only)
 Swage semantic MLIR            (dialect: swage)
         ↓  canonicalization and fusion
 SwagePlan task IR              (dialect: swage_plan — not yet started)
@@ -57,6 +57,16 @@ There is exactly one production IR between Python and LLVM: MLIR. The
 Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
+
+## Current Python frontend boundary
+
+M2 is in progress. The shipped fixed-block vector-add subset captures a
+`@sw.jit` function and, with an explicit signature and `constexprs`, emits a
+verified live `mlir_swage.ir.Module` directly through the native bindings.
+The supported scalar and pointer facts are declared by the caller; no
+PyTorch tensor metadata is inferred. Kernel calls and direct symbolic
+language operations do not execute, and no lowering, PTX emission, launch,
+or runtime result exists. Issue #4 tracks the remaining frontend work.
 
 ## The `swage` dialect (semantic level)
 
@@ -117,7 +127,8 @@ fallback, or backend fallback.
 
 ## Testing strategy
 
-- Python: pytest for the frontend, JIT specialization, runtime validation.
+- Python: pytest for compile-only frontend emission and source diagnostics;
+  JIT specialization and runtime validation follow with their implementations.
 - MLIR: lit + FileCheck for parse/print round trips, verifier failures,
   and lowering; checks target semantic invariants, not incidental
   formatting.

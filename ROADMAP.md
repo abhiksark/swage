@@ -8,7 +8,7 @@ passes with tests; nothing below claims more than the tests show.
 | P0 — Python prototype freeze | Tag and freeze the pre-existing Python prototype | Prototype reproducible | **Not applicable** — the repository started empty; there is no prototype (ADR-0005) |
 | M0 — MLIR project foundation | LLVM pin, out-of-tree CMake, `swage` dialect skeleton, `swage-opt`, lit, CPU CI, community health | `swage-opt` round-trips Swage IR; lit + pytest green | **In progress (this PR)** |
 | M1 — Swage dialect | Region-based `map`/`reduce`/`map_store`/`yield`, full verifier set | Positive and negative dialect tests | Not started |
-| M2 — Python AST → MLIR | `@sw.jit` frontend, `constexpr`, source locations, diagnostics | Vector-add kernel emits deterministic MLIR; no dataclass IR | Not started |
+| M2 — Python AST → MLIR | `@sw.jit` frontend, `constexpr`, source locations, diagnostics | Vector-add kernel emits deterministic MLIR; no dataclass IR | **In progress (Issue #4)** |
 | M3 — Fixed vector add via NVPTX | GPU lowering, PTX emission, driver launch, JIT cache | Python vector add returns correct CUDA results on PyTorch tensors | Not started |
 | M4 — Segmented sum | One-CTA-per-segment lowering, empty segments, offset validation | Matches PyTorch oracle | Not started |
 | M5 — Ragged softmax parity | Fusion, captures, stable softmax, multi-stage execution | Matches PyTorch across adversarial distributions | Not started |
