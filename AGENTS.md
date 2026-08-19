@@ -75,5 +75,5 @@ known limitations; follow-up issue.
 `swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
 build-tree `PYTHONPATH`. The bindings require an MLIR install built with
 Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
-is an error. The Python frontend is deferred to Issue #4, and no Python
-kernel compiles or executes.
+is an error. The M2 Python frontend emits MLIR from explicit descriptors or
+PyTorch metadata, but no Python kernel executes.

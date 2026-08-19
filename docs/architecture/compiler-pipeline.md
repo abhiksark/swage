@@ -28,33 +28,34 @@ LLVM IR → LLVM NVPTX → PTX                                      (ADR-0006)
 CUDA Driver API launch on the current PyTorch stream
 ```
 
-## Frontend (M2 in progress)
+## Frontend (M2 complete)
 
 The shipped slice captures source with `@sw.jit`, parses a deliberately
 restricted Python subset, and emits a live `mlir_swage.ir.Module` directly
 through MLIR Python bindings. It accepts the README fixed-block vector-add
-form when the caller supplies explicit pointer and scalar types in
-`signature` and compile-time values in `constexprs`. It preserves Python
-source locations and returns verifiable deterministic MLIR without textual
+form with either explicit pointer and scalar types in `signature` or an
+`arguments` mapping containing supported PyTorch tensors and Python integers.
+Compile-time values remain in `constexprs`. It preserves Python source
+locations and returns verifiable deterministic MLIR without textual
 round-tripping.
 
-The boundary is compile only. It does not infer PyTorch tensor metadata,
-execute kernel calls or direct symbolic language operations, lower to PTX,
-launch a GPU kernel, or return a runtime result. The remaining frontend work
-stays in Issue #4. Later M2 work must retain these constraints while
-extending the subset:
+The boundary is compile only. PyTorch inference reads layout, dtype, rank,
+device type, and contiguity, then discards the arguments. It does not read
+data pointers or contents, execute kernel calls or direct symbolic language
+operations, lower to PTX, launch a GPU kernel, or return a runtime result.
+The following constraints remain in force:
 
 - `constexpr` arguments remain separate from runtime arguments.
 - Arbitrary Python calls and unsupported control flow remain rejected with
   source-located errors.
 - No Torch FX or MLIR text round-tripping appears on the emission path.
 
-## Semantic level (partially exists, M0–M1)
+## Semantic level (M0–M1 complete)
 
 The `swage` dialect models segment-local computation. Today:
 `!swage.segment<T>`, `swage.segment_id`, `swage.make_segment`,
-`swage.extent`. Next (M1): region-based `swage.map`, `swage.reduce`,
-`swage.map_store`, `swage.yield`, with ordinary arithmetic expressed by
+`swage.extent`, and the region-based `swage.map`, `swage.reduce`,
+`swage.map_store`, and `swage.yield` operations. Ordinary arithmetic uses
 `arith`/`math` ops *inside* regions — a dynamic-length segment is never
 materialized as a runtime-sized SSA vector; reductions and maps stay
 symbolic until tiling.

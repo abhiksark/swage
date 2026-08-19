@@ -2,7 +2,7 @@
 
 Rules for the Python package (`swage`, distributed as `swage-compiler`).
 
-- The future kernel frontend parses a restricted subset via
+- The kernel frontend parses a restricted subset via
   `inspect.getsource` → `ast.parse` and builds MLIR directly. Never execute
   user kernel bodies as normal Python; never widen the accepted subset
   without diagnostics tests.
@@ -19,5 +19,5 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
 - Native binding tests live in `python/tests/mlir/` and run through
   `ninja -C build check-swage-python`, which sets the build-tree
   `PYTHONPATH` for `mlir_swage`.
-- `mlir_swage` is not a wheel or public `swage.ir` API. Keep frontend work
-  deferred to Issue #4; no Python kernel compiles or executes yet.
+- `mlir_swage` is not a wheel or public `swage.ir` API. PyTorch metadata
+  inference is optional and compile-only; no Python kernel executes yet.

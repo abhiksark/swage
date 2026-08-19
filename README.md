@@ -8,19 +8,22 @@ logical segment*; Swage decides how that segment becomes fixed-size GPU
 tile tasks and generates NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
 > **Status: pre-alpha foundation.** The `swage` MLIR dialect, pinned
-> LLVM/MLIR build, `swage-opt`, native bindings, and the explicit-signature
-> fixed-block vector-add AST-emission slice work today. **No Python kernel
+> LLVM/MLIR build, `swage-opt`, native bindings, and the fixed-block
+> vector-add AST-emission slice with PyTorch metadata inference work today.
+> **No Python kernel
 > executes** and no PTX, lowering, launch, or runtime result exists. See
 > [Current status](#current-status) for the exact line.
 
 ## The programming model
 
-The fixed-block vector-add subset is deliberately Triton-like and can emit
-MLIR with an explicit signature:
+The fixed-block vector-add subset is deliberately Triton-like and can infer
+its narrow MLIR signature from supported PyTorch tensor metadata and Python
+integers (`n` maps to `sl.int32`):
 
 ```python
 import swage as sw
 import swage.language as sl
+import torch
 
 
 @sw.jit
@@ -33,22 +36,29 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+length = 1024
+x = torch.empty(length, dtype=torch.float32)
+y = torch.empty(length, dtype=torch.float32)
+output = torch.empty(length, dtype=torch.float32)
 module = add_kernel.emit_mlir(
-    signature={
-        "x_ptr": sl.pointer(sl.float32),
-        "y_ptr": sl.pointer(sl.float32),
-        "output_ptr": sl.pointer(sl.float32),
-        "n": sl.int32,
+    arguments={
+        "x_ptr": x,
+        "y_ptr": y,
+        "output_ptr": output,
+        "n": length,
     },
     constexprs={"BLOCK": 128},
 )
 assert module.operation.verify()
 ```
 
+Install the optional dependency with `pip install "swage-compiler[pytorch]"`.
+The explicit `signature=` form remains available without PyTorch.
 `emit_mlir` requires the build-tree-only `mlir_swage` bindings. It produces
-a live `mlir_swage.ir.Module`; it does not infer tensor metadata or execute
-the kernel. Calling a decorated kernel, direct symbolic language operations,
-and every PTX, lowering, launch, or runtime path remain unavailable.
+a live `mlir_swage.ir.Module`; it reads metadata only and does not execute or
+retain the supplied arguments. Calling a decorated kernel, direct symbolic
+language operations, and every PTX, lowering, launch, or runtime path remain
+unavailable.
 
 The research target is the segment API: one segment-local program, from
 which the compiler derives packing, bucketing, partitioning, partial
@@ -100,7 +110,7 @@ warp or CTA. See
 | Pinned out-of-tree LLVM/MLIR build (`llvmorg-22.1.8`) + `swage-opt` | **Works today** |
 | `python -m swage.env` environment diagnostics | **Works today** |
 | Native `mlir_swage` bindings package | **Works today** from the build tree; integration-tested |
-| Python AST → verified live `mlir_swage.ir.Module` (explicit-signature fixed-block vector add) | **Works today, compile only** |
+| Python AST → verified live `mlir_swage.ir.Module` (fixed-block vector add, inferred or explicit signature) | **Works today, compile only** |
 | Fixed vector add through LLVM NVPTX to a real GPU result | Not started |
 | Segment lowering (segmented sum/max, ragged softmax) | Planned |
 | SwagePlan task dialect; warp/CTA/split-CTA/persistent policies | Research target |
@@ -127,9 +137,8 @@ make test
 
 The native bindings require the pinned LLVM/MLIR install with its Python
 bindings enabled. Run `ninja -C build check-swage-python` after the native
-build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. The in-progress
-frontend work is tracked in Issue #4. This slice emits MLIR only: no Python
-kernel executes, no tensor metadata is inferred, and no GPU result is
+build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. This M2 frontend
+slice emits MLIR only: no Python kernel executes and no GPU result is
 produced.
 
 See [docs/quickstart.md](docs/quickstart.md). A GPU is not required to

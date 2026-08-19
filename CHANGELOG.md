@@ -18,9 +18,12 @@ semantic versioning (`0.x` — anything may change).
   `scripts/fetch_llvm.sh` / `build_llvm.sh` / `build_swage.sh`.
 - Python package `swage-compiler` (import `swage`) with
   `python -m swage.env` environment diagnostics.
-- Compile-only Python AST-to-MLIR emission for the explicit-signature,
-  fixed-block vector-add subset. `emit_mlir` returns a verified live
-  build-tree `mlir_swage.ir.Module` with source locations and diagnostics.
+- Compile-only Python AST-to-MLIR emission for the fixed-block vector-add
+  subset. `emit_mlir` accepts either explicit descriptors or a PyTorch
+  argument mapping and returns a verified live build-tree
+  `mlir_swage.ir.Module` with source locations and diagnostics.
+- Optional `swage-compiler[pytorch]` metadata inference for contiguous,
+  strided, rank-one f32 CPU or CUDA tensors and signed i32 Python integers.
 - Native build-tree `mlir_swage` package with generated `swage` bindings,
   dialect registration, and the `check-swage-python` integration target.
 - Bindings-enabled `ci-cpp` coverage that runs the native integration target
@@ -31,6 +34,6 @@ semantic versioning (`0.x` — anything may change).
 
 ### Notes
 
-- The Python frontend emits MLIR only. No Python kernel executes, no tensor
-  metadata is inferred, and no PTX lowering, GPU launch, or runtime result
-  exists. Issue #4 remains open for the remaining frontend work.
+- The Python frontend emits MLIR only. Tensor inference reads metadata and
+  discards arguments; no Python kernel executes, and no PTX lowering, GPU
+  launch, or runtime result exists.

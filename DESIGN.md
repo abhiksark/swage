@@ -60,13 +60,18 @@ not the JIT construction path.
 
 ## Current Python frontend boundary
 
-M2 is in progress. The shipped fixed-block vector-add subset captures a
-`@sw.jit` function and, with an explicit signature and `constexprs`, emits a
-verified live `mlir_swage.ir.Module` directly through the native bindings.
-The supported scalar and pointer facts are declared by the caller; no
-PyTorch tensor metadata is inferred. Kernel calls and direct symbolic
-language operations do not execute, and no lowering, PTX emission, launch,
-or runtime result exists. Issue #4 tracks the remaining frontend work.
+M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
+function and emits a verified live `mlir_swage.ir.Module` directly through
+the native bindings. Callers must provide exactly one of `signature=` or
+`arguments=`; providing both or neither is invalid. From `arguments=`, the
+frontend infers rank-one f32 pointers and i32 scalars. PyTorch stays optional
+and is imported only for inference.
+
+Inference reads metadata only. It does not inspect data pointers or contents,
+retain arguments, infer lengths, validate cross-tensor relationships, or
+cache specializations. Kernel calls and direct symbolic language operations
+do not execute, and no lowering, PTX emission, launch, or runtime result
+exists (ADR-0011).
 
 ## The `swage` dialect (semantic level)
 

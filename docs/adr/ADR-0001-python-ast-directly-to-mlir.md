@@ -27,5 +27,4 @@ Python.
   Python into MLIR diagnostics.
 - The frontend depends on the MLIR Python bindings, so the pinned LLVM
   build enables `MLIR_ENABLE_BINDINGS_PYTHON=ON`.
-- Frontend work cannot begin until the dialect registers in Python
-  (tracked for M2).
+- Frontend work was gated on registering the dialect in Python.

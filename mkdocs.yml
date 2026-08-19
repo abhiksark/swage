@@ -31,3 +31,7 @@ nav:
       - "ADR-0005: No prototype, PyTorch oracle": adr/ADR-0005-no-prototype-pytorch-oracle.md
       - "ADR-0006: PTX via LLVM NVPTX": adr/ADR-0006-ptx-via-llvm-nvptx.md
       - "ADR-0007: Distribution naming": adr/ADR-0007-distribution-naming.md
+      - "ADR-0008: Region ops": adr/ADR-0008-region-ops-isolation-and-kinds.md
+      - "ADR-0009: Python bindings": adr/ADR-0009-python-bindings-package-and-ci.md
+      - "ADR-0010: Fixed-block MLIR": adr/ADR-0010-fixed-block-mlir-boundary.md
+      - "ADR-0011: PyTorch metadata inference": adr/ADR-0011-pytorch-metadata-inference.md

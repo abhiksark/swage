@@ -80,10 +80,10 @@ class _Kernel:
             f"Swage kernel '{self.__name__}' execution is unavailable until M3"
         )
 
-    def emit_mlir(self, *, signature, constexprs):
+    def emit_mlir(self, *, signature=None, arguments=None, constexprs):
         """Emit and return a live native MLIR module for this kernel."""
         runtime_types, static_values = self._validate_inputs(
-            signature, constexprs
+            signature, arguments, constexprs
         )
         from mlir_swage import ir
         from mlir_swage.dialects import arith, func, swage, vector
@@ -100,52 +100,63 @@ class _Kernel:
         )
         return emitter.emit()
 
-    def _validate_inputs(self, signature, constexprs):
-        if not isinstance(signature, Mapping):
-            self._raise(self.function, "signature must be a mapping")
+    def _validate_inputs(self, signature, arguments, constexprs):
+        if (signature is None) == (arguments is None):
+            self._raise(
+                self.function,
+                "exactly one of signature or arguments is required",
+            )
+        runtime_values = signature if signature is not None else arguments
+        runtime_label = "signature" if signature is not None else "arguments"
+        if not isinstance(runtime_values, Mapping):
+            self._raise(
+                self.function, f"{runtime_label} must be a mapping"
+            )
         if not isinstance(constexprs, Mapping):
             self._raise(self.function, "constexprs must be a mapping")
-        if any(not isinstance(key, str) for key in signature):
-            self._raise(self.function, "signature keys must be strings")
+        if any(not isinstance(key, str) for key in runtime_values):
+            self._raise(
+                self.function, f"{runtime_label} keys must be strings"
+            )
         if any(not isinstance(key, str) for key in constexprs):
             self._raise(self.function, "constexprs keys must be strings")
 
-        arguments = self.function.args
-        if arguments.posonlyargs:
+        syntax_arguments = self.function.args
+        if syntax_arguments.posonlyargs:
             self._raise(
-                arguments.posonlyargs[0],
+                syntax_arguments.posonlyargs[0],
                 "positional-only parameters are unsupported",
             )
-        if arguments.kwonlyargs:
+        if syntax_arguments.kwonlyargs:
             self._raise(
-                arguments.kwonlyargs[0],
+                syntax_arguments.kwonlyargs[0],
                 "keyword-only parameters are unsupported",
             )
-        if arguments.vararg:
+        if syntax_arguments.vararg:
             self._raise(
-                arguments.vararg,
+                syntax_arguments.vararg,
                 "variadic positional parameters are unsupported",
             )
-        if arguments.kwarg:
+        if syntax_arguments.kwarg:
             self._raise(
-                arguments.kwarg,
+                syntax_arguments.kwarg,
                 "variadic keyword parameters are unsupported",
             )
 
-        parameters = [argument.arg for argument in arguments.args]
+        parameters = [argument.arg for argument in syntax_arguments.args]
         constexpr_names = {
             argument.arg
-            for argument in arguments.args
+            for argument in syntax_arguments.args
             if _is_constexpr_annotation(argument.annotation)
         }
         runtime_parameters = [
             name for name in parameters if name not in constexpr_names
         ]
         runtime_names = set(runtime_parameters)
-        signature_names = set(signature)
+        runtime_value_names = set(runtime_values)
         supplied_constexprs = set(constexprs)
 
-        misplaced = signature_names & constexpr_names
+        misplaced = runtime_value_names & constexpr_names
         if misplaced:
             name = sorted(misplaced)[0]
             self._raise(
@@ -157,25 +168,23 @@ class _Kernel:
             name = sorted(misplaced)[0]
             self._raise(
                 self.function,
-                f"runtime parameter '{name}' must be passed in signature",
+                f"runtime parameter '{name}' must be passed in "
+                f"{runtime_label}",
             )
-        self._require_keys("signature", signature_names, runtime_names)
+        self._require_keys(
+            runtime_label, runtime_value_names, runtime_names
+        )
         self._require_keys(
             "constexprs", supplied_constexprs, constexpr_names
         )
 
-        for name in runtime_parameters:
-            value = signature[name]
-            if value is language.int32:
-                continue
-            if (
-                isinstance(value, language._PointerType)
-                and value.element_type is language.float32
-            ):
-                continue
-            self._raise(
-                self.function,
-                f"unsupported type for parameter '{name}'",
+        if signature is not None:
+            runtime_types = self._validate_signature(
+                signature, runtime_parameters
+            )
+        else:
+            runtime_types = self._infer_signature(
+                arguments, runtime_parameters
             )
 
         for name in parameters:
@@ -203,7 +212,78 @@ class _Kernel:
                     "constexpr 'BLOCK' must fit a signed 64-bit MLIR "
                     "dimension",
                 )
-        return dict(signature), dict(constexprs)
+        return runtime_types, dict(constexprs)
+
+    def _validate_signature(self, signature, runtime_parameters):
+        for name in runtime_parameters:
+            value = signature[name]
+            if value is language.int32:
+                continue
+            if (
+                isinstance(value, language._PointerType)
+                and value.element_type is language.float32
+            ):
+                continue
+            self._raise(
+                self.function,
+                f"unsupported type for parameter '{name}'",
+            )
+        return dict(signature)
+
+    def _infer_signature(self, arguments, runtime_parameters):
+        try:
+            import torch
+            float32 = torch.float32
+            strided = torch.strided
+            tensor_type = torch.Tensor
+        except Exception:
+            self._raise(
+                self.function,
+                "PyTorch metadata inference requires "
+                "'swage-compiler[pytorch]'",
+            )
+
+        signature = {}
+        for name in runtime_parameters:
+            value = arguments[name]
+            if type(value) is int and -(1 << 31) <= value < (1 << 31):
+                signature[name] = language.int32
+                continue
+            if not isinstance(value, tensor_type):
+                self._raise(
+                    self.function,
+                    f"unsupported argument for parameter '{name}'",
+                )
+            try:
+                layout = value.layout
+                dtype = value.dtype
+                rank = value.dim()
+                device_type = value.device.type
+                contiguous = value.is_contiguous()
+            except Exception:
+                self._raise(
+                    self.function,
+                    f"could not read PyTorch metadata for parameter "
+                    f"'{name}'; install 'swage-compiler[pytorch]'",
+                )
+            if layout != strided:
+                reason = f"layout {layout}"
+            elif dtype != float32:
+                reason = f"dtype {dtype}"
+            elif rank != 1:
+                reason = f"rank {rank}"
+            elif device_type not in {"cpu", "cuda"}:
+                reason = f"device type '{device_type}'"
+            elif not contiguous:
+                reason = "non-contiguous"
+            else:
+                signature[name] = language.pointer(language.float32)
+                continue
+            self._raise(
+                self.function,
+                f"unsupported argument for parameter '{name}': {reason}",
+            )
+        return signature
 
     def _require_keys(self, label, actual, expected):
         if actual == expected:
@@ -216,7 +296,7 @@ class _Kernel:
         if extra:
             details.append(f"extra: {', '.join(extra)}")
         parameter_kind = (
-            "runtime parameters" if label == "signature" else
+            "runtime parameters" if label in {"signature", "arguments"} else
             "constexpr parameters"
         )
         self._raise(
