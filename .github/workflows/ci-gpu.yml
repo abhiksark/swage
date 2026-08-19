@@ -1,0 +1,62 @@
+name: ci-gpu
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-gpu-main
+  cancel-in-progress: false
+
+jobs:
+  runtime-qualification:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, swage-gpu]
+    timeout-minutes: 120
+    env:
+      SWAGE_CACHE_DIR: >-
+        ${{ runner.temp }}/swage-cache-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Use the runner LLVM install
+        run: echo "SWAGE_LLVM_HOME=$HOME/.swage/llvm" >> "$GITHUB_ENV"
+
+      - name: Require CUDA and the trusted runner toolchain
+        run: |
+          python - <<'PY'
+          import torch
+
+          assert torch.cuda.is_available(), "trusted GPU runner has no CUDA"
+          print(f"PyTorch: {torch.__version__} (CUDA {torch.version.cuda})")
+          print(f"GPU: {torch.cuda.get_device_name()}")
+          print(f"compute capability: {torch.cuda.get_device_capability()}")
+          PY
+          cmake --version
+          ninja --version
+          lit --version
+
+      - name: Build native bindings and run CPU qualification
+        run: SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh
+
+      - name: Test cache validation
+        run: |
+          python -m pytest -q \
+            tests/python/test_runtime.py::test_cache_round_trip_and_corruption_rejection \
+            tests/python/test_runtime.py::test_cache_rejects_unsafe_entries
+
+      - name: Test CUDA correctness, streams, and process reuse
+        run: |
+          PYTHONPATH=build/python_packages \
+            python -m pytest -q python/tests/mlir/test_runtime.py
+
+      - name: Test persistent cache reuse in a new process
+        run: |
+          test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"
+          PYTHONPATH=build/python_packages \
+            python -m pytest -q \
+              'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'
