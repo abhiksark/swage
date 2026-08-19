@@ -93,6 +93,10 @@ class _Kernel:
             self._raise(self.function, "signature must be a mapping")
         if not isinstance(constexprs, Mapping):
             self._raise(self.function, "constexprs must be a mapping")
+        if any(not isinstance(key, str) for key in signature):
+            self._raise(self.function, "signature keys must be strings")
+        if any(not isinstance(key, str) for key in constexprs):
+            self._raise(self.function, "constexprs keys must be strings")
 
         arguments = self.function.args
         if arguments.posonlyargs:
@@ -168,6 +172,12 @@ class _Kernel:
                 self._raise(
                     self.function,
                     "constexpr 'BLOCK' must be a positive integer",
+                )
+            if block > (1 << 63) - 1:
+                self._raise(
+                    self.function,
+                    "constexpr 'BLOCK' must fit a signed 64-bit MLIR "
+                    "dimension",
                 )
         return dict(signature), dict(constexprs)
 
@@ -254,6 +264,18 @@ class _Emitter:
                         self.kernel.function.body[-1], ast.Return
                     ):
                         self.func.ReturnOp([], loc=location)
+            try:
+                verified = module.operation.verify()
+            except self.ir.MLIRError:
+                self._error(
+                    self.kernel.function,
+                    "emitted MLIR failed verification",
+                )
+            if not verified:
+                self._error(
+                    self.kernel.function,
+                    "emitted MLIR failed verification",
+                )
             return module
 
     def _argument_types(self):
@@ -286,7 +308,13 @@ class _Emitter:
                 node.targets[0], ast.Name
             ):
                 self._error(node, "only single-name assignments are supported")
-            self.symbols[node.targets[0].id] = self._expression(node.value)
+            target = node.targets[0]
+            if target.id in self.constexprs:
+                self._error(
+                    target,
+                    f"cannot assign to constexpr parameter '{target.id}'",
+                )
+            self.symbols[target.id] = self._expression(node.value)
             return
         if isinstance(node, ast.Expr):
             if (
@@ -327,7 +355,11 @@ class _Emitter:
         left = self._expression(node.left)
         right = self._expression(node.right)
         if isinstance(left, _Value) and left.kind == "pointer":
-            if isinstance(node.op, ast.Add) and right.kind == "index_vector":
+            if (
+                isinstance(node.op, ast.Add)
+                and isinstance(right, _Value)
+                and right.kind == "index_vector"
+            ):
                 return _Address(left.value, right.value)
             self._error(node, "pointers support only addition with offsets")
         if not isinstance(left, _Value) or not isinstance(right, _Value):
@@ -440,6 +472,8 @@ class _Emitter:
             or axis.value < 0
         ):
             self._error(axis, "program_id axis must be a nonnegative integer")
+        if axis.value > (1 << 31) - 1:
+            self._error(axis, "program_id axis must fit signed i32")
         result = self.swage.ProgramIdOp(
             self.index, axis.value, loc=self._location(node)
         ).result

@@ -19,6 +19,25 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+@sw.jit
+def rebound_block_kernel(BLOCK: sl.constexpr):  # noqa: D103
+    BLOCK = 4
+    pid = sl.program_id(0)
+    _ = pid * BLOCK + sl.arange(0, BLOCK)
+
+
+@sw.jit
+def nested_address_kernel(x_ptr, BLOCK: sl.constexpr):  # noqa: D103
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    _ = x_ptr + (x_ptr + offsets)
+
+
+@sw.jit
+def oversized_axis_kernel():  # noqa: D103
+    _ = sl.program_id(2147483648)
+
+
 SIGNATURE = {
     "x_ptr": sl.pointer(sl.float32),
     "y_ptr": sl.pointer(sl.float32),
@@ -277,3 +296,90 @@ def test_unsupported_runtime_types_have_stable_diagnostics(bad_type):
         match="unsupported type for parameter 'n'",
     ):
         _emit(signature={**SIGNATURE, "n": bad_type})
+
+
+def test_constexpr_parameter_cannot_be_rebound():
+    """Keep constexpr arithmetic consistent with the emitted vector width."""
+    with pytest.raises(sw.CompilationError) as caught:
+        rebound_block_kernel.emit_mlir(
+            signature={}, constexprs={"BLOCK": 8}
+        )
+
+    assert str(caught.value).endswith(
+        "rebound_block_kernel: cannot assign to constexpr parameter 'BLOCK'"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kernel_name", "emit", "reason"),
+    [
+        (
+            "add_kernel",
+            lambda: _emit(signature={1: sl.int32}),
+            "signature keys must be strings",
+        ),
+        (
+            "nested_address_kernel",
+            lambda: nested_address_kernel.emit_mlir(
+                signature={"x_ptr": sl.pointer(sl.float32)},
+                constexprs={"BLOCK": 8},
+            ),
+            "pointers support only addition with offsets",
+        ),
+        (
+            "oversized_axis_kernel",
+            lambda: oversized_axis_kernel.emit_mlir(
+                signature={}, constexprs={}
+            ),
+            "program_id axis must fit signed i32",
+        ),
+        (
+            "add_kernel",
+            lambda: _emit(constexprs={"BLOCK": 1 << 63}),
+            "constexpr 'BLOCK' must fit a signed 64-bit MLIR dimension",
+        ),
+    ],
+    ids=["mapping-key", "nested-address", "axis-range", "block-range"],
+)
+def test_malformed_supported_inputs_have_stable_diagnostics(
+    kernel_name, emit, reason
+):
+    """Translate malformed trust-boundary inputs to compilation errors."""
+    with pytest.raises(sw.CompilationError) as caught:
+        emit()
+
+    message = str(caught.value)
+    assert message.startswith(f"{__file__}:")
+    assert message.endswith(f"{kernel_name}: {reason}")
+
+
+def test_internal_mlir_verification_error_is_source_located(monkeypatch):
+    """Verify emitted modules and translate only native verification errors."""
+    native_module = ir.Module
+
+    class FailingOperation:
+        """Operation proxy that reports a native verifier failure."""
+
+        @staticmethod
+        def verify():
+            raise ir.MLIRError("forced verification failure", [])
+
+    class FailingModule:
+        """Module proxy retaining the real body used by operation builders."""
+
+        def __init__(self, module):
+            self.body = module.body
+            self.operation = FailingOperation()
+
+        @classmethod
+        def create(cls, location):
+            return cls(native_module.create(location))
+
+    monkeypatch.setattr(ir, "Module", FailingModule)
+
+    with pytest.raises(sw.CompilationError) as caught:
+        _emit()
+
+    assert str(caught.value).endswith(
+        "add_kernel: emitted MLIR failed verification"
+    )
