@@ -105,9 +105,9 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
 
 
 length = 1024
-x = torch.empty(length)
-y = torch.empty(length)
-output = torch.empty(length)
+x = torch.empty(length, dtype=torch.float32)
+y = torch.empty(length, dtype=torch.float32)
+output = torch.empty(length, dtype=torch.float32)
 module = add_kernel.emit_mlir(
     arguments={
         "x_ptr": x,

@@ -62,9 +62,10 @@ not the JIT construction path.
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
-the native bindings. Callers either provide an explicit `signature` or an
-`arguments` mapping from which the frontend infers rank-one f32 pointers and
-i32 scalars. PyTorch stays optional and is imported only for inference.
+the native bindings. Callers must provide exactly one of `signature=` or
+`arguments=`; providing both or neither is invalid. From `arguments=`, the
+frontend infers rank-one f32 pointers and i32 scalars. PyTorch stays optional
+and is imported only for inference.
 
 Inference reads metadata only. It does not inspect data pointers or contents,
 retain arguments, infer lengths, validate cross-tensor relationships, or

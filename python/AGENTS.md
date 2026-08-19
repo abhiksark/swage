@@ -20,4 +20,4 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
   `ninja -C build check-swage-python`, which sets the build-tree
   `PYTHONPATH` for `mlir_swage`.
 - `mlir_swage` is not a wheel or public `swage.ir` API. PyTorch metadata
-  inference is optional and compile only; no Python kernel executes yet.
+  inference is optional and compile-only; no Python kernel executes yet.
