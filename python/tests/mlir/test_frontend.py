@@ -89,10 +89,140 @@ def test_control_flow_has_a_stable_source_diagnostic():
         bad_kernel.emit_mlir(signature={}, constexprs={})
 
     expected = (
-        f"{__file__}:{function_line + 1}:5: bad_kernel: "
+        f"{__file__}:{function_line + 1}:9: bad_kernel: "
         "unsupported statement 'If'"
     )
     assert str(caught.value) == expected
+
+
+def test_nested_kernel_mlir_location_uses_real_source_column():
+    """Restore indentation removed before parsing to emitted locations."""
+    @sw.jit
+    def nested_kernel():
+        pid = sl.program_id(0)  # noqa: F841
+
+    source_line = inspect.getsourcelines(nested_kernel.python_function)[1]
+    debug_asm = nested_kernel.emit_mlir(
+        signature={}, constexprs={}
+    ).operation.get_asm(enable_debug_info=True)
+
+    assert f'{__file__}":{source_line + 2}:15' in debug_asm
+
+
+def test_rejects_every_unsupported_parameter_kind():
+    """Never silently omit Python parameter kinds from the MLIR ABI."""
+    @sw.jit
+    def positional_only(value, /):
+        return
+
+    @sw.jit
+    def keyword_only(*, value):
+        return
+
+    @sw.jit
+    def variadic(*values):
+        return
+
+    @sw.jit
+    def keyword_variadic(**values):
+        return
+
+    cases = [
+        (
+            positional_only,
+            "value",
+            "positional-only parameters are unsupported",
+        ),
+        (
+            keyword_only,
+            "value",
+            "keyword-only parameters are unsupported",
+        ),
+        (
+            variadic,
+            "values",
+            "variadic positional parameters are unsupported",
+        ),
+        (
+            keyword_variadic,
+            "values",
+            "variadic keyword parameters are unsupported",
+        ),
+    ]
+    for kernel, parameter, reason in cases:
+        source, source_line = inspect.getsourcelines(kernel.python_function)
+        parameter_line = next(
+            offset for offset, line in enumerate(source) if parameter in line
+        )
+        column = source[parameter_line].index(parameter) + 1
+        with pytest.raises(sw.CompilationError) as caught:
+            kernel.emit_mlir(signature={}, constexprs={})
+
+        expected = (
+            f"{__file__}:{source_line + parameter_line}:{column}: "
+            f"{kernel.__name__}: {reason}"
+        )
+        assert str(caught.value) == expected
+
+
+def test_store_is_rejected_on_an_assignment_rhs():
+    """Permit the effectful store only in expression-statement position."""
+    @sw.jit
+    def bad_kernel(output_ptr, n, BLOCK: sl.constexpr):
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        value = sl.load(output_ptr + offsets, mask=mask, other=0.0)
+        _ = sl.store(output_ptr + offsets, value, mask=mask)
+
+    with pytest.raises(
+        sw.CompilationError,
+        match="sl.store is only supported as an expression statement",
+    ):
+        bad_kernel.emit_mlir(
+            signature={
+                "output_ptr": sl.pointer(sl.float32),
+                "n": sl.int32,
+            },
+            constexprs={"BLOCK": 32},
+        )
+
+
+def test_empty_return_must_be_the_final_statement():
+    """Reject statements after return before constructing an invalid block."""
+    @sw.jit
+    def bad_kernel():
+        return
+        sl.program_id(0)
+
+    with pytest.raises(
+        sw.CompilationError,
+        match="empty return must be the final statement",
+    ):
+        bad_kernel.emit_mlir(signature={}, constexprs={})
+
+
+def test_unsupported_types_are_reported_in_source_parameter_order():
+    """Choose the first invalid parameter independently of set ordering."""
+    @sw.jit
+    def alpha_first(alpha, beta):
+        return
+
+    @sw.jit
+    def beta_first(beta, alpha):
+        return
+
+    signature = {"alpha": sl.float32, "beta": sl.float32}
+    for kernel, expected_name in (
+        (alpha_first, "alpha"),
+        (beta_first, "beta"),
+    ):
+        with pytest.raises(sw.CompilationError) as caught:
+            kernel.emit_mlir(signature=signature, constexprs={})
+
+        assert str(caught.value).endswith(
+            f"unsupported type for parameter '{expected_name}'"
+        )
 
 
 @pytest.mark.parametrize(

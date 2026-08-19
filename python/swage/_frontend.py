@@ -42,11 +42,12 @@ class _Kernel:
                 f"{self.filename}:1:1: {function.__name__}: "
                 "source is unavailable"
             ) from error
+        self.source_indent = len(source[0]) - len(source[0].lstrip())
         try:
             parsed = ast.parse(textwrap.dedent("".join(source)))
         except SyntaxError as error:
             line = self.source_line + (error.lineno or 1) - 1
-            column = error.offset or 1
+            column = (error.offset or 1) + self.source_indent
             raise CompilationError(
                 f"{self.filename}:{line}:{column}: {function.__name__}: "
                 f"{error.msg}"
@@ -55,7 +56,8 @@ class _Kernel:
             parsed.body[0], ast.FunctionDef
         ):
             raise CompilationError(
-                f"{self.filename}:{self.source_line}:1: "
+                f"{self.filename}:{self.source_line}:"
+                f"{self.source_indent + 1}: "
                 f"{function.__name__}: expected one function definition"
             )
         self.function = parsed.body[0]
@@ -92,13 +94,38 @@ class _Kernel:
         if not isinstance(constexprs, Mapping):
             self._raise(self.function, "constexprs must be a mapping")
 
-        parameters = [argument.arg for argument in self.function.args.args]
+        arguments = self.function.args
+        if arguments.posonlyargs:
+            self._raise(
+                arguments.posonlyargs[0],
+                "positional-only parameters are unsupported",
+            )
+        if arguments.kwonlyargs:
+            self._raise(
+                arguments.kwonlyargs[0],
+                "keyword-only parameters are unsupported",
+            )
+        if arguments.vararg:
+            self._raise(
+                arguments.vararg,
+                "variadic positional parameters are unsupported",
+            )
+        if arguments.kwarg:
+            self._raise(
+                arguments.kwarg,
+                "variadic keyword parameters are unsupported",
+            )
+
+        parameters = [argument.arg for argument in arguments.args]
         constexpr_names = {
             argument.arg
-            for argument in self.function.args.args
+            for argument in arguments.args
             if _is_constexpr_annotation(argument.annotation)
         }
-        runtime_names = set(parameters) - constexpr_names
+        runtime_parameters = [
+            name for name in parameters if name not in constexpr_names
+        ]
+        runtime_names = set(runtime_parameters)
         signature_names = set(signature)
         supplied_constexprs = set(constexprs)
 
@@ -121,7 +148,7 @@ class _Kernel:
             "constexprs", supplied_constexprs, constexpr_names
         )
 
-        for name in runtime_names:
+        for name in runtime_parameters:
             value = signature[name]
             if value is language.int32:
                 continue
@@ -165,7 +192,7 @@ class _Kernel:
 
     def _raise(self, node, reason):
         line = self.source_line + node.lineno - 1
-        column = node.col_offset + 1
+        column = node.col_offset + self.source_indent + 1
         raise CompilationError(
             f"{self.filename}:{line}:{column}: {self.__name__}: {reason}"
         )
@@ -196,6 +223,12 @@ class _Emitter:
         self.symbols = {}
 
     def emit(self):
+        for statement in self.kernel.function.body[:-1]:
+            if isinstance(statement, ast.Return):
+                self._error(
+                    statement,
+                    "empty return must be the final statement",
+                )
         context = self.ir.Context()
         with context:
             self.swage.register_dialects(context)
@@ -256,6 +289,12 @@ class _Emitter:
             self.symbols[node.targets[0].id] = self._expression(node.value)
             return
         if isinstance(node, ast.Expr):
+            if (
+                isinstance(node.value, ast.Call)
+                and self._symbolic_call_name(node.value) == "store"
+            ):
+                self._store(node.value)
+                return
             value = self._expression(node.value)
             if value is not None:
                 self._error(node, "only sl.store may be used as a statement")
@@ -370,8 +409,12 @@ class _Emitter:
             "program_id": self._program_id,
             "arange": self._arange,
             "load": self._load,
-            "store": self._store,
         }
+        if name == "store":
+            self._error(
+                node,
+                "sl.store is only supported as an expression statement",
+            )
         if name not in handlers:
             self._error(node, "unsupported call")
         return handlers[name](node)
@@ -510,7 +553,7 @@ class _Emitter:
         child = self.ir.Location.file(
             self.kernel.filename,
             line,
-            node.col_offset + 1,
+            node.col_offset + self.kernel.source_indent + 1,
         )
         return self.ir.Location.name(self.kernel.__name__, child)
 
