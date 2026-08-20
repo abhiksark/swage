@@ -17,7 +17,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -34,6 +33,9 @@ bool isRankOneMemRef(Type type, Type elementType) {
          memref.getLayout().isIdentity() && memref.getMemorySpaceAsInt() == 0;
 }
 
+/// Classification of one operation inside a Swage region.
+enum class RegionOpStatus { Admitted, UnknownName, NonF32Result };
+
 /// Operations a Swage region may contain.
 ///
 /// The list is a whitelist rather than a purity test because both backends
@@ -41,30 +43,41 @@ bool isRankOneMemRef(Type type, Type elementType) {
 /// `math.exp2` of a scaled operand; `math.exp` is deliberately absent
 /// because `--convert-gpu-to-nvvm` turns every `math` operation into a
 /// libdevice call, and the PTX path links no libdevice.
-bool isAdmittedRegionOperation(Operation &operation) {
+RegionOpStatus classifyRegionOperation(Operation &operation) {
   static constexpr StringRef admitted[] = {
       "arith.constant", "arith.addf",     "arith.subf",     "arith.mulf",
       "arith.divf",     "arith.maximumf", "arith.minimumf", "math.exp2"};
-  if (!isMemoryEffectFree(&operation) || operation.getNumRegions() != 0)
-    return false;
   if (!llvm::is_contained(admitted, operation.getName().getStringRef()))
-    return false;
-  return llvm::all_of(operation.getResultTypes(),
-                      [](Type type) { return type.isF32(); });
+    return RegionOpStatus::UnknownName;
+  if (!llvm::all_of(operation.getResultTypes(),
+                    [](Type type) { return type.isF32(); }))
+    return RegionOpStatus::NonF32Result;
+  return RegionOpStatus::Admitted;
 }
 
-/// Verify a Swage region: one block, f32 element argument, admitted
-/// operations only, and an f32 yield.
-LogicalResult verifyRegion(Operation *owner, Region &region) {
-  if (!region.hasOneBlock())
-    return owner->emitError("segment region requires one block");
+/// Verify a Swage region: an f32 element argument followed by one f32
+/// argument per capture, admitted operations only, and an f32 yield.
+LogicalResult verifyRegion(Operation *owner, Region &region,
+                           unsigned captureCount) {
   Block &body = region.front();
-  if (body.getNumArguments() != 1 || !body.getArgument(0).getType().isF32())
-    return owner->emitError("segment region requires one f32 element argument");
-  for (Operation &operation : body.without_terminator())
-    if (!isAdmittedRegionOperation(operation))
+  if (body.getNumArguments() != 1 + captureCount ||
+      llvm::any_of(body.getArgumentTypes(),
+                   [](Type type) { return !type.isF32(); }))
+    return owner->emitError(
+        "segment region requires an f32 element argument followed by f32 "
+        "captures");
+  for (Operation &operation : body.without_terminator()) {
+    switch (classifyRegionOperation(operation)) {
+    case RegionOpStatus::Admitted:
+      break;
+    case RegionOpStatus::UnknownName:
       return operation.emitError("operation is unsupported inside a segment "
                                  "region; exponentials must use math.exp2");
+    case RegionOpStatus::NonF32Result:
+      return operation.emitError("operation is unsupported inside a segment "
+                                 "region; every result must be f32");
+    }
+  }
   auto yield = dyn_cast<YieldOp>(body.getTerminator());
   if (!yield || !yield.getValue().getType().isF32())
     return owner->emitError("segment region must yield an f32 value");
@@ -81,6 +94,43 @@ Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
     builder.clone(operation, mapping);
   return mapping.lookup(cast<YieldOp>(body.getTerminator()).getValue());
 }
+
+/// A per-element expression: the fused `swage.map` bodies in application
+/// order, followed by the consumer's own body. `captures[i]` lists, for
+/// `regions[i]`, the reduction stages whose results bind to that region's
+/// capture arguments, in order.
+struct ElementProgram {
+  SmallVector<Region *> regions;
+  SmallVector<SmallVector<unsigned>> captures;
+};
+
+/// One `swage.reduce` and the element expression feeding it.
+struct ReductionStage {
+  ElementProgram element;
+  ReductionKind kind = ReductionKind::Sum;
+};
+
+/// An admitted segment program. It holds no handle into the source function:
+/// every region is detached into a RegionOwner and every capture is a stage
+/// index, so an emitter may erase the source IR before emitting.
+struct SegmentProgram {
+  SmallVector<ReductionStage> reductions;
+  unsigned storedReduction = 0; ///< Index into `reductions`.
+};
+
+/// Owns the region bodies detached from the source function, and must
+/// outlive the SegmentProgram pointing into it.
+class RegionOwner {
+public:
+  Region *take(Region &body) {
+    owned.push_back(std::make_unique<Region>());
+    owned.back()->takeBody(body);
+    return owned.back().get();
+  }
+
+private:
+  SmallVector<std::unique_ptr<Region>> owned;
+};
 
 FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
   SmallVector<func::FuncOp> candidates;
@@ -103,9 +153,22 @@ FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
   return candidates.front();
 }
 
-LogicalResult verifySegmentedReduction(func::FuncOp function,
-                                       ReductionKind &kind,
-                                       ReduceOp &reduceOp) {
+/// Walk back through fused maps to the root segment, collecting them in
+/// application order. Every segment value in an admitted body is defined by
+/// a map or by the single make_segment, so the walk always terminates.
+SmallVector<MapOp> fusionChain(Value segment) {
+  SmallVector<MapOp> chain;
+  while (auto map = segment.getDefiningOp<MapOp>()) {
+    chain.push_back(map);
+    segment = map.getSegment();
+  }
+  std::reverse(chain.begin(), chain.end());
+  return chain;
+}
+
+/// Admit one canonical segment program, or emit the first rule violation.
+LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
+                                  SegmentProgram &program) {
   FunctionType type = function.getFunctionType();
   Builder builder(function.getContext());
   if (type.getNumInputs() != 5 || type.getNumResults() != 0 ||
@@ -120,28 +183,36 @@ LogicalResult verifySegmentedReduction(func::FuncOp function,
   if (!function.getBody().hasOneBlock())
     return function.emitError("segmented reduction requires one block");
 
-  auto segmentIds = llvm::to_vector(function.getOps<SegmentIdOp>());
-  auto segments = llvm::to_vector(function.getOps<MakeSegmentOp>());
-  auto reductions = llvm::to_vector(function.getOps<ReduceOp>());
-  auto stores = llvm::to_vector(function.getOps<memref::StoreOp>());
-  auto returns = llvm::to_vector(function.getOps<func::ReturnOp>());
-  if (segmentIds.size() != 1 || segments.size() != 1 ||
-      reductions.size() != 1 || stores.size() != 1 || returns.size() != 1)
-    return function.emitError(
-        "segmented reduction requires one segment_id, make_segment, reduce, "
-        "output store, and return");
-
+  SmallVector<SegmentIdOp> segmentIds;
+  SmallVector<MakeSegmentOp> segments;
+  SmallVector<MapOp> maps;
+  SmallVector<ReduceOp> reductions;
+  SmallVector<memref::StoreOp> stores;
+  SmallVector<func::ReturnOp> returns;
   for (Operation &operation : function.getBody().front()) {
-    if (!isa<SegmentIdOp, MakeSegmentOp, ReduceOp, memref::StoreOp,
-             func::ReturnOp>(operation))
+    if (auto segmentId = dyn_cast<SegmentIdOp>(operation))
+      segmentIds.push_back(segmentId);
+    else if (auto segment = dyn_cast<MakeSegmentOp>(operation))
+      segments.push_back(segment);
+    else if (auto map = dyn_cast<MapOp>(operation))
+      maps.push_back(map);
+    else if (auto reduction = dyn_cast<ReduceOp>(operation))
+      reductions.push_back(reduction);
+    else if (auto store = dyn_cast<memref::StoreOp>(operation))
+      stores.push_back(store);
+    else if (auto returnOp = dyn_cast<func::ReturnOp>(operation))
+      returns.push_back(returnOp);
+    else
       return operation.emitError(
           "operation is unsupported by segmented reduction lowering");
   }
-
+  if (segmentIds.size() != 1 || segments.size() != 1 || reductions.empty() ||
+      returns.size() != 1)
+    return function.emitError(
+        "segmented reduction requires one segment_id, one make_segment, at "
+        "least one reduce, and one return");
   SegmentIdOp segmentId = segmentIds.front();
   MakeSegmentOp segment = segments.front();
-  ReduceOp reduction = reductions.front();
-  memref::StoreOp store = stores.front();
   if (segmentId.getAxis() != 0)
     return segmentId.emitError("only swage.segment_id axis 0 is supported");
   if (segment.getValues() != function.getArgument(0) ||
@@ -149,17 +220,61 @@ LogicalResult verifySegmentedReduction(func::FuncOp function,
       segment.getSegmentId() != segmentId.getResult())
     return segment.emitError(
         "make_segment must bind the function values and offsets at segment_id");
-  if (reduction.getSegment() != segment.getResult() ||
-      !reduction.getCaptures().empty())
-    return reduction.emitError(
-        "segmented reduction requires a capture-free reduction");
-  kind = reduction.getKind();
-  if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
-    return reduction.emitError(
-        "segmented reduction supports only kind<sum> and kind<max>");
-  if (failed(verifyRegion(reduction, reduction.getBody())))
-    return failure();
-  if (store.getValue() != reduction.getResult() ||
+  if (stores.size() != 1)
+    return function.emitError(
+        "segmented reduction requires exactly one output terminal: a "
+        "memref.store of a reduction at output[segment_id]");
+  memref::StoreOp store = stores.front();
+
+  for (MapOp map : maps) {
+    if (!map.getResult().hasOneUse())
+      return map.emitError(
+          "swage.map result must have exactly one segment consumer; a mapped "
+          "segment is never materialized");
+    Operation *consumer = *map.getResult().getUsers().begin();
+    if (!isa<MapOp, ReduceOp>(consumer))
+      return map.emitError(
+          "swage.map result must have exactly one segment consumer; a mapped "
+          "segment is never materialized");
+  }
+
+  DenseMap<Operation *, unsigned> stageOf;
+  for (auto [index, reduction] : llvm::enumerate(reductions))
+    stageOf[reduction.getOperation()] = index;
+
+  SmallVector<Operation *> capturing;
+  for (MapOp map : maps)
+    capturing.push_back(map.getOperation());
+  for (ReduceOp reduction : reductions)
+    capturing.push_back(reduction.getOperation());
+  for (Operation *operation : capturing) {
+    ValueRange captures = isa<MapOp>(operation)
+                              ? cast<MapOp>(operation).getCaptures()
+                              : cast<ReduceOp>(operation).getCaptures();
+    for (Value capture : captures)
+      if (!capture.getDefiningOp<ReduceOp>() || !capture.getType().isF32())
+        return operation->emitError(
+            "segment captures must be f32 results of a swage.reduce in the "
+            "same function");
+  }
+
+  for (ReduceOp reduction : reductions) {
+    ReductionKind kind = reduction.getKind();
+    if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
+      return reduction.emitError(
+          "segmented reduction supports only kind<sum> and kind<max>");
+  }
+
+  for (MapOp map : maps)
+    if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size())))
+      return failure();
+  for (ReduceOp reduction : reductions)
+    if (failed(verifyRegion(reduction, reduction.getBody(),
+                            reduction.getCaptures().size())))
+      return failure();
+
+  auto storedReduction = store.getValue().getDefiningOp<ReduceOp>();
+  if (!storedReduction || !stageOf.contains(storedReduction.getOperation()) ||
       store.getMemRef() != function.getArgument(2) ||
       store.getIndices().size() != 1 ||
       store.getIndices().front() != segmentId.getResult())
@@ -167,12 +282,68 @@ LogicalResult verifySegmentedReduction(func::FuncOp function,
         "segmented reduction result must be stored at output[segment_id]");
   if (!returns.front().getOperands().empty())
     return returns.front().emitError("segmented reduction must return void");
-  reduceOp = reduction;
+
+  // Every rule passed, so the program may now take ownership of the regions.
+  program.storedReduction = stageOf.lookup(storedReduction.getOperation());
+  auto takeElement = [&](Operation *consumer, ValueRange consumerCaptures,
+                         Value consumerSegment) {
+    ElementProgram element;
+    auto append = [&](Operation *stage, Region &body, ValueRange captures) {
+      SmallVector<unsigned> indices;
+      for (Value capture : captures)
+        indices.push_back(stageOf.lookup(capture.getDefiningOp()));
+      element.regions.push_back(owner.take(body));
+      element.captures.push_back(std::move(indices));
+      (void)stage;
+    };
+    for (MapOp map : fusionChain(consumerSegment))
+      append(map, map.getBody(), map.getCaptures());
+    append(consumer, consumer->getRegion(0), consumerCaptures);
+    return element;
+  };
+  for (ReduceOp reduction : reductions) {
+    ReductionStage stage;
+    stage.kind = reduction.getKind();
+    stage.element =
+        takeElement(reduction, reduction.getCaptures(), reduction.getSegment());
+    program.reductions.push_back(std::move(stage));
+  }
   return success();
 }
 
-void buildSequentialReduction(func::FuncOp function, ReductionKind kind,
-                              Region &region) {
+/// Apply an admitted element expression to one loaded value.
+Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
+                      Value value, ArrayRef<Value> reductions) {
+  for (auto [region, captures] :
+       llvm::zip_equal(element.regions, element.captures)) {
+    SmallVector<Value> arguments{value};
+    for (unsigned stage : captures)
+      arguments.push_back(reductions[stage]);
+    value = inlineRegion(builder, *region, arguments);
+  }
+  return value;
+}
+
+/// The identity element of a reduction kind.
+Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind) {
+  FloatType f32 = builder.getF32Type();
+  APFloat identity = kind == ReductionKind::Sum
+                         ? APFloat(f32.getFloatSemantics(), 0)
+                         : APFloat::getInf(f32.getFloatSemantics(), true);
+  return arith::ConstantFloatOp::create(builder, loc, f32, identity);
+}
+
+/// Combine an accumulator with one element.
+Value combine(OpBuilder &builder, Location loc, ReductionKind kind,
+              Value accumulator, Value value) {
+  if (kind == ReductionKind::Sum)
+    return arith::AddFOp::create(builder, loc, accumulator, value).getResult();
+  return arith::MaximumFOp::create(builder, loc, accumulator, value)
+      .getResult();
+}
+
+void buildSequentialProgram(func::FuncOp function,
+                            const SegmentProgram &program) {
   Block &entry = function.getBody().front();
   while (!entry.empty())
     entry.back().erase();
@@ -196,39 +367,32 @@ void buildSequentialReduction(func::FuncOp function, ReductionKind kind,
             outer, outerLoc, outer.getIndexType(), startI32);
         Value end = arith::IndexCastOp::create(outer, outerLoc,
                                                outer.getIndexType(), endI32);
-        FloatType f32 = outer.getF32Type();
-        APFloat identityValue =
-            kind == ReductionKind::Sum
-                ? APFloat(f32.getFloatSemantics(), 0)
-                : APFloat::getInf(f32.getFloatSemantics(), true);
-        Value identity =
-            arith::ConstantFloatOp::create(outer, outerLoc, f32, identityValue);
-        auto reduction = scf::ForOp::create(
-            outer, outerLoc, start, end, one, ValueRange(identity),
-            [&](OpBuilder &inner, Location innerLoc, Value index,
-                ValueRange accumulator) {
-              Value value = memref::LoadOp::create(
-                  inner, innerLoc, function.getArgument(0), index);
-              value = inlineRegion(inner, region, value);
-              Value nextAccumulator =
-                  kind == ReductionKind::Sum
-                      ? arith::AddFOp::create(inner, innerLoc,
-                                              accumulator.front(), value)
-                            .getResult()
-                      : arith::MaximumFOp::create(inner, innerLoc,
-                                                  accumulator.front(), value)
-                            .getResult();
-              scf::YieldOp::create(inner, innerLoc, nextAccumulator);
-            });
-        memref::StoreOp::create(outer, outerLoc, reduction.getResult(0),
+        SmallVector<Value> results;
+        for (const ReductionStage &stage : program.reductions) {
+          Value identity = identityFor(outer, outerLoc, stage.kind);
+          auto reduction = scf::ForOp::create(
+              outer, outerLoc, start, end, one, ValueRange(identity),
+              [&](OpBuilder &inner, Location innerLoc, Value index,
+                  ValueRange accumulator) {
+                Value value = memref::LoadOp::create(
+                    inner, innerLoc, function.getArgument(0), index);
+                value = evaluateElement(inner, stage.element, value, results);
+                scf::YieldOp::create(inner, innerLoc,
+                                     combine(inner, innerLoc, stage.kind,
+                                             accumulator.front(), value));
+              });
+          results.push_back(reduction.getResult(0));
+        }
+        memref::StoreOp::create(outer, outerLoc,
+                                results[program.storedReduction],
                                 function.getArgument(2), segmentId);
         scf::YieldOp::create(outer, outerLoc);
       });
   func::ReturnOp::create(builder, loc);
 }
 
-void buildGPUReduction(ModuleOp module, func::FuncOp source, ReductionKind kind,
-                       Region &region, int64_t blockSize) {
+void buildGPUProgram(ModuleOp module, func::FuncOp source,
+                     const SegmentProgram &program, int64_t blockSize) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -277,40 +441,38 @@ void buildGPUReduction(ModuleOp module, func::FuncOp source, ReductionKind kind,
         Value end = arith::IndexCastOp::create(body, bodyLoc,
                                                body.getIndexType(), endI32);
         Value first = arith::AddIOp::create(body, bodyLoc, start, threadId);
-        FloatType f32Type = body.getF32Type();
-        APFloat identityValue =
-            kind == ReductionKind::Sum
-                ? APFloat(f32Type.getFloatSemantics(), 0)
-                : APFloat::getInf(f32Type.getFloatSemantics(), true);
-        Value identity = arith::ConstantFloatOp::create(body, bodyLoc, f32Type,
-                                                        identityValue);
-        auto local = scf::ForOp::create(
-            body, bodyLoc, first, end, block, ValueRange(identity),
-            [&](OpBuilder &loop, Location loopLoc, Value index,
-                ValueRange accumulator) {
-              Value index64 = arith::IndexCastOp::create(
-                  loop, loopLoc, loop.getI64Type(), index);
-              Value address = LLVM::GEPOp::create(
-                  loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
-              Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
-              value = inlineRegion(loop, region, value);
-              Value nextAccumulator =
-                  kind == ReductionKind::Sum
-                      ? arith::AddFOp::create(loop, loopLoc,
-                                              accumulator.front(), value)
-                            .getResult()
-                      : arith::MaximumFOp::create(loop, loopLoc,
-                                                  accumulator.front(), value)
-                            .getResult();
-              scf::YieldOp::create(loop, loopLoc, nextAccumulator);
-            });
-        gpu::AllReduceOperation gpuKind =
-            kind == ReductionKind::Sum ? gpu::AllReduceOperation::ADD
-                                       : gpu::AllReduceOperation::MAXIMUMF;
-        auto operation =
-            gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
-        Value total = gpu::AllReduceOp::create(
-            body, bodyLoc, local.getResult(0), operation, true);
+
+        SmallVector<Value> results;
+        for (const ReductionStage &stage : program.reductions) {
+          Value identity = identityFor(body, bodyLoc, stage.kind);
+          auto local = scf::ForOp::create(
+              body, bodyLoc, first, end, block, ValueRange(identity),
+              [&](OpBuilder &loop, Location loopLoc, Value index,
+                  ValueRange accumulator) {
+                Value index64 = arith::IndexCastOp::create(
+                    loop, loopLoc, loop.getI64Type(), index);
+                Value address =
+                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                        entry->getArgument(0), index64);
+                Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+                value = evaluateElement(loop, stage.element, value, results);
+                scf::YieldOp::create(loop, loopLoc,
+                                     combine(loop, loopLoc, stage.kind,
+                                             accumulator.front(), value));
+              });
+          gpu::AllReduceOperation gpuKind =
+              stage.kind == ReductionKind::Sum
+                  ? gpu::AllReduceOperation::ADD
+                  : gpu::AllReduceOperation::MAXIMUMF;
+          auto operation =
+              gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
+          // uniform = true, so the result is broadcast to every thread and
+          // the lowering's trailing barrier fences this stage from the next.
+          results.push_back(gpu::AllReduceOp::create(
+              body, bodyLoc, local.getResult(0), operation, true));
+        }
+
+        Value total = results[program.storedReduction];
         Value firstThread = arith::CmpIOp::create(
             body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
         scf::IfOp::create(
@@ -349,14 +511,12 @@ public:
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
     if (failed(function))
       return signalPassFailure();
-    ReductionKind kind = ReductionKind::Sum;
-    ReduceOp reduction;
-    if (failed(verifySegmentedReduction(*function, kind, reduction)))
+    // The owner must outlive the program, which points into it.
+    RegionOwner owner;
+    SegmentProgram program;
+    if (failed(admitSegmentProgram(*function, owner, program)))
       return signalPassFailure();
-    // The entry block is rebuilt from scratch, so detach the region first.
-    Region region;
-    region.takeBody(reduction.getBody());
-    buildSequentialReduction(*function, kind, region);
+    buildSequentialProgram(*function, program);
   }
 };
 
@@ -394,12 +554,11 @@ public:
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
     if (failed(function))
       return signalPassFailure();
-    ReductionKind kind = ReductionKind::Sum;
-    ReduceOp reduction;
-    if (failed(verifySegmentedReduction(*function, kind, reduction)))
+    RegionOwner owner;
+    SegmentProgram program;
+    if (failed(admitSegmentProgram(*function, owner, program)))
       return signalPassFailure();
-    buildGPUReduction(getOperation(), *function, kind, reduction.getBody(),
-                      blockSize);
+    buildGPUProgram(getOperation(), *function, program, blockSize);
   }
 
 private:
