@@ -11,7 +11,8 @@ from . import _runtime
 
 _I32_LIMIT = 1 << 31
 _LOWERING_PIPELINE = (
-    "builtin.module(func.func(convert-scf-to-cf,convert-arith-to-llvm),"
+    "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
+    "convert-arith-to-llvm),"
     "finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,"
     "reconcile-unrealized-casts)"
 )

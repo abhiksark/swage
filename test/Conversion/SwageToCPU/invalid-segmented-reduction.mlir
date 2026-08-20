@@ -84,19 +84,21 @@ module {
 
 // -----
 
+// math.exp becomes a libdevice call the PTX path cannot resolve, so it is
+// rejected on both backends; exponentials must be written as math.exp2.
 module {
-  func.func @transformed_value(
+  func.func @unsupported_region_operation(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
       %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    // expected-error@+1 {{segmented reduction region must only yield its f32 element argument}}
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
-      %negative = arith.negf %value : f32
-      swage.yield %negative : f32
+      // expected-error@+1 {{operation is unsupported inside a segment region}}
+      %exponential = math.exp %value : f32
+      swage.yield %exponential : f32
     }
     memref.store %sum, %output[%sid] : memref<?xf32>
     return

@@ -16,6 +16,8 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -30,6 +32,54 @@ bool isRankOneMemRef(Type type, Type elementType) {
   return memref && memref.getRank() == 1 && memref.isDynamicDim(0) &&
          memref.getElementType() == elementType &&
          memref.getLayout().isIdentity() && memref.getMemorySpaceAsInt() == 0;
+}
+
+/// Operations a Swage region may contain.
+///
+/// The list is a whitelist rather than a purity test because both backends
+/// must lower every admitted operation. Exponentials are written as
+/// `math.exp2` of a scaled operand; `math.exp` is deliberately absent
+/// because `--convert-gpu-to-nvvm` turns every `math` operation into a
+/// libdevice call, and the PTX path links no libdevice.
+bool isAdmittedRegionOperation(Operation &operation) {
+  static constexpr StringRef admitted[] = {
+      "arith.constant", "arith.addf",     "arith.subf",     "arith.mulf",
+      "arith.divf",     "arith.maximumf", "arith.minimumf", "math.exp2"};
+  if (!isMemoryEffectFree(&operation) || operation.getNumRegions() != 0)
+    return false;
+  if (!llvm::is_contained(admitted, operation.getName().getStringRef()))
+    return false;
+  return llvm::all_of(operation.getResultTypes(),
+                      [](Type type) { return type.isF32(); });
+}
+
+/// Verify a Swage region: one block, f32 element argument, admitted
+/// operations only, and an f32 yield.
+LogicalResult verifyRegion(Operation *owner, Region &region) {
+  if (!region.hasOneBlock())
+    return owner->emitError("segment region requires one block");
+  Block &body = region.front();
+  if (body.getNumArguments() != 1 || !body.getArgument(0).getType().isF32())
+    return owner->emitError("segment region requires one f32 element argument");
+  for (Operation &operation : body.without_terminator())
+    if (!isAdmittedRegionOperation(operation))
+      return operation.emitError("operation is unsupported inside a segment "
+                                 "region; exponentials must use math.exp2");
+  auto yield = dyn_cast<YieldOp>(body.getTerminator());
+  if (!yield || !yield.getValue().getType().isF32())
+    return owner->emitError("segment region must yield an f32 value");
+  return success();
+}
+
+/// Clone a verified region inline at the builder's insertion point and
+/// return the mapped yielded value.
+Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
+  Block &body = region.front();
+  IRMapping mapping;
+  mapping.map(body.getArguments(), arguments);
+  for (Operation &operation : body.without_terminator())
+    builder.clone(operation, mapping);
+  return mapping.lookup(cast<YieldOp>(body.getTerminator()).getValue());
 }
 
 FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
@@ -54,7 +104,8 @@ FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
 }
 
 LogicalResult verifySegmentedReduction(func::FuncOp function,
-                                       ReductionKind &kind) {
+                                       ReductionKind &kind,
+                                       ReduceOp &reduceOp) {
   FunctionType type = function.getFunctionType();
   Builder builder(function.getContext());
   if (type.getNumInputs() != 5 || type.getNumResults() != 0 ||
@@ -106,17 +157,8 @@ LogicalResult verifySegmentedReduction(func::FuncOp function,
   if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
     return reduction.emitError(
         "segmented reduction supports only kind<sum> and kind<max>");
-  if (!reduction.getBody().hasOneBlock() ||
-      reduction.getBody().front().getNumArguments() != 1 ||
-      !reduction.getBody().front().getArgument(0).getType().isF32() ||
-      std::distance(reduction.getBody().front().begin(),
-                    reduction.getBody().front().end()) != 1)
-    return reduction.emitError(
-        "segmented reduction region must only yield its f32 element argument");
-  auto yield = dyn_cast<YieldOp>(reduction.getBody().front().getTerminator());
-  if (!yield || yield.getValue() != reduction.getBody().front().getArgument(0))
-    return reduction.emitError(
-        "segmented reduction region must only yield its f32 element argument");
+  if (failed(verifyRegion(reduction, reduction.getBody())))
+    return failure();
   if (store.getValue() != reduction.getResult() ||
       store.getMemRef() != function.getArgument(2) ||
       store.getIndices().size() != 1 ||
@@ -125,10 +167,12 @@ LogicalResult verifySegmentedReduction(func::FuncOp function,
         "segmented reduction result must be stored at output[segment_id]");
   if (!returns.front().getOperands().empty())
     return returns.front().emitError("segmented reduction must return void");
+  reduceOp = reduction;
   return success();
 }
 
-void buildSequentialReduction(func::FuncOp function, ReductionKind kind) {
+void buildSequentialReduction(func::FuncOp function, ReductionKind kind,
+                              Region &region) {
   Block &entry = function.getBody().front();
   while (!entry.empty())
     entry.back().erase();
@@ -165,6 +209,7 @@ void buildSequentialReduction(func::FuncOp function, ReductionKind kind) {
                 ValueRange accumulator) {
               Value value = memref::LoadOp::create(
                   inner, innerLoc, function.getArgument(0), index);
+              value = inlineRegion(inner, region, value);
               Value nextAccumulator =
                   kind == ReductionKind::Sum
                       ? arith::AddFOp::create(inner, innerLoc,
@@ -183,7 +228,7 @@ void buildSequentialReduction(func::FuncOp function, ReductionKind kind) {
 }
 
 void buildGPUReduction(ModuleOp module, func::FuncOp source, ReductionKind kind,
-                       int64_t blockSize) {
+                       Region &region, int64_t blockSize) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -248,6 +293,7 @@ void buildGPUReduction(ModuleOp module, func::FuncOp source, ReductionKind kind,
               Value address = LLVM::GEPOp::create(
                   loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
               Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+              value = inlineRegion(loop, region, value);
               Value nextAccumulator =
                   kind == ReductionKind::Sum
                       ? arith::AddFOp::create(loop, loopLoc,
@@ -304,9 +350,13 @@ public:
     if (failed(function))
       return signalPassFailure();
     ReductionKind kind = ReductionKind::Sum;
-    if (failed(verifySegmentedReduction(*function, kind)))
+    ReduceOp reduction;
+    if (failed(verifySegmentedReduction(*function, kind, reduction)))
       return signalPassFailure();
-    buildSequentialReduction(*function, kind);
+    // The entry block is rebuilt from scratch, so detach the region first.
+    Region region;
+    region.takeBody(reduction.getBody());
+    buildSequentialReduction(*function, kind, region);
   }
 };
 
@@ -345,9 +395,11 @@ public:
     if (failed(function))
       return signalPassFailure();
     ReductionKind kind = ReductionKind::Sum;
-    if (failed(verifySegmentedReduction(*function, kind)))
+    ReduceOp reduction;
+    if (failed(verifySegmentedReduction(*function, kind, reduction)))
       return signalPassFailure();
-    buildGPUReduction(getOperation(), *function, kind, blockSize);
+    buildGPUReduction(getOperation(), *function, kind, reduction.getBody(),
+                      blockSize);
   }
 
 private:
