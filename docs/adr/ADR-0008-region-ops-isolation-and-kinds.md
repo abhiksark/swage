@@ -44,6 +44,9 @@ Semantic contract:
   nothing, `reduce` returns the identity of its kind. This deliberately
   differs from PyTorch, where `max` of an empty tensor errors; oracle
   comparisons must account for it.
+- **Floating max NaNs**: a non-empty f32 `max` reduction propagates NaN. M4
+  lowers both its sequential and CTA combiners with `maximumf`, not
+  `maxnumf`, and tests the behavior against the CPU oracle and PyTorch.
 - **Effects**: `map` and `reduce` expose only their region's effects, so
   unused instances with pure `arith`/`math` bodies fold away.
   `swage.map_store` declares a write on its output operand and is never

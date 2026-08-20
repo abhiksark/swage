@@ -1,3 +1,4 @@
+// tools/swage-opt/swage-opt.cpp
 //===- swage-opt.cpp - Swage optimizer driver -------------------*- C++ -*-===//
 //
 // Part of the Swage project, under the MIT License.
@@ -18,11 +19,13 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
+#include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::swage::registerFixedBlockToGPUPass();
+  mlir::swage::registerSegmentedReductionPasses();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::swage::SwageDialect, mlir::func::FuncDialect,

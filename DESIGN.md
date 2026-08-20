@@ -47,7 +47,11 @@ Swage semantic MLIR            (dialect: swage)
         │     ↓
         │   current PyTorch stream
         │
-        └── General segment path (planned)
+        ├── M4 canonical segmented sum/max
+        │     ├── sequential scf + memref → upstream mlir-runner
+        │     └── one CTA per segment → gpu + nvvm + llvm → PTX
+        │
+        └── General scheduling path (planned)
               ↓  canonicalization and fusion
             SwagePlan task IR (dialect: swage_plan)
               ↓  task decomposition and policy selection
@@ -59,7 +63,7 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python and M3 execution boundary
+## Current Python, M3 execution, and M4 qualification boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
@@ -81,6 +85,21 @@ marshalled. The backend lowers through standard GPU, NVVM, and LLVM paths,
 emits PTX for the active device's exact compute capability, and launches on
 the current PyTorch stream (ADR-0011, ADR-0012). Unsupported kernels and ABI
 shapes fail closed.
+
+M4 adds native compiler qualification for one canonical f32 segmented
+reduction shape. It accepts rank-one values, i32 offsets, rank-one output,
+and explicit i32 value and segment counts. `segment_id(0)` becomes the
+sequential CPU loop induction variable or the GPU x-block ID. GPU threads
+perform block-stride loads and an upstream `gpu.all_reduce`; only thread zero
+stores the result. Sum uses zero and max uses negative infinity for empty
+segments. Floating max uses NaN-propagating `maximumf` semantics.
+
+The qualification runner validates offsets on the host before launch and
+uses the existing CUDA Driver wrapper and exact active `sm_*` target. This is
+not a new public runtime contract: `swage.language` gains no segment
+primitives, `emit_mlir()` remains compile-only, and public `launch()` remains
+the M3 fixed vector-add boundary. Device-only offset validation and general
+segment transforms remain future runtime and compiler work.
 
 ## The `swage` dialect (semantic level)
 
@@ -163,8 +182,9 @@ pointers.
   (ADR-0005), PyTorch reference implementations are the initial oracle;
   a CPU reference lowering joins it with the first segment lowerings.
 - GPU: a trusted main-only self-hosted workflow checks fixed vector-add
-  correctness, non-default streams, argument lifetime, and cache reuse on a
-  real NVIDIA device. Pull requests never execute on that runner.
+  correctness, segmented sum/max distributions, empty and NaN identities,
+  repeated execution, non-default streams, argument lifetime, and cache reuse
+  on a real NVIDIA device. Pull requests never execute on that runner.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.

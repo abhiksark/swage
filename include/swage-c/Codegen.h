@@ -1,3 +1,4 @@
+// include/swage-c/Codegen.h
 //===- Codegen.h - Swage code generation C API -----------------*- C -*-===//
 //
 // Part of the Swage project, under the MIT License.
@@ -20,6 +21,11 @@ extern "C" {
 typedef void (*SwageStringCallback)(MlirStringRef value, void *userData);
 
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFixedBlockToPTX(
+    MlirModule module, MlirStringRef kernelName, int64_t blockSize,
+    MlirStringRef target, SwageStringCallback loweredCallback,
+    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData);
+
+MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData);

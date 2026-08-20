@@ -1,3 +1,4 @@
+// lib/CAPI/Codegen.cpp
 //===- Codegen.cpp - Swage code generation C API ------------------------===//
 //
 // Part of the Swage project, under the MIT License.
@@ -33,6 +34,7 @@
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
+#include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -49,6 +51,8 @@ using namespace mlir;
 
 namespace {
 
+enum class KernelKind { FixedBlock, SegmentedReduction };
+
 bool isSupportedTarget(llvm::StringRef target) {
   llvm::StringRef digits = target.consume_front("sm_") ? target : "";
   if (digits.size() < 2 || digits.size() > 3 ||
@@ -60,7 +64,8 @@ bool isSupportedTarget(llvm::StringRef target) {
 
 LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          int64_t blockSize, llvm::StringRef target,
-                         std::string &lowered, std::string &ptx) {
+                         KernelKind kind, std::string &lowered,
+                         std::string &ptx) {
   if (!isSupportedTarget(target))
     return source.emitError("target must match sm_<major><minor>");
   if (blockSize <= 0)
@@ -89,7 +94,10 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   context->appendDialectRegistry(registry);
 
   PassManager manager(context);
-  manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
+  if (kind == KernelKind::FixedBlock)
+    manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
+  else
+    manager.addPass(swage::createSegmentedReductionToGPUPass(blockSize));
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
@@ -157,7 +165,24 @@ MlirLogicalResult swageCompileFixedBlockToPTX(
   std::string lowered;
   std::string ptx;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
-                        unwrap(target), lowered, ptx)))
+                        unwrap(target), KernelKind::FixedBlock, lowered, ptx)))
+    return mlirLogicalResultFailure();
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult swageCompileSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, int64_t blockSize,
+    MlirStringRef target, SwageStringCallback loweredCallback,
+    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
+  std::string lowered;
+  std::string ptx;
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
+                        unwrap(target), KernelKind::SegmentedReduction, lowered,
+                        ptx)))
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
   ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);

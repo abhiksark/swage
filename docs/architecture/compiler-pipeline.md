@@ -10,8 +10,8 @@ Python @sw.jit kernel
 Restricted Python AST
         ↓   AST visitor building ops via MLIR Python bindings   ✅
 Swage semantic MLIR (dialect: swage)                            ✅ (initial ops)
-        ↓   verified module boundary                             ✅ (fixed vector add)
-Live mlir_swage.ir.Module                                        (M2 endpoint)
+        ↓   verified module boundary                             ✅
+Live mlir_swage.ir.Module                                        (M2 fixed path)
         ├── M3 fixed vector-add path
         │     ↓   validate canonical kernel                      ✅
         │   gpu + scf + llvm dialect                             ✅
@@ -22,7 +22,12 @@ Live mlir_swage.ir.Module                                        (M2 endpoint)
         │     ↓
         │   current PyTorch CUDA stream                           ✅
         │
-        └── General segment path
+        ├── M4 canonical segmented sum/max path                  ✅
+        │     ├── sequential scf + memref → mlir-runner          ✅
+        │     └── one CTA per segment → gpu + nvvm → PTX         ✅
+        │         → host-validated internal CUDA qualification    ✅
+        │
+        └── General scheduling path
               ↓   canonicalization and fusion                    ⏳
             SwagePlan task IR (dialect: swage_plan)              🔬 (ADR-0003)
               ↓   task decomposition, policy selection
@@ -78,6 +83,28 @@ each tensor after submission. It never copies, casts, changes devices,
 creates a CUDA context, synchronizes, or falls back. The trusted GPU workflow
 qualifies correctness, non-default streams, argument lifetime, and cache
 reuse on `main`.
+
+## Segmented reduction qualification (M4 complete)
+
+The native M4 path accepts one fail-closed semantic shape: axis-zero
+`segment_id`, `make_segment` over rank-one f32 values and i32 offsets, and a
+capture-free identity transform reduced with `kind<sum>` or `kind<max>`. The
+ABI adds rank-one f32 output plus explicit i32 value and segment counts.
+Unsupported axes, types, captures, region operations, reduction kinds, and
+stores fail before lowering.
+
+The CPU conversion replaces the logical segment grid with a sequential
+`scf.for` and executes the fully lowered module with upstream `mlir-runner`.
+The GPU conversion maps one segment to each x-block. Threads traverse the
+segment with block-stride loads and use `gpu.all_reduce` before thread zero
+stores one result. Empty sums return zero; empty maxima return negative
+infinity. Max uses `maximumf` so a NaN input produces a NaN result.
+
+An internal qualification runner copies offset metadata to the host for
+validation, then launches raw CUDA pointers and the two explicit counts on
+the current PyTorch stream. This runner is not public API and does not change
+the M3 `kernel.launch()` contract. General CUDA-resident offset validation,
+segment transforms, and schedule selection remain outside M4.
 
 ## Semantic level (M0–M1 complete)
 

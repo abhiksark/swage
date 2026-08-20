@@ -42,6 +42,15 @@ semantic versioning (`0.x`; anything may change).
 - Trusted dispatch and weekly GPU qualification for vector-add correctness,
   non-default streams, argument lifetime, and cache reuse. Pull-request code
   never runs on the self-hosted GPU runner.
+- Fail-closed native lowering for canonical f32 segmented sum and max. The CPU
+  oracle uses sequential `scf`/`memref` loops executed by upstream
+  `mlir-runner`; the GPU path uses one CTA per segment and exact-target LLVM
+  NVPTX output.
+- An internal host-validated segmented-reduction qualification runner with
+  explicit values, offsets, output, value-count, and segment-count ABI fields.
+  It checks malformed offsets before launch and compares CPU and RTX A6000
+  results with PyTorch across empty, boundary, large, uniform, and skewed
+  distributions.
 - Project documentation (README, DESIGN, ROADMAP, concept docs, ADRs
   0001–0012), community health files, issue forms, and CPU CI.
 
@@ -50,5 +59,8 @@ semantic versioning (`0.x`; anything may change).
 - `emit_mlir()` remains compile-only and direct kernel calls remain
   unavailable. The M3 `launch()` path executes only the canonical
   one-dimensional fixed vector add with f32 pointers and an i32 length.
+- M4 segmented sum and max are native compiler qualification paths only. They
+  do not add segment primitives to `swage.language` or widen public
+  `kernel.launch()` behavior.
 - The pip package remains GPU-free at import time. Execution requires Linux,
   CUDA-enabled PyTorch, `libcuda`, and the build-tree `mlir_swage` bindings.

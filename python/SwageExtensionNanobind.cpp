@@ -1,3 +1,4 @@
+// python/SwageExtensionNanobind.cpp
 //===- SwageExtensionNanobind.cpp - swage dialect python module -----------===//
 //
 // Exposes registration of the dialects the semantic level composes with.
@@ -23,10 +24,9 @@ namespace nb = nanobind;
 
 namespace {
 
-std::pair<std::string, std::string> compilePTX(nb::object moduleObject,
-                                               std::string kernelName,
-                                               int64_t blockSize,
-                                               std::string target) {
+std::pair<std::string, std::string>
+compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
+           std::string target, bool segmented) {
   std::optional<nb::object> capsule =
       nb::detail::mlirApiObjectToCapsule(moduleObject);
   if (!capsule)
@@ -42,10 +42,19 @@ std::pair<std::string, std::string> compilePTX(nb::object moduleObject,
   };
   mlir::python::CollectDiagnosticsToStringScope diagnostics(
       mlirModuleGetContext(module));
-  if (mlirLogicalResultIsFailure(swageCompileFixedBlockToPTX(
-          module, mlirStringRefCreate(kernelName.data(), kernelName.size()),
-          blockSize, mlirStringRefCreate(target.data(), target.size()), store,
-          &lowered, store, &ptx)))
+  MlirLogicalResult result =
+      segmented
+          ? swageCompileSegmentedReductionToPTX(
+                module,
+                mlirStringRefCreate(kernelName.data(), kernelName.size()),
+                blockSize, mlirStringRefCreate(target.data(), target.size()),
+                store, &lowered, store, &ptx)
+          : swageCompileFixedBlockToPTX(
+                module,
+                mlirStringRefCreate(kernelName.data(), kernelName.size()),
+                blockSize, mlirStringRefCreate(target.data(), target.size()),
+                store, &lowered, store, &ptx);
+  if (mlirLogicalResultIsFailure(result))
     throw nb::value_error(diagnostics.takeMessage().c_str());
   return {std::move(lowered), std::move(ptx)};
 }
@@ -70,6 +79,22 @@ NB_MODULE(_swageDialectsNanobind, m) {
       },
       nb::arg("context"), nb::arg("load") = true);
 
-  swageM.def("_compile_ptx", &compilePTX, nb::arg("module"),
-             nb::arg("kernel_name"), nb::arg("block_size"), nb::arg("target"));
+  swageM.def(
+      "_compile_ptx",
+      [](nb::object module, std::string kernelName, int64_t blockSize,
+         std::string target) {
+        return compilePTX(module, std::move(kernelName), blockSize,
+                          std::move(target), false);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
+      nb::arg("target"));
+  swageM.def(
+      "_compile_segmented_reduction_ptx",
+      [](nb::object module, std::string kernelName, int64_t blockSize,
+         std::string target) {
+        return compilePTX(module, std::move(kernelName), blockSize,
+                          std::move(target), true);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
+      nb::arg("target"));
 }

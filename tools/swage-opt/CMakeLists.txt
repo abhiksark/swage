@@ -1,6 +1,8 @@
+# tools/swage-opt/CMakeLists.txt
 set(LIBS
   MLIRSwage
   MLIRSwageFixedBlockToGPU
+  MLIRSwageSegmentedReduction
   MLIROptLib
   MLIRRegisterAllPasses
   MLIRFuncDialect

@@ -500,6 +500,15 @@ class _CudaDriver:
     def launch(self, function, grid, block, stream, arguments):
         values = [ctypes.c_void_p(value) for value in arguments[:3]]
         values.append(ctypes.c_int32(arguments[3]))
+        self._launch(function, grid, block, stream, values)
+
+    def launch_segmented(self, function, grid, block, stream, arguments):
+        """Launch the internal three-pointer, two-count M4 ABI."""
+        values = [ctypes.c_void_p(value) for value in arguments[:3]]
+        values.extend(ctypes.c_int32(value) for value in arguments[3:])
+        self._launch(function, grid, block, stream, values)
+
+    def _launch(self, function, grid, block, stream, values):
         parameter_pointers = (ctypes.c_void_p * len(values))(
             *[
                 ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)

@@ -1,3 +1,4 @@
+# .github/workflows/ci-gpu.yml
 name: ci-gpu
 
 on:
@@ -52,7 +53,9 @@ jobs:
       - name: Test CUDA correctness, streams, and process reuse
         run: |
           PYTHONPATH=build/python_packages \
-            python -m pytest -q python/tests/mlir/test_runtime.py
+            python -m pytest -q \
+              python/tests/mlir/test_runtime.py \
+              python/tests/mlir/test_segmented_runtime.py
 
       - name: Run the documented fixed vector-add walkthrough
         run: |
