@@ -262,6 +262,10 @@ def test_gpu_softmax_matches_pytorch_and_cpu_oracle(lengths, outlier):
     output = torch.empty(covered, device="cuda")
 
     launch_softmax_gpu(values, offsets, output)
+    # A zero-length output enqueues no copy on .cpu(), so without this the
+    # all-empty row would compare two empty tensors and observe nothing
+    # about whether the launch even succeeded.
+    torch.cuda.synchronize()
 
     expected = _pytorch_softmax_reference(host_values, host_offsets)
     torch.testing.assert_close(
@@ -292,7 +296,14 @@ def test_gpu_softmax_is_repeatable():
 
 
 def test_cpu_softmax_of_singleton_is_exactly_one():
-    """A one-element segment normalizes to exactly 1.0, bit for bit."""
+    """A one-element segment normalizes to 1.0 within the text transport.
+
+    The assertion uses no tolerance, but the value reaches it through
+    printMemrefF32's six significant digits, so its real strictness is the
+    5e-06 floor documented above and not bit equality. That is still about
+    twice as tight as _ORACLE_RTOL. The bit-exactness claim belongs to the
+    GPU twin, which compares device memory directly.
+    """
     values, offsets = _softmax_case([1, 1, 1])
 
     actual = cpu_softmax_oracle(values, offsets)
@@ -304,11 +315,11 @@ def test_cpu_softmax_of_singleton_is_exactly_one():
 def test_gpu_softmax_of_singleton_is_exactly_one():
     """The recompute schedule makes the singleton quotient exact.
 
-    map_store repeats the identical subtract, multiply, and exp2 sequence the
-    reduce used, so the sum equals the exponential bit for bit and the
-    quotient is exactly 1.0 regardless of ex2.approx's accuracy. If a future
-    change caches exponentials, or contracts one clone into an FMA and not
-    the other, this is the test that trips first.
+    map_store repeats the identical subtract, multiply, and exp2 sequence
+    the reduce used, so the sum equals the exponential bit for bit and the
+    quotient is exactly 1.0 regardless of ex2.approx's accuracy. This is the
+    test that trips if the two region clones ever lower differently, which
+    is the only way the recompute can stop agreeing with itself.
     """
     host_values, host_offsets = _softmax_case([1, 1, 1])
     output = torch.empty(3, device="cuda")
@@ -394,3 +405,19 @@ def test_rejects_softmax_output_aliasing_values():
 
     with pytest.raises(ValueError, match="must not overlap the values buffer"):
         launch_softmax_gpu(values, host_offsets.cuda(), values.narrow(0, 0, 8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rejects_softmax_output_aliasing_offsets():
+    """The kernel re-reads offsets, so an aliased output voids validation."""
+    host_values, host_offsets = _softmax_case([4, 4])
+    count = host_offsets.numel()
+    shared = torch.empty(16, dtype=torch.int32, device="cuda")
+    shared[:count] = host_offsets.cuda()
+    offsets = shared.narrow(0, 0, count)
+    output = shared.view(torch.float32).narrow(0, 0, 8)
+
+    with pytest.raises(
+        ValueError, match="must not overlap the offsets buffer"
+    ):
+        launch_softmax_gpu(host_values.cuda(), offsets, output)

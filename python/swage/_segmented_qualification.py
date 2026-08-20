@@ -78,20 +78,25 @@ def _validate_softmax_offsets(offsets, value_count, output_count):
     return segment_count
 
 
-def _validate_disjoint(values, output):
-    """Enforce map_store's obligation that the output not alias the values.
+def _validate_disjoint(name, buffer, output):
+    """Reject an output that overlaps a buffer the kernel reads.
 
-    Both tensors are already known contiguous and rank one, so the byte
-    extent is exact and a half-open intersection is exact. It cannot see two
-    virtual mappings of one physical allocation, nor aliasing created after
-    this returns.
+    ADR-0008 names only the values buffer, but the offsets buffer needs the
+    same treatment: the kernel re-reads offsets from device memory after
+    other CTAs have already stored through an aliased output, which voids
+    the host-side offset walk entirely.
+
+    Both tensors are known contiguous and rank one by this point, so the
+    byte extent is exact and a half-open intersection is exact. It cannot
+    see two virtual mappings of one physical allocation, nor aliasing
+    created after this returns.
     """
-    value_start = values.data_ptr()
-    value_end = value_start + values.numel() * values.element_size()
+    buffer_start = buffer.data_ptr()
+    buffer_end = buffer_start + buffer.numel() * buffer.element_size()
     output_start = output.data_ptr()
     output_end = output_start + output.numel() * output.element_size()
-    if value_start < output_end and output_start < value_end:
-        raise ValueError("output must not overlap the values buffer")
+    if buffer_start < output_end and output_start < buffer_end:
+        raise ValueError(f"output must not overlap the {name} buffer")
 
 
 def _validate_shapes(
@@ -150,9 +155,10 @@ def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
         _validate_softmax_offsets,
         require_cuda=require_cuda,
     )
-    # Only now are both tensors known to sit on one device, which is what
-    # makes comparing their raw addresses meaningful.
-    _validate_disjoint(values, output)
+    # On the CUDA path both tensors are now known to sit on one device,
+    # which is what makes comparing their raw addresses meaningful.
+    _validate_disjoint("values", values, output)
+    _validate_disjoint("offsets", offsets, output)
     return counts
 
 
