@@ -20,6 +20,7 @@
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 
@@ -110,12 +111,20 @@ struct ReductionStage {
   ReductionKind kind = ReductionKind::Sum;
 };
 
+/// Where an admitted program writes its result.
+enum class TerminalKind {
+  ScalarStore, ///< One f32 per segment, at output[segment_id].
+  MapStore     ///< One f32 per element, at output[element index].
+};
+
 /// An admitted segment program. It holds no handle into the source function:
 /// every region is detached into a RegionOwner and every capture is a stage
 /// index, so an emitter may erase the source IR before emitting.
 struct SegmentProgram {
   SmallVector<ReductionStage> reductions;
-  unsigned storedReduction = 0; ///< Index into `reductions`.
+  TerminalKind terminal = TerminalKind::ScalarStore;
+  unsigned storedReduction = 0; ///< ScalarStore: index into `reductions`.
+  ElementProgram mapStore;      ///< MapStore: the per-element expression.
 };
 
 /// Owns the region bodies detached from the source function, and must
@@ -188,6 +197,7 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
   SmallVector<MapOp> maps;
   SmallVector<ReduceOp> reductions;
   SmallVector<memref::StoreOp> stores;
+  SmallVector<MapStoreOp> mapStores;
   SmallVector<func::ReturnOp> returns;
   for (Operation &operation : function.getBody().front()) {
     if (auto segmentId = dyn_cast<SegmentIdOp>(operation))
@@ -200,6 +210,8 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
       reductions.push_back(reduction);
     else if (auto store = dyn_cast<memref::StoreOp>(operation))
       stores.push_back(store);
+    else if (auto mapStore = dyn_cast<MapStoreOp>(operation))
+      mapStores.push_back(mapStore);
     else if (auto returnOp = dyn_cast<func::ReturnOp>(operation))
       returns.push_back(returnOp);
     else
@@ -220,11 +232,11 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
       segment.getSegmentId() != segmentId.getResult())
     return segment.emitError(
         "make_segment must bind the function values and offsets at segment_id");
-  if (stores.size() != 1)
+  if (stores.size() + mapStores.size() != 1)
     return function.emitError(
         "segmented reduction requires exactly one output terminal: a "
-        "memref.store of a reduction at output[segment_id]");
-  memref::StoreOp store = stores.front();
+        "memref.store of a reduction at output[segment_id] or a "
+        "swage.map_store into the output");
 
   for (MapOp map : maps) {
     if (!map.getResult().hasOneUse())
@@ -232,7 +244,7 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
           "swage.map result must have exactly one segment consumer; a mapped "
           "segment is never materialized");
     Operation *consumer = *map.getResult().getUsers().begin();
-    if (!isa<MapOp, ReduceOp>(consumer))
+    if (!isa<MapOp, ReduceOp, MapStoreOp>(consumer))
       return map.emitError(
           "swage.map result must have exactly one segment consumer; a mapped "
           "segment is never materialized");
@@ -247,10 +259,16 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
     capturing.push_back(map.getOperation());
   for (ReduceOp reduction : reductions)
     capturing.push_back(reduction.getOperation());
+  for (MapStoreOp mapStore : mapStores)
+    capturing.push_back(mapStore.getOperation());
   for (Operation *operation : capturing) {
-    ValueRange captures = isa<MapOp>(operation)
-                              ? cast<MapOp>(operation).getCaptures()
-                              : cast<ReduceOp>(operation).getCaptures();
+    ValueRange captures =
+        llvm::TypeSwitch<Operation *, ValueRange>(operation)
+            .Case<MapOp>([](MapOp map) { return map.getCaptures(); })
+            .Case<ReduceOp>(
+                [](ReduceOp reduce) { return reduce.getCaptures(); })
+            .Case<MapStoreOp>(
+                [](MapStoreOp store) { return store.getCaptures(); });
     for (Value capture : captures)
       if (!capture.getDefiningOp<ReduceOp>() || !capture.getType().isF32())
         return operation->emitError(
@@ -272,19 +290,33 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
     if (failed(verifyRegion(reduction, reduction.getBody(),
                             reduction.getCaptures().size())))
       return failure();
+  for (MapStoreOp mapStore : mapStores)
+    if (failed(verifyRegion(mapStore, mapStore.getBody(),
+                            mapStore.getCaptures().size())))
+      return failure();
 
-  auto storedReduction = store.getValue().getDefiningOp<ReduceOp>();
-  if (!storedReduction || !stageOf.contains(storedReduction.getOperation()) ||
-      store.getMemRef() != function.getArgument(2) ||
-      store.getIndices().size() != 1 ||
-      store.getIndices().front() != segmentId.getResult())
-    return store.emitError(
-        "segmented reduction result must be stored at output[segment_id]");
+  ReduceOp storedReduction;
+  if (mapStores.empty()) {
+    memref::StoreOp store = stores.front();
+    storedReduction = store.getValue().getDefiningOp<ReduceOp>();
+    if (!storedReduction || !stageOf.contains(storedReduction.getOperation()) ||
+        store.getMemRef() != function.getArgument(2) ||
+        store.getIndices().size() != 1 ||
+        store.getIndices().front() != segmentId.getResult())
+      return store.emitError(
+          "segmented reduction result must be stored at output[segment_id]");
+  } else if (mapStores.front().getOutput() != function.getArgument(2)) {
+    return mapStores.front().emitError(
+        "swage.map_store must write the function output buffer");
+  }
   if (!returns.front().getOperands().empty())
     return returns.front().emitError("segmented reduction must return void");
 
   // Every rule passed, so the program may now take ownership of the regions.
-  program.storedReduction = stageOf.lookup(storedReduction.getOperation());
+  program.terminal =
+      mapStores.empty() ? TerminalKind::ScalarStore : TerminalKind::MapStore;
+  if (mapStores.empty())
+    program.storedReduction = stageOf.lookup(storedReduction.getOperation());
   auto takeElement = [&](Operation *consumer, ValueRange consumerCaptures,
                          Value consumerSegment) {
     ElementProgram element;
@@ -307,6 +339,11 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
     stage.element =
         takeElement(reduction, reduction.getCaptures(), reduction.getSegment());
     program.reductions.push_back(std::move(stage));
+  }
+  if (!mapStores.empty()) {
+    MapStoreOp mapStore = mapStores.front();
+    program.mapStore =
+        takeElement(mapStore, mapStore.getCaptures(), mapStore.getSegment());
   }
   return success();
 }
@@ -383,9 +420,24 @@ void buildSequentialProgram(func::FuncOp function,
               });
           results.push_back(reduction.getResult(0));
         }
-        memref::StoreOp::create(outer, outerLoc,
-                                results[program.storedReduction],
-                                function.getArgument(2), segmentId);
+        if (program.terminal == TerminalKind::ScalarStore) {
+          memref::StoreOp::create(outer, outerLoc,
+                                  results[program.storedReduction],
+                                  function.getArgument(2), segmentId);
+        } else {
+          scf::ForOp::create(
+              outer, outerLoc, start, end, one, ValueRange(),
+              [&](OpBuilder &inner, Location innerLoc, Value index,
+                  ValueRange) {
+                Value value = memref::LoadOp::create(
+                    inner, innerLoc, function.getArgument(0), index);
+                value =
+                    evaluateElement(inner, program.mapStore, value, results);
+                memref::StoreOp::create(inner, innerLoc, value,
+                                        function.getArgument(2), index);
+                scf::YieldOp::create(inner, innerLoc);
+              });
+        }
         scf::YieldOp::create(outer, outerLoc);
       });
   func::ReturnOp::create(builder, loc);
@@ -472,18 +524,41 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               body, bodyLoc, local.getResult(0), operation, true));
         }
 
-        Value total = results[program.storedReduction];
-        Value firstThread = arith::CmpIOp::create(
-            body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
-        scf::IfOp::create(
-            body, bodyLoc, firstThread,
-            [&](OpBuilder &store, Location storeLoc) {
-              Value outputAddress =
-                  LLVM::GEPOp::create(store, storeLoc, pointer, f32,
-                                      entry->getArgument(2), segmentId64);
-              LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
-              scf::YieldOp::create(store, storeLoc);
-            });
+        if (program.terminal == TerminalKind::ScalarStore) {
+          Value total = results[program.storedReduction];
+          Value firstThread = arith::CmpIOp::create(
+              body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
+          scf::IfOp::create(
+              body, bodyLoc, firstThread,
+              [&](OpBuilder &store, Location storeLoc) {
+                Value outputAddress =
+                    LLVM::GEPOp::create(store, storeLoc, pointer, f32,
+                                        entry->getArgument(2), segmentId64);
+                LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
+                scf::YieldOp::create(store, storeLoc);
+              });
+        } else {
+          // Guard-free on purpose: every thread runs the same block-stride
+          // loop it ran for each reduction stage, and an empty segment makes
+          // it zero-trip. A thread-dependent guard here would put a predicate
+          // around code the barriers above already made CTA-uniform.
+          scf::ForOp::create(
+              body, bodyLoc, first, end, block, ValueRange(),
+              [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
+                Value index64 = arith::IndexCastOp::create(
+                    loop, loopLoc, loop.getI64Type(), index);
+                Value address =
+                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                        entry->getArgument(0), index64);
+                Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+                value = evaluateElement(loop, program.mapStore, value, results);
+                Value outputAddress =
+                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                        entry->getArgument(2), index64);
+                LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
+                scf::YieldOp::create(loop, loopLoc);
+              });
+        }
         scf::YieldOp::create(body, bodyLoc);
       });
   gpu::ReturnOp::create(builder, loc);

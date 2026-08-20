@@ -226,3 +226,51 @@ module {
     return
   }
 }
+
+// -----
+
+// Exactly one output terminal, so a scalar store beside a map_store is an
+// error rather than a silent choice between two output shapes.
+module {
+  // expected-error@+1 {{segmented reduction requires exactly one output terminal}}
+  func.func @two_terminals(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    swage.map_store %segment, %output : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// A map_store may only write the function's output buffer.
+module {
+  func.func @map_store_wrong_buffer(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    // expected-error@+1 {{swage.map_store must write the function output buffer}}
+    swage.map_store %segment, %values : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    return
+  }
+}
