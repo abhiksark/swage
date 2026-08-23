@@ -8,7 +8,9 @@ from swage._segmented_qualification import (
     _validate_offsets,
     _validate_tensors,
     cpu_oracle,
+    cpu_softmax_oracle,
     launch_gpu,
+    launch_softmax_gpu,
 )
 
 
@@ -179,3 +181,243 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
         output.cpu(), cpu_oracle(host_values, host_offsets, "max"),
         equal_nan=True,
     )
+
+
+# Softmax tolerances, measured on an RTX A6000 at sm_86.
+#
+# The dominant term is the f32 rounding of `x * 1.44269502`, whose relative
+# effect on exp2 is about 6e-08 per unit of intra-segment spread. It is
+# identical on both backends, so it does not cancel against PyTorch. Every
+# distribution below except one-outlier caps its spread at 4, and _GPU_RTOL
+# is sized for a cap of 8. Widening a segment past that needs a larger
+# constant, so the fix for a failure just above rtol is the distribution.
+_GPU_RTOL, _GPU_ATOL = 2e-6, 1e-7
+
+# Anything compared against cpu_softmax_oracle carries a hard 5e-06 relative
+# floor, because the oracle parses printMemrefF32's six-significant-digit
+# text. That floor is the transport, not the arithmetic.
+_ORACLE_RTOL, _ORACLE_ATOL = 1e-5, 1e-6
+
+
+def _softmax_case(lengths, outlier=None):
+    """Build a softmax case, optionally planting one dominant value."""
+    values, offsets = _case(lengths)
+    if outlier is not None:
+        values = values.clone()
+        values[int(offsets[1])] = outlier
+    return values, offsets
+
+
+SOFTMAX_CASES = [
+    pytest.param([0] * 8, None, id="all-empty"),
+    pytest.param([1] * 64, None, id="all-ones"),
+    pytest.param([1, 2, 3, 4] * 24, None, id="many-tiny"),
+    pytest.param([4096, 3, 2731], None, id="few-huge"),
+    pytest.param([1, 127, 640], 100.0, id="one-outlier"),
+    pytest.param([0, 5, 0, 7, 0, 3, 0, 1, 0], None, id="alternating-empty"),
+]
+
+
+def _pytorch_softmax_reference(values, offsets):
+    """Compute segmented softmax in float32, with the shift written out.
+
+    The maximum shift is the thing under test, so it is explicit rather than
+    delegated to torch.softmax. Empty segments contribute nothing, so the
+    result is a concatenation of length offsets[-1].
+    """
+    pieces = []
+    for index in range(len(offsets) - 1):
+        segment = values[offsets[index] : offsets[index + 1]]
+        if not segment.numel():
+            continue
+        shifted = segment - segment.max()
+        exponentials = shifted.exp()
+        pieces.append(exponentials / exponentials.sum())
+    if not pieces:
+        return torch.empty(0, dtype=torch.float32)
+    return torch.cat(pieces)
+
+
+@pytest.mark.parametrize(("lengths", "outlier"), SOFTMAX_CASES)
+def test_cpu_softmax_matches_pytorch(lengths, outlier):
+    """Execute the sequential softmax through upstream mlir-runner."""
+    values, offsets = _softmax_case(lengths, outlier)
+
+    actual = cpu_softmax_oracle(values, offsets)
+    expected = _pytorch_softmax_reference(values, offsets)
+
+    torch.testing.assert_close(
+        actual, expected, rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize(("lengths", "outlier"), SOFTMAX_CASES)
+def test_gpu_softmax_matches_pytorch_and_cpu_oracle(lengths, outlier):
+    """Qualify the three-phase kernel against both independent references."""
+    host_values, host_offsets = _softmax_case(lengths, outlier)
+    covered = int(host_offsets[-1])
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    output = torch.empty(covered, device="cuda")
+
+    launch_softmax_gpu(values, offsets, output)
+    # A zero-length output enqueues no copy on .cpu(), so without this the
+    # all-empty row would compare two empty tensors and observe nothing
+    # about whether the launch even succeeded.
+    torch.cuda.synchronize()
+
+    expected = _pytorch_softmax_reference(host_values, host_offsets)
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=_GPU_RTOL, atol=_GPU_ATOL
+    )
+    torch.testing.assert_close(
+        output.cpu(),
+        cpu_softmax_oracle(host_values, host_offsets),
+        rtol=_ORACLE_RTOL,
+        atol=_ORACLE_ATOL,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_is_repeatable():
+    """Run the same loaded shape twice without stale CTA state."""
+    host_values, host_offsets = _softmax_case([0, 2, 0, 129])
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    output = torch.empty(int(host_offsets[-1]), device="cuda")
+
+    launch_softmax_gpu(values, offsets, output)
+    first = output.clone()
+    output.fill_(float("nan"))
+    launch_softmax_gpu(values, offsets, output)
+
+    torch.testing.assert_close(output, first)
+
+
+def test_cpu_softmax_of_singleton_is_exactly_one():
+    """A one-element segment normalizes to 1.0 within the text transport.
+
+    The assertion uses no tolerance, but the value reaches it through
+    printMemrefF32's six significant digits, so its real strictness is the
+    5e-06 floor documented above and not bit equality. That is still about
+    twice as tight as _ORACLE_RTOL. The bit-exactness claim belongs to the
+    GPU twin, which compares device memory directly.
+    """
+    values, offsets = _softmax_case([1, 1, 1])
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    torch.testing.assert_close(actual, torch.ones(3), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_of_singleton_is_exactly_one():
+    """The recompute schedule makes the singleton quotient exact.
+
+    map_store repeats the identical subtract, multiply, and exp2 sequence
+    the reduce used, so the sum equals the exponential bit for bit and the
+    quotient is exactly 1.0 regardless of ex2.approx's accuracy. This is the
+    test that trips if the two region clones ever lower differently, which
+    is the only way the recompute can stop agreeing with itself.
+    """
+    host_values, host_offsets = _softmax_case([1, 1, 1])
+    output = torch.empty(3, device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    torch.testing.assert_close(
+        output.cpu(), torch.ones(3), rtol=0, atol=0
+    )
+
+
+def _semantic_edge_case():
+    """Three segments: a NaN, all negative infinity, and a finite maximum."""
+    values = torch.tensor(
+        [float("nan"), 1.0, float("-inf"), float("-inf"), float("-inf"), 0.0],
+        dtype=torch.float32,
+    )
+    offsets = torch.tensor([0, 2, 4, 6], dtype=torch.int32)
+    # A NaN propagates through maximumf and ex2. A segment that is entirely
+    # negative infinity has a negative-infinity maximum, so every difference
+    # is NaN. A segment where negative infinity sits under a finite maximum
+    # is well defined, because exp2 of negative infinity is exactly zero.
+    expected = torch.tensor(
+        [float("nan"), float("nan"), float("nan"), float("nan"), 0.0, 1.0],
+        dtype=torch.float32,
+    )
+    return values, offsets, expected
+
+
+def test_cpu_softmax_propagates_nan_and_is_nan_for_all_negative_infinity():
+    """Pin the three float edge cases on the sequential lowering."""
+    values, offsets, expected = _semantic_edge_case()
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    torch.testing.assert_close(
+        actual, expected, rtol=0, atol=0, equal_nan=True
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_propagates_nan_and_is_nan_for_all_negative_infinity():
+    """Pin the same three edge cases on the one-CTA kernel."""
+    host_values, host_offsets, expected = _semantic_edge_case()
+    output = torch.empty(6, device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_leaves_output_beyond_final_offset_untouched():
+    """An empty CTA that stored would write a neighbour's first slot."""
+    host_values, host_offsets = _softmax_case([0, 5, 0, 7, 0])
+    covered = int(host_offsets[-1])
+    output = torch.full((covered + 8,), -1.0, device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    torch.testing.assert_close(
+        output[covered:].cpu(), torch.full((8,), -1.0), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rejects_softmax_output_shorter_than_final_offset():
+    """The softmax ABI needs one output element per covered value."""
+    host_values, host_offsets = _softmax_case([3, 4])
+    output = torch.empty(6, device="cuda")
+
+    with pytest.raises(ValueError, match="output has 6 elements for 7 values"):
+        launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rejects_softmax_output_aliasing_values():
+    """map_store's no-alias obligation is enforced before any launch."""
+    host_values, host_offsets = _softmax_case([4, 4])
+    values = host_values.cuda()
+
+    with pytest.raises(ValueError, match="must not overlap the values buffer"):
+        launch_softmax_gpu(values, host_offsets.cuda(), values.narrow(0, 0, 8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rejects_softmax_output_aliasing_offsets():
+    """The kernel re-reads offsets, so an aliased output voids validation."""
+    host_values, host_offsets = _softmax_case([4, 4])
+    count = host_offsets.numel()
+    shared = torch.empty(16, dtype=torch.int32, device="cuda")
+    shared[:count] = host_offsets.cuda()
+    offsets = shared.narrow(0, 0, count)
+    output = shared.view(torch.float32).narrow(0, 0, 8)
+
+    with pytest.raises(
+        ValueError, match="must not overlap the offsets buffer"
+    ):
+        launch_softmax_gpu(host_values.cuda(), offsets, output)

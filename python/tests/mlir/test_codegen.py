@@ -54,10 +54,13 @@ def test_compiles_fixed_vector_add_to_deterministic_ptx():
     assert module.operation.get_asm(enable_debug_info=False) == original
 
 
-@pytest.mark.parametrize("target", ["sm_8", "compute_80", "sm_999"])
+@pytest.mark.parametrize("target", ["sm_8", "compute_80", "sm_79", "sm_999"])
 def test_rejects_invalid_nvptx_targets(target):
     """Fail closed instead of silently choosing another architecture."""
-    with pytest.raises(ValueError, match="target must match sm_<major><minor>"):
+    with pytest.raises(
+        ValueError,
+        match="target must match sm_<major><minor> and be sm_80 or newer",
+    ):
         native_swage._compile_ptx(
             _emit(),
             kernel_name="add_kernel",

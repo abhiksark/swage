@@ -51,6 +51,11 @@ Swage semantic MLIR            (dialect: swage)
         │     ├── sequential scf + memref → upstream mlir-runner
         │     └── one CTA per segment → gpu + nvvm + llvm → PTX
         │
+        ├── M5 canonical ragged softmax
+        │     ├── maximum → exponential sum → normalize/store
+        │     ├── sequential scf + memref → upstream mlir-runner
+        │     └── one CTA per segment → gpu + nvvm + llvm → PTX
+        │
         └── General scheduling path (planned)
               ↓  canonicalization and fusion
             SwagePlan task IR (dialect: swage_plan)
@@ -63,7 +68,7 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python, M3 execution, and M4 qualification boundary
+## Current Python, M3 execution, and M4–M5 qualification boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
@@ -98,8 +103,29 @@ The qualification runner validates offsets on the host before launch and
 uses the existing CUDA Driver wrapper and exact active `sm_*` target. This is
 not a new public runtime contract: `swage.language` gains no segment
 primitives, `emit_mlir()` remains compile-only, and public `launch()` remains
-the M3 fixed vector-add boundary. Device-only offset validation and general
-segment transforms remain future runtime and compiler work.
+the M3 fixed vector-add boundary.
+
+M5 extends only this internal qualification path (ADR-0013). It admits
+ordered f32 reduction captures and single-consumer maps, then fuses each map
+into its consumer. Stable ragged softmax runs a maximum pass, a sum of shifted
+exponentials, and a normalization/store pass. The terminal
+`swage.map_store` writes one output per covered input element, whereas the M4
+scalar `memref.store` terminal writes one output per segment; both retain the
+same five-argument internal ABI. Exponentials are recomputed for the terminal
+pass instead of stored in an intermediate buffer.
+
+The CPU path executes those phases sequentially. The GPU path uses one CTA
+per segment, with uniform all-reduces broadcasting results and synchronizing
+the phases. GPU `math.exp2` becomes the native NVPTX approximation, and exact
+target compilation requires `sm_80` or newer. The internal runner requires
+output to be disjoint from values and offsets and large enough for
+`offsets[-1]`; empty segments write nothing.
+
+CPU output matches PyTorch, and RTX A6000 `sm_86` output matches both PyTorch
+and the CPU oracle across all-empty, all-singleton, many-tiny, few-huge,
+one-outlier, and alternating-empty distributions. Public segment primitives,
+public segmented launch, schedule selection, multi-CTA execution, and
+device-side offset validation remain future runtime and compiler work.
 
 ## The `swage` dialect (semantic level)
 
@@ -182,9 +208,10 @@ pointers.
   (ADR-0005), PyTorch reference implementations are the initial oracle;
   a CPU reference lowering joins it with the first segment lowerings.
 - GPU: a trusted main-only self-hosted workflow checks fixed vector-add
-  correctness, segmented sum/max distributions, empty and NaN identities,
-  repeated execution, non-default streams, argument lifetime, and cache reuse
-  on a real NVIDIA device. Pull requests never execute on that runner.
+  correctness; segmented sum, max, and ragged-softmax distributions; empty
+  and NaN behavior; repeated execution; non-default streams; argument
+  lifetime; and cache reuse on a real NVIDIA device. Pull requests never
+  execute on that runner.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.

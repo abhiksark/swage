@@ -59,7 +59,45 @@ bool isSupportedTarget(llvm::StringRef target) {
       !llvm::all_of(digits, llvm::isDigit))
     return false;
   unsigned value = 0;
-  return !digits.getAsInteger(10, value) && value >= 30 && value <= 129;
+  return !digits.getAsInteger(10, value) && value >= 80 && value <= 129;
+}
+
+/// Replace libdevice calls with LLVM intrinsics the NVPTX backend lowers
+/// natively.
+///
+/// `--convert-gpu-to-nvvm` rewrites every `math` operation into a call to a
+/// libdevice symbol such as `__nv_exp2f`. Nothing in this path links
+/// libdevice, so the emitted PTX would carry an unresolvable `.extern .func`
+/// and fail to load. The equivalent LLVM intrinsic becomes a native
+/// instruction, `ex2.approx.f32` for exp2, at the cost of the hardware
+/// approximation rather than libdevice's correctly rounded result.
+LogicalResult replaceLibdeviceCalls(gpu::GPUModuleOp gpuModule) {
+  SmallVector<LLVM::CallOp> calls;
+  gpuModule.walk([&](LLVM::CallOp call) {
+    if (call.getCallee() == "__nv_exp2f")
+      calls.push_back(call);
+  });
+  for (LLVM::CallOp call : calls) {
+    OpBuilder builder(call);
+    Value exponential =
+        LLVM::Exp2Op::create(builder, call.getLoc(), call.getOperand(0));
+    call.getResult().replaceAllUsesWith(exponential);
+    call.erase();
+  }
+  // Any surviving libdevice declaration is an unresolvable extern, so fail
+  // rather than emit a module that cannot load.
+  WalkResult remaining = gpuModule.walk([&](LLVM::LLVMFuncOp function) {
+    if (!function.isExternal() || !function.getName().starts_with("__nv_"))
+      return WalkResult::advance();
+    if (function.symbolKnownUseEmpty(gpuModule)) {
+      function.erase();
+      return WalkResult::advance();
+    }
+    function.emitError("no libdevice implementation is linked for ")
+        << function.getName();
+    return WalkResult::interrupt();
+  });
+  return failure(remaining.wasInterrupted());
 }
 
 LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
@@ -67,7 +105,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          KernelKind kind, std::string &lowered,
                          std::string &ptx) {
   if (!isSupportedTarget(target))
-    return source.emitError("target must match sm_<major><minor>");
+    return source.emitError(
+        "target must match sm_<major><minor> and be sm_80 or newer");
   if (blockSize <= 0)
     return source.emitError("block_size must be a positive integer");
 
@@ -110,6 +149,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (std::distance(gpuModules.begin(), gpuModules.end()) != 1)
     return source.emitError("lowering did not produce exactly one GPU module");
   gpu::GPUModuleOp gpuModule = *gpuModules.begin();
+  if (failed(replaceLibdeviceCalls(gpuModule)))
+    return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
       context,
       {NVVM::NVVMTargetAttr::get(context, 2, "nvptx64-nvidia-cuda", target)}));

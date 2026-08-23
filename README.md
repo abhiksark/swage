@@ -11,12 +11,12 @@ LLVM. You write a Triton-like kernel that describes what happens to *one
 logical segment*; Swage is designed to derive fixed-size GPU tile tasks and
 generate NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
-> **Status: pre-alpha, M4 native qualification complete.** The canonical fixed
-> vector-add kernel remains the public execution subset. Canonical segmented
-> sum and max modules now lower to a sequential CPU oracle and one CTA per
-> segment on NVIDIA GPUs. Public segment syntax, public segmented launch, and
-> schedule selection remain planned. See [Current status](#current-status) for
-> the exact boundary.
+> **Status: pre-alpha, M5 internal qualification complete.** The canonical
+> fixed vector-add kernel remains the public execution subset. Internal
+> segmented sum, max, and stable ragged-softmax modules lower to a sequential
+> CPU oracle and one CTA per segment on NVIDIA GPUs. Public segment syntax,
+> public segmented launch, and schedule selection remain planned. See
+> [Current status](#current-status) for the exact boundary.
 
 ## The programming model
 
@@ -97,6 +97,8 @@ Swage semantic MLIR
         │                        → current PyTorch stream
         ├── M4 segmented sum/max → sequential scf/memref CPU oracle
         │                         → one CTA per segment → NVPTX
+        ├── M5 ragged softmax → max → exponential sum → normalize/store
+        │                      → internal CPU and one-CTA GPU qualification
         └── general scheduling → SwagePlan task IR (planned)
                                  → fixed tiles and GPU schedules (planned)
 ```
@@ -119,8 +121,15 @@ warp or CTA. See
 | Fixed vector add lowering through LLVM NVPTX to deterministic PTX | **Works today, internal**; native-tested for exact targets |
 | CUDA Driver launch, cache, and real GPU result | **Works today for the public M3 subset**; trusted A6000 GPU workflow |
 | Native segmented sum/max lowering | **Works today for canonical internal qualification modules**; upstream `mlir-runner` CPU oracle and one-CTA `sm_86` tests |
-| Public segment frontend and launch; ragged softmax | Planned |
+| Native stable ragged-softmax lowering | **Works today for the canonical internal qualification module**; max, exponential-sum, and normalization/store phases match PyTorch and the CPU oracle on RTX A6000 `sm_86` |
+| Public segment frontend and segmented launch, including ragged softmax | Planned |
 | SwagePlan task dialect; warp/CTA/split-CTA/persistent policies | Research target |
+
+The M5 differential suite covers all-empty, all-singleton, many-tiny,
+few-huge, one-outlier, and alternating-empty segment distributions. The
+runner is internal: it retains the five-argument values, offsets, output,
+value-count, and segment-count ABI, validates host-visible metadata, and does
+not widen `swage.language`, `emit_mlir()`, or public `launch()`.
 
 The research question: *can one segment-local program automatically produce
 competitive warp, CTA, split-CTA, and persistent schedules as the runtime
@@ -147,7 +156,8 @@ bindings enabled. Run `ninja -C build check-swage-python` after the native
 build; it sets the build-tree `PYTHONPATH` for `mlir_swage`. On Linux with
 PyTorch CUDA and `libcuda`, the M3 subset can then compile and launch the
 fixed vector add. The internal native suite also qualifies M4 segmented sum
-and max. The public launch path has no CUDA toolkit dependency.
+and max plus M5 ragged softmax. The public launch path has no CUDA toolkit
+dependency.
 
 See the [runnable M3 walkthrough](docs/quickstart.md#execute-fixed-vector-add).
 A GPU is not required for the CPU and compile-only development paths.
