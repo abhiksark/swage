@@ -36,7 +36,7 @@ bool isRankOneMemRef(Type type, Type elementType) {
   auto memref = dyn_cast<MemRefType>(type);
   return memref && memref.getRank() == 1 && memref.isDynamicDim(0) &&
          memref.getElementType() == elementType &&
-         memref.getLayout().isIdentity() && memref.getMemorySpaceAsInt() == 0;
+         memref.getLayout().isIdentity() && !memref.getMemorySpace();
 }
 
 /// Classification of one operation inside a Swage region.
@@ -201,7 +201,8 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
       !isRankOneMemRef(type.getInput(0), builder.getF32Type()) ||
       !isRankOneMemRef(type.getInput(1), builder.getI32Type()) ||
       !isRankOneMemRef(type.getInput(2), builder.getF32Type()) ||
-      !type.getInput(3).isInteger(32) || !type.getInput(4).isInteger(32))
+      !type.getInput(3).isSignlessInteger(32) ||
+      !type.getInput(4).isSignlessInteger(32))
     return function.emitError(
         "segmented reduction requires rank-one f32 values, rank-one i32 "
         "offsets, rank-one f32 output, i32 value count, and i32 segment "

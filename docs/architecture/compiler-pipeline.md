@@ -33,15 +33,12 @@ Live mlir_swage.ir.Module                                        (M2 fixed path)
         │     └── one CTA per segment → native exp2 → PTX         ✅
         │         → internal PyTorch and CPU-oracle qualification ✅
         │
-        └── General scheduling path
-              ↓   general canonicalization and fusion            ⏳
-            SwagePlan task IR (dialect: swage_plan)              🔬 (ADR-0003)
-              ↓   task decomposition, policy selection
-            Fixed-size tile operations
-              ↓
-            arith + math + scf + memref + vector                 (standard MLIR)
-              ↓
-            gpu + nvgpu → nvvm + llvm → LLVM NVPTX → PTX         (ADR-0006)
+        ├── M6 canonical identity segmented-sum planning path
+        │     ↓   read-only admission                             ✅
+        │   private companion with swage_plan.classify           ✅ (ADR-0014)
+        └── M6 host metadata → warp/CTA descriptors               ✅ (independent)
+                              → classifier integration            ⏳ (M7)
+                              → mixed-policy GPU execution        🔬
 ```
 
 ## Frontend (M2 complete)
@@ -147,6 +144,28 @@ oracle across all-empty, all-singleton, many-tiny, few-huge, one-outlier, and
 alternating-empty distributions. This does not add public segment primitives,
 public segmented launch, schedule selection, or multi-CTA execution.
 
+## Minimal planning gate (M6 complete)
+
+The `--swage-to-plan` pass accepts only the canonical capture-free,
+map-free, single-stage identity segmented sum. Admission is read-only. On
+success, the pass preserves the semantic function and adds one private
+planning companion containing `swage_plan.classify`, the semantic kernel
+reference, the configured threshold, warp then CTA as the legal policy order,
+and one `!swage_plan.task_range`. Unsupported modules fail before mutation.
+
+The internal host classifier separately validates i32 offsets, counts, and
+the threshold before emitting one stable descriptor per segment, including
+empty segments. Each descriptor carries the segment ID, absolute half-open
+range, stage zero, selected warp or CTA policy, and a dependency group equal
+to the segment ID. This tested generator is not yet connected to the planning
+operation or a runtime dispatch path.
+
+M7 must integrate classification, lower the task range, dispatch descriptors,
+and execute both policies on the GPU before Swage can claim mixed-policy
+execution. Broader planning, including packing, splitting, partial
+reductions, merges, queues, persistent scheduling, and ragged-softmax
+planning, remains deferred.
+
 ## Semantic level (M0–M1 complete)
 
 The `swage` dialect models segment-local computation. Today:
@@ -157,14 +176,19 @@ The `swage` dialect models segment-local computation. Today:
 materialized as a runtime-sized SSA vector; reductions and maps stay
 symbolic until tiling.
 
-## Planning level (research, M6+)
+## Planning level (M6 minimal gate complete)
 
-`swage_plan` will represent tasks, policies (`warp`, `packed_warp`, `cta`,
-`split_cta`, `merge`, `persistent`), queues, and dependencies. Compile
-time decides *legal schedule variants, tile sizes, reduction structure,
-cost estimates*; runtime decides *actual lengths, counts, skew, task
-counts, selected policies*. Passes never pretend to know offset contents;
-where runtime decisions are needed, the compiler emits planner code.
+`swage_plan` currently represents only warp and CTA policy attributes, one
+opaque task-range type, and one classification operation. Compile time records
+the legal policy order and threshold for the admitted semantic kernel. The
+independent host classifier uses actual lengths and counts to produce stable
+descriptors. It does not yet execute the operation or materialize the opaque
+task range.
+
+M7 owns classifier integration, task-range lowering, dispatch, mixed-policy
+launch, and benchmark comparison. Later milestones own packing, splitting,
+partial reductions, merges, queues, dependencies, and persistent scheduling.
+Passes never pretend to know offset contents.
 
 ## Backend
 

@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: /home/runner/.swage/llvm/install-${{ steps.pin.outputs.tag }}
-          key: llvm-${{ runner.os }}-${{ steps.pin.outputs.tag }}-release-py313-bindings-v2
+          key: llvm-${{ runner.os }}-${{ steps.pin.outputs.tag }}-release-py313-bindings-v2-gtest-v1
 
       - name: Free runner disk space (LLVM build only)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
@@ -77,6 +77,9 @@ jobs:
 
       - name: Build Swage and run lit suite
         run: SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh
+
+      - name: Run C++ unit tests
+        run: ninja -C build check-swage-unit
 
       - name: Run Python binding integration tests
         run: ninja -C build check-swage-python

@@ -120,3 +120,46 @@ module {
     return
   }
 }
+
+// -----
+
+module {
+  func.func private @signed_value_count_kernel(
+      memref<?xf32>, memref<?xi32>, memref<?xf32>, si32, i32)
+  func.func @signed_value_count(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @signed_value_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func private @unsigned_segment_count_kernel(
+      memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, ui32)
+  func.func @unsigned_segment_count(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @unsigned_segment_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func private @non_default_memory_kernel(
+      memref<?xf32, #gpu.address_space<workgroup>>, memref<?xi32>,
+      memref<?xf32>, i32, i32)
+  func.func @non_default_kernel_memory_space(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @non_default_memory_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
