@@ -8,6 +8,9 @@
 
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 
+#include <limits>
+#include <string>
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -17,8 +20,10 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
+#include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -127,6 +132,18 @@ struct SegmentProgram {
   ElementProgram mapStore;      ///< MapStore: the per-element expression.
 };
 
+/// Read-only admission result shared by every segmented-program consumer.
+struct SegmentProgramAnalysis {
+  SmallVector<SegmentIdOp> segmentIds;
+  SmallVector<MakeSegmentOp> segments;
+  SmallVector<MapOp> maps;
+  SmallVector<ReduceOp> reductions;
+  SmallVector<memref::StoreOp> stores;
+  SmallVector<MapStoreOp> mapStores;
+  SmallVector<func::ReturnOp> returns;
+  ReduceOp storedReduction;
+};
+
 /// Owns the region bodies detached from the source function, and must
 /// outlive the SegmentProgram pointing into it.
 class RegionOwner {
@@ -175,9 +192,9 @@ SmallVector<MapOp> fusionChain(Value segment) {
   return chain;
 }
 
-/// Admit one canonical segment program, or emit the first rule violation.
-LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
-                                  SegmentProgram &program) {
+/// Analyze one canonical segment program without mutating it.
+LogicalResult analyzeSegmentProgram(func::FuncOp function,
+                                    SegmentProgramAnalysis &analysis) {
   FunctionType type = function.getFunctionType();
   Builder builder(function.getContext());
   if (type.getNumInputs() != 5 || type.getNumResults() != 0 ||
@@ -192,39 +209,32 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
   if (!function.getBody().hasOneBlock())
     return function.emitError("segmented reduction requires one block");
 
-  SmallVector<SegmentIdOp> segmentIds;
-  SmallVector<MakeSegmentOp> segments;
-  SmallVector<MapOp> maps;
-  SmallVector<ReduceOp> reductions;
-  SmallVector<memref::StoreOp> stores;
-  SmallVector<MapStoreOp> mapStores;
-  SmallVector<func::ReturnOp> returns;
   for (Operation &operation : function.getBody().front()) {
     if (auto segmentId = dyn_cast<SegmentIdOp>(operation))
-      segmentIds.push_back(segmentId);
+      analysis.segmentIds.push_back(segmentId);
     else if (auto segment = dyn_cast<MakeSegmentOp>(operation))
-      segments.push_back(segment);
+      analysis.segments.push_back(segment);
     else if (auto map = dyn_cast<MapOp>(operation))
-      maps.push_back(map);
+      analysis.maps.push_back(map);
     else if (auto reduction = dyn_cast<ReduceOp>(operation))
-      reductions.push_back(reduction);
+      analysis.reductions.push_back(reduction);
     else if (auto store = dyn_cast<memref::StoreOp>(operation))
-      stores.push_back(store);
+      analysis.stores.push_back(store);
     else if (auto mapStore = dyn_cast<MapStoreOp>(operation))
-      mapStores.push_back(mapStore);
+      analysis.mapStores.push_back(mapStore);
     else if (auto returnOp = dyn_cast<func::ReturnOp>(operation))
-      returns.push_back(returnOp);
+      analysis.returns.push_back(returnOp);
     else
       return operation.emitError(
           "operation is unsupported by segmented reduction lowering");
   }
-  if (segmentIds.size() != 1 || segments.size() != 1 || reductions.empty() ||
-      returns.size() != 1)
+  if (analysis.segmentIds.size() != 1 || analysis.segments.size() != 1 ||
+      analysis.reductions.empty() || analysis.returns.size() != 1)
     return function.emitError(
         "segmented reduction requires one segment_id, one make_segment, at "
         "least one reduce, and one return");
-  SegmentIdOp segmentId = segmentIds.front();
-  MakeSegmentOp segment = segments.front();
+  SegmentIdOp segmentId = analysis.segmentIds.front();
+  MakeSegmentOp segment = analysis.segments.front();
   if (segmentId.getAxis() != 0)
     return segmentId.emitError("only swage.segment_id axis 0 is supported");
   if (segment.getValues() != function.getArgument(0) ||
@@ -232,13 +242,13 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
       segment.getSegmentId() != segmentId.getResult())
     return segment.emitError(
         "make_segment must bind the function values and offsets at segment_id");
-  if (stores.size() + mapStores.size() != 1)
+  if (analysis.stores.size() + analysis.mapStores.size() != 1)
     return function.emitError(
         "segmented reduction requires exactly one output terminal: a "
         "memref.store of a reduction at output[segment_id] or a "
         "swage.map_store into the output");
 
-  for (MapOp map : maps) {
+  for (MapOp map : analysis.maps) {
     if (!map.getResult().hasOneUse())
       return map.emitError(
           "swage.map result must have exactly one segment consumer; a mapped "
@@ -251,15 +261,15 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
   }
 
   DenseMap<Operation *, unsigned> stageOf;
-  for (auto [index, reduction] : llvm::enumerate(reductions))
+  for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
     stageOf[reduction.getOperation()] = index;
 
   SmallVector<Operation *> capturing;
-  for (MapOp map : maps)
+  for (MapOp map : analysis.maps)
     capturing.push_back(map.getOperation());
-  for (ReduceOp reduction : reductions)
+  for (ReduceOp reduction : analysis.reductions)
     capturing.push_back(reduction.getOperation());
-  for (MapStoreOp mapStore : mapStores)
+  for (MapStoreOp mapStore : analysis.mapStores)
     capturing.push_back(mapStore.getOperation());
   for (Operation *operation : capturing) {
     ValueRange captures =
@@ -276,76 +286,141 @@ LogicalResult admitSegmentProgram(func::FuncOp function, RegionOwner &owner,
             "same function");
   }
 
-  for (ReduceOp reduction : reductions) {
+  for (ReduceOp reduction : analysis.reductions) {
     ReductionKind kind = reduction.getKind();
     if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
       return reduction.emitError(
           "segmented reduction supports only kind<sum> and kind<max>");
   }
 
-  for (MapOp map : maps)
+  for (MapOp map : analysis.maps)
     if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size())))
       return failure();
-  for (ReduceOp reduction : reductions)
+  for (ReduceOp reduction : analysis.reductions)
     if (failed(verifyRegion(reduction, reduction.getBody(),
                             reduction.getCaptures().size())))
       return failure();
-  for (MapStoreOp mapStore : mapStores)
+  for (MapStoreOp mapStore : analysis.mapStores)
     if (failed(verifyRegion(mapStore, mapStore.getBody(),
                             mapStore.getCaptures().size())))
       return failure();
 
-  ReduceOp storedReduction;
-  if (mapStores.empty()) {
-    memref::StoreOp store = stores.front();
-    storedReduction = store.getValue().getDefiningOp<ReduceOp>();
-    if (!storedReduction || !stageOf.contains(storedReduction.getOperation()) ||
+  if (analysis.mapStores.empty()) {
+    memref::StoreOp store = analysis.stores.front();
+    analysis.storedReduction = store.getValue().getDefiningOp<ReduceOp>();
+    if (!analysis.storedReduction ||
+        !stageOf.contains(analysis.storedReduction.getOperation()) ||
         store.getMemRef() != function.getArgument(2) ||
         store.getIndices().size() != 1 ||
         store.getIndices().front() != segmentId.getResult())
       return store.emitError(
           "segmented reduction result must be stored at output[segment_id]");
-  } else if (mapStores.front().getOutput() != function.getArgument(2)) {
-    return mapStores.front().emitError(
+  } else if (analysis.mapStores.front().getOutput() !=
+             function.getArgument(2)) {
+    return analysis.mapStores.front().emitError(
         "swage.map_store must write the function output buffer");
   }
-  if (!returns.front().getOperands().empty())
-    return returns.front().emitError("segmented reduction must return void");
+  if (!analysis.returns.front().getOperands().empty())
+    return analysis.returns.front().emitError(
+        "segmented reduction must return void");
 
-  // Every rule passed, so the program may now take ownership of the regions.
-  program.terminal =
-      mapStores.empty() ? TerminalKind::ScalarStore : TerminalKind::MapStore;
-  if (mapStores.empty())
-    program.storedReduction = stageOf.lookup(storedReduction.getOperation());
+  return success();
+}
+
+/// Detach regions only after read-only admission has succeeded.
+void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
+                          SegmentProgram &program) {
+  DenseMap<Operation *, unsigned> stageOf;
+  for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
+    stageOf[reduction.getOperation()] = index;
+  program.terminal = analysis.mapStores.empty() ? TerminalKind::ScalarStore
+                                                : TerminalKind::MapStore;
+  if (analysis.mapStores.empty())
+    program.storedReduction =
+        stageOf.lookup(analysis.storedReduction.getOperation());
   auto takeElement = [&](Operation *consumer, ValueRange consumerCaptures,
                          Value consumerSegment) {
     ElementProgram element;
-    auto append = [&](Operation *stage, Region &body, ValueRange captures) {
+    auto append = [&](Region &body, ValueRange captures) {
       SmallVector<unsigned> indices;
       for (Value capture : captures)
         indices.push_back(stageOf.lookup(capture.getDefiningOp()));
       element.regions.push_back(owner.take(body));
       element.captures.push_back(std::move(indices));
-      (void)stage;
     };
     for (MapOp map : fusionChain(consumerSegment))
-      append(map, map.getBody(), map.getCaptures());
-    append(consumer, consumer->getRegion(0), consumerCaptures);
+      append(map.getBody(), map.getCaptures());
+    append(consumer->getRegion(0), consumerCaptures);
     return element;
   };
-  for (ReduceOp reduction : reductions) {
+  for (ReduceOp reduction : analysis.reductions) {
     ReductionStage stage;
     stage.kind = reduction.getKind();
     stage.element =
         takeElement(reduction, reduction.getCaptures(), reduction.getSegment());
     program.reductions.push_back(std::move(stage));
   }
-  if (!mapStores.empty()) {
-    MapStoreOp mapStore = mapStores.front();
+  if (!analysis.mapStores.empty()) {
+    MapStoreOp mapStore = analysis.mapStores.front();
     program.mapStore =
         takeElement(mapStore, mapStore.getCaptures(), mapStore.getSegment());
   }
+}
+
+/// Accept only the M6 identity segmented-sum planning shape.
+LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
+  if (!analysis.maps.empty())
+    return analysis.maps.front().emitError(
+        "planning does not support swage.map");
+  for (ReduceOp reduction : analysis.reductions)
+    if (!reduction.getCaptures().empty())
+      return reduction.emitError("planning requires a capture-free reduction");
+  if (analysis.reductions.size() != 1)
+    return analysis.reductions.back().emitError(
+        "planning requires exactly one reduction stage");
+  if (!analysis.mapStores.empty())
+    return analysis.mapStores.front().emitError(
+        "planning requires memref.store of the reduction result");
+
+  ReduceOp reduction = analysis.reductions.front();
+  if (reduction.getKind() != ReductionKind::Sum)
+    return reduction.emitError("planning requires kind<sum>");
+  Block &body = reduction.getBody().front();
+  auto yield = cast<YieldOp>(body.getTerminator());
+  if (!body.without_terminator().empty() ||
+      yield.getValue() != body.getArgument(0))
+    return reduction.emitError(
+        "planning requires an identity reduction region");
   return success();
+}
+
+void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
+                            int32_t warpMaxElements) {
+  OpBuilder builder(module.getContext());
+  Location loc = semanticFunction.getLoc();
+  Type taskRange = swage_plan::TaskRangeType::get(module.getContext());
+  auto functionType =
+      builder.getFunctionType({semanticFunction.getArgument(1).getType(),
+                               builder.getI32Type(), builder.getI32Type()},
+                              taskRange);
+
+  builder.setInsertionPointAfter(semanticFunction);
+  auto companion = func::FuncOp::create(
+      builder, loc, semanticFunction.getName().str() + "__swage_plan",
+      functionType);
+  companion.setPrivate();
+  Block *entry = companion.addEntryBlock();
+  builder.setInsertionPointToStart(entry);
+  ArrayAttr policies = builder.getArrayAttr(
+      {swage_plan::TaskPolicyAttr::get(module.getContext(),
+                                       swage_plan::TaskPolicy::Warp),
+       swage_plan::TaskPolicyAttr::get(module.getContext(),
+                                       swage_plan::TaskPolicy::CTA)});
+  auto tasks = swage_plan::ClassifyOp::create(
+      builder, loc, taskRange, entry->getArgument(0), entry->getArgument(1),
+      entry->getArgument(2), semanticFunction.getName(),
+      static_cast<uint32_t>(warpMaxElements), policies);
+  func::ReturnOp::create(builder, loc, tasks.getResult());
 }
 
 /// Apply an admitted element expression to one loaded value.
@@ -586,11 +661,13 @@ public:
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
     if (failed(function))
       return signalPassFailure();
+    SegmentProgramAnalysis analysis;
+    if (failed(analyzeSegmentProgram(*function, analysis)))
+      return signalPassFailure();
     // The owner must outlive the program, which points into it.
     RegionOwner owner;
     SegmentProgram program;
-    if (failed(admitSegmentProgram(*function, owner, program)))
-      return signalPassFailure();
+    detachSegmentProgram(analysis, owner, program);
     buildSequentialProgram(*function, program);
   }
 };
@@ -629,10 +706,12 @@ public:
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
     if (failed(function))
       return signalPassFailure();
+    SegmentProgramAnalysis analysis;
+    if (failed(analyzeSegmentProgram(*function, analysis)))
+      return signalPassFailure();
     RegionOwner owner;
     SegmentProgram program;
-    if (failed(admitSegmentProgram(*function, owner, program)))
-      return signalPassFailure();
+    detachSegmentProgram(analysis, owner, program);
     buildGPUProgram(getOperation(), *function, program, blockSize);
   }
 
@@ -640,6 +719,62 @@ private:
   Option<int64_t> blockSize{*this, "block-size",
                             llvm::cl::desc("CTA x block size"),
                             llvm::cl::init(0)};
+};
+
+class SwageToPlanPass
+    : public PassWrapper<SwageToPlanPass, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwageToPlanPass)
+
+  SwageToPlanPass() = default;
+  SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
+    warpMaxElements = other.warpMaxElements.getValue();
+  }
+
+  StringRef getArgument() const final { return "swage-to-plan"; }
+  StringRef getDescription() const final {
+    return "Add runtime classification for one identity segmented sum";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const final {
+    registry.insert<func::FuncDialect, swage_plan::SwagePlanDialect>();
+  }
+
+  void runOnOperation() final {
+    ModuleOp module = getOperation();
+    if (warpMaxElements < 0 ||
+        warpMaxElements > std::numeric_limits<int32_t>::max()) {
+      module.emitError("warp-max-elements must be a nonnegative i32");
+      return signalPassFailure();
+    }
+
+    SmallVector<func::FuncOp> functions(module.getOps<func::FuncOp>());
+    if (functions.size() != 1) {
+      module.emitError() << "planning requires exactly one function, found "
+                         << functions.size();
+      return signalPassFailure();
+    }
+    func::FuncOp function = functions.front();
+    std::string companionName = function.getName().str() + "__swage_plan";
+    if (SymbolTable::lookupSymbolIn(module.getOperation(), companionName)) {
+      module.emitError() << "planning companion symbol @" << companionName
+                         << " already exists";
+      return signalPassFailure();
+    }
+    SegmentProgramAnalysis analysis;
+    if (failed(analyzeSegmentProgram(function, analysis)) ||
+        failed(verifyPlanningProgram(analysis)))
+      return signalPassFailure();
+
+    buildPlanningCompanion(module, function,
+                           static_cast<int32_t>(warpMaxElements));
+  }
+
+private:
+  Option<int64_t> warpMaxElements{
+      *this, "warp-max-elements",
+      llvm::cl::desc("Maximum segment length admitted for warp policy"),
+      llvm::cl::init(32)};
 };
 
 } // namespace
@@ -655,6 +790,7 @@ std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize) {
 void registerSegmentedReductionPasses() {
   PassRegistration<SegmentedReductionToSCFPass>();
   PassRegistration<SegmentedReductionToGPUPass>();
+  PassRegistration<SwageToPlanPass>();
 }
 
 } // namespace mlir::swage

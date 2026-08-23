@@ -21,6 +21,7 @@
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
+#include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
@@ -28,11 +29,11 @@ int main(int argc, char **argv) {
   mlir::swage::registerSegmentedReductionPasses();
 
   mlir::DialectRegistry registry;
-  registry.insert<mlir::swage::SwageDialect, mlir::func::FuncDialect,
-                  mlir::arith::ArithDialect, mlir::math::MathDialect,
-                  mlir::scf::SCFDialect, mlir::memref::MemRefDialect,
-                  mlir::vector::VectorDialect, mlir::gpu::GPUDialect,
-                  mlir::LLVM::LLVMDialect>();
+  registry.insert<mlir::swage::SwageDialect, mlir::swage_plan::SwagePlanDialect,
+                  mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                  mlir::math::MathDialect, mlir::scf::SCFDialect,
+                  mlir::memref::MemRefDialect, mlir::vector::VectorDialect,
+                  mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect>();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Swage optimizer driver\n", registry));
