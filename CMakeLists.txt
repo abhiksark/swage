@@ -39,6 +39,7 @@ add_subdirectory(lib/CAPI)
 add_subdirectory(lib/Conversion)
 add_subdirectory(tools/swage-opt)
 add_subdirectory(test)
+add_subdirectory(unittests)
 
 # Python bindings: default to whatever the MLIR install supports; an
 # explicit ON against a non-bindings install is an error, never a skip.
