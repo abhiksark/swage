@@ -284,6 +284,83 @@ def launch_gpu(values, offsets, output, kind, block_size=128):
     return None
 
 
+def _launch_segmented_sum_tasks(
+    values, offsets, output, task_ids, *, block_size
+):
+    """Launch one internal identity-sum task list with a warp or CTA block."""
+    torch = _runtime._import_torch()
+    value_count, segment_count = _validate_tensors(values, offsets, output)
+    if not isinstance(task_ids, torch.Tensor):
+        raise TypeError("task_ids must be a torch.Tensor")
+    if task_ids.dtype != torch.int32:
+        raise TypeError("task_ids must have dtype torch.int32")
+    if task_ids.dim() != 1:
+        raise TypeError("task_ids must have rank one")
+    if not task_ids.is_contiguous():
+        raise ValueError("task_ids must be contiguous")
+    if task_ids.device.type != "cuda":
+        raise TypeError("task_ids must be a CUDA tensor")
+    if task_ids.device.index != torch.cuda.current_device():
+        raise ValueError("task_ids must be on the current CUDA device")
+    host_task_ids = task_ids.detach().cpu().tolist()
+    task_count = len(host_task_ids)
+    _validate_counts(value_count, task_count)
+    if any(type(task_id) is not int or not 0 <= task_id < segment_count
+           for task_id in host_task_ids):
+        raise ValueError("task_ids must contain valid segment IDs")
+    if block_size not in {32, 128}:
+        raise ValueError("task block size must be 32 or 128")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if block_size > properties.max_threads_per_block:
+        raise ValueError(
+            f"block size {block_size} exceeds device limit "
+            f"{properties.max_threads_per_block}"
+        )
+    if task_count == 0:
+        return None
+
+    from mlir_swage import ir
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from mlir_swage.dialects import swage
+
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    target = f"sm_{major}{minor}"
+    kernel_name = "segmented_sum"
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_semantic_module("sum"))
+        _, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            block_size=block_size,
+            target=target,
+            use_task_ids=True,
+        )
+
+    driver = _runtime._get_driver()
+    _, function = driver.load(ptx, kernel_name)
+    stream = torch.cuda.current_stream()
+    driver.launch_segmented_tasks(
+        function,
+        (task_count,),
+        block_size,
+        stream.cuda_stream,
+        (
+            values.data_ptr(),
+            offsets.data_ptr(),
+            output.data_ptr(),
+            task_ids.data_ptr(),
+            value_count,
+            task_count,
+        ),
+    )
+    for tensor in (values, offsets, output, task_ids):
+        tensor.record_stream(stream)
+    return None
+
+
 def launch_softmax_gpu(values, offsets, output, block_size=128):
     """Compile and launch the internally qualified ragged softmax."""
     torch = _runtime._import_torch()

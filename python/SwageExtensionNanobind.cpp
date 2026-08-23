@@ -26,7 +26,7 @@ namespace {
 
 std::pair<std::string, std::string>
 compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
-           std::string target, bool segmented) {
+           std::string target, bool segmented, bool useTaskIds) {
   std::optional<nb::object> capsule =
       nb::detail::mlirApiObjectToCapsule(moduleObject);
   if (!capsule)
@@ -48,7 +48,7 @@ compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
                 module,
                 mlirStringRefCreate(kernelName.data(), kernelName.size()),
                 blockSize, mlirStringRefCreate(target.data(), target.size()),
-                store, &lowered, store, &ptx)
+                useTaskIds, store, &lowered, store, &ptx)
           : swageCompileFixedBlockToPTX(
                 module,
                 mlirStringRefCreate(kernelName.data(), kernelName.size()),
@@ -84,17 +84,17 @@ NB_MODULE(_swageDialectsNanobind, m) {
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target) {
         return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), false);
+                          std::move(target), false, false);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"));
   swageM.def(
       "_compile_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,
-         std::string target) {
+         std::string target, bool useTaskIds) {
         return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), true);
+                          std::move(target), true, useTaskIds);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
-      nb::arg("target"));
+      nb::arg("target"), nb::arg("use_task_ids") = false);
 }

@@ -4,6 +4,7 @@
 import pytest
 import torch
 from swage._segmented_qualification import (
+    _launch_segmented_sum_tasks,
     _validate_counts,
     _validate_offsets,
     _validate_tensors,
@@ -35,6 +36,16 @@ CASES = [
     pytest.param([33, 33, 33, 33], id="uniform"),
     pytest.param([1, 257, 2, 3837], id="skewed"),
     pytest.param([0, 2, 0, 0, 3], id="repeated-empty"),
+]
+
+
+TASK_CASES = [
+    pytest.param([], id="no-segments"),
+    pytest.param([0], id="empty"),
+    pytest.param([32, 33], id="policy-boundary"),
+    pytest.param([0, 2, 0, 0, 3], id="repeated-empty"),
+    pytest.param([1, 257, 2, 3837], id="skewed"),
+    pytest.param([4097], id="large"),
 ]
 
 
@@ -130,6 +141,30 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     torch.testing.assert_close(
         output.cpu(), cpu_oracle(host_values, host_offsets, kind),
         rtol=1e-5, atol=1e-5,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
+@pytest.mark.parametrize("lengths", TASK_CASES)
+def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
+    """Execute every segment through each private M7 task policy."""
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full(
+        (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
+    )
+    task_ids = torch.arange(len(lengths), device="cuda", dtype=torch.int32)
+
+    _launch_segmented_sum_tasks(
+        values, device_offsets, output, task_ids, block_size=block_size
+    )
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
     )
 
 

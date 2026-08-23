@@ -60,6 +60,30 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
+def test_compiles_identity_sum_with_task_id_indirection():
+    """Load original segment IDs through the private M7 task ABI."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            block_size=32,
+            target="sm_80",
+            use_task_ids=True,
+        )
+
+        signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
+        assert signature is not None
+        assert signature.group(1).count("!llvm.ptr") == 4
+        assert signature.group(1).count("i32") == 2
+        assert "ld.global.b32" in ptx
+        assert ".entry segmented_sum" in ptx
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
 SEGMENTED_EXPONENTIAL_SUM = """
 module {
   func.func @segmented_sum(

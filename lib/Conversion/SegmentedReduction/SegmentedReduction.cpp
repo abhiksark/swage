@@ -520,7 +520,8 @@ void buildSequentialProgram(func::FuncOp function,
 }
 
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
-                     const SegmentProgram &program, int64_t blockSize) {
+                     const SegmentProgram &program, int64_t blockSize,
+                     bool useTaskIds) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -531,8 +532,11 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  auto kernelType = FunctionType::get(
-      module.getContext(), {pointer, pointer, pointer, i32, i32}, {});
+  SmallVector<Type> inputs{pointer, pointer, pointer};
+  if (useTaskIds)
+    inputs.push_back(pointer);
+  inputs.append({i32, i32});
+  auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel =
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
@@ -540,18 +544,30 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
-  Value segmentId = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
+  Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
   Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
   Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
-  Value segmentCount = arith::IndexCastOp::create(
-      builder, loc, builder.getIndexType(), entry->getArgument(4));
+  Value taskCount =
+      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                 entry->getArgument(useTaskIds ? 5 : 4));
   Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
-                                        segmentId, segmentCount);
+                                        taskIndex, taskCount);
 
   scf::IfOp::create(
       builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
+        Value segmentId = taskIndex;
+        if (useTaskIds) {
+          Value taskIndex64 = arith::IndexCastOp::create(
+              body, bodyLoc, body.getI64Type(), taskIndex);
+          Value taskAddress = LLVM::GEPOp::create(
+              body, bodyLoc, pointer, i32, entry->getArgument(3), taskIndex64);
+          Value segmentIdI32 =
+              LLVM::LoadOp::create(body, bodyLoc, i32, taskAddress);
+          segmentId = arith::IndexCastOp::create(
+              body, bodyLoc, body.getIndexType(), segmentIdI32);
+        }
         Value segmentId64 = arith::IndexCastOp::create(
             body, bodyLoc, body.getI64Type(), segmentId);
         Value startAddress = LLVM::GEPOp::create(
@@ -682,9 +698,12 @@ public:
   SegmentedReductionToGPUPass(const SegmentedReductionToGPUPass &other)
       : PassWrapper(other) {
     blockSize = other.blockSize.getValue();
+    useTaskIds = other.useTaskIds.getValue();
   }
-  explicit SegmentedReductionToGPUPass(int64_t requestedBlockSize) {
+  SegmentedReductionToGPUPass(int64_t requestedBlockSize,
+                              bool requestedTaskIds) {
     blockSize = requestedBlockSize;
+    useTaskIds = requestedTaskIds;
   }
 
   StringRef getArgument() const final {
@@ -710,16 +729,22 @@ public:
     SegmentProgramAnalysis analysis;
     if (failed(analyzeSegmentProgram(*function, analysis)))
       return signalPassFailure();
+    if (useTaskIds && failed(verifyPlanningProgram(analysis)))
+      return signalPassFailure();
     RegionOwner owner;
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
-    buildGPUProgram(getOperation(), *function, program, blockSize);
+    buildGPUProgram(getOperation(), *function, program, blockSize, useTaskIds);
   }
 
 private:
   Option<int64_t> blockSize{*this, "block-size",
                             llvm::cl::desc("CTA x block size"),
                             llvm::cl::init(0)};
+  Option<bool> useTaskIds{
+      *this, "use-task-ids",
+      llvm::cl::desc("Load segment IDs through the internal task ABI"),
+      llvm::cl::init(false)};
 };
 
 class SwageToPlanPass
@@ -784,8 +809,9 @@ std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
   return std::make_unique<SegmentedReductionToSCFPass>();
 }
 
-std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize) {
-  return std::make_unique<SegmentedReductionToGPUPass>(blockSize);
+std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
+                                                        bool useTaskIds) {
+  return std::make_unique<SegmentedReductionToGPUPass>(blockSize, useTaskIds);
 }
 
 void registerSegmentedReductionPasses() {
