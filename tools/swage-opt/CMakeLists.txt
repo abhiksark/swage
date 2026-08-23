@@ -1,6 +1,7 @@
 # tools/swage-opt/CMakeLists.txt
 set(LIBS
   MLIRSwage
+  MLIRSwagePlan
   MLIRSwageFixedBlockToGPU
   MLIRSwageSegmentedReduction
   MLIROptLib
