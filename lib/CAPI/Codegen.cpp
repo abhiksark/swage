@@ -59,7 +59,7 @@ bool isSupportedTarget(llvm::StringRef target) {
       !llvm::all_of(digits, llvm::isDigit))
     return false;
   unsigned value = 0;
-  return !digits.getAsInteger(10, value) && value >= 30 && value <= 129;
+  return !digits.getAsInteger(10, value) && value >= 80 && value <= 129;
 }
 
 /// Replace libdevice calls with LLVM intrinsics the NVPTX backend lowers
@@ -105,7 +105,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          KernelKind kind, std::string &lowered,
                          std::string &ptx) {
   if (!isSupportedTarget(target))
-    return source.emitError("target must match sm_<major><minor>");
+    return source.emitError(
+        "target must match sm_<major><minor> and be sm_80 or newer");
   if (blockSize <= 0)
     return source.emitError("block_size must be a positive integer");
 
