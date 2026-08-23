@@ -3,6 +3,7 @@
 
 import re
 
+import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
@@ -81,7 +82,59 @@ def test_compiles_identity_sum_with_task_id_indirection():
         assert signature.group(1).count("i32") == 2
         assert "ld.global.b32" in ptx
         assert ".entry segmented_sum" in ptx
+        assert "shfl.sync.bfly" in ptx
+        assert ".shared" not in ptx
+        assert "bar.sync" not in ptx
         assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_materializes_stable_policy_segment_ids_without_mutating_source():
+    """Connect the private plan operation to the existing host classifier."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        warp, cta = native_swage._materialize_segmented_plan(
+            module,
+            offsets=[0, 0, 32, 65, 65, 66],
+            value_count=66,
+            segment_count=5,
+            warp_max_elements=32,
+        )
+
+        assert warp == [0, 1, 3, 4]
+        assert cta == [2]
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_materialized_plan_rejects_invalid_metadata_and_semantics():
+    """Fail closed through the native planning and classification chain."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        with pytest.raises(ValueError, match="offsets must be nondecreasing"):
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=[0, 2, 1],
+                value_count=2,
+                segment_count=2,
+                warp_max_elements=32,
+            )
+
+        transformed = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        original = transformed.operation.get_asm(enable_debug_info=False)
+        with pytest.raises(ValueError, match="identity reduction region"):
+            native_swage._materialize_segmented_plan(
+                transformed,
+                offsets=[0, 1],
+                value_count=1,
+                segment_count=1,
+                warp_max_elements=32,
+            )
+        assert (
+            transformed.operation.get_asm(enable_debug_info=False) == original
+        )
 
 
 SEGMENTED_EXPONENTIAL_SUM = """

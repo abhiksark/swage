@@ -608,12 +608,23 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               stage.kind == ReductionKind::Sum
                   ? gpu::AllReduceOperation::ADD
                   : gpu::AllReduceOperation::MAXIMUMF;
-          auto operation =
-              gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
-          // uniform = true, so the result is broadcast to every thread and
-          // the lowering's trailing barrier fences this stage from the next.
-          results.push_back(gpu::AllReduceOp::create(
-              body, bodyLoc, local.getResult(0), operation, true));
+          Value total = local.getResult(0);
+          if (useTaskIds && blockSize == 32) {
+            for (int32_t offset = 1; offset < 32; offset <<= 1) {
+              auto shuffled = gpu::ShuffleOp::create(
+                  body, bodyLoc, total, offset, 32, gpu::ShuffleMode::XOR);
+              total = combine(body, bodyLoc, stage.kind, total,
+                              shuffled.getShuffleResult());
+            }
+          } else {
+            auto operation =
+                gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
+            // uniform = true, so the result is broadcast to every thread and
+            // the lowering's trailing barrier fences this stage from the next.
+            total =
+                gpu::AllReduceOp::create(body, bodyLoc, total, operation, true);
+          }
+          results.push_back(total);
         }
 
         if (program.terminal == TerminalKind::ScalarStore) {
@@ -756,6 +767,9 @@ public:
   SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
     warpMaxElements = other.warpMaxElements.getValue();
   }
+  explicit SwageToPlanPass(int64_t requestedWarpMaxElements) {
+    warpMaxElements = requestedWarpMaxElements;
+  }
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
@@ -812,6 +826,10 @@ std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
 std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
                                                         bool useTaskIds) {
   return std::make_unique<SegmentedReductionToGPUPass>(blockSize, useTaskIds);
+}
+
+std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements) {
+  return std::make_unique<SwageToPlanPass>(warpMaxElements);
 }
 
 void registerSegmentedReductionPasses() {

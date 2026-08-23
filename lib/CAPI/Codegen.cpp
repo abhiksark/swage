@@ -35,9 +35,12 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
+#include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
+#include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
@@ -46,6 +49,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace mlir;
 
@@ -229,5 +233,54 @@ MlirLogicalResult swageCompileSegmentedReductionToPTX(
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
   ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult swageMaterializeSegmentedPlan(
+    MlirModule module, const int64_t *offsets, intptr_t offsetCount,
+    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
+    SwageTaskIdsCallback warpCallback, void *warpUserData,
+    SwageTaskIdsCallback ctaCallback, void *ctaUserData) {
+  if (offsetCount < 0 || (offsetCount && !offsets) || !warpCallback ||
+      !ctaCallback)
+    return mlirLogicalResultFailure();
+
+  ModuleOp source = unwrap(module);
+  OwningOpRef<ModuleOp> planned = source.clone();
+  PassManager manager(source.getContext());
+  manager.addPass(swage::createSwageToPlanPass(warpMaxElements));
+  if (failed(manager.run(*planned)))
+    return mlirLogicalResultFailure();
+
+  SmallVector<swage_plan::ClassifyOp> classifiers;
+  planned->walk([&](swage_plan::ClassifyOp classify) {
+    classifiers.push_back(classify);
+  });
+  if (classifiers.size() != 1) {
+    source.emitError(
+        "planning did not produce exactly one swage_plan.classify");
+    return mlirLogicalResultFailure();
+  }
+
+  auto tasks = swage_plan::classifyTasks(
+      ArrayRef(offsets, static_cast<size_t>(offsetCount)), valueCount,
+      segmentCount, classifiers.front().getWarpMaxElements());
+  if (!tasks) {
+    source.emitError(llvm::toString(tasks.takeError()));
+    return mlirLogicalResultFailure();
+  }
+
+  std::vector<int32_t> warp;
+  std::vector<int32_t> cta;
+  warp.reserve(tasks->size());
+  cta.reserve(tasks->size());
+  for (const swage_plan::TaskDescriptor &task : *tasks) {
+    if (task.policy == swage_plan::TaskPolicy::Warp)
+      warp.push_back(task.segment_id);
+    else
+      cta.push_back(task.segment_id);
+  }
+  warpCallback(warp.data(), static_cast<intptr_t>(warp.size()), warpUserData);
+  ctaCallback(cta.data(), static_cast<intptr_t>(cta.size()), ctaUserData);
   return mlirLogicalResultSuccess();
 }
