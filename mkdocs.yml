@@ -38,3 +38,4 @@ nav:
       - "ADR-0012: M3 launch ABI": adr/ADR-0012-m3-launch-abi-and-execution-boundary.md
       - "ADR-0013: M5 fusion and map-store ABI": adr/ADR-0013-m5-fusion-and-map-store-abi.md
       - "ADR-0014: M6 minimal SwagePlan gate": adr/ADR-0014-m6-minimal-swage-plan-gate.md
+      - "ADR-0015: M7 mixed-policy execution": adr/ADR-0015-m7-minimal-mixed-policy-execution.md
