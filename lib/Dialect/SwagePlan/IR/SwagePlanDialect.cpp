@@ -18,6 +18,28 @@
 using namespace mlir;
 using namespace mlir::swage_plan;
 
+namespace {
+
+bool isRankOneMemRef(Type type, Type elementType) {
+  auto memref = dyn_cast<MemRefType>(type);
+  return memref && memref.getRank() == 1 && memref.isDynamicDim(0) &&
+         memref.getElementType() == elementType &&
+         memref.getLayout().isIdentity() && memref.getMemorySpaceAsInt() == 0;
+}
+
+bool hasCanonicalSemanticABI(func::FuncOp function) {
+  FunctionType type = function.getFunctionType();
+  if (type.getNumInputs() != 5 || type.getNumResults() != 0)
+    return false;
+  MLIRContext *context = function.getContext();
+  return isRankOneMemRef(type.getInput(0), Float32Type::get(context)) &&
+         isRankOneMemRef(type.getInput(1), IntegerType::get(context, 32)) &&
+         isRankOneMemRef(type.getInput(2), Float32Type::get(context)) &&
+         type.getInput(3).isInteger(32) && type.getInput(4).isInteger(32);
+}
+
+} // namespace
+
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOpsDialect.cpp.inc"
 
 #include "swage/Dialect/SwagePlan/IR/SwagePlanEnums.cpp.inc"
@@ -52,8 +74,15 @@ LogicalResult ClassifyOp::verify() {
       cast<TaskPolicyAttr>(policies[0]).getValue() != TaskPolicy::Warp ||
       cast<TaskPolicyAttr>(policies[1]).getValue() != TaskPolicy::CTA)
     return emitOpError("policies must be ordered warp then CTA");
-  if (!SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(getOperation(),
-                                                          getKernelAttr()))
+  Operation *symbol =
+      SymbolTable::lookupNearestSymbolFrom(getOperation(), getKernelAttr());
+  auto kernel = dyn_cast_or_null<func::FuncOp>(symbol);
+  if (!kernel)
     return emitOpError("kernel must reference a func.func semantic kernel");
+  if (kernel == getOperation()->getParentOfType<func::FuncOp>())
+    return emitOpError("kernel must not reference its containing function");
+  if (!hasCanonicalSemanticABI(kernel))
+    return emitOpError(
+        "kernel must use the canonical five-argument semantic ABI");
   return success();
 }

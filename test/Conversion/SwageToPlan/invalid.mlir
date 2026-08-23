@@ -1,6 +1,6 @@
 // test/Conversion/SwageToPlan/invalid.mlir
 // RUN: swage-opt --swage-to-plan --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-to-plan --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=NO-PLAN --implicit-check-not=swage_plan
+// RUN: swage-opt --swage-to-plan --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=NO-PLAN --implicit-check-not=swage_plan.classify
 
 // NO-PLAN-LABEL: func.func @maximum(
 // NO-PLAN: swage.reduce {{.*}} kind<max>
@@ -14,6 +14,9 @@
 // NO-PLAN-COUNT-2: swage.reduce
 // NO-PLAN-LABEL: func.func @map_store_terminal(
 // NO-PLAN: swage.map_store
+// NO-PLAN: memref.global "private" @companion_collision__swage_plan
+// NO-PLAN-LABEL: func.func @companion_collision(
+// NO-PLAN: swage.reduce
 
 module {
   func.func @maximum(%values: memref<?xf32>, %offsets: memref<?xi32>,
@@ -133,6 +136,25 @@ module {
     ^bb0(%element: f32):
       swage.yield %element : f32
     }
+    return
+  }
+}
+
+// -----
+
+// expected-error@+1 {{planning companion symbol @companion_collision__swage_plan already exists}}
+module {
+  memref.global "private" @companion_collision__swage_plan : memref<1xi32>
+  func.func @companion_collision(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
     return
   }
 }

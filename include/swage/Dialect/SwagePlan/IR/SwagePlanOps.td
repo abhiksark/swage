@@ -41,10 +41,10 @@ def SwagePlan_TaskRangeType
   let summary = "SwagePlan task range";
 }
 
-def SwagePlan_ClassifyOp : SwagePlan_Op<"classify", [Pure]> {
+def SwagePlan_ClassifyOp : SwagePlan_Op<"classify"> {
   let summary = "Classify runtime segment ranges for one semantic kernel";
   let arguments = (ins
-    MemRefRankOf<[I32], [1]>:$offsets,
+    Arg<MemRefRankOf<[I32], [1]>, "offset metadata", [MemRead]>:$offsets,
     I32:$value_count,
     I32:$segment_count,
     FlatSymbolRefAttr:$kernel,

@@ -9,6 +9,7 @@
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 
 #include <limits>
+#include <string>
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -19,6 +20,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
@@ -753,6 +755,12 @@ public:
       return signalPassFailure();
     }
     func::FuncOp function = functions.front();
+    std::string companionName = function.getName().str() + "__swage_plan";
+    if (SymbolTable::lookupSymbolIn(module.getOperation(), companionName)) {
+      module.emitError() << "planning companion symbol @" << companionName
+                         << " already exists";
+      return signalPassFailure();
+    }
     SegmentProgramAnalysis analysis;
     if (failed(analyzeSegmentProgram(function, analysis)) ||
         failed(verifyPlanningProgram(analysis)))

@@ -82,3 +82,41 @@ module {
     return %tasks : !swage_plan.task_range
   }
 }
+
+// -----
+
+module {
+  func.func private @wrong_signature(memref<?xi32>)
+  func.func @wrong_kernel_signature(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @wrong_signature, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  memref.global "private" @not_a_function : memref<1xi32>
+  func.func @non_function_kernel(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{kernel must reference a func.func semantic kernel}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @not_a_function, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func @self_referencing_kernel(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{kernel must not reference its containing function}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @self_referencing_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return
+  }
+}
