@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0014-m6-minimal-swage-plan-gate.md -->
 # ADR-0014: M6 minimal SwagePlan gate
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-08-23
 
 ## Context
@@ -29,17 +29,25 @@ the legal policy order as warp then CTA, and returns one
 `!swage_plan.task_range`. The operation does not contain runtime offset values
 or materialized task descriptors.
 
-The `--swage-to-plan` pass defaults `warp-max-elements` to 32. It accepts only
-the canonical capture-free, map-free, single-stage identity segmented sum. The
-pass preserves the semantic function and adds one private
-`<kernel>__swage_plan` companion containing the classification operation.
+The `--swage-to-plan` pass defaults `warp-max-elements` to 32. Its input module
+contains exactly one single-block, void `func.func` with the existing
+five-argument ABI, in order: rank-one f32 values, rank-one i32 offsets,
+rank-one f32 output, i32 value count, and i32 segment count. The block contains
+exactly one axis-zero `swage.segment_id`, one `swage.make_segment` binding the
+values and offsets arguments at that segment ID, one capture-free
+`swage.reduce` with `kind<sum>`, one scalar `memref.store` of that result to
+`output[segment_id]`, and one void `func.return`. The reduction has one block
+with one f32 element argument and only `swage.yield` of that same argument.
 
-The pass rejects max reductions, transformed sums, maps, captures, multi-stage
-programs, and map-store terminals. It also rejects any other semantic or ABI
-shape. Admission is read-only analysis. Every unsupported input fails before
-module mutation, so failure leaves no companion function or other partial Plan
-IR. The existing SCF and GPU paths reuse the same analysis, with optional
-region detachment occurring only after admission succeeds.
+The pass therefore rejects max reductions, transformed sums, maps, captures,
+multiple reductions, map-store terminals, extra operations, and every other
+function, semantic, or ABI shape. Admission is read-only analysis. Every
+unsupported input fails before module mutation, so failure leaves no companion
+function or other partial Plan IR. After admission, the pass preserves the
+semantic function and adds one private `<kernel>__swage_plan` companion
+containing the classification operation. The existing SCF and GPU paths reuse
+the same analysis, with optional region detachment occurring only after
+admission succeeds.
 
 ### Compile-time and runtime responsibilities
 
@@ -71,15 +79,20 @@ The internal host classifier returns
 - generated `TaskPolicy` `policy`;
 - i32 `dependency_group`.
 
-The classifier emits one descriptor per segment, including empty segments.
-Offsets `[0]` emit no descriptors. A segment uses warp when
+Valid metadata has a nonnegative i32 value count, segment count, and
+`warp_max_elements`. Offsets are nonnegative signed i32 values, contain exactly
+`segment_count + 1` entries, start at zero, are nondecreasing, and end no later
+than the value count. The entry-count relationship is checked in a wider type
+before addition, and every range length and descriptor field is computed in a
+wider type and checked before conversion to i32.
+
+Validation completes before descriptor construction. The classifier then
+emits one descriptor per segment, including empty segments. Offsets `[0]` with
+a zero segment count emit no descriptors. A segment uses warp when
 `end - begin <= warp_max_elements`; otherwise it uses CTA. Every descriptor has
 `stage` equal to zero and `dependency_group` equal to `segment_id`. Descriptor
-order is segment order.
-
-Malformed metadata or metadata that cannot be represented by the required i32
-fields returns an error. Rejection produces no descriptors and does not fall
-back to another policy or backend.
+order is segment order. Any violation returns an error with no descriptors and
+does not fall back to another policy or backend.
 
 ## Acceptance boundary
 
