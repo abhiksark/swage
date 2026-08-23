@@ -508,6 +508,14 @@ class _CudaDriver:
         values.extend(ctypes.c_int32(value) for value in arguments[3:])
         self._launch(function, grid, block, stream, values)
 
+    def launch_segmented_tasks(
+        self, function, grid, block, stream, arguments
+    ):
+        """Launch the internal four-pointer, two-count M7 task ABI."""
+        values = [ctypes.c_void_p(value) for value in arguments[:4]]
+        values.extend(ctypes.c_int32(value) for value in arguments[4:])
+        self._launch(function, grid, block, stream, values)
+
     def _launch(self, function, grid, block, stream, values):
         parameter_pointers = (ctypes.c_void_p * len(values))(
             *[

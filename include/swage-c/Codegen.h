@@ -12,6 +12,7 @@
 #include "mlir-c/IR.h"
 #include "mlir-c/Support.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -27,7 +28,7 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFixedBlockToPTX(
 
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
-    MlirStringRef target, SwageStringCallback loweredCallback,
+    MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData);
 
 #ifdef __cplusplus
