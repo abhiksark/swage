@@ -114,6 +114,7 @@ M6 is accepted when tests prove all of the following:
 
 M6 does not add:
 
+- the Issue #13 `task`, `pack`, `partition`, or `make_task` dialect surface;
 - packed warps, split CTAs, partial reductions, or merges;
 - queues, dispatch, mixed-policy GPU execution, or benchmarks;
 - ragged-softmax planning;
