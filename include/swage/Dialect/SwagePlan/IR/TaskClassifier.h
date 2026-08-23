@@ -13,12 +13,12 @@
 namespace mlir::swage_plan {
 
 struct TaskDescriptor {
-  int32_t segmentId;
+  int32_t segment_id;
   int32_t begin;
   int32_t end;
   int32_t stage;
   TaskPolicy policy;
-  int32_t dependencyGroup;
+  int32_t dependency_group;
 };
 
 llvm::Expected<llvm::SmallVector<TaskDescriptor>>

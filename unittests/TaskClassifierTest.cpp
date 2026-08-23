@@ -12,14 +12,14 @@
 namespace mlir::swage_plan {
 namespace {
 
-void expectDescriptor(const TaskDescriptor &descriptor, int32_t segmentId,
+void expectDescriptor(const TaskDescriptor &descriptor, int32_t segment_id,
                       int32_t begin, int32_t end, TaskPolicy policy) {
-  EXPECT_EQ(descriptor.segmentId, segmentId);
+  EXPECT_EQ(descriptor.segment_id, segment_id);
   EXPECT_EQ(descriptor.begin, begin);
   EXPECT_EQ(descriptor.end, end);
   EXPECT_EQ(descriptor.stage, 0);
   EXPECT_EQ(descriptor.policy, policy);
-  EXPECT_EQ(descriptor.dependencyGroup, segmentId);
+  EXPECT_EQ(descriptor.dependency_group, segment_id);
 }
 
 TEST(TaskClassifierTest, EmitsNoTasksForZeroSegments) {
