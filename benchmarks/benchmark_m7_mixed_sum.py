@@ -10,8 +10,6 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-import torch
-
 _COUNT = 32_768
 _SEED = 7
 _WARP_MAX_ELEMENTS = 32
@@ -56,6 +54,8 @@ def _evaluate_gate(medians):
 
 def _check_results(launches, output, expected):
     """Require exact all-one sums before collecting timing evidence."""
+    import torch
+
     for name, launch in launches.items():
         output.fill_(float("nan"))
         launch()
@@ -72,6 +72,8 @@ def _check_results(launches, output, expected):
 
 def _measure(launches):
     """Collect interleaved CUDA-event samples after fixed warmups."""
+    import torch
+
     for _ in range(_WARMUPS):
         for launch in launches.values():
             launch()
@@ -103,6 +105,7 @@ def _measure(launches):
 
 def main():
     """Run the fixed A6000 benchmark and commit-ready JSON report."""
+    import torch
     from distributions import generate_lengths, summarize_lengths
     from swage import _runtime
     from swage._segmented_qualification import (
