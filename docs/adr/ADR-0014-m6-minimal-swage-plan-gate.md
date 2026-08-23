@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0014-m6-minimal-swage-plan-gate.md -->
 # ADR-0014: M6 minimal SwagePlan gate
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-23
 
 ## Context

@@ -56,11 +56,11 @@ Swage semantic MLIR            (dialect: swage)
         │     ├── sequential scf + memref → upstream mlir-runner
         │     └── one CTA per segment → gpu + nvvm + llvm → PTX
         │
-        └── General scheduling path (planned)
-              ↓  canonicalization and fusion
-            SwagePlan task IR (dialect: swage_plan)
-              ↓  task decomposition and policy selection
-            Fixed-size tile operations → gpu + nvgpu → nvvm + llvm
+        ├── M6 identity segmented sum
+        │     ↓  read-only admission and private planning companion
+        │   SwagePlan classify (dialect: swage_plan)
+        └── M6 host metadata → warp/CTA descriptors (independent)
+                              → task-range lowering and GPU dispatch (M7)
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The
@@ -68,7 +68,7 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python, M3 execution, and M4–M5 qualification boundary
+## Current Python, M3 execution, and M4–M6 qualification boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
@@ -127,6 +127,22 @@ one-outlier, and alternating-empty distributions. Public segment primitives,
 public segmented launch, schedule selection, multi-CTA execution, and
 device-side offset validation remain future runtime and compiler work.
 
+M6 adds only the minimal planning boundary in ADR-0014. The
+`--swage-to-plan` conversion admits one capture-free, map-free, single-stage
+identity segmented sum, preserves the semantic function, and adds a private
+planning companion. The companion records one `swage_plan.classify`
+operation, warp then CTA as its legal policy order, and a configurable
+nonnegative i32 threshold that defaults to 32. Unsupported inputs fail before
+module mutation.
+
+The internal host classifier is a separately tested descriptor generator. It
+validates i32 runtime metadata before producing one absolute half-open range
+per segment, including empty segments. Lengths at or below the threshold use
+warp; longer lengths use CTA. M6 does not connect these descriptors to the
+planning operation, lower task ranges, dispatch work, execute either policy,
+or change the public frontend, emission, or launch contracts. Those execution
+steps begin in M7.
+
 ## The `swage` dialect (semantic level)
 
 Implemented today: `!swage.segment<T>` plus `swage.segment_id`,
@@ -166,14 +182,18 @@ optional at configure time (`SWAGE_PYTHON_BINDINGS`), and requesting
 them against an MLIR install built without bindings is a configure
 error, never a silent skip.
 
-## The `swage_plan` dialect (planning level, not yet started)
+## The `swage_plan` dialect (minimal planning level)
 
-Introduced only after the semantic dialect and one fixed GPU lowering work
-end to end (ADR-0003). It will model tasks, policies (`warp`, `packed_warp`,
-`cta`, `split_cta`, `merge`, `persistent`), queues, and dependencies. The
-planner distinguishes compile-time decisions (legal schedule variants, tile
-sizes, reduction structure, cost estimates) from runtime decisions (actual
-lengths, skew, task counts, selected policies); compiler passes never
+M6 implements only `#swage_plan.policy<warp|cta>`,
+`!swage_plan.task_range`, and `swage_plan.classify` (ADR-0014). Compile time
+verifies the one admitted semantic shape and records its legal policy order
+and threshold. The independent host classifier uses actual offsets and counts
+to select a policy and construct stable descriptors without changing the
+semantic IR.
+
+Packed warps, split CTAs, partial reductions, merges, queues, dependencies,
+task-range lowering, dispatch, mixed-policy GPU execution, ragged-softmax
+planning, and cost-based selection remain future work. Compiler passes do not
 pretend to know runtime offset contents.
 
 ## Runtime
@@ -202,7 +222,8 @@ pointers.
 - MLIR: lit + FileCheck for parse/print round trips, verifier failures,
   and lowering; checks target semantic invariants, not incidental
   formatting.
-- C++: GoogleTest for planner and cost-model units (when they exist).
+- C++: GoogleTest for the host task classifier and later planner or cost-model
+  units.
 - Differential: every public correctness claim is backed by at least one
   oracle comparison. With no Python prototype in this repository
   (ADR-0005), PyTorch reference implementations are the initial oracle;

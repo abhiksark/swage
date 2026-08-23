@@ -11,12 +11,14 @@ LLVM. You write a Triton-like kernel that describes what happens to *one
 logical segment*; Swage is designed to derive fixed-size GPU tile tasks and
 generate NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
-> **Status: pre-alpha, M5 internal qualification complete.** The canonical
+> **Status: pre-alpha, M6 compile-only planning gate complete.** The canonical
 > fixed vector-add kernel remains the public execution subset. Internal
 > segmented sum, max, and stable ragged-softmax modules lower to a sequential
-> CPU oracle and one CTA per segment on NVIDIA GPUs. Public segment syntax,
-> public segmented launch, and schedule selection remain planned. See
-> [Current status](#current-status) for the exact boundary.
+> CPU oracle and one CTA per segment on NVIDIA GPUs. The planning gate covers
+> one canonical identity segmented sum and tested host descriptor generation.
+> Public segment syntax, public segmented launch, classifier integration, and
+> mixed-policy GPU execution remain planned. See [Current status](#current-status)
+> for the exact boundary.
 
 ## The programming model
 
@@ -99,8 +101,9 @@ Swage semantic MLIR
         │                         → one CTA per segment → NVPTX
         ├── M5 ragged softmax → max → exponential sum → normalize/store
         │                      → internal CPU and one-CTA GPU qualification
-        └── general scheduling → SwagePlan task IR (planned)
-                                 → fixed tiles and GPU schedules (planned)
+        ├── M6 identity segmented sum → SwagePlan classify (compile-only)
+        └── M6 host metadata → warp/CTA descriptors (unit-tested, independent)
+                             → classifier integration and GPU dispatch (M7)
 ```
 
 The three-level vocabulary is load-bearing: a **segment** is a logical,
@@ -122,14 +125,24 @@ warp or CTA. See
 | CUDA Driver launch, cache, and real GPU result | **Works today for the public M3 subset**; trusted A6000 GPU workflow |
 | Native segmented sum/max lowering | **Works today for canonical internal qualification modules**; upstream `mlir-runner` CPU oracle and one-CTA `sm_86` tests |
 | Native stable ragged-softmax lowering | **Works today for the canonical internal qualification module**; max, exponential-sum, and normalization/store phases match PyTorch and the CPU oracle on RTX A6000 `sm_86` |
+| `swage_plan` policy attribute, task-range type, classify operation, and `--swage-to-plan` | **Works today, internal and compile-only** for one canonical identity segmented sum; the semantic function is preserved and unsupported inputs fail before mutation |
+| Internal host task descriptor generation | **Works today, unit-tested** for validated i32 metadata; emits one stable warp or CTA descriptor per segment but is not connected to GPU dispatch |
 | Public segment frontend and segmented launch, including ragged softmax | Planned |
-| SwagePlan task dialect; warp/CTA/split-CTA/persistent policies | Research target |
+| Classifier integration, task-range lowering, dispatch, mixed-policy GPU execution, and broader policies | Planned for M7 and later milestones |
 
 The M5 differential suite covers all-empty, all-singleton, many-tiny,
 few-huge, one-outlier, and alternating-empty segment distributions. The
 runner is internal: it retains the five-argument values, offsets, output,
 value-count, and segment-count ABI, validates host-visible metadata, and does
 not widen `swage.language`, `emit_mlir()`, or public `launch()`.
+
+The M6 planning conversion admits only the capture-free, map-free,
+single-stage identity segmented sum. It adds a private planning companion
+that records warp then CTA as the legal policy order. A separate internal
+host classifier validates runtime metadata and produces exact descriptors,
+including empty segments. M6 does not integrate that classifier with the
+planning operation, lower task ranges, dispatch work, execute either policy,
+or establish a performance claim.
 
 The research question: *can one segment-local program automatically produce
 competitive warp, CTA, split-CTA, and persistent schedules as the runtime
