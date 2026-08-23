@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-sum-region.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // A non-identity reduction region is inlined into the sequential element loop.
 module {
@@ -33,4 +34,3 @@ module {
 // CHECK:   }
 // CHECK:   memref.store %[[SUM]]
 // CHECK: }
-// CHECK-NOT: swage.

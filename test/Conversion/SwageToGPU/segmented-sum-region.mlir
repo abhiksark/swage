@@ -1,6 +1,6 @@
 // test/Conversion/SwageToGPU/segmented-sum-region.mlir
 // RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
-// RUN:   | FileCheck %s
+// RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // A non-identity reduction region is inlined into the block-stride loop.
 // The region survives as written; replacing the libdevice exponential with a
@@ -24,7 +24,6 @@ module {
   }
 }
 
-// CHECK-NOT: swage.
 // CHECK: gpu.func @segmented_sum
 // CHECK: scf.for %{{.*}} iter_args(%[[ACC:.*]] = %{{.*}}) -> (f32) {
 // CHECK:   %[[VALUE:.*]] = llvm.load %{{.*}} : !llvm.ptr -> f32
