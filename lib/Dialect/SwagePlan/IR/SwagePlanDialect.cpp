@@ -24,7 +24,7 @@ bool isRankOneMemRef(Type type, Type elementType) {
   auto memref = dyn_cast<MemRefType>(type);
   return memref && memref.getRank() == 1 && memref.isDynamicDim(0) &&
          memref.getElementType() == elementType &&
-         memref.getLayout().isIdentity() && memref.getMemorySpaceAsInt() == 0;
+         memref.getLayout().isIdentity() && !memref.getMemorySpace();
 }
 
 bool hasCanonicalSemanticABI(func::FuncOp function) {
@@ -35,7 +35,8 @@ bool hasCanonicalSemanticABI(func::FuncOp function) {
   return isRankOneMemRef(type.getInput(0), Float32Type::get(context)) &&
          isRankOneMemRef(type.getInput(1), IntegerType::get(context, 32)) &&
          isRankOneMemRef(type.getInput(2), Float32Type::get(context)) &&
-         type.getInput(3).isInteger(32) && type.getInput(4).isInteger(32);
+         type.getInput(3).isSignlessInteger(32) &&
+         type.getInput(4).isSignlessInteger(32);
 }
 
 } // namespace

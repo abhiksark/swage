@@ -17,6 +17,12 @@
 // NO-PLAN: memref.global "private" @companion_collision__swage_plan
 // NO-PLAN-LABEL: func.func @companion_collision(
 // NO-PLAN: swage.reduce
+// NO-PLAN-LABEL: func.func @signed_value_count(
+// NO-PLAN: swage.reduce
+// NO-PLAN-LABEL: func.func @unsigned_segment_count(
+// NO-PLAN: swage.reduce
+// NO-PLAN-LABEL: func.func @non_default_memory_space(
+// NO-PLAN: swage.reduce
 
 module {
   func.func @maximum(%values: memref<?xf32>, %offsets: memref<?xi32>,
@@ -150,6 +156,61 @@ module {
       %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
+  func.func @signed_value_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: si32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
+  func.func @unsigned_segment_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: ui32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
+  func.func @non_default_memory_space(
+      %values: memref<?xf32, #gpu.address_space<workgroup>>,
+      %offsets: memref<?xi32>, %output: memref<?xf32>, %value_count: i32,
+      %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32, #gpu.address_space<workgroup>>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
