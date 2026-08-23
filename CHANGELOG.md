@@ -51,8 +51,15 @@ semantic versioning (`0.x`; anything may change).
   It checks malformed offsets before launch and compares CPU and RTX A6000
   results with PyTorch across empty, boundary, large, uniform, and skewed
   distributions.
+- Fail-closed single-consumer map fusion, ordered f32 reduction captures, and
+  per-value `swage.map_store` lowering on the sequential CPU and one-CTA GPU
+  paths while retaining the five-argument internal segmented ABI.
+- Internal stable ragged-softmax qualification through maximum, exponential
+  sum, and normalization/store phases. CPU results match PyTorch, and RTX
+  A6000 `sm_86` results match both PyTorch and the CPU oracle across six
+  adversarial segment distributions.
 - Project documentation (README, DESIGN, ROADMAP, concept docs, ADRs
-  0001–0012), community health files, issue forms, and CPU CI.
+  0001–0013), community health files, issue forms, and CPU CI.
 
 ### Notes
 
@@ -62,5 +69,8 @@ semantic versioning (`0.x`; anything may change).
 - M4 segmented sum and max are native compiler qualification paths only. They
   do not add segment primitives to `swage.language` or widen public
   `kernel.launch()` behavior.
+- M5 ragged softmax is also an internal qualification path. Public segment
+  primitives, segmented launch, schedule selection, and multi-CTA execution
+  remain planned; `v0.4.0` is eligible but not released.
 - The pip package remains GPU-free at import time. Execution requires Linux,
   CUDA-enabled PyTorch, `libcuda`, and the build-tree `mlir_swage` bindings.

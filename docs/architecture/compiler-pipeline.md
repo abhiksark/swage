@@ -27,8 +27,14 @@ Live mlir_swage.ir.Module                                        (M2 fixed path)
         │     └── one CTA per segment → gpu + nvvm → PTX         ✅
         │         → host-validated internal CUDA qualification    ✅
         │
+        ├── M5 canonical ragged-softmax path                     ✅
+        │     ├── max → exponential sum → normalize/store         ✅
+        │     ├── sequential scf + memref → mlir-runner           ✅
+        │     └── one CTA per segment → native exp2 → PTX         ✅
+        │         → internal PyTorch and CPU-oracle qualification ✅
+        │
         └── General scheduling path
-              ↓   canonicalization and fusion                    ⏳
+              ↓   general canonicalization and fusion            ⏳
             SwagePlan task IR (dialect: swage_plan)              🔬 (ADR-0003)
               ↓   task decomposition, policy selection
             Fixed-size tile operations
@@ -104,7 +110,42 @@ An internal qualification runner copies offset metadata to the host for
 validation, then launches raw CUDA pointers and the two explicit counts on
 the current PyTorch stream. This runner is not public API and does not change
 the M3 `kernel.launch()` contract. General CUDA-resident offset validation,
-segment transforms, and schedule selection remain outside M4.
+public segment transforms, and schedule selection remain outside M4.
+
+## Ragged-softmax qualification (M5 complete)
+
+M5 keeps the M4 five-argument internal ABI (ADR-0013) and admits ordered f32
+reduction captures plus single-consumer `swage.map` chains. Maps are fused
+into their sole map, reduce, or map-store consumer rather than materialized.
+Admission is fail-closed: unsupported region operations, captures, consumers,
+types, or multiple output terminals fail before either backend lowers the
+module.
+
+The canonical stable softmax performs three stages per segment:
+
+1. Reduce the maximum.
+2. Reduce the sum of `exp2((value - maximum) * log2(e))`.
+3. Recompute that exponential, divide by the captured sum, and store each
+   normalized value.
+
+The scalar `memref.store` terminal used by reductions writes one value per
+segment. The `swage.map_store` terminal writes one value per covered input
+element and therefore requires output capacity of at least `offsets[-1]`.
+Output must not overlap values or offsets. Empty segments perform no stores.
+
+The CPU backend executes reductions in source order and then the store loop.
+The GPU backend maps one segment to one CTA and makes one block-stride pass per
+stage. Uniform `gpu.all_reduce` broadcasts each result and fences the next
+phase, so the emitter adds no separate barrier or scratch buffer. The terminal
+recomputes exponentials instead of retaining an intermediate allocation. GPU
+code generation replaces the unavailable libdevice call with LLVM's native
+`exp2` intrinsic; exact-target NVPTX compilation requires `sm_80` or newer.
+
+The internal runner validates metadata on the host. Its CPU result matches
+PyTorch, and its RTX A6000 `sm_86` result matches both PyTorch and the CPU
+oracle across all-empty, all-singleton, many-tiny, few-huge, one-outlier, and
+alternating-empty distributions. This does not add public segment primitives,
+public segmented launch, schedule selection, or multi-CTA execution.
 
 ## Semantic level (M0–M1 complete)
 

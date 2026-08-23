@@ -8,10 +8,11 @@ it into fixed-size GPU tile tasks and generate PTX through MLIR, LLVM, and
 NVPTX.
 
 !!! warning "Pre-alpha"
-    The MLIR dialect, pinned LLVM build, Python AST emitter, and M3 fixed
-    vector-add execution path work today. General segment lowering and
-    schedule selection remain planned. The README status table is the single
-    source of truth for what works.
+    The MLIR dialect, pinned LLVM build, Python AST emitter, M3 fixed
+    vector-add execution path, and internal M4–M5 segment qualification paths
+    work today. Public segment syntax and launch plus general schedule
+    selection remain planned. The README status table is the single source of
+    truth for what works.
 
 Start with:
 
