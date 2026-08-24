@@ -1,9 +1,10 @@
 # Task 3 report: accessible visual atlas and transparent branding
 
-## Commit
+## Commits
 
-- Task 3 is committed as the single `HEAD` commit containing this report. The
-  resolved SHA is recorded in the controller handoff after commit creation.
+- Initial Task 3 implementation: `6ab8a4376cca20fb62e29741f0287c49bd191e85`.
+- Scoped review correction: the `HEAD` commit containing this report update.
+  Its resolved SHA is recorded in the controller handoff after commit creation.
 
 ## Files and scope
 
@@ -43,19 +44,23 @@ Reason: scripts/render_docs_diagrams.py was absent.
 A second focused RED caught the missing `public segmented API` label before
 that status lane was corrected.
 
+A scoped review RED exercised the rendered runtime validation panel. The new
+bounds check failed because `before compile or allocation` extended beyond the
+panel's horizontal padding.
+
 GREEN:
 
 ```text
 PYTHONPATH="$PWD/python" python -m pytest \
   tests/python/test_render_docs_diagrams.py -q
-6 passed in 0.01s
+7 passed in 0.02s
 ```
 
 The tests cover deterministic bytes, the exact output inventory, XML parsing,
 globally unique IDs, title and description wiring, the opaque canvas, minimum
 text size, prohibited resources and features, required semantic labels,
-contrast thresholds, write mode, and non-mutating missing, stale, and orphan
-checks.
+contrast thresholds, validation-panel text bounds, write mode, and
+non-mutating missing, stale, and orphan checks.
 
 ## Visual and branding inspection
 
@@ -66,6 +71,10 @@ checks.
 - Rendered all seven SVGs in Chrome at their full view boxes. Arrow markers,
   labels, range ownership, panel edges, and captions are visible without
   clipping or overlap after the scoped Chrome corrections.
+- After scoped review, inspected the regenerated compiler and runtime figures
+  directly in Chrome. The M4/M5 sequential CPU oracle now stops at SCF/memref,
+  while its separate one-CTA GPU path continues to the common backend. The
+  runtime validation phrase is wrapped within its panel.
 - Inspected all seven integrated pages at 1440 px and 390 px in Material
   `default` and `slate`. Every page loaded its figure, had no broken images and
   no page-level horizontal overflow. The shared wrapper contained horizontal
@@ -91,10 +100,10 @@ pass
 
 PYTHONPATH="$PWD/python" python -m pytest \
   tests/python/test_render_docs_diagrams.py -q
-6 passed
+7 passed in 0.02s
 
 PYTHONPATH="$PWD/python" python -m pytest tests/python -q
-102 passed in 3.53s
+103 passed in 3.62s
 
 ruff check .
 All checks passed

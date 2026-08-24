@@ -547,9 +547,12 @@ def compiler_pipeline() -> bytes:
     svg = Svg(
         "compiler-pipeline.svg",
         "Swage compiler pipeline",
-        "Verified semantic MLIR enters one of three admitted current branches "
-        "before rejoining upstream MLIR, LLVM NVPTX, PTX, and CUDA.",
-        height=790,
+        "Verified semantic MLIR enters three admitted branches. Public M3, "
+        "the private M4/M5 GPU: one CTA / segment path, and private M6-M8 "
+        "GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. "
+        "The M4/M5 sequential CPU oracle exits separately through SCF and "
+        "memref.",
+        height=850,
     )
     svg.text(
         48,
@@ -577,7 +580,7 @@ def compiler_pipeline() -> bytes:
             420,
             "PRIVATE M4-M5",
             "M4 / M5 segmented direct",
-            ("CPU oracle or one CTA / segment", "sum, max, stable softmax"),
+            ("sum, max, stable softmax", "two qualified paths"),
             "purple",
             "purple_fill",
         ),
@@ -591,7 +594,7 @@ def compiler_pipeline() -> bytes:
         ),
     )
     for x, status, heading, body, color, fill in branches:
-        svg.box(x, 245, 330, 220, fill=fill, stroke=color)
+        svg.box(x, 245, 330, 180, fill=fill, stroke=color)
         svg.status_tag(x + 22, 265, 180, status, color=color, fill=fill)
         svg.text(x + 165, 344, heading, size=19, weight=750, anchor="middle")
         svg.multiline(
@@ -607,13 +610,38 @@ def compiler_pipeline() -> bytes:
     svg.arrow(600, 215, 585, 235)
     svg.arrow(600, 215, 950, 235)
 
-    svg.arrow(220, 465, 500, 530)
-    svg.arrow(585, 465, 600, 530)
-    svg.arrow(950, 465, 700, 530)
-    svg.box(330, 545, 540, 78, fill="gray_fill")
+    svg.arrow(585, 425, 475, 435)
+    svg.arrow(585, 425, 695, 435)
+    svg.box(380, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.multiline(
+        475,
+        480,
+        ("sequential CPU", "oracle", "SCF / memref stop"),
+        size=16,
+        weight=650,
+        color="purple",
+        gap=27,
+        anchor="middle",
+    )
+    svg.box(600, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.multiline(
+        695,
+        480,
+        ("GPU: one CTA", "per segment", "continues below"),
+        size=16,
+        weight=650,
+        color="purple",
+        gap=27,
+        anchor="middle",
+    )
+
+    svg.arrow(220, 425, 350, 565)
+    svg.arrow(695, 550, 600, 565)
+    svg.arrow(950, 425, 850, 565)
+    svg.box(330, 580, 540, 78, fill="gray_fill")
     svg.text(
         600,
-        578,
+        613,
         "GPU / SCF / NVVM / LLVM",
         size=22,
         weight=750,
@@ -621,26 +649,26 @@ def compiler_pipeline() -> bytes:
     )
     svg.text(
         600,
-        605,
+        640,
         "upstream MLIR and LLVM paths",
         size=16,
         color="muted",
         anchor="middle",
     )
-    svg.arrow(600, 623, 310, 664)
+    svg.arrow(600, 658, 310, 690)
     backend = (
         (210, "LLVM NVPTX"),
         (500, "PTX"),
         (790, "CUDA Driver API"),
     )
     for x, label in backend:
-        svg.box(x, 674, 200, 68, fill="canvas")
-        svg.text(x + 100, 716, label, size=17, weight=700, anchor="middle")
-    svg.arrow(410, 708, 490, 708)
-    svg.arrow(700, 708, 780, 708)
+        svg.box(x, 700, 200, 68, fill="canvas")
+        svg.text(x + 100, 742, label, size=17, weight=700, anchor="middle")
+    svg.arrow(410, 734, 490, 734)
+    svg.arrow(700, 734, 780, 734)
     svg.text(
         600,
-        770,
+        818,
         "No second production IR and no silent backend fallback.",
         size=16,
         color="muted",
@@ -758,11 +786,11 @@ def runtime_lifecycle() -> bytes:
     svg.box(55, 172, 220, 138, fill="orange_fill", stroke="orange")
     svg.multiline(
         165,
-        210,
-        ("tensors / ABI", "grid / device", "before compile or allocation"),
+        205,
+        ("tensors / ABI", "grid / device", "before compile", "or allocation"),
         size=16,
         weight=650,
-        gap=30,
+        gap=27,
         anchor="middle",
     )
     svg.status_tag(

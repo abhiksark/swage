@@ -49,6 +49,9 @@ REQUIRED_LABELS = {
         "M6-M8 SwagePlan",
         "GPU / SCF / NVVM / LLVM",
         "CUDA Driver API",
+        "sequential CPU oracle",
+        "SCF / memref stop",
+        "GPU: one CTA / segment",
     ),
     "m8-split-lifecycle.svg": (
         "identity sum only",
@@ -164,6 +167,26 @@ def test_diagrams_include_the_required_semantic_labels():
         content = renderer.render_all()[name].decode()
         for label in labels:
             assert label in content, f"{name} is missing {label!r}"
+
+
+def test_runtime_validation_labels_fit_panel():
+    """Catch centered validation labels that visibly exceed their panel."""
+    renderer = _load_renderer()
+    root = ET.fromstring(renderer.render_all()["runtime-lifecycle.svg"])
+    labels = [
+        element
+        for element in root.iter("{http://www.w3.org/2000/svg}text")
+        if 172 <= float(element.attrib["y"]) <= 310
+        and 55 <= float(element.attrib["x"]) <= 275
+    ]
+
+    assert labels
+    for label in labels:
+        font_size = float(label.attrib["font-size"])
+        estimated_width = len("".join(label.itertext())) * font_size * 0.62
+        center = float(label.attrib["x"])
+        assert center - estimated_width / 2 >= 67
+        assert center + estimated_width / 2 <= 263
 
 
 def test_palette_pairs_meet_accessible_contrast_thresholds():

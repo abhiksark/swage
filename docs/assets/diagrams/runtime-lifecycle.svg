@@ -16,9 +16,10 @@
   <rect x="55" y="120" width="145" height="38" rx="19" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
   <text x="127" y="146" font-size="16" font-weight="750" fill="#A94500" text-anchor="middle">VALIDATE</text>
   <rect x="55" y="172" width="220" height="138" rx="14" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
-  <text x="165" y="210" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">tensors / ABI</text>
-  <text x="165" y="240" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">grid / device</text>
-  <text x="165" y="270" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">before compile or allocation</text>
+  <text x="165" y="205" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">tensors / ABI</text>
+  <text x="165" y="232" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">grid / device</text>
+  <text x="165" y="259" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">before compile</text>
+  <text x="165" y="286" font-size="16" font-weight="650" fill="#17212B" text-anchor="middle">or allocation</text>
   <rect x="82" y="326" width="165" height="38" rx="19" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
   <text x="164" y="352" font-size="16" font-weight="750" fill="#A94500" text-anchor="middle">FAIL CLOSED</text>
   <text x="165" y="392" font-size="16" font-weight="500" fill="#A94500" text-anchor="middle">invalid input stops</text>
