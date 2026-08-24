@@ -10,6 +10,20 @@ capability 8.0 or newer; the native compiler currently accepts exact targets
 from `sm_80` through `sm_129`. A validated `n == 0` public launch returns
 before target admission.
 
+Python source crosses a restricted AST validation boundary before becoming
+verified semantic MLIR. From that point, `emit_mlir()` stops with a
+compile-only module and needs no GPU. The canonical `launch()` path continues
+through native compilation to CUDA. Nonzero native work requires `sm_80` or
+newer, while the validated zero-work path returns before that target gate.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Frontend validation, compile-only emission, and canonical launch branches](assets/diagrams/frontend-boundary.svg)
+
+</div>
+
+*The verified frontend boundary and its two public outcomes. [Open the full-size figure](assets/diagrams/frontend-boundary.svg).*
+
 ## Prepare the checkout
 
 Follow [Installation](getting-started/installation.md) to install the Python

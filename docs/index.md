@@ -1,8 +1,10 @@
 <!-- docs/index.md -->
 
-<p align="center">
-  <img src="assets/images/swage-logo.png" alt="Swage logo" width="720">
-</p>
+<div class="doc-wordmark" markdown="1">
+
+![Swage wordmark](assets/images/swage-logo.png)
+
+</div>
 
 # Swage
 
@@ -47,6 +49,21 @@ the public Python language or launch contract.
 - Packing several short segments into one warp allocation.
 - Split max and split softmax.
 - Device queues, persistent scheduling, and broader policy selection.
+
+The three lanes below are status boundaries, not fallback paths. Public today
+contains Python capture, compile-only `emit_mlir()`, and canonical M3 fixed
+vector-add `launch()`. Private qualification contains the tested M4 to M8
+segmented compiler and runtime evidence, but it is not a public API. Planned
+work contains a public segmented API, packed work, split max and softmax, and
+persistent scheduling.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Public, private qualification, and planned capability lanes](assets/diagrams/capability-boundary.svg)
+
+</div>
+
+*Swage capability status at a glance. [Open the full-size figure](assets/diagrams/capability-boundary.svg).*
 
 ## Choose a path
 

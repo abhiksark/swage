@@ -21,6 +21,21 @@ fallback backend. Loaded functions are reused per specialization and CUDA
 context. Tensor storage remains owned by PyTorch, and submitted tensors are
 retained through `record_stream()`.
 
+Validation fails closed before specialization, compilation, or private
+allocation. Validated zero-work returns as a no-op. Other work specializes
+and checks the cache, compiles and loads when needed, and enqueues
+asynchronously on the current PyTorch stream. Swage retains submitted tensors
+until the launch is safe and calls `record_stream()` on that stream. It does
+not synchronize or choose a fallback backend.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Fail-closed validation, current-stream launch, and tensor retention](../assets/diagrams/runtime-lifecycle.svg)
+
+</div>
+
+*The validated runtime lifecycle, including zero work and stream retention. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
+
 ## Specialization and cache
 
 The specialization key contains normalized source, kernel name, ordered ABI

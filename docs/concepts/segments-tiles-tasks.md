@@ -6,6 +6,20 @@ Swage keeps program meaning, schedulable work, and physical execution
 separate. The order matters: begin with the segment, derive tasks, then map
 each task to a fixed hardware step.
 
+One runtime-length segment retains its logical dense meaning. Qualification
+may derive one direct task or several ordered partial tasks plus a merge task;
+the task is the policy-bearing work unit. Each task executes through a fixed
+32-thread warp or 128-thread CTA step. The execution shape is not a
+runtime-sized register array, and it does not change the segment's meaning.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![A segment mapped to policy-bearing tasks and fixed GPU steps](../assets/diagrams/segments-tasks-tiles.svg)
+
+</div>
+
+*Segment meaning, task policy, and fixed execution shape stay distinct. [Open the full-size figure](../assets/diagrams/segments-tasks-tiles.svg).*
+
 ## Segment: the semantic unit
 
 A segment is one logical, runtime-sized, internally dense slice:

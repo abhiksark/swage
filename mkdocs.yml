@@ -7,7 +7,7 @@ repo_url: https://github.com/abhiksark/swage
 theme:
   name: material
   logo: assets/images/swage-icon.png
-  favicon: assets/images/swage-icon.png
+  favicon: assets/images/swage-favicon.png
   palette:
     - scheme: default
       toggle:
@@ -19,10 +19,13 @@ theme:
         name: Switch to light mode
 markdown_extensions:
   - admonition
+  - md_in_html
   - pymdownx.snippets:
       check_paths: true
   - pymdownx.superfences
   - tables
+extra_css:
+  - stylesheets/figures.css
 nav:
   - Home: index.md
   - Getting started:

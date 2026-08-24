@@ -82,6 +82,23 @@ segment receives ordered stage-zero CTA chunks of at most 4096 input elements
 and one stage-one merge descriptor. These are current defaults and must satisfy
 the planning-limit invariant.
 
+The figure uses one oversized identity-sum segment over absolute input range
+`[100, 9500)`. Its three ordered partial CTAs own `[100, 4196)`,
+`[4196, 8292)`, and `[8292, 9500)`. Each partial has one unique scratch
+writer. The merge record names segment 7 and compact scratch range `[0, 3)`,
+then one writer stores `output[7]`. Mixed execution submits direct fused work,
+partial CTAs, and merge CTAs in that order on the current stream, skipping any
+empty phase. This lifecycle is private identity-sum qualification only; it
+does not imply split max or split softmax.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Absolute split ranges, unique scratch writers, and one merge writer](../assets/diagrams/m8-split-lifecycle.svg)
+
+</div>
+
+*Private M8 ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/m8-split-lifecycle.svg).*
+
 Partial ABI:
 
 ```text

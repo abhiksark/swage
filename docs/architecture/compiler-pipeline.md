@@ -7,32 +7,21 @@ becomes verified semantic MLIR, then an admitted lowering branch uses upstream
 MLIR and LLVM infrastructure. There is no second production IR between Python
 and MLIR.
 
-```text
-Python @swage.jit source
-        |
-        | inspect source, dedent, parse restricted AST
-        v
-direct MLIR Python construction
-        |
-        v
-verified Swage semantic MLIR
-        |
-        +-- public M3 fixed vector add
-        |      -> fixed-block GPU conversion
-        |      -> GPU, SCF, NVVM, and LLVM lowering
-        |      -> LLVM NVPTX -> PTX -> CUDA Driver launch
-        |
-        +-- private M4 and M5 segmented modules
-        |      +-> sequential SCF and memref CPU oracle
-        |      +-> one CTA per segment GPU conversion
-        |           -> NVVM and LLVM lowering -> PTX
-        |
-        +-- private M6 to M8 identity segmented sum
-               -> admitted planning companion
-               -> validated host materialization
-               -> direct warp/CTA or split partial/merge GPU conversion
-               -> NVVM and LLVM lowering -> PTX
-```
+Verified semantic MLIR enters one of three admitted branches. Public M3 uses
+the fixed-block conversion for canonical vector add. Private M4 and M5 use
+direct segmented lowering to the sequential CPU oracle or one-CTA GPU path.
+Private M6 to M8 adds the narrow `SwagePlan` classification companion for
+direct or split identity-sum lowering. GPU branches rejoin upstream GPU, SCF,
+NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the CUDA Driver API.
+No branch introduces a second production IR or a silent backend fallback.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Verified semantic MLIR entering three admitted compiler branches](../assets/diagrams/compiler-pipeline.svg)
+
+</div>
+
+*The implemented compiler spine and its public and private branches. [Open the full-size figure](../assets/diagrams/compiler-pipeline.svg).*
 
 ## Frontend boundary
 

@@ -3,17 +3,20 @@
 # Swage, Visually
 
 Swage starts with ragged storage: one dense values buffer plus offsets that
-divide it into logical segments.
+divide it into logical segments. In the concrete example below, offsets
+`[0, 2, 2, 5, 6]` describe ranges `[0, 2)`, `[2, 2)`, `[2, 5)`, and `[5, 6)`
+over six dense values. The repeated offset makes the second segment empty.
+Segment `i` is always the half-open slice
+`values[offsets[i] : offsets[i + 1]]`; differing segment lengths do not add
+padding or gaps to the values buffer.
 
-```text
-values  = [ 4.0, 1.0 | | 3.0, 8.0, 2.0 ]
-offsets = [ 0,        2, 2,            5 ]
-```
+<div class="doc-figure" tabindex="0" markdown="1">
 
-Segment `i` is the half-open slice
-`values[offsets[i] : offsets[i + 1]]`. Repeated offsets create an empty
-segment. The elements inside each nonempty segment remain dense even though
-segment lengths differ.
+![Dense values and offsets forming four half-open segments](../assets/diagrams/ragged-storage.svg)
+
+</div>
+
+*Dense ragged storage, including a repeated offset and empty segment. [Open the full-size figure](../assets/diagrams/ragged-storage.svg).*
 
 ## Three questions, three levels
 
