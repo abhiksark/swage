@@ -9,11 +9,20 @@ reading pointers, allocating private storage, compiling, or launching.
 
 ## Launch lifecycle
 
-The public path validates tensors, scalar values, block size, grid, device,
-and ABI. It then emits semantic MLIR, specializes for the active device's
-exact `sm_*` target, lowers and emits PTX in process through LLVM NVPTX, loads
-the module through `libcuda.so.1`, and enqueues on the current PyTorch CUDA
-stream.
+The public path requires three contiguous rank-one `torch.float32` CUDA
+tensors on the current device. `n` is a nonnegative i32 no larger than any
+tensor, `BLOCK` is a positive integer within the active device limit, and
+`grid` must equal `(ceildiv(n, BLOCK),)`. Validation also checks the canonical
+parameter names and ordered ABI before reading pointers or starting compiler
+work.
+
+For `n == 0`, the required grid is `(0,)`, and the validated launch returns
+without compilation, cache access, module loading, or enqueue. Other launches
+target the active device exactly and admit `sm_80` through `sm_129`; a device
+below compute capability 8.0 is rejected during compilation. The runtime then
+emits semantic MLIR, lowers and emits PTX in process through LLVM NVPTX, loads
+the module through `libcuda.so.1`, and enqueues asynchronously on the current
+PyTorch CUDA stream.
 
 Swage does not invoke NVRTC or a subprocess compiler. It does not copy or
 cast tensors, change devices, create a CUDA context, synchronize, or select a
@@ -22,11 +31,8 @@ context. Tensor storage remains owned by PyTorch, and submitted tensors are
 retained through `record_stream()`.
 
 Validation fails closed before specialization, compilation, or private
-allocation. Validated zero-work returns as a no-op. Other work specializes
-and checks the cache, compiles and loads when needed, and enqueues
-asynchronously on the current PyTorch stream. Swage retains submitted tensors
-until the launch is safe and calls `record_stream()` on that stream. It does
-not synchronize or choose a fallback backend.
+allocation. Nonzero work specializes and checks the cache, then compiles and
+loads when needed.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -85,7 +91,7 @@ optional components are absent and reports them as unavailable.
 The package backend field describes what is built into the installed Python
 package. It does not detect a separate build-tree `mlir_swage` package.
 
-Continue with [Public Python API](public-python-api.md) for the exact launch
-contract, [Troubleshooting](../getting-started/troubleshooting.md) for common
+Continue with [Public Python API](public-python-api.md) for the public call
+surface, [Troubleshooting](../getting-started/troubleshooting.md) for common
 boundary failures, or [Verification Evidence](../qualification/evidence.md)
 for the tests behind runtime claims.

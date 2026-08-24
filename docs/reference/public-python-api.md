@@ -58,23 +58,13 @@ this order:
 x_ptr, y_ptr, output_ptr, n, BLOCK
 ```
 
-`arguments` must contain the first four names. The three tensor arguments are
-contiguous rank-one `torch.float32` CUDA tensors on the current device. `n` is
-a nonnegative i32 no larger than any tensor. `constexprs` contains only a
-positive integer `BLOCK` that fits the active device limit. `grid` is the
-one-element tuple `(ceildiv(n, BLOCK),)`. For `n == 0`, `grid` is `(0,)` and
-the validated launch performs no compilation or enqueue.
+`arguments` contains the first four names, `constexprs` contains `BLOCK`, and
+`grid` provides the one-dimensional launch geometry. Exact validation, target
+admission, zero-work, cache, stream, and retention rules live in
+[Runtime and Environment](runtime-environment.md).
 
-For a nonzero launch, the native compiler targets the active device exactly
-and accepts `sm_80` through `sm_129`. A nonzero launch on a device below
-compute capability 8.0 is rejected during compilation. The validated
-`n == 0` path returns before native compilation and does not apply this target
-gate.
-
-Execution is asynchronous on `torch.cuda.current_stream()`. The runtime
-records all three tensors on that stream after submission. There is no public
-`emit_ptx()` method, direct kernel call, CPU execution fallback, or public
-segmented launch.
+There is no public `emit_ptx()` method, direct kernel call, CPU execution
+fallback, or public segmented launch.
 
 ## Exceptions
 

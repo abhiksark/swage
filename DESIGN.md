@@ -44,7 +44,7 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private M4/M5 segmented qualification
-        +-- private M6/M8 identity-sum planning and execution
+        +-- private M6 to M8 identity-sum planning and execution
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
