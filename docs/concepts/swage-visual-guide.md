@@ -28,10 +28,8 @@ schedules.
 Variable-sized segments can share one dense values buffer. An offsets array
 marks where each segment begins and ends:
 
-```text
-values  = [ 4.0, 1.0 | | 3.0, 8.0, 2.0 | ... ]
-offsets = [ 0,        2, 2,            5, ... ]
-```
+    values  = [ 4.0, 1.0 | | 3.0, 8.0, 2.0 | ... ]
+    offsets = [ 0,        2, 2,            5, ... ]
 
 Segment `i` is the half-open slice
 `values[offsets[i] : offsets[i + 1]]`. Its elements are dense, but its
@@ -74,7 +72,7 @@ and writes the segment output once.
   style="overflow-x: auto;"
 >
   <img
-    src="../assets/diagrams/segments-tasks-tiles.svg"
+    src="../../assets/diagrams/segments-tasks-tiles.svg"
     alt="Four variable-sized segments mapped through direct and split tasks to fixed 32-value and 128-value tiles."
     loading="lazy"
     style="width: 100%; min-width: 60rem; height: auto;"
@@ -103,7 +101,7 @@ max or split softmax.
   style="overflow-x: auto;"
 >
   <img
-    src="../assets/diagrams/compiler-journey.svg"
+    src="../../assets/diagrams/compiler-journey.svg"
     alt="The public fixed vector-add path and the separate M4 to M8 private qualification paths through Swage MLIR, LLVM NVPTX, and the current PyTorch stream."
     loading="lazy"
     style="width: 100%; min-width: 60rem; height: auto;"
