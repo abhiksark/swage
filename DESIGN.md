@@ -252,9 +252,11 @@ pointers.
 - GPU: a trusted main-only self-hosted workflow checks fixed vector-add
   correctness; segmented sum, max, and ragged-softmax distributions; empty
   and NaN behavior; repeated execution; non-default streams; argument
-  lifetime; cache reuse; and the internal M7 pure and fused mixed identity-sum
-  schedules on a real NVIDIA device. Pull requests never execute on that
-  runner.
+  lifetime; and cache reuse on a real NVIDIA device. Pull requests never
+  execute on that runner.
+- M7 GPU: the verified local RTX A6000 `sm_86` suite covers pure warp, pure
+  CTA, and fused mixed identity-sum schedules. The committed frozen benchmark
+  records the local performance evidence.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.
