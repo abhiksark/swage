@@ -106,8 +106,8 @@ LogicalResult replaceLibdeviceCalls(gpu::GPUModuleOp gpuModule) {
 
 LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          int64_t blockSize, llvm::StringRef target,
-                         KernelKind kind, bool useTaskIds, std::string &lowered,
-                         std::string &ptx) {
+                         KernelKind kind, bool useTaskIds, bool fusedMixed,
+                         std::string &lowered, std::string &ptx) {
   if (!isSupportedTarget(target))
     return source.emitError(
         "target must match sm_<major><minor> and be sm_80 or newer");
@@ -140,8 +140,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (kind == KernelKind::FixedBlock)
     manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
   else
-    manager.addPass(
-        swage::createSegmentedReductionToGPUPass(blockSize, useTaskIds));
+    manager.addPass(swage::createSegmentedReductionToGPUPass(
+        blockSize, useTaskIds, fusedMixed));
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
@@ -211,8 +211,8 @@ MlirLogicalResult swageCompileFixedBlockToPTX(
   std::string lowered;
   std::string ptx;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
-                        unwrap(target), KernelKind::FixedBlock, false, lowered,
-                        ptx)))
+                        unwrap(target), KernelKind::FixedBlock, false, false,
+                        lowered, ptx)))
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
   ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
@@ -229,7 +229,24 @@ MlirLogicalResult swageCompileSegmentedReductionToPTX(
   std::string ptx;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
                         unwrap(target), KernelKind::SegmentedReduction,
-                        useTaskIds, lowered, ptx)))
+                        useTaskIds, false, lowered, ptx)))
+    return mlirLogicalResultFailure();
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
+  std::string lowered;
+  std::string ptx;
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+                        KernelKind::SegmentedReduction, true, true, lowered,
+                        ptx)))
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
   ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);

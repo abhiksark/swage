@@ -19,9 +19,8 @@ class Pass;
 namespace mlir::swage {
 
 std::unique_ptr<Pass> createSegmentedReductionToSCFPass();
-std::unique_ptr<Pass>
-createSegmentedReductionToGPUPass(int64_t blockSize = 0,
-                                  bool useTaskIds = false);
+std::unique_ptr<Pass> createSegmentedReductionToGPUPass(
+    int64_t blockSize = 0, bool useTaskIds = false, bool fusedMixed = false);
 std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements = 32);
 void registerSegmentedReductionPasses();
 

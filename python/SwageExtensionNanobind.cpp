@@ -41,7 +41,8 @@ MlirModule unwrapModule(nb::object moduleObject) {
 
 std::pair<std::string, std::string>
 compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
-           std::string target, bool segmented, bool useTaskIds) {
+           std::string target, bool segmented, bool useTaskIds,
+           bool fusedMixed = false) {
   MlirModule module = unwrapModule(moduleObject);
 
   std::string lowered;
@@ -52,7 +53,13 @@ compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
   mlir::python::CollectDiagnosticsToStringScope diagnostics(
       mlirModuleGetContext(module));
   MlirLogicalResult result =
-      segmented
+      fusedMixed
+          ? swageCompileFusedSegmentedReductionToPTX(
+                module,
+                mlirStringRefCreate(kernelName.data(), kernelName.size()),
+                mlirStringRefCreate(target.data(), target.size()), store,
+                &lowered, store, &ptx)
+      : segmented
           ? swageCompileSegmentedReductionToPTX(
                 module,
                 mlirStringRefCreate(kernelName.data(), kernelName.size()),
@@ -127,6 +134,13 @@ NB_MODULE(_swageDialectsNanobind, m) {
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"), nb::arg("use_task_ids") = false);
+  swageM.def(
+      "_compile_fused_segmented_reduction_ptx",
+      [](nb::object module, std::string kernelName, std::string target) {
+        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+                          true, true, true);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def("_materialize_segmented_plan", &materializeSegmentedPlan,
              nb::arg("module"), nb::arg("offsets"), nb::arg("value_count"),
              nb::arg("segment_count"), nb::arg("warp_max_elements") = 32);

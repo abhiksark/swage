@@ -521,7 +521,7 @@ void buildSequentialProgram(func::FuncOp function,
 
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program, int64_t blockSize,
-                     bool useTaskIds) {
+                     bool useTaskIds, bool fusedMixed) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -533,9 +533,11 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
   SmallVector<Type> inputs{pointer, pointer, pointer};
-  if (useTaskIds)
+  if (useTaskIds || fusedMixed)
     inputs.push_back(pointer);
   inputs.append({i32, i32});
+  if (fusedMixed)
+    inputs.push_back(i32);
   auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel =
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
@@ -549,121 +551,183 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
   Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
+  auto loadSegmentId = [&](OpBuilder &body, Location bodyLoc, Value taskId) {
+    Value taskId64 =
+        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), taskId);
+    Value taskAddress = LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
+                                            entry->getArgument(3), taskId64);
+    Value segmentIdI32 = LLVM::LoadOp::create(body, bodyLoc, i32, taskAddress);
+    return Value(arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
+                                            segmentIdI32));
+  };
+  auto emitSegment = [&](OpBuilder &body, Location bodyLoc, Value segmentId,
+                         Value logicalThreadId, Value stride,
+                         bool useWarpShuffle) {
+    Value segmentId64 =
+        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), segmentId);
+    Value startAddress = LLVM::GEPOp::create(
+        body, bodyLoc, pointer, i32, entry->getArgument(1), segmentId64);
+    Value startI32 = LLVM::LoadOp::create(body, bodyLoc, i32, startAddress);
+    Value nextSegment = arith::AddIOp::create(body, bodyLoc, segmentId, one);
+    Value nextSegment64 = arith::IndexCastOp::create(
+        body, bodyLoc, body.getI64Type(), nextSegment);
+    Value endAddress = LLVM::GEPOp::create(
+        body, bodyLoc, pointer, i32, entry->getArgument(1), nextSegment64);
+    Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
+    Value start = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
+                                             startI32);
+    Value end =
+        arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(), endI32);
+    Value first = arith::AddIOp::create(body, bodyLoc, start, logicalThreadId);
+
+    SmallVector<Value> results;
+    for (const ReductionStage &stage : program.reductions) {
+      Value identity = identityFor(body, bodyLoc, stage.kind);
+      auto local = scf::ForOp::create(
+          body, bodyLoc, first, end, stride, ValueRange(identity),
+          [&](OpBuilder &loop, Location loopLoc, Value index,
+              ValueRange accumulator) {
+            Value index64 = arith::IndexCastOp::create(
+                loop, loopLoc, loop.getI64Type(), index);
+            Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                                entry->getArgument(0), index64);
+            Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+            value = evaluateElement(loop, stage.element, value, results);
+            scf::YieldOp::create(
+                loop, loopLoc,
+                combine(loop, loopLoc, stage.kind, accumulator.front(), value));
+          });
+      gpu::AllReduceOperation gpuKind = stage.kind == ReductionKind::Sum
+                                            ? gpu::AllReduceOperation::ADD
+                                            : gpu::AllReduceOperation::MAXIMUMF;
+      Value total = local.getResult(0);
+      if (useWarpShuffle) {
+        for (int32_t offset = 1; offset < 32; offset <<= 1) {
+          auto shuffled = gpu::ShuffleOp::create(body, bodyLoc, total, offset,
+                                                 32, gpu::ShuffleMode::XOR);
+          total = combine(body, bodyLoc, stage.kind, total,
+                          shuffled.getShuffleResult());
+        }
+      } else {
+        auto operation =
+            gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
+        // uniform = true, so the result is broadcast to every thread and the
+        // lowering's trailing barrier fences this stage from the next.
+        total = gpu::AllReduceOp::create(body, bodyLoc, total, operation, true);
+      }
+      results.push_back(total);
+    }
+
+    if (program.terminal == TerminalKind::ScalarStore) {
+      Value total = results[program.storedReduction];
+      Value firstThread = arith::CmpIOp::create(
+          body, bodyLoc, arith::CmpIPredicate::eq, logicalThreadId, zero);
+      scf::IfOp::create(
+          body, bodyLoc, firstThread, [&](OpBuilder &store, Location storeLoc) {
+            Value outputAddress =
+                LLVM::GEPOp::create(store, storeLoc, pointer, f32,
+                                    entry->getArgument(2), segmentId64);
+            LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
+            scf::YieldOp::create(store, storeLoc);
+          });
+      return;
+    }
+
+    // Guard-free on purpose: every thread runs the same block-stride loop it
+    // ran for each reduction stage, and an empty segment makes it zero-trip.
+    // A thread-dependent guard here would put a predicate around code the
+    // barriers above already made CTA-uniform.
+    scf::ForOp::create(
+        body, bodyLoc, first, end, stride, ValueRange(),
+        [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
+          Value index64 = arith::IndexCastOp::create(loop, loopLoc,
+                                                     loop.getI64Type(), index);
+          Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                              entry->getArgument(0), index64);
+          Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+          value = evaluateElement(loop, program.mapStore, value, results);
+          Value outputAddress = LLVM::GEPOp::create(
+              loop, loopLoc, pointer, f32, entry->getArgument(2), index64);
+          LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
+          scf::YieldOp::create(loop, loopLoc);
+        });
+  };
+
+  if (fusedMixed) {
+    Value three = arith::ConstantIndexOp::create(builder, loc, 3);
+    Value four = arith::ConstantIndexOp::create(builder, loc, 4);
+    Value warp = arith::ConstantIndexOp::create(builder, loc, 32);
+    Value warpTaskCount = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), entry->getArgument(5));
+    Value ctaTaskCount = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), entry->getArgument(6));
+    Value roundedWarpTaskCount =
+        arith::AddIOp::create(builder, loc, warpTaskCount, three);
+    Value warpBlockCount =
+        arith::DivUIOp::create(builder, loc, roundedWarpTaskCount, four);
+    Value isWarpBlock = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::ult, taskIndex, warpBlockCount);
+    scf::IfOp::create(
+        builder, loc, isWarpBlock,
+        [&](OpBuilder &warpBlock, Location warpLoc) {
+          Value physicalWarp =
+              arith::DivUIOp::create(warpBlock, warpLoc, threadId, warp);
+          Value lane =
+              arith::RemUIOp::create(warpBlock, warpLoc, threadId, warp);
+          Value firstTask =
+              arith::MulIOp::create(warpBlock, warpLoc, taskIndex, four);
+          Value warpTaskId = arith::AddIOp::create(warpBlock, warpLoc,
+                                                   firstTask, physicalWarp);
+          Value inRange = arith::CmpIOp::create(warpBlock, warpLoc,
+                                                arith::CmpIPredicate::ult,
+                                                warpTaskId, warpTaskCount);
+          scf::IfOp::create(
+              warpBlock, warpLoc, inRange,
+              [&](OpBuilder &task, Location taskLoc) {
+                Value segmentId = loadSegmentId(task, taskLoc, warpTaskId);
+                emitSegment(task, taskLoc, segmentId, lane, warp, true);
+                scf::YieldOp::create(task, taskLoc);
+              });
+          scf::YieldOp::create(warpBlock, warpLoc);
+        },
+        [&](OpBuilder &ctaBlock, Location ctaLoc) {
+          Value ctaTaskId = arith::SubIOp::create(ctaBlock, ctaLoc, taskIndex,
+                                                  warpBlockCount);
+          Value inRange =
+              arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
+                                    ctaTaskId, ctaTaskCount);
+          scf::IfOp::create(
+              ctaBlock, ctaLoc, inRange,
+              [&](OpBuilder &task, Location taskLoc) {
+                Value mixedTaskId = arith::AddIOp::create(
+                    task, taskLoc, warpTaskCount, ctaTaskId);
+                Value segmentId = loadSegmentId(task, taskLoc, mixedTaskId);
+                emitSegment(task, taskLoc, segmentId, threadId, block, false);
+                scf::YieldOp::create(task, taskLoc);
+              });
+          scf::YieldOp::create(ctaBlock, ctaLoc);
+        });
+    gpu::ReturnOp::create(builder, loc);
+    source.erase();
+    return;
+  }
+
   Value taskCount =
       arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
                                  entry->getArgument(useTaskIds ? 5 : 4));
   Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
                                         taskIndex, taskCount);
 
-  scf::IfOp::create(
-      builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-        Value segmentId = taskIndex;
-        if (useTaskIds) {
-          Value taskIndex64 = arith::IndexCastOp::create(
-              body, bodyLoc, body.getI64Type(), taskIndex);
-          Value taskAddress = LLVM::GEPOp::create(
-              body, bodyLoc, pointer, i32, entry->getArgument(3), taskIndex64);
-          Value segmentIdI32 =
-              LLVM::LoadOp::create(body, bodyLoc, i32, taskAddress);
-          segmentId = arith::IndexCastOp::create(
-              body, bodyLoc, body.getIndexType(), segmentIdI32);
-        }
-        Value segmentId64 = arith::IndexCastOp::create(
-            body, bodyLoc, body.getI64Type(), segmentId);
-        Value startAddress = LLVM::GEPOp::create(
-            body, bodyLoc, pointer, i32, entry->getArgument(1), segmentId64);
-        Value startI32 = LLVM::LoadOp::create(body, bodyLoc, i32, startAddress);
-        Value nextSegment =
-            arith::AddIOp::create(body, bodyLoc, segmentId, one);
-        Value nextSegment64 = arith::IndexCastOp::create(
-            body, bodyLoc, body.getI64Type(), nextSegment);
-        Value endAddress = LLVM::GEPOp::create(
-            body, bodyLoc, pointer, i32, entry->getArgument(1), nextSegment64);
-        Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
-        Value start = arith::IndexCastOp::create(body, bodyLoc,
-                                                 body.getIndexType(), startI32);
-        Value end = arith::IndexCastOp::create(body, bodyLoc,
-                                               body.getIndexType(), endI32);
-        Value first = arith::AddIOp::create(body, bodyLoc, start, threadId);
+  scf::IfOp::create(builder, loc, inRange,
+                    [&](OpBuilder &body, Location bodyLoc) {
+                      Value segmentId = taskIndex;
+                      if (useTaskIds)
+                        segmentId = loadSegmentId(body, bodyLoc, taskIndex);
+                      emitSegment(body, bodyLoc, segmentId, threadId, block,
+                                  useTaskIds && blockSize == 32);
 
-        SmallVector<Value> results;
-        for (const ReductionStage &stage : program.reductions) {
-          Value identity = identityFor(body, bodyLoc, stage.kind);
-          auto local = scf::ForOp::create(
-              body, bodyLoc, first, end, block, ValueRange(identity),
-              [&](OpBuilder &loop, Location loopLoc, Value index,
-                  ValueRange accumulator) {
-                Value index64 = arith::IndexCastOp::create(
-                    loop, loopLoc, loop.getI64Type(), index);
-                Value address =
-                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                        entry->getArgument(0), index64);
-                Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
-                value = evaluateElement(loop, stage.element, value, results);
-                scf::YieldOp::create(loop, loopLoc,
-                                     combine(loop, loopLoc, stage.kind,
-                                             accumulator.front(), value));
-              });
-          gpu::AllReduceOperation gpuKind =
-              stage.kind == ReductionKind::Sum
-                  ? gpu::AllReduceOperation::ADD
-                  : gpu::AllReduceOperation::MAXIMUMF;
-          Value total = local.getResult(0);
-          if (useTaskIds && blockSize == 32) {
-            for (int32_t offset = 1; offset < 32; offset <<= 1) {
-              auto shuffled = gpu::ShuffleOp::create(
-                  body, bodyLoc, total, offset, 32, gpu::ShuffleMode::XOR);
-              total = combine(body, bodyLoc, stage.kind, total,
-                              shuffled.getShuffleResult());
-            }
-          } else {
-            auto operation =
-                gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
-            // uniform = true, so the result is broadcast to every thread and
-            // the lowering's trailing barrier fences this stage from the next.
-            total =
-                gpu::AllReduceOp::create(body, bodyLoc, total, operation, true);
-          }
-          results.push_back(total);
-        }
-
-        if (program.terminal == TerminalKind::ScalarStore) {
-          Value total = results[program.storedReduction];
-          Value firstThread = arith::CmpIOp::create(
-              body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
-          scf::IfOp::create(
-              body, bodyLoc, firstThread,
-              [&](OpBuilder &store, Location storeLoc) {
-                Value outputAddress =
-                    LLVM::GEPOp::create(store, storeLoc, pointer, f32,
-                                        entry->getArgument(2), segmentId64);
-                LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
-                scf::YieldOp::create(store, storeLoc);
-              });
-        } else {
-          // Guard-free on purpose: every thread runs the same block-stride
-          // loop it ran for each reduction stage, and an empty segment makes
-          // it zero-trip. A thread-dependent guard here would put a predicate
-          // around code the barriers above already made CTA-uniform.
-          scf::ForOp::create(
-              body, bodyLoc, first, end, block, ValueRange(),
-              [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
-                Value index64 = arith::IndexCastOp::create(
-                    loop, loopLoc, loop.getI64Type(), index);
-                Value address =
-                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                        entry->getArgument(0), index64);
-                Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
-                value = evaluateElement(loop, program.mapStore, value, results);
-                Value outputAddress =
-                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                        entry->getArgument(2), index64);
-                LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
-                scf::YieldOp::create(loop, loopLoc);
-              });
-        }
-        scf::YieldOp::create(body, bodyLoc);
-      });
+                      scf::YieldOp::create(body, bodyLoc);
+                    });
   gpu::ReturnOp::create(builder, loc);
   source.erase();
 }
@@ -710,11 +774,13 @@ public:
       : PassWrapper(other) {
     blockSize = other.blockSize.getValue();
     useTaskIds = other.useTaskIds.getValue();
+    fusedMixed = other.fusedMixed.getValue();
   }
-  SegmentedReductionToGPUPass(int64_t requestedBlockSize,
-                              bool requestedTaskIds) {
+  SegmentedReductionToGPUPass(int64_t requestedBlockSize, bool requestedTaskIds,
+                              bool requestedFusedMixed) {
     blockSize = requestedBlockSize;
     useTaskIds = requestedTaskIds;
+    fusedMixed = requestedFusedMixed;
   }
 
   StringRef getArgument() const final {
@@ -734,18 +800,23 @@ public:
       getOperation().emitError("block-size must be a positive integer");
       return signalPassFailure();
     }
+    if (fusedMixed && blockSize != 128) {
+      getOperation().emitError("fused mixed lowering requires block-size 128");
+      return signalPassFailure();
+    }
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
     if (failed(function))
       return signalPassFailure();
     SegmentProgramAnalysis analysis;
     if (failed(analyzeSegmentProgram(*function, analysis)))
       return signalPassFailure();
-    if (useTaskIds && failed(verifyPlanningProgram(analysis)))
+    if ((useTaskIds || fusedMixed) && failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
     RegionOwner owner;
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
-    buildGPUProgram(getOperation(), *function, program, blockSize, useTaskIds);
+    buildGPUProgram(getOperation(), *function, program, blockSize, useTaskIds,
+                    fusedMixed);
   }
 
 private:
@@ -755,6 +826,10 @@ private:
   Option<bool> useTaskIds{
       *this, "use-task-ids",
       llvm::cl::desc("Load segment IDs through the internal task ABI"),
+      llvm::cl::init(false)};
+  Option<bool> fusedMixed{
+      *this, "fused-mixed",
+      llvm::cl::desc("Fuse warp and CTA task schedules into one kernel"),
       llvm::cl::init(false)};
 };
 
@@ -824,8 +899,10 @@ std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
 }
 
 std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
-                                                        bool useTaskIds) {
-  return std::make_unique<SegmentedReductionToGPUPass>(blockSize, useTaskIds);
+                                                        bool useTaskIds,
+                                                        bool fusedMixed) {
+  return std::make_unique<SegmentedReductionToGPUPass>(blockSize, useTaskIds,
+                                                       fusedMixed);
 }
 
 std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements) {

@@ -33,6 +33,11 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData);
 
+MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData);
+
 MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
     MlirModule module, const int64_t *offsets, intptr_t offsetCount,
     int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
