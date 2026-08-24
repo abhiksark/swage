@@ -42,11 +42,10 @@ python -m swage.env
 ```
 
 A CUDA launch additionally requires Linux, a CUDA-enabled PyTorch build, and
-`libcuda.so.1` from the installed driver. A nonzero launch performs native
-compilation and requires a device with compute capability 8.0 or newer; the
-compiler currently accepts exact targets from `sm_80` through `sm_129`. The
-validated `n == 0` path returns before target admission. Swage does not use the
-CUDA toolkit compiler on the production path.
+`libcuda.so.1` from the installed driver. See
+[Runtime and Environment](../reference/runtime-environment.md) for exact
+target-admission and zero-work rules. Swage does not use the CUDA toolkit
+compiler on the production path.
 
 ## The wrong `swage` checkout is imported
 

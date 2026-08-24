@@ -42,10 +42,8 @@ C++17 compiler. The pinned LLVM/MLIR build uses about 25 GB and can take about
 an hour on its first build.
 
 GPU execution additionally requires a CUDA-enabled PyTorch build and the
-NVIDIA driver. Nonzero launches perform native compilation and require a
-device with compute capability 8.0 or newer; the compiler currently accepts
-exact targets from `sm_80` through `sm_129`. The validated `n == 0` public
-launch returns before native target admission.
+NVIDIA driver. Exact target-admission and zero-work rules live in
+[Runtime and Environment](../reference/runtime-environment.md).
 
 ```bash
 ./scripts/fetch_llvm.sh

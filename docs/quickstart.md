@@ -5,16 +5,14 @@
 This walkthrough exercises the supported public fixed vector-add path. The
 compile-only and CPU test paths work without a GPU. CUDA execution requires
 the native build, CUDA-enabled PyTorch, an NVIDIA GPU, and the installed CUDA
-driver. The example launches nonzero work, so the device must have compute
-capability 8.0 or newer; the native compiler currently accepts exact targets
-from `sm_80` through `sm_129`. A validated `n == 0` public launch returns
-before target admission.
+driver. The example launches nonzero work. Exact target-admission and zero-work
+rules live in
+[Runtime and Environment](reference/runtime-environment.md).
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
 compile-only module and needs no GPU. The canonical `launch()` path continues
-through native compilation to CUDA. Nonzero native work requires `sm_80` or
-newer, while the validated zero-work path returns before that target gate.
+through native compilation to CUDA.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
