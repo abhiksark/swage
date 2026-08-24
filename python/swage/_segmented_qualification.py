@@ -445,11 +445,14 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
     mixed_tasks = torch.tensor(
         [*warp_ids, *cta_ids], dtype=torch.int32, device=device
     )
+    tasks_ready = torch.cuda.Event()
+    tasks_ready.record(torch.cuda.current_stream())
 
     def submit(function, block_size, task_ids, stream):
         task_count = task_ids.numel()
         if task_count == 0:
             return None
+        stream.wait_event(tasks_ready)
         driver.launch_segmented_tasks(
             function,
             (task_count,),
@@ -491,6 +494,7 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
 
     def mixed():
         stream = current_stream()
+        stream.wait_event(tasks_ready)
         driver.launch_segmented_mixed(
             mixed_function,
             ((warp_count + 3) // 4 + cta_count,),

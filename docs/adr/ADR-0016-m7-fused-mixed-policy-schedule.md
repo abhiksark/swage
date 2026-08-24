@@ -16,7 +16,7 @@ gate. The failure is recorded here before any new benchmark timing run.
 ADR-0016 supersedes only ADR-0015's two-launch mixed rule. The revised fused
 mixed schedule is:
 
-- one 128-thread block;
+- 128 threads per block;
 - four one-segment warp slots per block;
 - one kernel launch.
 
@@ -54,7 +54,7 @@ change. The implementation must improve or M7 remains open.
 
 ## Consequences
 
-- Mixed execution has one launch with one 128-thread block and four
+- Mixed execution has one launch with 128 threads per block and four
   one-segment warp slots per block.
 - The existing two-launch mixed schedule is no longer the predeclared M7
   schedule.

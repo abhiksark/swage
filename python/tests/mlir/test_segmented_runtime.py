@@ -1,6 +1,8 @@
 # python/tests/mlir/test_segmented_runtime.py
 """Differential qualification for native segmented reductions."""
 
+import threading
+
 import pytest
 import torch
 from swage._segmented_qualification import (
@@ -174,7 +176,7 @@ def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("lengths", TASK_CASES)
 def test_prepared_mixed_sum_matches_exact_segment_lengths(lengths):
-    """Classify once and execute warp tasks before CTA tasks."""
+    """Execute one fused launch with stable warp IDs before stable CTA IDs."""
     offsets = [0]
     for length in lengths:
         offsets.append(offsets[-1] + length)
@@ -234,6 +236,67 @@ def test_prepared_sum_uses_current_non_default_stream(policy):
     torch.testing.assert_close(
         output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+def test_prepared_sum_waits_for_task_initialization_across_streams(
+    monkeypatch, policy
+):
+    """Order asynchronous task initialization before another stream launches."""
+    from swage import _runtime
+
+    preparation_stream = torch.cuda.Stream()
+    launch_stream = torch.cuda.Stream()
+    launch_observed = torch.cuda.Event()
+    launch_completed = threading.Event()
+
+    class _Driver:
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_segmented_tasks(self, *_arguments):
+            launch_observed.record(launch_stream)
+
+        def launch_segmented_mixed(self, *_arguments):
+            launch_observed.record(launch_stream)
+
+    values = torch.ones(34, device="cuda", dtype=torch.float32)
+    offsets = torch.tensor([0, 1, 34], device="cuda", dtype=torch.int32)
+    output = torch.empty(2, device="cuda", dtype=torch.float32)
+    all_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    mixed_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+
+    def asynchronous_arange(*_args, **_kwargs):
+        torch.cuda._sleep(2_000_000_000)
+        return all_task_storage
+
+    def asynchronous_tensor(_data, *, dtype, device):
+        assert dtype == torch.int32
+        assert device == offsets.device
+        return mixed_task_storage
+
+    monkeypatch.setattr(torch, "arange", asynchronous_arange)
+    monkeypatch.setattr(torch, "tensor", asynchronous_tensor)
+    with torch.cuda.stream(preparation_stream):
+        prepared = _prepare_planned_sum(values, offsets, output)
+    with torch.cuda.stream(launch_stream):
+        getattr(prepared, policy)()
+
+    def observe_launch():
+        launch_observed.synchronize()
+        launch_completed.set()
+
+    observer = threading.Thread(target=observe_launch)
+    observer.start()
+    bypassed_initialization = launch_completed.wait(timeout=0.5)
+    preparation_stream.synchronize()
+    launch_stream.synchronize()
+    observer.join()
+
+    assert not bypassed_initialization
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
