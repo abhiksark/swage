@@ -59,8 +59,9 @@ Swage semantic MLIR            (dialect: swage)
         ├── M6 identity segmented sum
         │     ↓  read-only admission and private planning companion
         │   SwagePlan classify (dialect: swage_plan)
-        └── M6 host metadata → warp/CTA descriptors (independent)
-                              → task-range lowering and GPU dispatch (M7)
+        └── M7 private materialization → stable warp/CTA task IDs
+                                       → pure task-ID kernels
+                                       → one fused mixed GPU kernel
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The
@@ -68,7 +69,7 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python, M3 execution, and M4–M6 qualification boundary
+## Current Python, M3 execution, and M4–M7 qualification boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
@@ -138,10 +139,29 @@ module mutation.
 The internal host classifier is a separately tested descriptor generator. It
 validates i32 runtime metadata before producing one absolute half-open range
 per segment, including empty segments. Lengths at or below the threshold use
-warp; longer lengths use CTA. M6 does not connect these descriptors to the
-planning operation, lower task ranges, dispatch work, execute either policy,
-or change the public frontend, emission, or launch contracts. Those execution
-steps begin in M7.
+warp; longer lengths use CTA. M6 alone does not connect these descriptors to
+the planning operation, dispatch work, execute either policy, or change the
+public frontend, emission, or launch contracts.
+
+M7 adds the smallest private execution connection defined by ADR-0015 and
+ADR-0016. A native helper clones the semantic module, runs the M6 planning
+pass, requires exactly one `swage_plan.classify`, reads its threshold, and
+invokes the host classifier. Python materializes stable warp IDs followed by
+CTA IDs only after tensor and offset validation. Unsupported shapes and
+failures do not fall back to another policy or backend.
+
+Pure qualification schedules run every segment through either a 32-thread
+warp kernel or a 128-thread CTA kernel with the same task-ID ABI. The mixed
+schedule submits one 128-thread kernel. Its warp blocks hold four independent
+one-segment warp slots, followed by one block for each CTA task. Empty total
+work enqueues no kernel. Launches use the current PyTorch CUDA stream and
+retain all submitted tensors through stream recording.
+
+Exact identity sums pass the internal GPU suite on NVIDIA RTX A6000 `sm_86`.
+On the frozen 32,768-segment bimodal benchmark, the mixed median is
+`0.063488 ms`, the best pure median is `0.067584 ms`, and their ratio is
+`0.939394`, below the predeclared `1.05` maximum. This evidence does not widen
+`swage.language`, `emit_mlir()`, or the public M3 `launch()` contract.
 
 ## The `swage` dialect (semantic level)
 
@@ -182,19 +202,20 @@ optional at configure time (`SWAGE_PYTHON_BINDINGS`), and requesting
 them against an MLIR install built without bindings is a configure
 error, never a silent skip.
 
-## The `swage_plan` dialect (minimal planning level)
+## The `swage_plan` dialect (minimal planning and execution level)
 
 M6 implements only `#swage_plan.policy<warp|cta>`,
 `!swage_plan.task_range`, and `swage_plan.classify` (ADR-0014). Compile time
 verifies the one admitted semantic shape and records its legal policy order
-and threshold. The independent host classifier uses actual offsets and counts
-to select a policy and construct stable descriptors without changing the
-semantic IR.
+and threshold. M7 privately consumes that record to classify actual offsets
+and materialize stable task-ID lists without changing the semantic IR. It
+executes only the canonical identity segmented sum through the fixed pure and
+fused schedules above.
 
 Packed warps, split CTAs, partial reductions, merges, queues, dependencies,
-task-range lowering, dispatch, mixed-policy GPU execution, ragged-softmax
-planning, and cost-based selection remain future work. Compiler passes do not
-pretend to know runtime offset contents.
+ragged-softmax planning, general task-range lowering, and cost-based selection
+remain future work. Compiler passes do not pretend to know runtime offset
+contents.
 
 ## Runtime
 
@@ -231,8 +252,9 @@ pointers.
 - GPU: a trusted main-only self-hosted workflow checks fixed vector-add
   correctness; segmented sum, max, and ragged-softmax distributions; empty
   and NaN behavior; repeated execution; non-default streams; argument
-  lifetime; and cache reuse on a real NVIDIA device. Pull requests never
-  execute on that runner.
+  lifetime; cache reuse; and the internal M7 pure and fused mixed identity-sum
+  schedules on a real NVIDIA device. Pull requests never execute on that
+  runner.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.

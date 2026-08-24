@@ -58,8 +58,21 @@ semantic versioning (`0.x`; anything may change).
   sum, and normalization/store phases. CPU results match PyTorch, and RTX
   A6000 `sm_86` results match both PyTorch and the CPU oracle across six
   adversarial segment distributions.
+- Minimal `swage_plan` support for warp and CTA policy attributes, an opaque
+  task-range type, and a classify operation. The fail-closed M6 conversion
+  preserves one canonical identity segmented-sum function while adding a
+  private planning companion, and the host classifier emits validated stable
+  descriptors.
+- Private M7 identity-sum preparation that clones the semantic module,
+  consumes its planning threshold, and materializes stable warp and CTA task
+  IDs before compiling or allocating GPU work. Pure schedules use 32-thread
+  warp or 128-thread CTA kernels with the same task-ID ABI.
+- One-launch fused M7 mixed execution with four one-segment warp slots per
+  initial 128-thread block followed by one block per CTA task. The frozen RTX
+  A6000 `sm_86` bimodal benchmark records a `0.939394`
+  mixed-to-best-pure ratio, passing the predeclared `1.05` maximum.
 - Project documentation (README, DESIGN, ROADMAP, concept docs, ADRs
-  0001–0013), community health files, issue forms, and CPU CI.
+  0001–0016), community health files, issue forms, and CPU CI.
 
 ### Notes
 
@@ -72,5 +85,9 @@ semantic versioning (`0.x`; anything may change).
 - M5 ragged softmax is also an internal qualification path. Public segment
   primitives, segmented launch, schedule selection, and multi-CTA execution
   remain planned; `v0.4.0` is eligible but not released.
+- M7 mixed-policy execution remains an internal qualification path for one
+  canonical identity segmented sum. It adds no public segmented launch,
+  packed warps, split CTAs, queues, or persistent scheduling. `v0.5.0` is
+  eligible but not released.
 - The pip package remains GPU-free at import time. Execution requires Linux,
   CUDA-enabled PyTorch, `libcuda`, and the build-tree `mlir_swage` bindings.
