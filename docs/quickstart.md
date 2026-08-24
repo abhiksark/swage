@@ -5,7 +5,8 @@
 This walkthrough exercises the supported public fixed vector-add path. The
 compile-only and CPU test paths work without a GPU. CUDA execution requires
 the native build, CUDA-enabled PyTorch, an NVIDIA GPU, and the installed CUDA
-driver.
+driver. The device must have compute capability 8.0 or newer; the native
+compiler currently accepts exact targets from `sm_80` through `sm_129`.
 
 ## Prepare the checkout
 

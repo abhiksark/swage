@@ -104,11 +104,8 @@ planned. They are not current Swage ownership claims.
 - Launch is asynchronous. Submitted tensors are recorded on the stream.
 - No path silently copies, casts, synchronizes, changes devices, creates a
   context, or falls back to another backend or policy.
-- Persistent artifacts are keyed by compiler and specialization identity,
-  digest-checked, permission-checked, and written atomically.
-- Dirty or unidentified builds use process-local compilation reuse only.
 
-Exact runtime and cache rules live in
+Runtime and cache requirements live only in
 [`docs/reference/runtime-environment.md`](docs/reference/runtime-environment.md).
 
 ## Package boundary

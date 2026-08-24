@@ -41,6 +41,10 @@ The native build requires Linux x86-64, CMake 3.20 or newer, Ninja, and a
 C++17 compiler. The pinned LLVM/MLIR build uses about 25 GB and can take about
 an hour on its first build.
 
+GPU execution additionally requires a CUDA-enabled PyTorch build, the NVIDIA
+driver, and a device with compute capability 8.0 or newer. The native compiler
+currently accepts exact targets from `sm_80` through `sm_129`.
+
 ```bash
 ./scripts/fetch_llvm.sh
 ./scripts/build_llvm.sh

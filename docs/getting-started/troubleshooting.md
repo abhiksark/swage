@@ -41,9 +41,11 @@ python -m pip install "swage-compiler[pytorch]"
 python -m swage.env
 ```
 
-A CUDA launch additionally requires Linux, a CUDA-enabled PyTorch build, a
-supported NVIDIA GPU, and `libcuda.so.1` from the installed driver. Swage does
-not use the CUDA toolkit compiler on the production path.
+A CUDA launch additionally requires Linux, a CUDA-enabled PyTorch build,
+`libcuda.so.1` from the installed driver, and a device with compute capability
+8.0 or newer. The native compiler currently accepts exact targets from
+`sm_80` through `sm_129`. Swage does not use the CUDA toolkit compiler on the
+production path.
 
 ## The wrong `swage` checkout is imported
 
@@ -62,14 +64,13 @@ provides that environment.
 
 ## The cache is not reused
 
-Persistent caching is deliberately disabled for a dirty or unidentified
-compiler checkout. Clean, identified builds may reuse verified disk entries;
-other builds use only process-local reuse. Set `SWAGE_CACHE_DIR` to isolate a
-run when investigating cache behavior.
+Set `SWAGE_CACHE_DIR` to a fresh, isolated directory and rerun the command. If
+reuse still does not occur, include the command, error, and `python -m
+swage.env` output in the report. Do not weaken cache checks or remove a broad
+shared cache while diagnosing the symptom.
 
-Unsafe, incomplete, corrupt, or specialization-mismatched entries fail
-closed. Remove only the specific isolated cache directory you created for the
-investigation, then rerun the command.
+[Runtime and Environment](../reference/runtime-environment.md) owns the rules
+for persistent reuse, cache location, and entry validation.
 
 ## The build uses the wrong LLVM/MLIR
 

@@ -16,9 +16,7 @@ swage.__version__
 ```
 
 `jit(function)` returns a captured kernel object without executing the
-function body. A decorated kernel is not directly callable. Unsupported
-source or inputs raise a source-located `CompilationError`; missing optional
-or native components raise `RuntimeError` at the boundary that needs them.
+function body. A decorated kernel is not directly callable.
 
 ## Compile-only emission
 
@@ -67,10 +65,27 @@ positive integer `BLOCK` that fits the active device limit. `grid` is the
 one-element tuple `(ceildiv(n, BLOCK),)`. For `n == 0`, `grid` is `(0,)` and
 the validated launch performs no compilation or enqueue.
 
+The native compiler targets the active device exactly and accepts `sm_80`
+through `sm_129`. A device below compute capability 8.0 is rejected even when
+its tensors, block size, and grid satisfy the Python launch checks.
+
 Execution is asynchronous on `torch.cuda.current_stream()`. The runtime
 records all three tensors on that stream after submission. There is no public
 `emit_ptx()` method, direct kernel call, CPU execution fallback, or public
 segmented launch.
+
+## Exceptions
+
+- `CompilationError` reports source-located capture and `emit_mlir()` input
+  failures. This includes unavailable or unreadable PyTorch metadata when the
+  `arguments` inference path is selected.
+- `TypeError` reports launch inputs with the wrong container, tensor, dtype,
+  rank, or ABI category.
+- `ValueError` reports invalid launch values, geometry, device placement, or
+  native compiler admission such as an unsupported `sm_*` target.
+- `RuntimeError` reports direct kernel calls, symbolic language calls outside
+  a captured kernel, missing native bindings, missing PyTorch for launch,
+  unavailable CUDA, and runtime driver or cache failures.
 
 ## Kernel language symbols
 
