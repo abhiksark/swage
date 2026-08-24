@@ -26,6 +26,16 @@ markdown_extensions:
   - tables
 extra_css:
   - stylesheets/figures.css
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+    anchors: warn
 nav:
   - Home: index.md
   - Getting started:

@@ -78,6 +78,17 @@ jobs:
       - name: Build Swage and run lit suite
         run: SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh
 
+      - name: Build MLIR documentation
+        run: >
+          ninja -C build
+          SwageDialectDocGen
+          SwageOpsDocGen
+          SwagePlanDialectDocGen
+          SwagePlanOpsDocGen
+
+      - name: Check committed MLIR reference
+        run: python scripts/sync_mlir_reference.py --build-dir build --check
+
       - name: Run C++ unit tests
         run: ninja -C build check-swage-unit
 

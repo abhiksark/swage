@@ -45,4 +45,4 @@ jobs:
       - name: Install docs toolchain
         run: pip install ".[docs]"
       - name: Build docs strictly
-        run: mkdocs build --strict
+        run: make docs
