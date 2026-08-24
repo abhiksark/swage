@@ -1,3 +1,5 @@
+# mkdocs.yml
+
 site_name: Swage
 site_description: Turn variable-sized dense segments into efficient GPU tile tasks
 site_url: !ENV READTHEDOCS_CANONICAL_URL
@@ -23,6 +25,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Concepts:
+      - Swage, Visually: concepts/swage-visual-guide.md
       - Segments, Tasks, and Tiles: concepts/segments-tiles-tasks.md
   - Architecture:
       - Compiler pipeline: architecture/compiler-pipeline.md

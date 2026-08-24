@@ -1,0 +1,158 @@
+<!-- docs/assets/diagrams/segments-tasks-tiles.svg -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1200 720"
+     role="img"
+     aria-labelledby="title description">
+  <title id="title">How Swage maps segments to tasks and fixed GPU tiles</title>
+  <desc id="description">
+    Four variable-length segments become direct warp tasks, a direct CTA task,
+    or three partial CTA tasks followed by one merge task. Each execution group
+    processes one or more fixed 32-value or 128-value tiles.
+  </desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4B5563"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+          BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #17212B;
+      }
+      .title { font-size: 36px; font-weight: 750; }
+      .eyebrow { font-size: 16px; font-weight: 750; letter-spacing: 1.6px; }
+      .heading { font-size: 28px; font-weight: 750; }
+      .body { font-size: 18px; }
+      .small { font-size: 16px; }
+      .tiny { font-size: 15px; }
+      .strong { font-weight: 700; }
+      .muted { fill: #52606D; }
+      .panel { fill: #FFFDF8; stroke: #CBD2D9; stroke-width: 1.5; }
+      .segment { fill: #F7F8FA; stroke: #7B8794; stroke-width: 1.5; }
+      .task { fill: #F7F8FA; stroke: #7B8794; stroke-width: 1.5; }
+      .warp { fill: #DCEFFD; stroke: #0072B2; stroke-width: 2; }
+      .cta { fill: #F7E2EF; stroke: #CC79A7; stroke-width: 2; }
+      .merge { fill: #FCE5DC; stroke: #D55E00; stroke-width: 2; }
+      .arrow {
+        fill: none;
+        stroke: #4B5563;
+        stroke-width: 2;
+        marker-end: url(#arrow);
+      }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="718" rx="24"
+        fill="#FFFDF8" stroke="#CBD2D9" stroke-width="2"/>
+
+  <text x="48" y="55" class="title">One ragged batch, three separate layers</text>
+  <text x="48" y="84" class="body muted">
+    Labels and shapes carry meaning as well as color.
+  </text>
+
+  <rect x="40" y="112" width="335" height="530" rx="18" class="panel"/>
+  <rect x="432" y="112" width="335" height="530" rx="18" class="panel"/>
+  <rect x="824" y="112" width="335" height="530" rx="18" class="panel"/>
+
+  <text x="68" y="145" class="eyebrow">1 · SEMANTIC</text>
+  <text x="68" y="178" class="heading">Segments</text>
+  <text x="68" y="202" class="small muted">Runtime-sized dense slices</text>
+
+  <rect x="68" y="226" width="279" height="64" rx="12" class="segment"/>
+  <text x="84" y="251" class="body strong">S0 · length 12</text>
+  <rect x="84" y="266" width="72" height="9" rx="4.5" fill="#D55E00"/>
+  <text x="167" y="276" class="tiny muted">values[0:12]</text>
+
+  <rect x="68" y="304" width="279" height="64" rx="12" class="segment"/>
+  <text x="84" y="329" class="body strong">S1 · length 0</text>
+  <line x1="84" y1="349" x2="112" y2="349"
+        stroke="#D55E00" stroke-width="4" stroke-dasharray="4 4"/>
+  <text x="124" y="354" class="tiny muted">values[12:12]</text>
+
+  <rect x="68" y="382" width="279" height="64" rx="12" class="segment"/>
+  <text x="84" y="407" class="body strong">S2 · length 96</text>
+  <rect x="84" y="422" width="132" height="9" rx="4.5" fill="#D55E00"/>
+  <text x="226" y="432" class="tiny muted">[12:108]</text>
+
+  <rect x="68" y="460" width="279" height="104" rx="12" class="segment"/>
+  <text x="84" y="486" class="body strong">S3 · length 9000</text>
+  <rect x="84" y="503" width="236" height="9" rx="4.5" fill="#D55E00"/>
+  <text x="84" y="537" class="small muted">
+    One logical segment
+  </text>
+  <text x="84" y="557" class="tiny muted">values[108:9108]</text>
+
+  <text x="68" y="608" class="small strong">Meaning:</text>
+  <text x="152" y="608" class="small muted">what the program computes</text>
+
+  <text x="460" y="145" class="eyebrow">2 · PLANNING</text>
+  <text x="460" y="178" class="heading">Tasks</text>
+  <text x="460" y="202" class="small muted">Schedulable work descriptors</text>
+
+  <rect x="460" y="226" width="279" height="64" rx="12" class="task"/>
+  <text x="476" y="251" class="body strong">Direct warp task · S0</text>
+  <text x="476" y="274" class="small muted">absolute range [0, 12)</text>
+
+  <rect x="460" y="304" width="279" height="64" rx="12" class="task"/>
+  <text x="476" y="329" class="body strong">Direct warp task · S1</text>
+  <text x="476" y="352" class="small muted">empty range [12, 12)</text>
+
+  <rect x="460" y="382" width="279" height="64" rx="12" class="task"/>
+  <text x="476" y="407" class="body strong">Direct CTA task · S2</text>
+  <text x="476" y="430" class="small muted">absolute range [12, 108)</text>
+
+  <rect x="460" y="460" width="279" height="150" rx="12" class="task"/>
+  <text x="476" y="485" class="body strong">Split tasks · S3</text>
+  <text x="476" y="509" class="tiny muted">partial 0 · [108, 4204)</text>
+  <text x="476" y="530" class="tiny muted">partial 1 · [4204, 8300)</text>
+  <text x="476" y="551" class="tiny muted">partial 2 · [8300, 9108)</text>
+  <line x1="476" y1="567" x2="720" y2="567"
+        stroke="#E69F00" stroke-width="1.5"/>
+  <text x="476" y="591" class="tiny strong">merge · scratch [0, 3)</text>
+
+  <path d="M 375 258 C 398 258, 402 258, 426 258" class="arrow"/>
+  <path d="M 375 336 C 398 336, 402 336, 426 336" class="arrow"/>
+  <path d="M 375 414 C 398 414, 402 414, 426 414" class="arrow"/>
+  <path d="M 375 512 C 398 512, 402 512, 426 512" class="arrow"/>
+
+  <text x="852" y="145" class="eyebrow">3 · HARDWARE</text>
+  <text x="852" y="178" class="heading">Tiles</text>
+  <text x="852" y="202" class="small muted">Fixed 32- or 128-value steps</text>
+
+  <rect x="852" y="226" width="279" height="64" rx="12" class="warp"/>
+  <text x="868" y="251" class="body strong">tile&lt;32xf32&gt;</text>
+  <text x="868" y="274" class="small muted">1 warp · masked to length 12</text>
+
+  <rect x="852" y="304" width="279" height="64" rx="12" class="warp"/>
+  <text x="868" y="329" class="body strong">tile&lt;32xf32&gt;</text>
+  <text x="868" y="352" class="small muted">1 warp · no loads · writes 0</text>
+
+  <rect x="852" y="382" width="279" height="64" rx="12" class="cta"/>
+  <text x="868" y="407" class="body strong">tile&lt;128xf32&gt;</text>
+  <text x="868" y="430" class="small muted">1 CTA · masked to length 96</text>
+
+  <rect x="852" y="460" width="279" height="84" rx="12" class="cta"/>
+  <text x="868" y="485" class="body strong">Each partial CTA repeats</text>
+  <text x="868" y="508" class="small muted">tile&lt;128xf32&gt; up to 32 times</text>
+  <text x="868" y="529" class="tiny muted">one global scratch write per task</text>
+
+  <rect x="852" y="558" width="279" height="52" rx="12" class="merge"/>
+  <text x="868" y="580" class="body strong">Merge · tile&lt;128xf32&gt;</text>
+  <text x="868" y="600" class="tiny muted">one final output writer</text>
+
+  <path d="M 767 258 C 790 258, 794 258, 818 258" class="arrow"/>
+  <path d="M 767 336 C 790 336, 794 336, 818 336" class="arrow"/>
+  <path d="M 767 414 C 790 414, 794 414, 818 414" class="arrow"/>
+  <path d="M 767 512 C 790 512, 794 512, 818 512" class="arrow"/>
+  <path d="M 991 544 L 991 552" class="arrow"/>
+
+  <text x="460" y="630" class="tiny muted">
+    launch order: direct &gt; partial &gt; merge
+  </text>
+
+  <rect x="172" y="666" width="856" height="34" rx="17" fill="#EEF2F5"/>
+  <text x="600" y="689" text-anchor="middle" class="small strong">
+    Meaning stays stable · planning changes the work · hardware executes fixed tiles
+  </text>
+</svg>
