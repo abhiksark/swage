@@ -6,6 +6,8 @@ semantic versioning (`0.x`; anything may change).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-24
+
 ### Added
 
 - Region-based semantic ops `swage.map`, `swage.reduce`
@@ -86,8 +88,7 @@ semantic versioning (`0.x`; anything may change).
   primitives, segmented launch, schedule selection, and multi-CTA execution
   remain planned; `v0.4.0` is eligible but not released.
 - M7 mixed-policy execution remains an internal qualification path for one
-  canonical identity segmented sum. It adds no public segmented launch,
-  packed warps, split CTAs, queues, or persistent scheduling. `v0.5.0` is
-  eligible but not released.
+  canonical identity segmented sum. Version 0.5.0 adds no public segmented
+  launch, packed warps, split CTAs, queues, or persistent scheduling.
 - The pip package remains GPU-free at import time. Execution requires Linux,
   CUDA-enabled PyTorch, `libcuda`, and the build-tree `mlir_swage` bindings.

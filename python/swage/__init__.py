@@ -3,6 +3,6 @@
 
 from ._frontend import CompilationError, jit
 
-__version__ = "0.0.1.dev0"
+__version__ = "0.5.0"
 
 __all__ = ["CompilationError", "jit"]

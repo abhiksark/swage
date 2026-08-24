@@ -97,8 +97,14 @@ class _Kernel:
         runtime_types, static_values = self._validate_inputs(
             signature, arguments, constexprs
         )
-        from mlir_swage import ir
-        from mlir_swage.dialects import arith, func, swage, vector
+        try:
+            from mlir_swage import ir
+            from mlir_swage.dialects import arith, func, swage, vector
+        except ImportError as error:
+            raise RuntimeError(
+                "Swage emit_mlir() requires the build-tree "
+                "mlir_swage bindings"
+            ) from error
 
         emitter = _Emitter(
             self,
