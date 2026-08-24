@@ -1,5 +1,6 @@
 site_name: Swage
 site_description: Turn variable-sized dense segments into efficient GPU tile tasks
+site_url: !ENV READTHEDOCS_CANONICAL_URL
 repo_url: https://github.com/abhiksark/swage
 theme:
   name: material
