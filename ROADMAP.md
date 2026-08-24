@@ -23,9 +23,9 @@ after M4, `v0.4.0` after M5, `v0.5.0` after M7, `v0.6.0` after M9. `v0.1.0`
 was reserved for the frozen Python prototype and will not be used
 (ADR-0005).
 
-M7 completion makes `v0.5.0` eligible. It is not released. The deferred
-`v0.2.0`, `v0.3.0`, and `v0.4.0` releases, all tagging, and release
-publication remain separate release work.
+M7 is the `v0.5.0` feature gate. Release tagging and publication are separate
+external operations and are not phase-gate evidence. The deferred `v0.2.0`,
+`v0.3.0`, and `v0.4.0` versions remain outside this roadmap gate.
 
 Tracked as GitHub milestones; per-phase issues carry the detailed
 acceptance criteria.

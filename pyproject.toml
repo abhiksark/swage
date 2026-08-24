@@ -1,3 +1,5 @@
+# pyproject.toml
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -23,7 +25,7 @@ classifiers = [
 Repository = "https://github.com/abhiksark/swage"
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "lit"]
+dev = ["build", "hatchling", "lit", "pytest", "ruff"]
 docs = ["mkdocs", "mkdocs-material"]
 pytorch = ["torch>=2.6"]
 
@@ -32,6 +34,14 @@ path = "python/swage/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/swage"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+  "/python/swage",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

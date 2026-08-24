@@ -60,13 +60,15 @@ add_kernel.launch(
 torch.testing.assert_close(output, x + y)
 ```
 
-Install the optional dependency with `pip install "swage-compiler[pytorch]"`.
-Both `launch()` and `emit_mlir()` require the build-tree-only `mlir_swage`
-bindings. `launch()` is keyword-only, asynchronous, returns `None`, and uses
-the current PyTorch CUDA stream. `emit_mlir()` remains compile-only, and its
-explicit `signature=` form remains available without PyTorch. Direct kernel
-calls remain unavailable. PTX emission is an internal runtime operation, not
-a public API.
+The PyPI wheel installs the importable `swage` package. It does not contain
+the native `mlir_swage` package or compiler build output. Both `launch()` and
+`emit_mlir()` require a bindings-enabled native build and its build-tree
+`mlir_swage` package. Install the optional PyTorch dependency with
+`pip install "swage-compiler[pytorch]"`. `launch()` is keyword-only,
+asynchronous, returns `None`, and uses the current PyTorch CUDA stream.
+`emit_mlir()` remains compile-only, and its explicit `signature=` form
+remains available without PyTorch. Direct kernel calls remain unavailable.
+PTX emission is an internal runtime operation, not a public API.
 
 The research target is the segment API: one segment-local program, from
 which the compiler derives packing, bucketing, partitioning, partial
