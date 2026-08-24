@@ -43,6 +43,10 @@ segment IDs, direct CTA segment IDs, partial `[begin, end]` records, and merge
 `[segment_id, partial_begin, partial_end]` records. This adds no operation,
 type, policy, or public Python API.
 
+The partial and merge lowering passes are available only through private
+compiler factories. They are intentionally not registered as public
+`swage-opt` pass arguments.
+
 ### Private GPU execution
 
 The partial kernel uses 128 threads and this ABI:

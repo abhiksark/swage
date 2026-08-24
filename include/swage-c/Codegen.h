@@ -48,6 +48,9 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData);
 
+// Callback counts below are flat i32 element counts. Partial records use
+// [begin, end] pairs; merge records use
+// [segment_id, partial_begin, partial_end] triples.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
     MlirModule module, const int64_t *offsets, intptr_t offsetCount,
     int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,

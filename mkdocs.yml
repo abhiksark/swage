@@ -3,6 +3,8 @@ site_description: Turn variable-sized dense segments into efficient GPU tile tas
 repo_url: https://github.com/abhiksark/swage
 theme:
   name: material
+  logo: assets/images/swage-icon.png
+  favicon: assets/images/swage-icon.png
   palette:
     - scheme: default
       toggle:

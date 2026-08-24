@@ -9,9 +9,9 @@ semantic versioning (`0.x`; anything may change).
 ### Added
 
 - Private M8 split-CTA execution for the canonical identity segmented sum.
-  Oversized segments become ordered 4096-element partial ranges followed by
-  one compact scratch-range merge, using fixed 128-thread kernels and the
-  existing CUDA Driver launch boundary.
+  Oversized segments become ordered partial ranges no larger than 4096
+  elements followed by one compact scratch-range merge, using fixed 128-thread
+  kernels and the existing CUDA Driver launch boundary.
 - Exact and nontrivial f32 qualification on NVIDIA RTX A6000 `sm_86`, covering
   split-only, direct-only, mixed, zero-work, stream, lifetime, device drift,
   and fail-closed compile, allocation, and launch cases.

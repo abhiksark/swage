@@ -1,3 +1,13 @@
+<!-- README.md -->
+
+<p align="center">
+  <img
+    src="docs/assets/images/swage-logo.png"
+    alt="Swage logo"
+    width="720"
+  >
+</p>
+
 # Swage
 
 [![ci-python](https://github.com/abhiksark/swage/actions/workflows/ci-python.yml/badge.svg?branch=main)](https://github.com/abhiksark/swage/actions/workflows/ci-python.yml)
@@ -106,7 +116,7 @@ Swage semantic MLIR
         ├── M6 identity segmented sum → SwagePlan classify
         ├── M7 private materialization → stable warp/CTA task IDs
         │                              → one fused mixed GPU kernel
-        └── M8 private split path → ordered 4096-element CTA chunks
+        └── M8 private split path → ordered CTA chunks up to 4096 elements
                                   → partial scratch sums → merge CTAs
 ```
 
