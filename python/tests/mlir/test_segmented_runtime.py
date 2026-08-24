@@ -300,6 +300,7 @@ def test_prepared_mixed_uses_one_ordered_fused_launch(
     prepared.mixed()
 
     assert len(driver.launches) == 1
+    assert len(task_tensors) == 1
     kind, _, grid, block, _, arguments = driver.launches[0]
     mixed_ids, mixed_tasks = task_tensors[-1]
     assert kind == "mixed"

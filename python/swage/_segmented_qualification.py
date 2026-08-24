@@ -440,8 +440,8 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
     device = offsets.device
     device_index = device.index
     all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
-    warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
-    cta_tasks = torch.tensor(cta_ids, dtype=torch.int32, device=device)
+    warp_count = len(warp_ids)
+    cta_count = len(cta_ids)
     mixed_tasks = torch.tensor(
         [*warp_ids, *cta_ids], dtype=torch.int32, device=device
     )
@@ -491,8 +491,6 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
 
     def mixed():
         stream = current_stream()
-        warp_count = warp_tasks.numel()
-        cta_count = cta_tasks.numel()
         driver.launch_segmented_mixed(
             mixed_function,
             ((warp_count + 3) // 4 + cta_count,),
