@@ -49,6 +49,7 @@ def SwagePlan_ClassifyOp : SwagePlan_Op<"classify"> {
     I32:$segment_count,
     FlatSymbolRefAttr:$kernel,
     ConfinedAttr<I32Attr, [IntNonNegative]>:$warp_max_elements,
+    ConfinedAttr<I32Attr, [IntNonNegative]>:$cta_chunk_elements,
     SwagePlan_TaskPolicyArrayAttr:$policies);
   let results = (outs SwagePlan_TaskRangeType:$result);
   let assemblyFormat = [{

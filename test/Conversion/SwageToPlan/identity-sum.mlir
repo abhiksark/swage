@@ -1,8 +1,11 @@
 // test/Conversion/SwageToPlan/identity-sum.mlir
 // RUN: swage-opt --swage-to-plan %s | FileCheck %s --check-prefix=DEFAULT
-// RUN: swage-opt --swage-to-plan='warp-max-elements=64' %s | FileCheck %s --check-prefix=CUSTOM
-// RUN: not swage-opt --swage-to-plan='warp-max-elements=-1' %s 2>&1 | FileCheck %s --check-prefix=BAD-THRESHOLD
-// RUN: not swage-opt --swage-to-plan='warp-max-elements=2147483648' %s 2>&1 | FileCheck %s --check-prefix=BAD-THRESHOLD
+// RUN: swage-opt --swage-to-plan='warp-max-elements=64 cta-chunk-elements=2048' %s | FileCheck %s --check-prefix=CUSTOM
+// RUN: not swage-opt --swage-to-plan='warp-max-elements=0' %s 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
+// RUN: not swage-opt --swage-to-plan='warp-max-elements=2147483648' %s 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
+// RUN: not swage-opt --swage-to-plan='cta-chunk-elements=0' %s 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
+// RUN: not swage-opt --swage-to-plan='cta-chunk-elements=2147483648' %s 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
+// RUN: not swage-opt --swage-to-plan='warp-max-elements=33 cta-chunk-elements=32' %s 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
 
 module {
   func.func @segmented_sum(
@@ -29,10 +32,10 @@ module {
 // DEFAULT: return
 // DEFAULT-LABEL: func.func private @segmented_sum__swage_plan(
 // DEFAULT-SAME: %[[OFFSETS:.*]]: memref<?xi32>, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) -> !swage_plan.task_range
-// DEFAULT: %[[TASKS:.*]] = swage_plan.classify %[[OFFSETS]], %[[VALUE_COUNT]], %[[SEGMENT_COUNT]] {kernel = @segmented_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+// DEFAULT: %[[TASKS:.*]] = swage_plan.classify %[[OFFSETS]], %[[VALUE_COUNT]], %[[SEGMENT_COUNT]] {cta_chunk_elements = 4096 : i32, kernel = @segmented_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
 // DEFAULT: return %[[TASKS]] : !swage_plan.task_range
 
 // CUSTOM-LABEL: func.func private @segmented_sum__swage_plan(
-// CUSTOM: swage_plan.classify {{.*}} warp_max_elements = 64 : i32
+// CUSTOM: swage_plan.classify {{.*}} {cta_chunk_elements = 2048 : i32, {{.*}} warp_max_elements = 64 : i32}
 
-// BAD-THRESHOLD: error: warp-max-elements must be a nonnegative i32
+// BAD-LIMIT: error: planning limits must satisfy 0 < warp-max-elements <= cta-chunk-elements <= INT32_MAX

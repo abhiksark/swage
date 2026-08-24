@@ -36,9 +36,10 @@ Live mlir_swage.ir.Module                                        (M2 fixed path)
         ├── M6 canonical identity segmented-sum planning path
         │     ↓   read-only admission                             ✅
         │   private companion with swage_plan.classify           ✅ (ADR-0014)
-        └── M7 private materialization → stable warp/CTA task IDs ✅
-                                       → pure task-ID kernels      ✅
-                                       → one fused mixed kernel    ✅ (ADR-0016)
+        ├── M7 private materialization → stable warp/CTA task IDs ✅
+        │                              → one fused mixed kernel    ✅ (ADR-0016)
+        └── M8 private split path → ordered CTA chunks            ✅
+                                  → partial scratch → merge CTAs   ✅ (ADR-0017)
 ```
 
 ## Frontend (M2 complete)
@@ -186,9 +187,38 @@ mixed-to-best-pure ratio is `0.939394`, which passes the predeclared `1.05`
 maximum.
 
 This remains a canonical identity-sum qualification path, not public
-segmented execution. Packing, splitting, partial reductions, merges, queues,
-persistent scheduling, ragged-softmax planning, and general task-range
-lowering remain deferred.
+segmented execution. Packing, queues, persistent scheduling, ragged-softmax
+planning, and general task-range lowering remain deferred.
+
+## Private split-CTA execution (M8 complete)
+
+`swage_plan.classify` now records a positive CTA chunk limit that defaults to
+4096 and must be at least the warp limit. Direct segments still produce one
+warp or CTA descriptor. An oversized segment produces ordered stage-zero CTA
+descriptors over absolute input ranges, then one stage-one descriptor over its
+compact scratch range. Every descriptor retains the segment ID as its
+dependency group, and all stage-zero work precedes all merges. Classification
+rejects malformed i32 metadata and descriptor or scratch-index overflow before
+returning any plan.
+
+Private materialization flattens that plan into direct warp IDs, direct CTA
+IDs, partial range pairs, and merge triples. The Python preparation boundary
+independently reconstructs the expected plan from validated offsets and rejects
+any duplicate, missing, overlapping, or misassigned record before compilation
+or allocation.
+
+The 128-thread partial kernel reduces one explicit input range into one unique
+scratch slot. The 128-thread merge kernel reduces one scratch range and writes
+one segment result from thread zero. Both use the existing three-pointer,
+two-i32 driver marshaller. Mixed execution submits direct fused work, partial
+CTAs, then merge CTAs on the same current stream and skips empty phases. Pure
+warp and CTA schedules remain whole-segment correctness controls, and the M7
+one-launch path is unchanged when no split is required.
+
+Exact all-one and tolerant nontrivial f32 results match PyTorch and the CPU
+oracle on NVIDIA RTX A6000 `sm_86`. This is a private correctness gate. It does
+not add a public segmented API, split max or softmax, or change the frozen M7
+benchmark.
 
 ## Semantic level (M0–M1 complete)
 
@@ -200,18 +230,17 @@ The `swage` dialect models segment-local computation. Today:
 materialized as a runtime-sized SSA vector; reductions and maps stay
 symbolic until tiling.
 
-## Planning level (M6–M7 minimal boundary complete)
+## Planning level (M6–M8 minimal boundary complete)
 
 `swage_plan` currently represents only warp and CTA policy attributes, one
 opaque task-range type, and one classification operation. Compile time records
-the legal policy order and threshold for the admitted semantic kernel. The M7
-private materialization path uses actual lengths and counts to produce stable
-task IDs and dispatch the fixed pure or fused mixed schedules.
+the legal policy order, warp limit, and CTA chunk limit for the admitted
+semantic kernel. Private materialization uses actual lengths and counts to
+produce direct IDs plus split partial and merge records.
 
 This does not define a general lowering for arbitrary task ranges. Later
-milestones own packing, splitting, partial reductions, merges, queues,
-dependencies, persistent scheduling, and broader policy selection. Passes
-never pretend to know offset contents.
+milestones own packing, queues, persistent scheduling, and broader policy
+selection. Passes never pretend to know offset contents.
 
 ## Backend
 

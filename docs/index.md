@@ -1,3 +1,9 @@
+<!-- docs/index.md -->
+
+<p align="center">
+  <img src="assets/images/swage-logo.png" alt="Swage logo" width="720">
+</p>
+
 # Swage
 
 **Turn variable-sized dense segments into efficient GPU tile tasks.**
@@ -9,7 +15,7 @@ NVPTX.
 
 !!! warning "Pre-alpha"
     The MLIR dialect, pinned LLVM build, Python AST emitter, M3 fixed
-    vector-add execution path, and internal M4–M5 segment qualification paths
+    vector-add execution path, and internal M4–M8 segment qualification paths
     work today. Public segment syntax and launch plus general schedule
     selection remain planned. The README status table is the single source of
     truth for what works.

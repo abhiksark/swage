@@ -59,9 +59,10 @@ Swage semantic MLIR            (dialect: swage)
         ├── M6 identity segmented sum
         │     ↓  read-only admission and private planning companion
         │   SwagePlan classify (dialect: swage_plan)
-        └── M7 private materialization → stable warp/CTA task IDs
-                                       → pure task-ID kernels
-                                       → one fused mixed GPU kernel
+        ├── M7 private materialization → stable warp/CTA task IDs
+        │                              → one fused mixed GPU kernel
+        └── M8 private split path → ordered CTA chunks
+                                  → partial scratch sums → merge CTAs
 ```
 
 There is exactly one production IR between Python and LLVM: MLIR. The
@@ -69,7 +70,7 @@ Python frontend constructs Swage MLIR directly through the MLIR Python
 bindings (ADR-0001). Textual MLIR is a debug, test, and reproducer format,
 not the JIT construction path.
 
-## Current Python, M3 execution, and M4–M7 qualification boundary
+## Current Python, M3 execution, and M4–M8 qualification boundary
 
 M2 is complete. The fixed-block vector-add subset captures a `@sw.jit`
 function and emits a verified live `mlir_swage.ir.Module` directly through
@@ -132,9 +133,10 @@ M6 adds only the minimal planning boundary in ADR-0014. The
 `--swage-to-plan` conversion admits one capture-free, map-free, single-stage
 identity segmented sum, preserves the semantic function, and adds a private
 planning companion. The companion records one `swage_plan.classify`
-operation, warp then CTA as its legal policy order, and a configurable
-nonnegative i32 threshold that defaults to 32. Unsupported inputs fail before
-module mutation.
+operation, warp then CTA as its legal policy order, a positive i32 warp limit
+that defaults to 32, and a positive i32 CTA chunk limit that defaults to 4096.
+The warp limit cannot exceed the CTA chunk limit. Unsupported inputs fail
+before module mutation.
 
 The internal host classifier is a separately tested descriptor generator. It
 validates i32 runtime metadata before producing one absolute half-open range
@@ -162,6 +164,21 @@ On the frozen 32,768-segment bimodal benchmark, the mixed median is
 `0.063488 ms`, the best pure median is `0.067584 ms`, and their ratio is
 `0.939394`, below the predeclared `1.05` maximum. This evidence does not widen
 `swage.language`, `emit_mlir()`, or the public M3 `launch()` contract.
+
+M8 extends that private identity-sum path with task decomposition, not a new
+policy (ADR-0017). Segments longer than the CTA chunk limit produce ordered
+stage-zero CTA chunks over absolute input ranges and one stage-one merge over
+the corresponding compact scratch range. All stage-zero descriptors precede
+all merges. Planning rejects count, range, scratch-index, and descriptor-count
+overflow before returning a plan.
+
+The 128-thread partial kernel writes one scratch value per chunk. The
+128-thread merge kernel reduces one scratch range and writes its segment output
+once. Mixed execution submits direct work, partial CTAs, then merge CTAs on one
+current stream and skips empty phases. If no segment is split, the M7 fused
+one-launch path is unchanged. Exact and nontrivial f32 split sums match PyTorch
+and the CPU oracle on NVIDIA RTX A6000 `sm_86`; this adds no public segmented
+API and does not retune the frozen M7 benchmark.
 
 ## The `swage` dialect (semantic level)
 
@@ -206,16 +223,15 @@ error, never a silent skip.
 
 M6 implements only `#swage_plan.policy<warp|cta>`,
 `!swage_plan.task_range`, and `swage_plan.classify` (ADR-0014). Compile time
-verifies the one admitted semantic shape and records its legal policy order
-and threshold. M7 privately consumes that record to classify actual offsets
-and materialize stable task-ID lists without changing the semantic IR. It
-executes only the canonical identity segmented sum through the fixed pure and
-fused schedules above.
+verifies the one admitted semantic shape and records its legal policy order,
+warp limit, and CTA chunk limit. M7 privately consumes that record to
+materialize stable direct task IDs. M8 uses the same classifier and policies
+to materialize private partial and merge records without changing the semantic
+IR.
 
-Packed warps, split CTAs, partial reductions, merges, queues, dependencies,
-ragged-softmax planning, general task-range lowering, and cost-based selection
-remain future work. Compiler passes do not pretend to know runtime offset
-contents.
+Packed warps, queues, persistent scheduling, ragged-softmax planning, general
+task-range lowering, and cost-based selection remain future work. Compiler
+passes do not pretend to know runtime offset contents.
 
 ## Runtime
 
@@ -257,6 +273,9 @@ pointers.
 - M7 GPU: the verified local RTX A6000 `sm_86` suite covers pure warp, pure
   CTA, and fused mixed identity-sum schedules. The committed frozen benchmark
   records the local performance evidence.
+- M8 GPU: the verified local RTX A6000 `sm_86` suite covers exact chunk
+  boundaries, split-only and mixed execution, nontrivial f32 oracles, stream
+  ordering, lifetime, device drift, and fail-closed preparation and launch.
 - Property-based: generated segment distributions (empty, tiny, uniform,
   log-normal, bimodal, Zipf-like, one-outlier) checking coverage and
   no-overlap invariants.

@@ -1,3 +1,13 @@
+<!-- README.md -->
+
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/abhiksark/swage/a1a49346772b28b9658a2305b9206f85d8e0443e/docs/assets/images/swage-logo.png"
+    alt="Swage logo"
+    width="720"
+  >
+</p>
+
 # Swage
 
 [![ci-python](https://github.com/abhiksark/swage/actions/workflows/ci-python.yml/badge.svg?branch=main)](https://github.com/abhiksark/swage/actions/workflows/ci-python.yml)
@@ -11,14 +21,14 @@ LLVM. You write a Triton-like kernel that describes what happens to *one
 logical segment*; Swage is designed to derive fixed-size GPU tile tasks and
 generate NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
-> **Status: pre-alpha, M7 internal mixed-policy qualification complete.** The
+> **Status: pre-alpha, M8 internal split-CTA qualification complete.** The
 > canonical fixed vector-add kernel remains the public execution subset. Internal
 > segmented sum, max, and stable ragged-softmax modules lower to a sequential
 > CPU oracle and one CTA per segment on NVIDIA GPUs. For one canonical identity
-> segmented sum, a private M7 path materializes warp and CTA task IDs and runs
-> pure or fused mixed schedules. Public segment syntax and public segmented
-> launch remain planned. See [Current status](#current-status) for the exact
-> boundary.
+> segmented sum, private M7 and M8 paths run direct warp/CTA work and split
+> oversized segments into partial and merge CTAs. Public segment syntax and
+> public segmented launch remain planned. See
+> [Current status](#current-status) for the exact boundary.
 
 ## The programming model
 
@@ -104,9 +114,10 @@ Swage semantic MLIR
         ├── M5 ragged softmax → max → exponential sum → normalize/store
         │                      → internal CPU and one-CTA GPU qualification
         ├── M6 identity segmented sum → SwagePlan classify
-        └── M7 private materialization → stable warp/CTA task IDs
-                                       → pure warp or CTA task kernels
-                                       → one fused mixed GPU kernel
+        ├── M7 private materialization → stable warp/CTA task IDs
+        │                              → one fused mixed GPU kernel
+        └── M8 private split path → ordered CTA chunks up to 4096 elements
+                                  → partial scratch sums → merge CTAs
 ```
 
 The three-level vocabulary is load-bearing: a **segment** is a logical,
@@ -129,10 +140,10 @@ warp or CTA. See
 | Native segmented sum/max lowering | **Works today for canonical internal qualification modules**; upstream `mlir-runner` CPU oracle and one-CTA `sm_86` tests |
 | Native stable ragged-softmax lowering | **Works today for the canonical internal qualification module**; max, exponential-sum, and normalization/store phases match PyTorch and the CPU oracle on RTX A6000 `sm_86` |
 | `swage_plan` policy attribute, task-range type, classify operation, and `--swage-to-plan` | **Works today, internal** for one canonical identity segmented sum; the semantic function is preserved and unsupported inputs fail before mutation |
-| Internal host task descriptor generation | **Works today, unit-tested** for validated i32 metadata; emits one stable warp or CTA descriptor per segment |
-| Internal M7 planned segmented-sum execution | **Works today for canonical qualification only**; a private path consumes the planning threshold, materializes stable task IDs, and executes pure 32-thread warp, pure 128-thread CTA, or one-launch fused mixed schedules on NVIDIA GPUs |
+| Internal host task descriptor generation | **Works today, unit-tested** for validated i32 metadata; emits direct warp/CTA descriptors or ordered split-CTA chunks and compact merge descriptors |
+| Internal M7/M8 planned segmented-sum execution | **Works today for canonical qualification only**; pure controls execute every segment, direct mixed work retains the M7 one-launch path, and oversized segments use private 128-thread partial and merge kernels |
 | Public segment frontend and segmented launch, including ragged softmax | Planned |
-| Packed warps, split CTAs, partial reductions, queues, persistent scheduling, and broader policies | Planned for M8 and later milestones |
+| Packed warps, queues, persistent scheduling, and broader policies | Planned for later milestones |
 
 The M5 differential suite covers all-empty, all-singleton, many-tiny,
 few-huge, one-outlier, and alternating-empty segment distributions. The
@@ -148,6 +159,15 @@ classifies validated runtime metadata into stable warp and CTA segment-ID
 lists. Pure policies use the same task-ID ABI. Mixed execution uses one
 128-thread kernel with four one-segment warp slots per warp block followed by
 one block per CTA task.
+
+M8 keeps warp and CTA as the complete policy list and adds private task
+decomposition for segments longer than 4096 elements. The classifier emits
+ordered absolute input chunks followed by one compact scratch-range merge per
+split segment. Mixed execution launches direct work, all partial CTAs, then all
+merge CTAs on the same current stream. The exact and nontrivial f32 suites pass
+against PyTorch and the CPU oracle on NVIDIA RTX A6000 `sm_86`. This is a
+correctness qualification only; the frozen M7 benchmark and its `1.05` gate
+are unchanged.
 
 The frozen `bimodal` benchmark on NVIDIA RTX A6000 `sm_86` measured medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms` for

@@ -6,6 +6,28 @@ semantic versioning (`0.x`; anything may change).
 
 ## [Unreleased]
 
+### Added
+
+- Private M8 split-CTA execution for the canonical identity segmented sum.
+  Oversized segments become ordered partial ranges no larger than 4096
+  elements followed by one compact scratch-range merge, using fixed 128-thread
+  kernels and the existing CUDA Driver launch boundary.
+- Exact and nontrivial f32 qualification on NVIDIA RTX A6000 `sm_86`, covering
+  split-only, direct-only, mixed, zero-work, stream, lifetime, device drift,
+  and fail-closed compile, allocation, and launch cases.
+
+### Changed
+
+- `swage_plan.classify` now records `cta_chunk_elements` and validates
+  `0 < warp_max_elements <= cta_chunk_elements <= INT32_MAX`. The default CTA
+  chunk limit is 4096; the warp and CTA policy set remains unchanged.
+
+### Notes
+
+- M8 remains a private identity-sum correctness path. It adds no public
+  segmented frontend or launch API, split max or softmax, and no change to the
+  frozen M7 benchmark or its `1.05` gate.
+
 ## [0.5.0] - 2026-08-24
 
 ### Added

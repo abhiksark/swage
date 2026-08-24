@@ -14,7 +14,7 @@ passes with tests; nothing below claims more than the tests show.
 | M5: Ragged softmax parity | Fusion, captures, stable softmax, multi-stage execution | Matches PyTorch across adversarial distributions | **Complete**; sequential CPU oracle and RTX A6000 `sm_86` one-CTA qualification pass |
 | M6: Minimal SwagePlan gate | Warp/CTA policy attribute, task-range type, classify operation, identity-sum conversion, host descriptors | One semantic kernel gains a private planning companion; validated host metadata produces exact warp/CTA descriptors | **Complete**; the planning artifact remains compile-only, and M7 consumes it only through a private qualification path |
 | M7: Warp vs CTA policy | Classifier integration, task-range materialization, mixed-policy launch, benchmark comparison | Auto mixed policy beats or matches better pure policy on a predeclared distribution | **Complete**; private identity-sum qualification passes on RTX A6000 `sm_86` with a `0.939394` mixed-to-best-pure ratio, with no public segmented launch |
-| M8: Split-CTA reductions | Long-segment partitioning, partial reductions, merges | Oversized segments execute with no dropped/duplicated elements | Not started |
+| M8: Split-CTA reductions | Long-segment partitioning, partial reductions, merges | Oversized segments execute with no dropped/duplicated elements | **Complete**; private identity-sum split-only and mixed paths match PyTorch and the CPU oracle on RTX A6000 `sm_86`, with no public segmented launch or benchmark retuning |
 | M9: Persistent scheduling | Device task queue, resident CTAs, dependency handling | Correct under extreme skew; reduces long-tail idle on a predeclared benchmark | Not started |
 | M10: Research benchmark + release | Harness, raw data, plots, prior-art doc, tutorial | One kernel evaluated across distributions against all declared baselines, reproducibly | Not started |
 
@@ -23,8 +23,8 @@ after M4, `v0.4.0` after M5, `v0.5.0` after M7, `v0.6.0` after M9. `v0.1.0`
 was reserved for the frozen Python prototype and will not be used
 (ADR-0005).
 
-M7 is the `v0.5.0` feature gate. Release tagging and publication are separate
-external operations and are not phase-gate evidence. The deferred `v0.2.0`,
+M7 was the `v0.5.0` feature gate, and `v0.5.0` was published on 2026-08-24.
+M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 `v0.3.0`, and `v0.4.0` versions remain outside this roadmap gate.
 
 Tracked as GitHub milestones; per-phase issues carry the detailed

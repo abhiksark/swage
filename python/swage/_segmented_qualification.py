@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 from collections.abc import Callable
+from itertools import pairwise
 from typing import NamedTuple
 
 from . import _runtime
@@ -14,6 +15,7 @@ from . import _runtime
 _I32_LIMIT = 1 << 31
 _WARP_BLOCK = 32
 _CTA_BLOCK = 128
+_CTA_CHUNK_ELEMENTS = 4096
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
     "convert-arith-to-llvm),"
@@ -381,8 +383,15 @@ def _launch_segmented_sum_tasks(
     return None
 
 
-def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
-    """Validate, classify, compile, and prepare private M7 sum policies."""
+def _prepare_planned_sum(
+    values,
+    offsets,
+    output,
+    *,
+    warp_max_elements=32,
+    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+):
+    """Validate, classify, compile, and prepare private sum policies."""
     torch = _runtime._import_torch()
     value_count, segment_count, host_offsets = _validate_shapes(
         values, offsets, output, _validate_offsets
@@ -400,13 +409,52 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(_semantic_module("sum"))
-        warp_ids, cta_ids = native_swage._materialize_segmented_plan(
-            module,
-            offsets=host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
+        warp_ids, cta_ids, partial_records, merge_records = (
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
         )
+        expected_warp = []
+        expected_cta = []
+        expected_partial = []
+        expected_merge = []
+        for segment_id, (begin, end) in enumerate(pairwise(host_offsets)):
+            length = end - begin
+            if length <= warp_max_elements:
+                expected_warp.append(segment_id)
+            elif length <= cta_chunk_elements:
+                expected_cta.append(segment_id)
+            else:
+                partial_begin = len(expected_partial) // 2
+                for chunk_begin in range(begin, end, cta_chunk_elements):
+                    chunk_end = min(
+                        end, chunk_begin + cta_chunk_elements
+                    )
+                    expected_partial.extend(
+                        [chunk_begin, chunk_end]
+                    )
+                expected_merge.extend(
+                    [segment_id, partial_begin, len(expected_partial) // 2]
+                )
+        if (
+            warp_ids != expected_warp
+            or cta_ids != expected_cta
+            or partial_records != expected_partial
+            or merge_records != expected_merge
+        ):
+            raise RuntimeError(
+                "materialized plan does not match classified metadata"
+            )
+        partial_count = len(partial_records) // 2
+        merge_count = len(merge_records) // 3
+        direct_warp_count = len(warp_ids)
+        direct_cta_count = len(cta_ids)
+        direct_count = direct_warp_count + direct_cta_count
         if segment_count == 0:
 
             def no_launch():
@@ -427,24 +475,69 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
             target=target,
             use_task_ids=True,
         )
-        _, mixed_ptx = native_swage._compile_fused_segmented_reduction_ptx(
-            module,
-            kernel_name=kernel_name,
-            target=target,
-        )
+        mixed_ptx = None
+        if direct_count:
+            _, mixed_ptx = (
+                native_swage._compile_fused_segmented_reduction_ptx(
+                    module,
+                    kernel_name=kernel_name,
+                    target=target,
+                )
+            )
+        partial_ptx = None
+        merge_ptx = None
+        if partial_count:
+            _, partial_ptx = (
+                native_swage._compile_split_partial_reduction_ptx(
+                    module,
+                    kernel_name=kernel_name,
+                    target=target,
+                )
+            )
+            _, merge_ptx = (
+                native_swage._compile_split_merge_reduction_ptx(
+                    module,
+                    kernel_name=kernel_name,
+                    target=target,
+                )
+            )
 
     driver = _runtime._get_driver()
     _, warp_function = driver.load(warp_ptx, kernel_name)
     _, cta_function = driver.load(cta_ptx, kernel_name)
-    _, mixed_function = driver.load(mixed_ptx, kernel_name)
+    mixed_function = None
+    if mixed_ptx is not None:
+        _, mixed_function = driver.load(mixed_ptx, kernel_name)
+    partial_function = None
+    merge_function = None
+    if partial_ptx is not None:
+        _, partial_function = driver.load(
+            partial_ptx, f"{kernel_name}__partial"
+        )
+        _, merge_function = driver.load(
+            merge_ptx, f"{kernel_name}__merge"
+        )
     device = offsets.device
     device_index = device.index
     all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
-    warp_count = len(warp_ids)
-    cta_count = len(cta_ids)
-    mixed_tasks = torch.tensor(
-        [*warp_ids, *cta_ids], dtype=torch.int32, device=device
-    )
+    mixed_tasks = None
+    if direct_count:
+        mixed_tasks = torch.tensor(
+            [*warp_ids, *cta_ids], dtype=torch.int32, device=device
+        )
+    partial_ranges = None
+    merge_ranges = None
+    scratch = None
+    if partial_count:
+        partial_ranges = torch.tensor(
+            partial_records, dtype=torch.int32, device=device
+        )
+        merge_ranges = torch.tensor(
+            merge_records, dtype=torch.int32, device=device
+        )
+        scratch = torch.empty(
+            partial_count, dtype=torch.float32, device=device
+        )
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream())
 
@@ -495,23 +588,55 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
     def mixed():
         stream = current_stream()
         stream.wait_event(tasks_ready)
-        driver.launch_segmented_mixed(
-            mixed_function,
-            ((warp_count + 3) // 4 + cta_count,),
-            _CTA_BLOCK,
-            stream.cuda_stream,
-            (
-                values.data_ptr(),
-                offsets.data_ptr(),
-                output.data_ptr(),
-                mixed_tasks.data_ptr(),
-                value_count,
-                warp_count,
-                cta_count,
-            ),
-        )
-        for tensor in (values, offsets, output, mixed_tasks):
-            tensor.record_stream(stream)
+        if direct_count:
+            driver.launch_segmented_mixed(
+                mixed_function,
+                ((direct_warp_count + 3) // 4 + direct_cta_count,),
+                _CTA_BLOCK,
+                stream.cuda_stream,
+                (
+                    values.data_ptr(),
+                    offsets.data_ptr(),
+                    output.data_ptr(),
+                    mixed_tasks.data_ptr(),
+                    value_count,
+                    direct_warp_count,
+                    direct_cta_count,
+                ),
+            )
+            for tensor in (values, offsets, output, mixed_tasks):
+                tensor.record_stream(stream)
+        if partial_count:
+            driver.launch_segmented(
+                partial_function,
+                (partial_count,),
+                _CTA_BLOCK,
+                stream.cuda_stream,
+                (
+                    values.data_ptr(),
+                    partial_ranges.data_ptr(),
+                    scratch.data_ptr(),
+                    value_count,
+                    partial_count,
+                ),
+            )
+            for tensor in (values, offsets, partial_ranges, scratch):
+                tensor.record_stream(stream)
+            driver.launch_segmented(
+                merge_function,
+                (merge_count,),
+                _CTA_BLOCK,
+                stream.cuda_stream,
+                (
+                    scratch.data_ptr(),
+                    output.data_ptr(),
+                    merge_ranges.data_ptr(),
+                    partial_count,
+                    merge_count,
+                ),
+            )
+            for tensor in (offsets, output, merge_ranges, scratch):
+                tensor.record_stream(stream)
         return None
 
     return _PreparedSum(warp, cta, mixed)

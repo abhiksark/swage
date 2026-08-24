@@ -3,6 +3,8 @@ site_description: Turn variable-sized dense segments into efficient GPU tile tas
 repo_url: https://github.com/abhiksark/swage
 theme:
   name: material
+  logo: assets/images/swage-icon.png
+  favicon: assets/images/swage-icon.png
   palette:
     - scheme: default
       toggle:
@@ -40,3 +42,4 @@ nav:
       - "ADR-0014: M6 minimal SwagePlan gate": adr/ADR-0014-m6-minimal-swage-plan-gate.md
       - "ADR-0015: M7 mixed-policy execution": adr/ADR-0015-m7-minimal-mixed-policy-execution.md
       - "ADR-0016: M7 fused mixed-policy schedule": adr/ADR-0016-m7-fused-mixed-policy-schedule.md
+      - "ADR-0017: M8 private split-CTA reductions": adr/ADR-0017-m8-private-split-cta-reductions.md
