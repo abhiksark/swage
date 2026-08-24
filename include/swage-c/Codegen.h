@@ -38,11 +38,23 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData);
 
+MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitPartialReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData);
+
+MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData);
+
 MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
     MlirModule module, const int64_t *offsets, intptr_t offsetCount,
     int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
-    SwageTaskIdsCallback warpCallback, void *warpUserData,
-    SwageTaskIdsCallback ctaCallback, void *ctaUserData);
+    int64_t ctaChunkElements, SwageTaskIdsCallback warpCallback,
+    void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
+    SwageTaskIdsCallback partialCallback, void *partialUserData,
+    SwageTaskIdsCallback mergeCallback, void *mergeUserData);
 
 #ifdef __cplusplus
 }

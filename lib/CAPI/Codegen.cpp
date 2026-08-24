@@ -37,6 +37,7 @@
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -55,7 +56,12 @@ using namespace mlir;
 
 namespace {
 
-enum class KernelKind { FixedBlock, SegmentedReduction };
+enum class KernelKind {
+  FixedBlock,
+  SegmentedReduction,
+  SplitPartialReduction,
+  SplitMergeReduction,
+};
 
 bool isSupportedTarget(llvm::StringRef target) {
   llvm::StringRef digits = target.consume_front("sm_") ? target : "";
@@ -137,11 +143,16 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   context->appendDialectRegistry(registry);
 
   PassManager manager(context);
-  if (kind == KernelKind::FixedBlock)
+  if (kind == KernelKind::FixedBlock) {
     manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
-  else
+  } else if (kind == KernelKind::SegmentedReduction) {
     manager.addPass(swage::createSegmentedReductionToGPUPass(
         blockSize, useTaskIds, fusedMixed));
+  } else if (kind == KernelKind::SplitPartialReduction) {
+    manager.addPass(swage::createSplitPartialReductionToGPUPass());
+  } else {
+    manager.addPass(swage::createSplitMergeReductionToGPUPass());
+  }
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
@@ -253,19 +264,56 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
   return mlirLogicalResultSuccess();
 }
 
+MlirLogicalResult swageCompileSplitPartialReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
+  std::string lowered;
+  std::string ptx;
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+                        KernelKind::SplitPartialReduction, false, false,
+                        lowered, ptx)))
+    return mlirLogicalResultFailure();
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult swageCompileSplitMergeReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
+  std::string lowered;
+  std::string ptx;
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+                        KernelKind::SplitMergeReduction, false, false, lowered,
+                        ptx)))
+    return mlirLogicalResultFailure();
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
 MlirLogicalResult swageMaterializeSegmentedPlan(
     MlirModule module, const int64_t *offsets, intptr_t offsetCount,
     int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
-    SwageTaskIdsCallback warpCallback, void *warpUserData,
-    SwageTaskIdsCallback ctaCallback, void *ctaUserData) {
+    int64_t ctaChunkElements, SwageTaskIdsCallback warpCallback,
+    void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
+    SwageTaskIdsCallback partialCallback, void *partialUserData,
+    SwageTaskIdsCallback mergeCallback, void *mergeUserData) {
   if (offsetCount < 0 || (offsetCount && !offsets) || !warpCallback ||
-      !ctaCallback)
+      !ctaCallback || !partialCallback || !mergeCallback)
     return mlirLogicalResultFailure();
 
   ModuleOp source = unwrap(module);
   OwningOpRef<ModuleOp> planned = source.clone();
   PassManager manager(source.getContext());
-  manager.addPass(swage::createSwageToPlanPass(warpMaxElements));
+  manager.addPass(
+      swage::createSwageToPlanPass(warpMaxElements, ctaChunkElements));
   if (failed(manager.run(*planned)))
     return mlirLogicalResultFailure();
 
@@ -281,7 +329,8 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
 
   auto tasks = swage_plan::classifyTasks(
       ArrayRef(offsets, static_cast<size_t>(offsetCount)), valueCount,
-      segmentCount, classifiers.front().getWarpMaxElements());
+      segmentCount, classifiers.front().getWarpMaxElements(),
+      classifiers.front().getCtaChunkElements());
   if (!tasks) {
     source.emitError(llvm::toString(tasks.takeError()));
     return mlirLogicalResultFailure();
@@ -289,15 +338,30 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
 
   std::vector<int32_t> warp;
   std::vector<int32_t> cta;
+  std::vector<int32_t> partial;
+  std::vector<int32_t> merge;
+  llvm::SmallDenseSet<int32_t, 8> splitSegments;
+  for (const swage_plan::TaskDescriptor &task : *tasks)
+    if (task.stage == 1)
+      splitSegments.insert(task.segment_id);
   warp.reserve(tasks->size());
   cta.reserve(tasks->size());
   for (const swage_plan::TaskDescriptor &task : *tasks) {
-    if (task.policy == swage_plan::TaskPolicy::Warp)
+    if (task.stage == 1) {
+      merge.insert(merge.end(), {task.segment_id, task.begin, task.end});
+    } else if (task.policy == swage_plan::TaskPolicy::Warp) {
       warp.push_back(task.segment_id);
-    else
+    } else if (splitSegments.contains(task.segment_id)) {
+      partial.insert(partial.end(), {task.begin, task.end});
+    } else {
       cta.push_back(task.segment_id);
+    }
   }
   warpCallback(warp.data(), static_cast<intptr_t>(warp.size()), warpUserData);
   ctaCallback(cta.data(), static_cast<intptr_t>(cta.size()), ctaUserData);
+  partialCallback(partial.data(), static_cast<intptr_t>(partial.size()),
+                  partialUserData);
+  mergeCallback(merge.data(), static_cast<intptr_t>(merge.size()),
+                mergeUserData);
   return mlirLogicalResultSuccess();
 }

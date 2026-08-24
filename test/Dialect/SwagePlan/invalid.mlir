@@ -7,7 +7,7 @@ module {
                         %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+2 {{expected ::mlir::swage_plan::TaskPolicy to be one of: warp, cta}}
     // expected-error@+1 {{failed to parse SwagePlan_TaskPolicyAttr parameter}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @semantic_sum, policies = [#swage_plan.policy<packed_warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<packed_warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -19,7 +19,44 @@ module {
   func.func @negative_threshold(%offsets: memref<?xi32>, %value_count: i32,
                                 %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+1 {{attribute 'warp_max_elements' failed to satisfy constraint}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = -1 : i32} : (memref<?xi32>, i32, i32) -> !swage_plan.task_range
+    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = -1 : i32} : (memref<?xi32>, i32, i32) -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
+  func.func @zero_warp_limit(%offsets: memref<?xi32>, %value_count: i32,
+                             %segment_count: i32) -> !swage_plan.task_range {
+    // expected-error@+1 {{warp_max_elements must be positive}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 0 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
+  func.func @zero_cta_chunk(%offsets: memref<?xi32>, %value_count: i32,
+                            %segment_count: i32) -> !swage_plan.task_range {
+    // expected-error@+1 {{cta_chunk_elements must be positive}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 0 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    return %tasks : !swage_plan.task_range
+  }
+}
+
+// -----
+
+module {
+  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
+  func.func @warp_above_cta_chunk(
+      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
+      -> !swage_plan.task_range {
+    // expected-error@+1 {{warp_max_elements must not exceed cta_chunk_elements}}
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 32 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 33 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -31,7 +68,7 @@ module {
   func.func @wrong_policy_order(%offsets: memref<?xi32>, %value_count: i32,
                                 %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+1 {{policies must be ordered warp then CTA}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @semantic_sum, policies = [#swage_plan.policy<cta>, #swage_plan.policy<warp>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<cta>, #swage_plan.policy<warp>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -43,7 +80,7 @@ module {
   func.func @wrong_offsets(%offsets: memref<?xf32>, %value_count: i32,
                            %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+1 {{operand #0 must be 1D memref of 32-bit signless integer values}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xf32>, i32, i32) -> !swage_plan.task_range
+    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xf32>, i32, i32) -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -55,7 +92,7 @@ module {
   func.func @wrong_count(%offsets: memref<?xi32>, %value_count: i64,
                          %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+1 {{operand #1 must be 32-bit signless integer}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i64, i32) -> !swage_plan.task_range
+    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i64, i32) -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -67,7 +104,7 @@ module {
   func.func @wrong_result(%offsets: memref<?xi32>, %value_count: i32,
                           %segment_count: i32) -> i32 {
     // expected-error@+1 {{result #0 must be SwagePlan task range}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i32, i32) -> i32
+    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i32, i32) -> i32
     return %tasks : i32
   }
 }
@@ -78,7 +115,7 @@ module {
   func.func @missing_kernel(%offsets: memref<?xi32>, %value_count: i32,
                             %segment_count: i32) -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must reference a func.func semantic kernel}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @absent, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @absent, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -91,7 +128,7 @@ module {
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
       -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @wrong_signature, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @wrong_signature, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -104,7 +141,7 @@ module {
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
       -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must reference a func.func semantic kernel}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @not_a_function, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @not_a_function, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -116,7 +153,7 @@ module {
       %values: memref<?xf32>, %offsets: memref<?xi32>,
       %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
     // expected-error@+1 {{kernel must not reference its containing function}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @self_referencing_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @self_referencing_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return
   }
 }
@@ -130,7 +167,7 @@ module {
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
       -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @signed_value_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @signed_value_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -144,7 +181,7 @@ module {
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
       -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @unsigned_segment_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @unsigned_segment_count_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }
@@ -159,7 +196,7 @@ module {
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
       -> !swage_plan.task_range {
     // expected-error@+1 {{kernel must use the canonical five-argument semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {kernel = @non_default_memory_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @non_default_memory_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
     return %tasks : !swage_plan.task_range
   }
 }

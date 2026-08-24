@@ -23,7 +23,8 @@ struct TaskDescriptor {
 
 llvm::Expected<llvm::SmallVector<TaskDescriptor>>
 classifyTasks(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
-              int64_t segmentCount, int64_t warpMaxElements);
+              int64_t segmentCount, int64_t warpMaxElements,
+              int64_t ctaChunkElements);
 
 } // namespace mlir::swage_plan
 

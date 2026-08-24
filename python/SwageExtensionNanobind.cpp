@@ -17,16 +17,20 @@
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "nanobind/stl/pair.h"
+#include "nanobind/stl/tuple.h"
 #include "nanobind/stl/vector.h"
 
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace nb = nanobind;
 
 namespace {
+
+enum class PTXKind { Fixed, Segmented, Fused, SplitPartial, SplitMerge };
 
 MlirModule unwrapModule(nb::object moduleObject) {
   std::optional<nb::object> capsule =
@@ -41,8 +45,7 @@ MlirModule unwrapModule(nb::object moduleObject) {
 
 std::pair<std::string, std::string>
 compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
-           std::string target, bool segmented, bool useTaskIds,
-           bool fusedMixed = false) {
+           std::string target, PTXKind kind, bool useTaskIds = false) {
   MlirModule module = unwrapModule(moduleObject);
 
   std::string lowered;
@@ -52,37 +55,51 @@ compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
   };
   mlir::python::CollectDiagnosticsToStringScope diagnostics(
       mlirModuleGetContext(module));
-  MlirLogicalResult result =
-      fusedMixed
-          ? swageCompileFusedSegmentedReductionToPTX(
-                module,
-                mlirStringRefCreate(kernelName.data(), kernelName.size()),
-                mlirStringRefCreate(target.data(), target.size()), store,
-                &lowered, store, &ptx)
-      : segmented
-          ? swageCompileSegmentedReductionToPTX(
-                module,
-                mlirStringRefCreate(kernelName.data(), kernelName.size()),
-                blockSize, mlirStringRefCreate(target.data(), target.size()),
-                useTaskIds, store, &lowered, store, &ptx)
-          : swageCompileFixedBlockToPTX(
-                module,
-                mlirStringRefCreate(kernelName.data(), kernelName.size()),
-                blockSize, mlirStringRefCreate(target.data(), target.size()),
-                store, &lowered, store, &ptx);
+  MlirStringRef kernel =
+      mlirStringRefCreate(kernelName.data(), kernelName.size());
+  MlirStringRef chip = mlirStringRefCreate(target.data(), target.size());
+  MlirLogicalResult result;
+  switch (kind) {
+  case PTXKind::Fixed:
+    result = swageCompileFixedBlockToPTX(module, kernel, blockSize, chip, store,
+                                         &lowered, store, &ptx);
+    break;
+  case PTXKind::Segmented:
+    result = swageCompileSegmentedReductionToPTX(module, kernel, blockSize,
+                                                 chip, useTaskIds, store,
+                                                 &lowered, store, &ptx);
+    break;
+  case PTXKind::Fused:
+    result = swageCompileFusedSegmentedReductionToPTX(
+        module, kernel, chip, store, &lowered, store, &ptx);
+    break;
+  case PTXKind::SplitPartial:
+    result = swageCompileSplitPartialReductionToPTX(module, kernel, chip, store,
+                                                    &lowered, store, &ptx);
+    break;
+  case PTXKind::SplitMerge:
+    result = swageCompileSplitMergeReductionToPTX(module, kernel, chip, store,
+                                                  &lowered, store, &ptx);
+    break;
+  }
   if (mlirLogicalResultIsFailure(result))
     throw nb::value_error(diagnostics.takeMessage().c_str());
   return {std::move(lowered), std::move(ptx)};
 }
 
-std::pair<std::vector<int32_t>, std::vector<int32_t>> materializeSegmentedPlan(
-    nb::object moduleObject, const std::vector<int64_t> &offsets,
-    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements) {
+std::tuple<std::vector<int32_t>, std::vector<int32_t>, std::vector<int32_t>,
+           std::vector<int32_t>>
+materializeSegmentedPlan(nb::object moduleObject,
+                         const std::vector<int64_t> &offsets,
+                         int64_t valueCount, int64_t segmentCount,
+                         int64_t warpMaxElements, int64_t ctaChunkElements) {
   MlirModule module = unwrapModule(moduleObject);
   mlir::python::CollectDiagnosticsToStringScope diagnostics(
       mlirModuleGetContext(module));
   std::vector<int32_t> warp;
   std::vector<int32_t> cta;
+  std::vector<int32_t> partial;
+  std::vector<int32_t> merge;
   auto store = [](const int32_t *taskIds, intptr_t taskCount, void *output) {
     auto &tasks = *static_cast<std::vector<int32_t> *>(output);
     if (taskCount)
@@ -90,10 +107,12 @@ std::pair<std::vector<int32_t>, std::vector<int32_t>> materializeSegmentedPlan(
   };
   MlirLogicalResult result = swageMaterializeSegmentedPlan(
       module, offsets.data(), static_cast<intptr_t>(offsets.size()), valueCount,
-      segmentCount, warpMaxElements, store, &warp, store, &cta);
+      segmentCount, warpMaxElements, ctaChunkElements, store, &warp, store,
+      &cta, store, &partial, store, &merge);
   if (mlirLogicalResultIsFailure(result))
     throw nb::value_error(diagnostics.takeMessage().c_str());
-  return {std::move(warp), std::move(cta)};
+  return {std::move(warp), std::move(cta), std::move(partial),
+          std::move(merge)};
 }
 
 } // namespace
@@ -121,7 +140,7 @@ NB_MODULE(_swageDialectsNanobind, m) {
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target) {
         return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), false, false);
+                          std::move(target), PTXKind::Fixed);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"));
@@ -130,7 +149,7 @@ NB_MODULE(_swageDialectsNanobind, m) {
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target, bool useTaskIds) {
         return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), true, useTaskIds);
+                          std::move(target), PTXKind::Segmented, useTaskIds);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"), nb::arg("use_task_ids") = false);
@@ -138,10 +157,25 @@ NB_MODULE(_swageDialectsNanobind, m) {
       "_compile_fused_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
         return compilePTX(module, std::move(kernelName), 128, std::move(target),
-                          true, true, true);
+                          PTXKind::Fused);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
+  swageM.def(
+      "_compile_split_partial_reduction_ptx",
+      [](nb::object module, std::string kernelName, std::string target) {
+        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+                          PTXKind::SplitPartial);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
+  swageM.def(
+      "_compile_split_merge_reduction_ptx",
+      [](nb::object module, std::string kernelName, std::string target) {
+        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+                          PTXKind::SplitMerge);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def("_materialize_segmented_plan", &materializeSegmentedPlan,
              nb::arg("module"), nb::arg("offsets"), nb::arg("value_count"),
-             nb::arg("segment_count"), nb::arg("warp_max_elements") = 32);
+             nb::arg("segment_count"), nb::arg("warp_max_elements") = 32,
+             nb::arg("cta_chunk_elements") = 4096);
 }

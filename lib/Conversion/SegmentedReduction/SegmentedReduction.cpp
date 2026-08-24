@@ -396,7 +396,7 @@ LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
 }
 
 void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
-                            int32_t warpMaxElements) {
+                            int32_t warpMaxElements, int32_t ctaChunkElements) {
   OpBuilder builder(module.getContext());
   Location loc = semanticFunction.getLoc();
   Type taskRange = swage_plan::TaskRangeType::get(module.getContext());
@@ -420,7 +420,8 @@ void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
   auto tasks = swage_plan::ClassifyOp::create(
       builder, loc, taskRange, entry->getArgument(0), entry->getArgument(1),
       entry->getArgument(2), semanticFunction.getName(),
-      static_cast<uint32_t>(warpMaxElements), policies);
+      static_cast<uint32_t>(warpMaxElements),
+      static_cast<uint32_t>(ctaChunkElements), policies);
   func::ReturnOp::create(builder, loc, tasks.getResult());
 }
 
@@ -732,6 +733,106 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   source.erase();
 }
 
+void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
+  constexpr int64_t blockSize = 128;
+  OpBuilder builder(module.getContext());
+  Location loc = source.getLoc();
+  std::string suffix = merge ? "__merge" : "__partial";
+  builder.setInsertionPoint(source);
+  auto gpuModule = gpu::GPUModuleOp::create(
+      builder, loc, source.getName().str() + suffix + "_module");
+
+  builder.setInsertionPointToStart(gpuModule.getBody());
+  Type pointer = LLVM::LLVMPointerType::get(module.getContext());
+  Type i32 = builder.getI32Type();
+  Type f32 = builder.getF32Type();
+  auto kernelType = FunctionType::get(
+      module.getContext(), {pointer, pointer, pointer, i32, i32}, {});
+  auto kernel = gpu::GPUFuncOp::create(
+      builder, loc, source.getName().str() + suffix, kernelType);
+  kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
+                  builder.getUnitAttr());
+
+  Block *entry = &kernel.getBody().front();
+  builder.setInsertionPointToStart(entry);
+  Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
+  Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
+  Value taskCount = arith::IndexCastOp::create(
+      builder, loc, builder.getIndexType(), entry->getArgument(4));
+  Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
+                                        taskIndex, taskCount);
+
+  scf::IfOp::create(
+      builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
+        Value fields =
+            arith::ConstantIndexOp::create(body, bodyLoc, merge ? 3 : 2);
+        Value recordBase =
+            arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
+        Value recordPointer = entry->getArgument(merge ? 2 : 1);
+        auto loadRecord = [&](int64_t field) {
+          Value index = recordBase;
+          if (field)
+            index = arith::AddIOp::create(
+                body, bodyLoc, recordBase,
+                arith::ConstantIndexOp::create(body, bodyLoc, field));
+          Value index64 = arith::IndexCastOp::create(body, bodyLoc,
+                                                     body.getI64Type(), index);
+          Value address = LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
+                                              recordPointer, index64);
+          return Value(LLVM::LoadOp::create(body, bodyLoc, i32, address));
+        };
+
+        Value outputIndex = taskIndex;
+        int64_t rangeField = 0;
+        if (merge) {
+          outputIndex = arith::IndexCastOp::create(
+              body, bodyLoc, body.getIndexType(), loadRecord(0));
+          rangeField = 1;
+        }
+        Value begin = arith::IndexCastOp::create(
+            body, bodyLoc, body.getIndexType(), loadRecord(rangeField));
+        Value end = arith::IndexCastOp::create(
+            body, bodyLoc, body.getIndexType(), loadRecord(rangeField + 1));
+        Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
+        Value identity = identityFor(body, bodyLoc, ReductionKind::Sum);
+        auto local = scf::ForOp::create(
+            body, bodyLoc, first, end, block, ValueRange(identity),
+            [&](OpBuilder &loop, Location loopLoc, Value index,
+                ValueRange accumulator) {
+              Value index64 = arith::IndexCastOp::create(
+                  loop, loopLoc, loop.getI64Type(), index);
+              Value address = LLVM::GEPOp::create(
+                  loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
+              Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+              scf::YieldOp::create(loop, loopLoc,
+                                   combine(loop, loopLoc, ReductionKind::Sum,
+                                           accumulator.front(), value));
+            });
+        auto operation = gpu::AllReduceOperationAttr::get(
+            module.getContext(), gpu::AllReduceOperation::ADD);
+        Value total = gpu::AllReduceOp::create(
+            body, bodyLoc, local.getResult(0), operation, true);
+        Value firstThread = arith::CmpIOp::create(
+            body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
+        scf::IfOp::create(
+            body, bodyLoc, firstThread,
+            [&](OpBuilder &store, Location storeLoc) {
+              Value outputIndex64 = arith::IndexCastOp::create(
+                  store, storeLoc, store.getI64Type(), outputIndex);
+              Value outputAddress = LLVM::GEPOp::create(
+                  store, storeLoc, pointer, f32,
+                  entry->getArgument(merge ? 1 : 2), outputIndex64);
+              LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
+              scf::YieldOp::create(store, storeLoc);
+            });
+        scf::YieldOp::create(body, bodyLoc);
+      });
+  gpu::ReturnOp::create(builder, loc);
+  source.erase();
+}
+
 class SegmentedReductionToSCFPass
     : public PassWrapper<SegmentedReductionToSCFPass, OperationPass<ModuleOp>> {
 public:
@@ -833,6 +934,46 @@ private:
       llvm::cl::init(false)};
 };
 
+class SplitSegmentedReductionToGPUPass
+    : public PassWrapper<SplitSegmentedReductionToGPUPass,
+                         OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SplitSegmentedReductionToGPUPass)
+
+  SplitSegmentedReductionToGPUPass() = default;
+  SplitSegmentedReductionToGPUPass(
+      const SplitSegmentedReductionToGPUPass &other)
+      : PassWrapper(other), merge(other.merge) {}
+  explicit SplitSegmentedReductionToGPUPass(bool requestedMerge)
+      : merge(requestedMerge) {}
+
+  StringRef getArgument() const final {
+    return "swage-split-segmented-reduction-to-gpu";
+  }
+  StringRef getDescription() const final {
+    return "Lower one identity sum to a private split reduction stage";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const final {
+    registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
+                    scf::SCFDialect>();
+  }
+
+  void runOnOperation() final {
+    FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
+    if (failed(function))
+      return signalPassFailure();
+    SegmentProgramAnalysis analysis;
+    if (failed(analyzeSegmentProgram(*function, analysis)) ||
+        failed(verifyPlanningProgram(analysis)))
+      return signalPassFailure();
+    buildSplitGPUProgram(getOperation(), *function, merge);
+  }
+
+private:
+  bool merge = false;
+};
+
 class SwageToPlanPass
     : public PassWrapper<SwageToPlanPass, OperationPass<ModuleOp>> {
 public:
@@ -841,9 +982,12 @@ public:
   SwageToPlanPass() = default;
   SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
     warpMaxElements = other.warpMaxElements.getValue();
+    ctaChunkElements = other.ctaChunkElements.getValue();
   }
-  explicit SwageToPlanPass(int64_t requestedWarpMaxElements) {
+  SwageToPlanPass(int64_t requestedWarpMaxElements,
+                  int64_t requestedCtaChunkElements) {
     warpMaxElements = requestedWarpMaxElements;
+    ctaChunkElements = requestedCtaChunkElements;
   }
 
   StringRef getArgument() const final { return "swage-to-plan"; }
@@ -857,9 +1001,11 @@ public:
 
   void runOnOperation() final {
     ModuleOp module = getOperation();
-    if (warpMaxElements < 0 ||
-        warpMaxElements > std::numeric_limits<int32_t>::max()) {
-      module.emitError("warp-max-elements must be a nonnegative i32");
+    if (warpMaxElements <= 0 || ctaChunkElements <= 0 ||
+        warpMaxElements > ctaChunkElements ||
+        ctaChunkElements > std::numeric_limits<int32_t>::max()) {
+      module.emitError("planning limits must satisfy 0 < warp-max-elements <= "
+                       "cta-chunk-elements <= INT32_MAX");
       return signalPassFailure();
     }
 
@@ -882,7 +1028,8 @@ public:
       return signalPassFailure();
 
     buildPlanningCompanion(module, function,
-                           static_cast<int32_t>(warpMaxElements));
+                           static_cast<int32_t>(warpMaxElements),
+                           static_cast<int32_t>(ctaChunkElements));
   }
 
 private:
@@ -890,6 +1037,10 @@ private:
       *this, "warp-max-elements",
       llvm::cl::desc("Maximum segment length admitted for warp policy"),
       llvm::cl::init(32)};
+  Option<int64_t> ctaChunkElements{
+      *this, "cta-chunk-elements",
+      llvm::cl::desc("Maximum input elements in one CTA task"),
+      llvm::cl::init(4096)};
 };
 
 } // namespace
@@ -905,8 +1056,17 @@ std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
                                                        fusedMixed);
 }
 
-std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements) {
-  return std::make_unique<SwageToPlanPass>(warpMaxElements);
+std::unique_ptr<Pass> createSplitPartialReductionToGPUPass() {
+  return std::make_unique<SplitSegmentedReductionToGPUPass>(false);
+}
+
+std::unique_ptr<Pass> createSplitMergeReductionToGPUPass() {
+  return std::make_unique<SplitSegmentedReductionToGPUPass>(true);
+}
+
+std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements,
+                                            int64_t ctaChunkElements) {
+  return std::make_unique<SwageToPlanPass>(warpMaxElements, ctaChunkElements);
 }
 
 void registerSegmentedReductionPasses() {

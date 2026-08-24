@@ -218,6 +218,138 @@ def test_fused_mixed_lowering_rejects_non_planning_program():
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
+@pytest.mark.parametrize(
+    ("compiler", "entry"),
+    [
+        ("_compile_split_partial_reduction_ptx", "segmented_sum__partial"),
+        ("_compile_split_merge_reduction_ptx", "segmented_sum__merge"),
+    ],
+)
+def test_compiles_deterministic_split_cta_kernels(compiler, entry):
+    """Emit each private three-pointer, two-i32 split ABI at 128 threads."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+        compile_split = getattr(native_swage, compiler)
+
+        first = compile_split(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+        second = compile_split(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+
+        assert first == second
+        lowered, ptx = first
+        signature = re.search(rf"llvm.func @{entry}\(([^)]*)\)", lowered)
+        assert signature is not None
+        assert signature.group(1).count("!llvm.ptr") == 3
+        assert signature.group(1).count("i32") == 2
+        assert "llvm.mlir.constant(128 : index)" in lowered
+        assert "nvvm.barrier0" in lowered
+        assert ptx.count(".param .u64") == 3
+        assert ptx.count(".param .u32") == 2
+        assert f".entry {entry}" in ptx
+        assert "bar.sync" in ptx
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+        definitions = {
+            name: expression
+            for line in lowered.splitlines()
+            if (match := re.match(r"\s*(%\d+) = (.*)", line))
+            for name, expression in [match.groups()]
+        }
+        block_id_i32 = next(
+            name
+            for name, expression in definitions.items()
+            if expression == "nvvm.read.ptx.sreg.ctaid.x : i32"
+        )
+        block_id = next(
+            name
+            for name, expression in definitions.items()
+            if expression == f"llvm.sext {block_id_i32} : i32 to i64"
+        )
+        if compiler == "_compile_split_partial_reduction_ptx":
+            assert f"llvm.getelementptr %arg2[{block_id}]" in lowered
+        else:
+            segment_pointer = next(
+                name
+                for name, expression in definitions.items()
+                if expression.startswith("llvm.getelementptr %arg2[")
+            )
+            segment_id = next(
+                name
+                for name, expression in definitions.items()
+                if expression
+                == f"llvm.load {segment_pointer} : !llvm.ptr -> i32"
+            )
+            segment_index = next(
+                name
+                for name, expression in definitions.items()
+                if expression == f"llvm.sext {segment_id} : i32 to i64"
+            )
+            assert f"llvm.getelementptr %arg1[{segment_index}]" in lowered
+
+
+@pytest.mark.parametrize(
+    "compiler",
+    [
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+    ],
+)
+def test_split_lowering_rejects_non_identity_sum(compiler):
+    """Keep split execution restricted to the planning semantic shape."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        with pytest.raises(ValueError, match="identity reduction region"):
+            getattr(native_swage, compiler)(
+                module,
+                kernel_name="segmented_sum",
+                target="sm_80",
+            )
+
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+@pytest.mark.parametrize(
+    "compiler",
+    [
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+    ],
+)
+def test_split_lowering_rejects_max_and_unsupported_target(compiler):
+    """Keep split kernels on identity sum and explicitly supported GPUs."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        maximum = ir.Module.parse(
+            SEGMENTED_SUM.replace("kind<sum>", "kind<max>")
+        )
+        with pytest.raises(ValueError, match="planning requires kind<sum>"):
+            getattr(native_swage, compiler)(
+                maximum,
+                kernel_name="segmented_sum",
+                target="sm_80",
+            )
+
+        total = ir.Module.parse(SEGMENTED_SUM)
+        with pytest.raises(ValueError, match="target must match"):
+            getattr(native_swage, compiler)(
+                total,
+                kernel_name="segmented_sum",
+                target="sm_79",
+            )
+
+
 def test_materializes_stable_policy_segment_ids_without_mutating_source():
     """Connect the private plan operation to the existing host classifier."""
     with ir.Context() as context:
@@ -225,7 +357,7 @@ def test_materializes_stable_policy_segment_ids_without_mutating_source():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta = native_swage._materialize_segmented_plan(
+        warp, cta, partial, merge = native_swage._materialize_segmented_plan(
             module,
             offsets=[0, 0, 32, 65, 65, 66],
             value_count=66,
@@ -235,6 +367,33 @@ def test_materializes_stable_policy_segment_ids_without_mutating_source():
 
         assert warp == [0, 1, 3, 4]
         assert cta == [2]
+        assert partial == []
+        assert merge == []
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_materializes_split_ranges_and_compact_merge_records():
+    """Return direct IDs and ordered flat records from one private plan."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        warp, cta, partial, merge = (
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=[0, 32, 65, 4162, 12354],
+                value_count=12354,
+                segment_count=4,
+                warp_max_elements=32,
+                cta_chunk_elements=4096,
+            )
+        )
+
+        assert warp == [0]
+        assert cta == [1]
+        assert partial == [65, 4161, 4161, 4162, 4162, 8258, 8258, 12354]
+        assert merge == [2, 0, 2, 3, 2, 4]
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -250,6 +409,16 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
                 value_count=2,
                 segment_count=2,
                 warp_max_elements=32,
+            )
+
+        with pytest.raises(ValueError, match="planning limits must satisfy"):
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=[0, 1],
+                value_count=1,
+                segment_count=1,
+                warp_max_elements=33,
+                cta_chunk_elements=32,
             )
 
         transformed = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)

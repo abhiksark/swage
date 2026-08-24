@@ -70,6 +70,12 @@ void SwagePlanDialect::initialize() {
 }
 
 LogicalResult ClassifyOp::verify() {
+  if (getWarpMaxElements() == 0)
+    return emitOpError("warp_max_elements must be positive");
+  if (getCtaChunkElements() == 0)
+    return emitOpError("cta_chunk_elements must be positive");
+  if (getWarpMaxElements() > getCtaChunkElements())
+    return emitOpError("warp_max_elements must not exceed cta_chunk_elements");
   ArrayAttr policies = getPolicies();
   if (policies.size() != 2 ||
       cast<TaskPolicyAttr>(policies[0]).getValue() != TaskPolicy::Warp ||
