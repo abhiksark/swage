@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_VERSION = "0.5.0"
+_VERSION = "0.5.1"
 _PACKAGE_FILES = {
     "swage/__init__.py",
     "swage/_frontend.py",
@@ -103,8 +103,8 @@ def test_sdist_contains_only_distribution_sources(distributions):
     assert _PACKAGE_FILES == package_members
 
 
-def test_distribution_metadata_identifies_v050(distributions):
-    """Publish matching wheel and sdist metadata for version 0.5.0."""
+def test_distribution_metadata_identifies_v051(distributions):
+    """Publish matching wheel and sdist metadata for version 0.5.1."""
     wheel, sdist = distributions
     with zipfile.ZipFile(wheel) as archive:
         metadata_name = next(
@@ -163,7 +163,7 @@ def test_wheel_clean_install_has_the_expected_native_boundary(
 
             import swage
 
-            assert swage.__version__ == "0.5.0"
+            assert swage.__version__ == "0.5.1"
             assert "torch" not in sys.modules
             assert "mlir_swage" not in sys.modules
 

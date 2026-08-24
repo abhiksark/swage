@@ -6,6 +6,8 @@ semantic versioning (`0.x`; anything may change).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-24
+
 ### Added
 
 - Private M8 split-CTA execution for the canonical identity segmented sum.
@@ -15,6 +17,9 @@ semantic versioning (`0.x`; anything may change).
 - Exact and nontrivial f32 qualification on NVIDIA RTX A6000 `sm_86`, covering
   split-only, direct-only, mixed, zero-work, stream, lifetime, device drift,
   and fail-closed compile, allocation, and launch cases.
+- Project logo and favicon assets for the README and MkDocs site.
+- Read the Docs configuration with pinned documentation dependencies and
+  canonical hosted URLs.
 
 ### Changed
 
@@ -27,6 +32,9 @@ semantic versioning (`0.x`; anything may change).
 - M8 remains a private identity-sum correctness path. It adds no public
   segmented frontend or launch API, split max or softmax, and no change to the
   frozen M7 benchmark or its `1.05` gate.
+- Version 0.5.1 is a fix-forward release so tagged documentation and the PyPI
+  project description include the current documentation configuration and
+  branding. The immutable 0.5.0 release remains unchanged.
 
 ## [0.5.0] - 2026-08-24
 
