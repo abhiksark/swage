@@ -11,14 +11,14 @@ LLVM. You write a Triton-like kernel that describes what happens to *one
 logical segment*; Swage is designed to derive fixed-size GPU tile tasks and
 generate NVIDIA GPU code through MLIR, LLVM, and NVPTX.
 
-> **Status: pre-alpha, M6 compile-only planning gate complete.** The canonical
-> fixed vector-add kernel remains the public execution subset. Internal
+> **Status: pre-alpha, M7 internal mixed-policy qualification complete.** The
+> canonical fixed vector-add kernel remains the public execution subset. Internal
 > segmented sum, max, and stable ragged-softmax modules lower to a sequential
-> CPU oracle and one CTA per segment on NVIDIA GPUs. The planning gate covers
-> one canonical identity segmented sum and tested host descriptor generation.
-> Public segment syntax, public segmented launch, classifier integration, and
-> mixed-policy GPU execution remain planned. See [Current status](#current-status)
-> for the exact boundary.
+> CPU oracle and one CTA per segment on NVIDIA GPUs. For one canonical identity
+> segmented sum, a private M7 path materializes warp and CTA task IDs and runs
+> pure or fused mixed schedules. Public segment syntax and public segmented
+> launch remain planned. See [Current status](#current-status) for the exact
+> boundary.
 
 ## The programming model
 
@@ -101,9 +101,10 @@ Swage semantic MLIR
         │                         → one CTA per segment → NVPTX
         ├── M5 ragged softmax → max → exponential sum → normalize/store
         │                      → internal CPU and one-CTA GPU qualification
-        ├── M6 identity segmented sum → SwagePlan classify (compile-only)
-        └── M6 host metadata → warp/CTA descriptors (unit-tested, independent)
-                             → classifier integration and GPU dispatch (M7)
+        ├── M6 identity segmented sum → SwagePlan classify
+        └── M7 private materialization → stable warp/CTA task IDs
+                                       → pure warp or CTA task kernels
+                                       → one fused mixed GPU kernel
 ```
 
 The three-level vocabulary is load-bearing: a **segment** is a logical,
@@ -125,10 +126,11 @@ warp or CTA. See
 | CUDA Driver launch, cache, and real GPU result | **Works today for the public M3 subset**; trusted A6000 GPU workflow |
 | Native segmented sum/max lowering | **Works today for canonical internal qualification modules**; upstream `mlir-runner` CPU oracle and one-CTA `sm_86` tests |
 | Native stable ragged-softmax lowering | **Works today for the canonical internal qualification module**; max, exponential-sum, and normalization/store phases match PyTorch and the CPU oracle on RTX A6000 `sm_86` |
-| `swage_plan` policy attribute, task-range type, classify operation, and `--swage-to-plan` | **Works today, internal and compile-only** for one canonical identity segmented sum; the semantic function is preserved and unsupported inputs fail before mutation |
-| Internal host task descriptor generation | **Works today, unit-tested** for validated i32 metadata; emits one stable warp or CTA descriptor per segment but is not connected to GPU dispatch |
+| `swage_plan` policy attribute, task-range type, classify operation, and `--swage-to-plan` | **Works today, internal** for one canonical identity segmented sum; the semantic function is preserved and unsupported inputs fail before mutation |
+| Internal host task descriptor generation | **Works today, unit-tested** for validated i32 metadata; emits one stable warp or CTA descriptor per segment |
+| Internal M7 planned segmented-sum execution | **Works today for canonical qualification only**; a private path consumes the planning threshold, materializes stable task IDs, and executes pure 32-thread warp, pure 128-thread CTA, or one-launch fused mixed schedules on NVIDIA GPUs |
 | Public segment frontend and segmented launch, including ragged softmax | Planned |
-| Classifier integration, task-range lowering, dispatch, mixed-policy GPU execution, and broader policies | Planned for M7 and later milestones |
+| Packed warps, split CTAs, partial reductions, queues, persistent scheduling, and broader policies | Planned for M8 and later milestones |
 
 The M5 differential suite covers all-empty, all-singleton, many-tiny,
 few-huge, one-outlier, and alternating-empty segment distributions. The
@@ -138,11 +140,19 @@ not widen `swage.language`, `emit_mlir()`, or public `launch()`.
 
 The M6 planning conversion admits only the capture-free, map-free,
 single-stage identity segmented sum. It adds a private planning companion
-that records warp then CTA as the legal policy order. A separate internal
-host classifier validates runtime metadata and produces exact descriptors,
-including empty segments. M6 does not integrate that classifier with the
-planning operation, lower task ranges, dispatch work, execute either policy,
-or establish a performance claim.
+that records warp then CTA as the legal policy order. M7 privately clones the
+semantic module, runs that conversion, reads the recorded threshold, and
+classifies validated runtime metadata into stable warp and CTA segment-ID
+lists. Pure policies use the same task-ID ABI. Mixed execution uses one
+128-thread kernel with four one-segment warp slots per warp block followed by
+one block per CTA task.
+
+The frozen `bimodal` benchmark on NVIDIA RTX A6000 `sm_86` measured medians of
+`0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms` for
+mixed execution. Its mixed-to-best-pure ratio is `0.939394`, passing the
+predeclared maximum of `1.05`. This qualifies only the private canonical
+identity-sum path. It does not add public segment syntax or public segmented
+execution.
 
 The research question: *can one segment-local program automatically produce
 competitive warp, CTA, split-CTA, and persistent schedules as the runtime

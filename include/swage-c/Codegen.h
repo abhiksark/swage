@@ -20,6 +20,8 @@ extern "C" {
 #endif
 
 typedef void (*SwageStringCallback)(MlirStringRef value, void *userData);
+typedef void (*SwageTaskIdsCallback)(const int32_t *taskIds, intptr_t taskCount,
+                                     void *userData);
 
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
@@ -30,6 +32,17 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData);
+
+MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData);
+
+MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
+    MlirModule module, const int64_t *offsets, intptr_t offsetCount,
+    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
+    SwageTaskIdsCallback warpCallback, void *warpUserData,
+    SwageTaskIdsCallback ctaCallback, void *ctaUserData);
 
 #ifdef __cplusplus
 }

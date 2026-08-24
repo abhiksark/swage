@@ -36,9 +36,9 @@ Live mlir_swage.ir.Module                                        (M2 fixed path)
         ├── M6 canonical identity segmented-sum planning path
         │     ↓   read-only admission                             ✅
         │   private companion with swage_plan.classify           ✅ (ADR-0014)
-        └── M6 host metadata → warp/CTA descriptors               ✅ (independent)
-                              → classifier integration            ⏳ (M7)
-                              → mixed-policy GPU execution        🔬
+        └── M7 private materialization → stable warp/CTA task IDs ✅
+                                       → pure task-ID kernels      ✅
+                                       → one fused mixed kernel    ✅ (ADR-0016)
 ```
 
 ## Frontend (M2 complete)
@@ -157,14 +157,38 @@ The internal host classifier separately validates i32 offsets, counts, and
 the threshold before emitting one stable descriptor per segment, including
 empty segments. Each descriptor carries the segment ID, absolute half-open
 range, stage zero, selected warp or CTA policy, and a dependency group equal
-to the segment ID. This tested generator is not yet connected to the planning
-operation or a runtime dispatch path.
+to the segment ID. M7 connects this generator to the planning operation only
+through the private qualification path described next.
 
-M7 must integrate classification, lower the task range, dispatch descriptors,
-and execute both policies on the GPU before Swage can claim mixed-policy
-execution. Broader planning, including packing, splitting, partial
-reductions, merges, queues, persistent scheduling, and ragged-softmax
-planning, remains deferred.
+## Minimal mixed-policy execution (M7 complete)
+
+The private native materialization helper clones the semantic module, runs
+`--swage-to-plan`, requires exactly one `swage_plan.classify`, reads its
+recorded threshold, and invokes the host classifier with validated i32
+metadata. The source module remains unchanged. The Python preparation path
+then materializes stable warp IDs followed by stable CTA IDs. Tensor, alias,
+offset, and device validation completes before compilation, allocation, or
+launch, and failures never select a fallback policy or backend.
+
+Pure warp and pure CTA qualification use the same four-pointer, two-count
+task-ID ABI with 32-thread and 128-thread blocks, respectively. Mixed
+qualification uses one four-pointer, three-count kernel launch. Each initial
+128-thread block contains four one-segment warp slots; the remaining blocks
+each execute one CTA task. Empty total work enqueues no kernel. Successful
+submission uses the current PyTorch stream and records values, offsets,
+output, and task IDs on that stream.
+
+The internal correctness suite covers empty, boundary, repeated-empty,
+skewed, and large segment cases on NVIDIA RTX A6000 `sm_86`. The frozen
+bimodal benchmark recorded medians of `0.067584 ms` for pure warp,
+`0.070656 ms` for pure CTA, and `0.063488 ms` for mixed execution. The
+mixed-to-best-pure ratio is `0.939394`, which passes the predeclared `1.05`
+maximum.
+
+This remains a canonical identity-sum qualification path, not public
+segmented execution. Packing, splitting, partial reductions, merges, queues,
+persistent scheduling, ragged-softmax planning, and general task-range
+lowering remain deferred.
 
 ## Semantic level (M0–M1 complete)
 
@@ -176,19 +200,18 @@ The `swage` dialect models segment-local computation. Today:
 materialized as a runtime-sized SSA vector; reductions and maps stay
 symbolic until tiling.
 
-## Planning level (M6 minimal gate complete)
+## Planning level (M6–M7 minimal boundary complete)
 
 `swage_plan` currently represents only warp and CTA policy attributes, one
 opaque task-range type, and one classification operation. Compile time records
-the legal policy order and threshold for the admitted semantic kernel. The
-independent host classifier uses actual lengths and counts to produce stable
-descriptors. It does not yet execute the operation or materialize the opaque
-task range.
+the legal policy order and threshold for the admitted semantic kernel. The M7
+private materialization path uses actual lengths and counts to produce stable
+task IDs and dispatch the fixed pure or fused mixed schedules.
 
-M7 owns classifier integration, task-range lowering, dispatch, mixed-policy
-launch, and benchmark comparison. Later milestones own packing, splitting,
-partial reductions, merges, queues, dependencies, and persistent scheduling.
-Passes never pretend to know offset contents.
+This does not define a general lowering for arbitrary task ranges. Later
+milestones own packing, splitting, partial reductions, merges, queues,
+dependencies, persistent scheduling, and broader policy selection. Passes
+never pretend to know offset contents.
 
 ## Backend
 

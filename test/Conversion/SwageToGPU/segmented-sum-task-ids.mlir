@@ -33,9 +33,8 @@ module {
 // CHECK:   %[[START_I32:.*]] = llvm.load %[[START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK:   %[[END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK:   %[[END_I32:.*]] = llvm.load %[[END_ADDRESS]] : !llvm.ptr -> i32
-// CHECK:   %[[TOTAL:.*]] = gpu.all_reduce add %{{.*}} uniform
+// CHECK-COUNT-5: gpu.shuffle xor
 // CHECK:   %[[OUTPUT_ADDRESS:.*]] = llvm.getelementptr %[[OUTPUT]]
-// CHECK:   llvm.store %[[TOTAL]], %[[OUTPUT_ADDRESS]] : f32, !llvm.ptr
+// CHECK:   llvm.store %{{.*}}, %[[OUTPUT_ADDRESS]] : f32, !llvm.ptr
 // CHECK: }
 // CHECK: gpu.return
-

@@ -18,6 +18,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, swage-gpu]
     timeout-minutes: 120
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python:${{ github.workspace }}/build/python_packages
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -52,23 +54,20 @@ jobs:
 
       - name: Test CUDA correctness, streams, and process reuse
         run: |
-          PYTHONPATH=build/python_packages \
-            python -m pytest -q \
-              python/tests/mlir/test_runtime.py \
-              python/tests/mlir/test_segmented_runtime.py
+          python -m pytest -q \
+            python/tests/mlir/test_runtime.py \
+            python/tests/mlir/test_segmented_runtime.py
 
       - name: Run the documented fixed vector-add walkthrough
         run: |
           SWAGE_DUMP_DIR="$RUNNER_TEMP/swage-example-dumps" \
           SWAGE_DUMP_MLIR=1 SWAGE_DUMP_PTX=1 \
-          PYTHONPATH=build/python_packages \
-            python examples/fixed_vector_add.py
+          python examples/fixed_vector_add.py
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.mlir' -print -quit)"
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.ptx' -print -quit)"
 
       - name: Test persistent cache reuse in a new process
         run: |
           test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"
-          PYTHONPATH=build/python_packages \
-            python -m pytest -q \
-              'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'
+          python -m pytest -q \
+            'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'

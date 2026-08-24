@@ -1,10 +1,13 @@
 # python/tests/mlir/test_segmented_runtime.py
 """Differential qualification for native segmented reductions."""
 
+import threading
+
 import pytest
 import torch
 from swage._segmented_qualification import (
     _launch_segmented_sum_tasks,
+    _prepare_planned_sum,
     _validate_counts,
     _validate_offsets,
     _validate_tensors,
@@ -73,9 +76,7 @@ def _pytorch_reference(values, offsets, kind):
         ([0, 1, 1], 1, 1, "output has 1 elements"),
     ],
 )
-def test_rejects_malformed_offsets(
-    offsets, value_count, output_count, message
-):
+def test_rejects_malformed_offsets(offsets, value_count, output_count, message):
     """Reject malformed metadata before a CUDA pointer is launched."""
     with pytest.raises(ValueError, match=message):
         _validate_offsets(offsets, value_count, output_count)
@@ -135,12 +136,16 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     launch_gpu(values, offsets, output, kind)
 
     torch.testing.assert_close(
-        output.cpu(), _pytorch_reference(host_values, host_offsets, kind),
-        rtol=1e-5, atol=1e-5,
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, kind),
+        rtol=1e-5,
+        atol=1e-5,
     )
     torch.testing.assert_close(
-        output.cpu(), cpu_oracle(host_values, host_offsets, kind),
-        rtol=1e-5, atol=1e-5,
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, kind),
+        rtol=1e-5,
+        atol=1e-5,
     )
 
 
@@ -166,6 +171,287 @@ def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
     torch.testing.assert_close(
         output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("lengths", TASK_CASES)
+def test_prepared_mixed_sum_matches_exact_segment_lengths(lengths):
+    """Execute one fused launch with stable warp IDs before stable CTA IDs."""
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full(
+        (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
+    )
+
+    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared.mixed()
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_prepared_sum_rejects_output_aliases_before_driver_work(monkeypatch):
+    """Reject either input alias before compilation or driver access."""
+    from swage import _runtime
+
+    monkeypatch.setattr(
+        _runtime,
+        "_get_driver",
+        lambda: pytest.fail("driver must not be accessed"),
+    )
+    values = torch.ones(2, device="cuda", dtype=torch.float32)
+    offsets = torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="values buffer"):
+        _prepare_planned_sum(values, offsets, values)
+
+    offset_output = offsets[:2].view(torch.float32)
+    with pytest.raises(ValueError, match="offsets buffer"):
+        _prepare_planned_sum(values, offsets, offset_output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+def test_prepared_sum_uses_current_non_default_stream(policy):
+    """Launch every prepared policy on PyTorch's current stream."""
+    lengths = [0, 32, 33, 4097]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    prepared = _prepare_planned_sum(values, device_offsets, output)
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        getattr(prepared, policy)()
+    stream.synchronize()
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+def test_prepared_sum_waits_for_task_initialization_across_streams(
+    monkeypatch, policy
+):
+    """Order asynchronous task initialization before another stream launches."""
+    from swage import _runtime
+
+    preparation_stream = torch.cuda.Stream()
+    launch_stream = torch.cuda.Stream()
+    launch_observed = torch.cuda.Event()
+    launch_completed = threading.Event()
+
+    class _Driver:
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_segmented_tasks(self, *_arguments):
+            launch_observed.record(launch_stream)
+
+        def launch_segmented_mixed(self, *_arguments):
+            launch_observed.record(launch_stream)
+
+    values = torch.ones(34, device="cuda", dtype=torch.float32)
+    offsets = torch.tensor([0, 1, 34], device="cuda", dtype=torch.int32)
+    output = torch.empty(2, device="cuda", dtype=torch.float32)
+    all_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    mixed_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+
+    def asynchronous_arange(*_args, **_kwargs):
+        torch.cuda._sleep(2_000_000_000)
+        return all_task_storage
+
+    def asynchronous_tensor(_data, *, dtype, device):
+        assert dtype == torch.int32
+        assert device == offsets.device
+        return mixed_task_storage
+
+    monkeypatch.setattr(torch, "arange", asynchronous_arange)
+    monkeypatch.setattr(torch, "tensor", asynchronous_tensor)
+    with torch.cuda.stream(preparation_stream):
+        prepared = _prepare_planned_sum(values, offsets, output)
+    with torch.cuda.stream(launch_stream):
+        getattr(prepared, policy)()
+
+    def observe_launch():
+        launch_observed.synchronize()
+        launch_completed.set()
+
+    observer = threading.Thread(target=observe_launch)
+    observer.start()
+    bypassed_initialization = launch_completed.wait(timeout=0.5)
+    preparation_stream.synchronize()
+    launch_stream.synchronize()
+    observer.join()
+
+    assert not bypassed_initialization
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize(
+    ("lengths", "expected_ids", "expected_counts", "expected_grid"),
+    [
+        ([33, 1], [1, 0], (1, 1), (2,)),
+        ([1, 2, 3, 4, 33], [0, 1, 2, 3, 4], (4, 1), (2,)),
+        ([1, 2, 3, 4, 5, 33], [0, 1, 2, 3, 4, 5], (5, 1), (3,)),
+        ([0, 32], [0, 1], (2, 0), (1,)),
+        ([33, 34], [0, 1], (0, 2), (2,)),
+    ],
+)
+def test_prepared_mixed_uses_one_ordered_fused_launch(
+    monkeypatch, lengths, expected_ids, expected_counts, expected_grid
+):
+    """Submit stable warp IDs before CTA IDs through one fused kernel."""
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.loads = []
+            self.launches = []
+
+        def load(self, ptx, kernel_name):
+            self.loads.append((ptx, kernel_name))
+            function = len(self.loads)
+            return function + 100, function
+
+        def launch_segmented_tasks(
+            self, function, grid, block, stream, arguments
+        ):
+            self.launches.append(
+                ("pure", function, grid, block, stream, arguments)
+            )
+
+        def launch_segmented_mixed(
+            self, function, grid, block, stream, arguments
+        ):
+            self.launches.append(
+                ("mixed", function, grid, block, stream, arguments)
+            )
+
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.empty(len(lengths), device="cuda")
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    original_tensor = torch.tensor
+    task_tensors = []
+
+    def capture_tensor(data, *args, **kwargs):
+        tensor = original_tensor(data, *args, **kwargs)
+        if kwargs.get("dtype") == torch.int32 and tensor.device.type == "cuda":
+            task_tensors.append((list(data), tensor))
+        return tensor
+
+    monkeypatch.setattr(torch, "tensor", capture_tensor)
+
+    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared.mixed()
+
+    assert len(driver.launches) == 1
+    assert len(task_tensors) == 1
+    kind, _, grid, block, _, arguments = driver.launches[0]
+    mixed_ids, mixed_tasks = task_tensors[-1]
+    assert kind == "mixed"
+    assert grid == expected_grid
+    assert block == 128
+    assert mixed_ids == expected_ids
+    assert arguments[3] == mixed_tasks.data_ptr()
+    assert arguments[5:] == expected_counts
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
+    """Return three no-ops after classification when there are no segments."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("empty work must not compile, allocate, or access driver")
+
+    monkeypatch.setattr(
+        native_swage, "_compile_segmented_reduction_ptx", fail
+    )
+    monkeypatch.setattr(
+        native_swage, "_compile_fused_segmented_reduction_ptx", fail
+    )
+    monkeypatch.setattr(torch, "arange", fail)
+    monkeypatch.setattr(torch, "tensor", fail)
+    monkeypatch.setattr(_runtime, "_get_driver", fail)
+    values = torch.empty(0, device="cuda", dtype=torch.float32)
+    offsets = torch.empty(1, device="cuda", dtype=torch.int32)
+    offsets.zero_()
+    output = torch.empty(0, device="cuda", dtype=torch.float32)
+
+    prepared = _prepare_planned_sum(values, offsets, output)
+
+    assert prepared.warp() is None
+    assert prepared.cta() is None
+    assert prepared.mixed() is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_prepared_sum_rejects_a_different_current_device(monkeypatch):
+    """Do not dispatch a prepared policy after the current device changes."""
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.launches = []
+
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_segmented_tasks(self, *arguments):
+            self.launches.append(arguments)
+
+    values = torch.ones(34, device="cuda", dtype=torch.float32)
+    offsets = torch.tensor([0, 1, 34], device="cuda", dtype=torch.int32)
+    output = torch.empty(2, device="cuda")
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    prepared = _prepare_planned_sum(values, offsets, output)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 999)
+
+    with pytest.raises(ValueError, match="prepared device"):
+        prepared.mixed()
+    assert not driver.launches
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_prepared_mixed_sum_is_repeatable():
+    """Run the same fused launch twice without stale warp or CTA state."""
+    lengths = [0, 32, 33, 0, 1, 4097]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.empty(len(lengths), device="cuda", dtype=torch.float32)
+    prepared = _prepare_planned_sum(values, device_offsets, output)
+
+    prepared.mixed()
+    first = output.clone()
+    output.fill_(float("nan"))
+    prepared.mixed()
+
+    torch.testing.assert_close(output, first, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -213,7 +499,8 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
     expected = torch.tensor([float("nan"), float("-inf"), 5.0])
     torch.testing.assert_close(output.cpu(), expected, equal_nan=True)
     torch.testing.assert_close(
-        output.cpu(), cpu_oracle(host_values, host_offsets, "max"),
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, "max"),
         equal_nan=True,
     )
 
@@ -361,9 +648,7 @@ def test_gpu_softmax_of_singleton_is_exactly_one():
 
     launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
 
-    torch.testing.assert_close(
-        output.cpu(), torch.ones(3), rtol=0, atol=0
-    )
+    torch.testing.assert_close(output.cpu(), torch.ones(3), rtol=0, atol=0)
 
 
 def _semantic_edge_case():
@@ -390,9 +675,7 @@ def test_cpu_softmax_propagates_nan_and_is_nan_for_all_negative_infinity():
 
     actual = cpu_softmax_oracle(values, offsets)
 
-    torch.testing.assert_close(
-        actual, expected, rtol=0, atol=0, equal_nan=True
-    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -452,7 +735,5 @@ def test_rejects_softmax_output_aliasing_offsets():
     offsets = shared.narrow(0, 0, count)
     output = shared.view(torch.float32).narrow(0, 0, 8)
 
-    with pytest.raises(
-        ValueError, match="must not overlap the offsets buffer"
-    ):
+    with pytest.raises(ValueError, match="must not overlap the offsets buffer"):
         launch_softmax_gpu(host_values.cuda(), offsets, output)

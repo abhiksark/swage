@@ -3,6 +3,7 @@
 
 import re
 
+import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
@@ -81,7 +82,189 @@ def test_compiles_identity_sum_with_task_id_indirection():
         assert signature.group(1).count("i32") == 2
         assert "ld.global.b32" in ptx
         assert ".entry segmented_sum" in ptx
+        assert "shfl.sync.bfly" in ptx
+        assert ".shared" not in ptx
+        assert "bar.sync" not in ptx
         assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
+    """Map four warp tasks then CTA tasks through one private kernel ABI."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        first = native_swage._compile_fused_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+        second = native_swage._compile_fused_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+
+        assert first == second
+        lowered, ptx = first
+        signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
+        assert signature is not None
+        assert signature.group(1).count("!llvm.ptr") == 4
+        assert signature.group(1).count("i32") == 3
+        assert "llvm.udiv" in lowered
+        assert "llvm.urem" in lowered
+        assert "llvm.mlir.constant(128 : index)" in lowered
+        assert "llvm.mlir.constant(32 : index)" in lowered
+        assert lowered.count("nvvm.shfl.sync  bfly") >= 15
+        assert "nvvm.barrier0" in lowered
+        assert "addr_space = 3" in lowered
+        assert ptx.count(".param .u64") == 4
+        assert ptx.count(".param .u32") == 3
+        assert "shfl.sync.bfly" in ptx
+        assert "bar.sync" in ptx
+        assert ".entry segmented_sum" in ptx
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+        definitions = {
+            name: expression
+            for line in lowered.splitlines()
+            if (match := re.match(r"\s*(%\d+) = (.*)", line))
+            for name, expression in [match.groups()]
+        }
+
+        def result_of(expression):
+            matches = [
+                name
+                for name, actual in definitions.items()
+                if actual == expression
+            ]
+            assert len(matches) == 1, (expression, matches)
+            return matches[0]
+
+        block_id_i32 = result_of("nvvm.read.ptx.sreg.ctaid.x : i32")
+        block_id = result_of(f"llvm.sext {block_id_i32} : i32 to i64")
+        thread_id_i32 = next(
+            name
+            for name, expression in definitions.items()
+            if expression == "nvvm.read.ptx.sreg.tid.x : i32"
+        )
+        thread_id = result_of(f"llvm.sext {thread_id_i32} : i32 to i64")
+        warp_count = result_of("llvm.sext %arg5 : i32 to i64")
+        cta_count = result_of("llvm.sext %arg6 : i32 to i64")
+        three = result_of("llvm.mlir.constant(3 : index) : i64")
+        four = result_of("llvm.mlir.constant(4 : index) : i64")
+        warp_width = next(
+            name
+            for name, expression in reversed(definitions.items())
+            if expression == "llvm.mlir.constant(32 : index) : i64"
+        )
+        rounded_warp_count = result_of(f"llvm.add {warp_count}, {three} : i64")
+        warp_blocks = result_of(
+            f"llvm.udiv {rounded_warp_count}, {four} : i64"
+        )
+        result_of(f'llvm.icmp "ult" {block_id}, {warp_blocks} : i64')
+
+        physical_warp = result_of(
+            f"llvm.udiv {thread_id}, {warp_width} : i64"
+        )
+        lane = result_of(f"llvm.urem {thread_id}, {warp_width} : i64")
+        first_warp_task = result_of(f"llvm.mul {block_id}, {four} : i64")
+        warp_task = result_of(
+            f"llvm.add {first_warp_task}, {physical_warp} : i64"
+        )
+        warp_guard = result_of(
+            f'llvm.icmp "ult" {warp_task}, {warp_count} : i64'
+        )
+        assert f"llvm.cond_br {warp_guard}" in lowered
+        assert f"llvm.getelementptr %arg3[{warp_task}]" in lowered
+        assert any(
+            re.fullmatch(rf"llvm.add %\d+, {lane} : i64", expression)
+            for expression in definitions.values()
+        )
+        assert any(
+            re.fullmatch(
+                rf"llvm.add %\d+, {warp_width} : i64", expression
+            )
+            for expression in definitions.values()
+        )
+
+        cta_task = result_of(f"llvm.sub {block_id}, {warp_blocks} : i64")
+        cta_guard = result_of(f'llvm.icmp "ult" {cta_task}, {cta_count} : i64')
+        mixed_task = result_of(f"llvm.add {warp_count}, {cta_task} : i64")
+        assert f"llvm.cond_br {cta_guard}" in lowered
+        assert f"llvm.getelementptr %arg3[{mixed_task}]" in lowered
+        cta_width = result_of("llvm.mlir.constant(128 : index) : i64")
+        assert any(
+            re.fullmatch(rf"llvm.add %\d+, {cta_width} : i64", expression)
+            for expression in definitions.values()
+        )
+
+
+def test_fused_mixed_lowering_rejects_non_planning_program():
+    """Fail before mutation when fused scheduling cannot preserve semantics."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        with pytest.raises(ValueError, match="identity reduction region"):
+            native_swage._compile_fused_segmented_reduction_ptx(
+                module,
+                kernel_name="segmented_sum",
+                target="sm_80",
+            )
+
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_materializes_stable_policy_segment_ids_without_mutating_source():
+    """Connect the private plan operation to the existing host classifier."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        warp, cta = native_swage._materialize_segmented_plan(
+            module,
+            offsets=[0, 0, 32, 65, 65, 66],
+            value_count=66,
+            segment_count=5,
+            warp_max_elements=32,
+        )
+
+        assert warp == [0, 1, 3, 4]
+        assert cta == [2]
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_materialized_plan_rejects_invalid_metadata_and_semantics():
+    """Fail closed through the native planning and classification chain."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        with pytest.raises(ValueError, match="offsets must be nondecreasing"):
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=[0, 2, 1],
+                value_count=2,
+                segment_count=2,
+                warp_max_elements=32,
+            )
+
+        transformed = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        original = transformed.operation.get_asm(enable_debug_info=False)
+        with pytest.raises(ValueError, match="identity reduction region"):
+            native_swage._materialize_segmented_plan(
+                transformed,
+                offsets=[0, 1],
+                value_count=1,
+                segment_count=1,
+                warp_max_elements=32,
+            )
+        assert (
+            transformed.operation.get_asm(enable_debug_info=False) == original
+        )
 
 
 SEGMENTED_EXPONENTIAL_SUM = """

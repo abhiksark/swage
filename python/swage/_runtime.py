@@ -516,6 +516,12 @@ class _CudaDriver:
         values.extend(ctypes.c_int32(value) for value in arguments[4:])
         self._launch(function, grid, block, stream, values)
 
+    def launch_segmented_mixed(
+        self, function, grid, block, stream, arguments
+    ):
+        """Launch the internal four-pointer, three-count M7 fused ABI."""
+        self.launch_segmented_tasks(function, grid, block, stream, arguments)
+
     def _launch(self, function, grid, block, stream, values):
         parameter_pointers = (ctypes.c_void_p * len(values))(
             *[

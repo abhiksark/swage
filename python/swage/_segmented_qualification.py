@@ -6,10 +6,14 @@ import re
 import shutil
 import struct
 import subprocess
+from collections.abc import Callable
+from typing import NamedTuple
 
 from . import _runtime
 
 _I32_LIMIT = 1 << 31
+_WARP_BLOCK = 32
+_CTA_BLOCK = 128
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
     "convert-arith-to-llvm),"
@@ -104,8 +108,11 @@ def _validate_shapes(
 ):
     """Validate tensor shapes against one of the two output ABIs."""
     torch = _runtime._import_torch()
-    for name, tensor in (("values", values), ("offsets", offsets),
-                         ("output", output)):
+    for name, tensor in (
+        ("values", values),
+        ("offsets", offsets),
+        ("output", output),
+    ):
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
     for name, tensor in (("values", values), ("output", output)):
@@ -113,8 +120,11 @@ def _validate_shapes(
             raise TypeError(f"{name} must have dtype torch.float32")
     if offsets.dtype != torch.int32:
         raise TypeError("offsets must have dtype torch.int32")
-    for name, tensor in (("values", values), ("offsets", offsets),
-                         ("output", output)):
+    for name, tensor in (
+        ("values", values),
+        ("offsets", offsets),
+        ("output", output),
+    ):
         if tensor.dim() != 1:
             raise TypeError(f"{name} must have rank one")
         if not tensor.is_contiguous():
@@ -122,44 +132,44 @@ def _validate_shapes(
 
     value_count = values.numel()
     host_offsets = offsets.detach().cpu().tolist()
-    segment_count = validate_offsets(
-        host_offsets, value_count, output.numel()
-    )
+    segment_count = validate_offsets(host_offsets, value_count, output.numel())
+    _validate_disjoint("values", values, output)
+    _validate_disjoint("offsets", offsets, output)
     if not require_cuda:
-        return value_count, segment_count
+        return value_count, segment_count, host_offsets
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable in PyTorch")
     current_device = torch.cuda.current_device()
-    for name, tensor in (("values", values), ("offsets", offsets),
-                         ("output", output)):
+    for name, tensor in (
+        ("values", values),
+        ("offsets", offsets),
+        ("output", output),
+    ):
         if tensor.device.type != "cuda":
             raise TypeError(f"{name} must be a CUDA tensor")
         if tensor.device.index != current_device:
             raise ValueError(f"{name} must be on the current CUDA device")
-    return value_count, segment_count
+    return value_count, segment_count, host_offsets
 
 
 def _validate_tensors(values, offsets, output, *, require_cuda=True):
     """Validate the reduction tensors and return their explicit counts."""
-    return _validate_shapes(
+    value_count, segment_count, _ = _validate_shapes(
         values, offsets, output, _validate_offsets, require_cuda=require_cuda
     )
+    return value_count, segment_count
 
 
 def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
     """Validate the softmax tensors, including the aliasing obligation."""
-    counts = _validate_shapes(
+    value_count, segment_count, _ = _validate_shapes(
         values,
         offsets,
         output,
         _validate_softmax_offsets,
         require_cuda=require_cuda,
     )
-    # On the CUDA path both tensors are now known to sit on one device,
-    # which is what makes comparing their raw addresses meaningful.
-    _validate_disjoint("values", values, output)
-    _validate_disjoint("offsets", offsets, output)
-    return counts
+    return value_count, segment_count
 
 
 def _semantic_module(kind):
@@ -227,6 +237,14 @@ module {
 """
 
 _SENTINEL = -1.0
+
+
+class _PreparedSum(NamedTuple):
+    """Prepared pure and classified launch policies."""
+
+    warp: Callable[[], None]
+    cta: Callable[[], None]
+    mixed: Callable[[], None]
 
 
 def launch_gpu(values, offsets, output, kind, block_size=128):
@@ -305,10 +323,12 @@ def _launch_segmented_sum_tasks(
     host_task_ids = task_ids.detach().cpu().tolist()
     task_count = len(host_task_ids)
     _validate_counts(value_count, task_count)
-    if any(type(task_id) is not int or not 0 <= task_id < segment_count
-           for task_id in host_task_ids):
+    if any(
+        type(task_id) is not int or not 0 <= task_id < segment_count
+        for task_id in host_task_ids
+    ):
         raise ValueError("task_ids must contain valid segment IDs")
-    if block_size not in {32, 128}:
+    if block_size not in {_WARP_BLOCK, _CTA_BLOCK}:
         raise ValueError("task block size must be 32 or 128")
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if block_size > properties.max_threads_per_block:
@@ -359,6 +379,142 @@ def _launch_segmented_sum_tasks(
     for tensor in (values, offsets, output, task_ids):
         tensor.record_stream(stream)
     return None
+
+
+def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
+    """Validate, classify, compile, and prepare private M7 sum policies."""
+    torch = _runtime._import_torch()
+    value_count, segment_count, host_offsets = _validate_shapes(
+        values, offsets, output, _validate_offsets
+    )
+
+    from mlir_swage import ir
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from mlir_swage.dialects import swage
+
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    target = f"sm_{major}{minor}"
+    kernel_name = "segmented_sum"
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_semantic_module("sum"))
+        warp_ids, cta_ids = native_swage._materialize_segmented_plan(
+            module,
+            offsets=host_offsets,
+            value_count=value_count,
+            segment_count=segment_count,
+            warp_max_elements=warp_max_elements,
+        )
+        if segment_count == 0:
+
+            def no_launch():
+                return None
+
+            return _PreparedSum(no_launch, no_launch, no_launch)
+        _, warp_ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            block_size=_WARP_BLOCK,
+            target=target,
+            use_task_ids=True,
+        )
+        _, cta_ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            block_size=_CTA_BLOCK,
+            target=target,
+            use_task_ids=True,
+        )
+        _, mixed_ptx = native_swage._compile_fused_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            target=target,
+        )
+
+    driver = _runtime._get_driver()
+    _, warp_function = driver.load(warp_ptx, kernel_name)
+    _, cta_function = driver.load(cta_ptx, kernel_name)
+    _, mixed_function = driver.load(mixed_ptx, kernel_name)
+    device = offsets.device
+    device_index = device.index
+    all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
+    warp_count = len(warp_ids)
+    cta_count = len(cta_ids)
+    mixed_tasks = torch.tensor(
+        [*warp_ids, *cta_ids], dtype=torch.int32, device=device
+    )
+    tasks_ready = torch.cuda.Event()
+    tasks_ready.record(torch.cuda.current_stream())
+
+    def submit(function, block_size, task_ids, stream):
+        task_count = task_ids.numel()
+        if task_count == 0:
+            return None
+        stream.wait_event(tasks_ready)
+        driver.launch_segmented_tasks(
+            function,
+            (task_count,),
+            block_size,
+            stream.cuda_stream,
+            (
+                values.data_ptr(),
+                offsets.data_ptr(),
+                output.data_ptr(),
+                task_ids.data_ptr(),
+                value_count,
+                task_count,
+            ),
+        )
+        for tensor in (values, offsets, output, task_ids):
+            tensor.record_stream(stream)
+        return None
+
+    def current_stream():
+        if torch.cuda.current_device() != device_index:
+            raise ValueError("prepared sum must launch on its prepared device")
+        return torch.cuda.current_stream()
+
+    def warp():
+        return submit(
+            warp_function,
+            _WARP_BLOCK,
+            all_tasks,
+            current_stream(),
+        )
+
+    def cta():
+        return submit(
+            cta_function,
+            _CTA_BLOCK,
+            all_tasks,
+            current_stream(),
+        )
+
+    def mixed():
+        stream = current_stream()
+        stream.wait_event(tasks_ready)
+        driver.launch_segmented_mixed(
+            mixed_function,
+            ((warp_count + 3) // 4 + cta_count,),
+            _CTA_BLOCK,
+            stream.cuda_stream,
+            (
+                values.data_ptr(),
+                offsets.data_ptr(),
+                output.data_ptr(),
+                mixed_tasks.data_ptr(),
+                value_count,
+                warp_count,
+                cta_count,
+            ),
+        )
+        for tensor in (values, offsets, output, mixed_tasks):
+            tensor.record_stream(stream)
+        return None
+
+    return _PreparedSum(warp, cta, mixed)
 
 
 def launch_softmax_gpu(values, offsets, output, block_size=128):
@@ -452,16 +608,11 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
         ),
         # Prefill so that a store past the live range, or a zero-length
         # print, is visible in the parsed result instead of being garbage.
-        (
-            f"    %sentinel = arith.constant {_float_literal(_SENTINEL)} : f32"
-        ),
+        (f"    %sentinel = arith.constant {_float_literal(_SENTINEL)} : f32"),
         "    %prefill_from = arith.constant 0 : index",
         "    %prefill_step = arith.constant 1 : index",
         f"    %prefill_to = arith.constant {output_length} : index",
-        (
-            "    scf.for %pi = %prefill_from to %prefill_to "
-            "step %prefill_step {"
-        ),
+        ("    scf.for %pi = %prefill_from to %prefill_to step %prefill_step {"),
         "      memref.store %sentinel, %output[%pi] : memref<?xf32>",
         "    }",
     ]
@@ -557,9 +708,7 @@ def _execute(module_text):
     lowered = _run(
         [swage_opt, "--swage-segmented-reduction-to-scf"], module_text
     )
-    llvm = _run(
-        [mlir_opt, f"--pass-pipeline={_LOWERING_PIPELINE}"], lowered
-    )
+    llvm = _run([mlir_opt, f"--pass-pipeline={_LOWERING_PIPELINE}"], lowered)
     runner_utils = llvm_root / "lib" / "libmlir_runner_utils.so"
     c_runner_utils = llvm_root / "lib" / "libmlir_c_runner_utils.so"
     printed = _run(
