@@ -32,9 +32,11 @@ narrower private subset described in [Private Qualification](../qualification/pr
 ## Generated reference boundary
 
 The detailed dialect and operation reference is generated from the TableGen
-definitions in `include/swage/Dialect/Swage/IR`. This wrapper remains useful
-without generated fragments and will host committed generated reference text
-once synchronization is enabled.
+definitions in `include/swage/Dialect/Swage/IR`.
+
+--8<-- "docs/reference/_generated/swage-dialect.inc"
+
+--8<-- "docs/reference/_generated/swage-ops.inc"
 
 Continue with [Segments, Tasks, and Tiles](../concepts/segments-tiles-tasks.md)
 for the semantic model, or [Compiler Tools and Passes](compiler-tools.md) for

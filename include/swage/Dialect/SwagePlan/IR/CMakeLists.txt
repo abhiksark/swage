@@ -1,5 +1,7 @@
 # include/swage/Dialect/SwagePlan/IR/CMakeLists.txt
 add_mlir_dialect(SwagePlanOps swage_plan)
+add_mlir_doc(SwagePlanDialect SwagePlanDialect swage_plan/ -gen-dialect-doc)
+add_mlir_doc(SwagePlanOps SwagePlanOps swage_plan/ -gen-op-doc)
 
 set(LLVM_TARGET_DEFINITIONS SwagePlanOps.td)
 mlir_tablegen(SwagePlanEnums.h.inc -gen-enum-decls)

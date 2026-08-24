@@ -25,9 +25,11 @@ There is no public `mlir_swage.dialects.swage_plan` Python module contract.
 ## Generated reference boundary
 
 The detailed dialect and operation reference is generated from TableGen in
-`include/swage/Dialect/SwagePlan/IR`. This wrapper remains complete without
-generated fragments and will host committed generated reference text once
-synchronization is enabled.
+`include/swage/Dialect/SwagePlan/IR`.
+
+--8<-- "docs/reference/_generated/swage-plan-dialect.inc"
+
+--8<-- "docs/reference/_generated/swage-plan-ops.inc"
 
 Continue with [Private Qualification](../qualification/private-m4-m8.md) for
 the M6 to M8 execution boundary or [Compiler Tools and Passes](compiler-tools.md)
