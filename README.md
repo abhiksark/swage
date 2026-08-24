@@ -2,7 +2,7 @@
 
 <p align="center">
   <img
-    src="docs/assets/images/swage-logo.png"
+    src="https://raw.githubusercontent.com/abhiksark/swage/a1a49346772b28b9658a2305b9206f85d8e0443e/docs/assets/images/swage-logo.png"
     alt="Swage logo"
     width="720"
   >
