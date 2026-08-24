@@ -25,7 +25,7 @@ classifiers = [
 Repository = "https://github.com/abhiksark/swage"
 
 [project.optional-dependencies]
-dev = ["build", "pytest", "ruff", "lit"]
+dev = ["build", "hatchling", "lit", "pytest", "ruff"]
 docs = ["mkdocs", "mkdocs-material"]
 pytorch = ["torch>=2.6"]
 
