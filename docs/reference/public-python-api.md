@@ -65,9 +65,11 @@ positive integer `BLOCK` that fits the active device limit. `grid` is the
 one-element tuple `(ceildiv(n, BLOCK),)`. For `n == 0`, `grid` is `(0,)` and
 the validated launch performs no compilation or enqueue.
 
-The native compiler targets the active device exactly and accepts `sm_80`
-through `sm_129`. A device below compute capability 8.0 is rejected even when
-its tensors, block size, and grid satisfy the Python launch checks.
+For a nonzero launch, the native compiler targets the active device exactly
+and accepts `sm_80` through `sm_129`. A nonzero launch on a device below
+compute capability 8.0 is rejected during compilation. The validated
+`n == 0` path returns before native compilation and does not apply this target
+gate.
 
 Execution is asynchronous on `torch.cuda.current_stream()`. The runtime
 records all three tensors on that stream after submission. There is no public
