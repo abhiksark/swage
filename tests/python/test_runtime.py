@@ -471,6 +471,39 @@ def test_driver_marshals_four_pointer_segmented_task_abi():
     assert scalar_values == [4096, 7]
 
 
+def test_driver_marshals_four_pointer_fused_segmented_abi():
+    """Pass four pointers and three i32 counts through the CUDA Driver ABI."""
+    from swage import _runtime
+
+    driver = object.__new__(_runtime._CudaDriver)
+    calls = []
+    driver._call = lambda name, *args: calls.append((name, args))
+
+    driver.launch_segmented_mixed(
+        0xF00D,
+        (9,),
+        128,
+        0xABCD,
+        (0x10, 0x20, 0x30, 0x40, 4096, 5, 7),
+    )
+
+    name, call = calls[0]
+    parameters = call[-2]
+    pointer_values = [
+        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
+        .contents.value
+        for index in range(4)
+    ]
+    scalar_values = [
+        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_int32))
+        .contents.value
+        for index in range(4, 7)
+    ]
+    assert name == "cuLaunchKernel"
+    assert pointer_values == [0x10, 0x20, 0x30, 0x40]
+    assert scalar_values == [4096, 5, 7]
+
+
 def test_driver_error_contains_stable_name_code_and_text():
     """Preserve actionable CUDA Driver diagnostics."""
     from swage import _runtime

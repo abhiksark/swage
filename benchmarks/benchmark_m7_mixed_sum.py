@@ -52,6 +52,33 @@ def _evaluate_gate(medians):
     return ratio, ratio <= _GATE_RATIO
 
 
+def _configuration():
+    """Return the fixed benchmark and fused schedule contract."""
+    return {
+        "distribution": "bimodal",
+        "seed": _SEED,
+        "segment_count": _COUNT,
+        "warp_max_elements": _WARP_MAX_ELEMENTS,
+        "warp_block": 32,
+        "cta_block": 128,
+        "mixed_schedule": {
+            "kind": "fused",
+            "kernel_launches": 1,
+            "block_threads": 128,
+            "warp_slots_per_block": 4,
+        },
+        "warmups_per_policy": _WARMUPS,
+        "interleaved_samples_per_policy": _SAMPLES,
+        "values": "f32 ones",
+        "excluded": [
+            "compilation",
+            "classification",
+            "allocation",
+            "module loading",
+        ],
+    }
+
+
 def _check_results(launches, output, expected):
     """Require exact all-one sums before collecting timing evidence."""
     import torch
@@ -109,8 +136,6 @@ def main():
     from distributions import generate_lengths, summarize_lengths
     from swage import _runtime
     from swage._segmented_qualification import (
-        _CTA_BLOCK,
-        _WARP_BLOCK,
         _prepare_planned_sum,
     )
 
@@ -166,23 +191,7 @@ def main():
             "multiprocessors": properties.multi_processor_count,
             "total_memory_bytes": properties.total_memory,
         },
-        "configuration": {
-            "distribution": "bimodal",
-            "seed": _SEED,
-            "segment_count": _COUNT,
-            "warp_max_elements": _WARP_MAX_ELEMENTS,
-            "warp_block": _WARP_BLOCK,
-            "cta_block": _CTA_BLOCK,
-            "warmups_per_policy": _WARMUPS,
-            "interleaved_samples_per_policy": _SAMPLES,
-            "values": "f32 ones",
-            "excluded": [
-                "compilation",
-                "classification",
-                "allocation",
-                "module loading",
-            ],
-        },
+        "configuration": _configuration(),
         "distribution_statistics": summarize_lengths(lengths),
         "raw_samples_ms": samples,
         "medians_ms": medians,

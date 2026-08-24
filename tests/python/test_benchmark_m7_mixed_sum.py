@@ -28,6 +28,16 @@ def test_gate_boundary(m7_benchmark):
     )[1]
 
 
+def test_configuration_records_fused_mixed_schedule(m7_benchmark):
+    """Keep the predeclared one-launch fused schedule in every result."""
+    assert m7_benchmark._configuration()["mixed_schedule"] == {
+        "kind": "fused",
+        "kernel_launches": 1,
+        "block_threads": 128,
+        "warp_slots_per_block": 4,
+    }
+
+
 def test_git_metadata_requires_a_clean_worktree(m7_benchmark, monkeypatch):
     """Do not label measurements from modified or untracked sources."""
     results = iter(

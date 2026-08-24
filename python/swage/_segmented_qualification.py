@@ -427,15 +427,24 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
             target=target,
             use_task_ids=True,
         )
+        _, mixed_ptx = native_swage._compile_fused_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            target=target,
+        )
 
     driver = _runtime._get_driver()
     _, warp_function = driver.load(warp_ptx, kernel_name)
     _, cta_function = driver.load(cta_ptx, kernel_name)
+    _, mixed_function = driver.load(mixed_ptx, kernel_name)
     device = offsets.device
     device_index = device.index
     all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
     warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
     cta_tasks = torch.tensor(cta_ids, dtype=torch.int32, device=device)
+    mixed_tasks = torch.tensor(
+        [*warp_ids, *cta_ids], dtype=torch.int32, device=device
+    )
 
     def submit(function, block_size, task_ids, stream):
         task_count = task_ids.numel()
@@ -482,8 +491,26 @@ def _prepare_planned_sum(values, offsets, output, *, warp_max_elements=32):
 
     def mixed():
         stream = current_stream()
-        submit(warp_function, _WARP_BLOCK, warp_tasks, stream)
-        return submit(cta_function, _CTA_BLOCK, cta_tasks, stream)
+        warp_count = warp_tasks.numel()
+        cta_count = cta_tasks.numel()
+        driver.launch_segmented_mixed(
+            mixed_function,
+            ((warp_count + 3) // 4 + cta_count,),
+            _CTA_BLOCK,
+            stream.cuda_stream,
+            (
+                values.data_ptr(),
+                offsets.data_ptr(),
+                output.data_ptr(),
+                mixed_tasks.data_ptr(),
+                value_count,
+                warp_count,
+                cta_count,
+            ),
+        )
+        for tensor in (values, offsets, output, mixed_tasks):
+            tensor.record_stream(stream)
+        return None
 
     return _PreparedSum(warp, cta, mixed)
 
