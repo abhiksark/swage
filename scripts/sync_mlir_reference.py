@@ -19,12 +19,27 @@ def normalize_markdown(text: str) -> str:
     fence = None
     for line in text.splitlines():
         candidate = line.lstrip(" ")
-        if candidate.startswith(("```", "~~~")):
-            marker = candidate[:3]
-            if fence is None:
-                fence = marker
-            elif marker == fence:
+        delimiter = candidate[:1]
+        run_length = 0
+        if delimiter in {"`", "~"}:
+            run_length = len(candidate) - len(candidate.lstrip(delimiter))
+        is_fence_line = False
+        if fence is None and run_length >= 3:
+            fence = (delimiter, run_length)
+            is_fence_line = True
+        elif fence is not None:
+            fence_delimiter, fence_length = fence
+            is_closer = (
+                delimiter == fence_delimiter
+                and run_length >= fence_length
+                and not candidate[run_length:].strip()
+            )
+            if is_closer:
                 fence = None
+                is_fence_line = True
+
+        if is_fence_line:
+            pass
         elif fence is None and candidate == "[TOC]":
             continue
         elif fence is None:

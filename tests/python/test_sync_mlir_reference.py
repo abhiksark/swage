@@ -60,6 +60,28 @@ Trailing text.
 """
 
 
+def test_normalize_preserves_content_in_longer_fences():
+    """Keep shorter delimiter runs inside a longer fenced block."""
+    sync = _load_sync_module()
+    source = (
+        "````markdown\n"
+        "literal delimiter:\n"
+        "```\n"
+        "# Still code, not a heading\n"
+        "````   \n"
+        "# Outside heading\n"
+    )
+
+    assert sync.normalize_markdown(source) == (
+        "````markdown\n"
+        "literal delimiter:\n"
+        "```\n"
+        "# Still code, not a heading\n"
+        "````   \n"
+        "## Outside heading\n"
+    )
+
+
 def test_write_mode_creates_all_four_deterministic_fragments(tmp_path):
     """Write the exact four stable fragments from generated inputs."""
     sync = _load_sync_module()
