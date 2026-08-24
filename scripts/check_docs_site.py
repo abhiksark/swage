@@ -68,7 +68,13 @@ def check_site(site_dir: Path = DEFAULT_SITE_DIR) -> list[str]:
         parsed = parsed_pages[page.resolve()]
         page_name = page.relative_to(site_dir).as_posix()
         for reference in parsed.references:
-            parts = urlsplit(reference)
+            try:
+                parts = urlsplit(reference)
+            except ValueError:
+                errors.append(
+                    f"{page_name}: malformed reference: {reference}"
+                )
+                continue
             if (
                 reference.startswith("//")
                 or parts.netloc
@@ -76,7 +82,15 @@ def check_site(site_dir: Path = DEFAULT_SITE_DIR) -> list[str]:
             ):
                 continue
 
-            target = _resolve_target(site_dir, page, unquote(parts.path))
+            try:
+                target = _resolve_target(
+                    site_dir, page, unquote(parts.path)
+                )
+            except (OSError, ValueError):
+                errors.append(
+                    f"{page_name}: malformed reference: {reference}"
+                )
+                continue
             try:
                 target.relative_to(site_dir)
             except ValueError:

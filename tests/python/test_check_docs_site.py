@@ -80,6 +80,26 @@ def test_missing_targets_and_fragments_are_all_reported_in_stable_order(
     ]
 
 
+def test_malformed_references_do_not_hide_other_failures(tmp_path):
+    """Report malformed links and continue checking every later reference."""
+    checker = _load_checker()
+    site = tmp_path / "site"
+    _write(
+        site / "index.html",
+        """<img src="assets/first-missing.svg">
+        <a href="http://[">Malformed URL</a>
+        <a href="bad%00path">Malformed path</a>
+        <img src="assets/last-missing.svg">""",
+    )
+
+    assert checker.check_site(site) == [
+        "index.html: malformed reference: bad%00path",
+        "index.html: malformed reference: http://[",
+        "index.html: missing target: assets/first-missing.svg",
+        "index.html: missing target: assets/last-missing.svg",
+    ]
+
+
 def test_missing_site_and_missing_html_fail_clearly(tmp_path):
     """Reject absent or empty rendered-site inputs with direct diagnostics."""
     checker = _load_checker()
