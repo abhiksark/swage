@@ -7,7 +7,7 @@ repo_url: https://github.com/abhiksark/swage
 theme:
   name: material
   logo: assets/images/swage-icon.png
-  favicon: assets/images/swage-icon.png
+  favicon: assets/images/swage-favicon.png
   palette:
     - scheme: default
       toggle:
@@ -19,17 +19,46 @@ theme:
         name: Switch to light mode
 markdown_extensions:
   - admonition
+  - md_in_html
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.superfences
   - tables
+extra_css:
+  - stylesheets/figures.css
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+    anchors: warn
 nav:
   - Home: index.md
-  - Quickstart: quickstart.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: quickstart.md
+      - Troubleshooting: getting-started/troubleshooting.md
   - Concepts:
       - Swage, Visually: concepts/swage-visual-guide.md
       - Segments, Tasks, and Tiles: concepts/segments-tiles-tasks.md
   - Architecture:
       - Compiler pipeline: architecture/compiler-pipeline.md
-  - ADRs:
+  - Reference:
+      - Public Python API: reference/public-python-api.md
+      - Kernel Language: reference/kernel-language.md
+      - Swage Dialect: reference/swage-dialect.md
+      - SwagePlan Dialect: reference/swage-plan-dialect.md
+      - Compiler Tools and Passes: reference/compiler-tools.md
+      - Runtime and Environment: reference/runtime-environment.md
+  - Qualification:
+      - Private M4 to M8: qualification/private-m4-m8.md
+      - Verification Evidence: qualification/evidence.md
+  - Decisions:
+      - ADR Index: decisions/index.md
       - "ADR-0001: Python AST directly to MLIR": adr/ADR-0001-python-ast-directly-to-mlir.md
       - "ADR-0002: Segment/Task/Tile terminology": adr/ADR-0002-segment-task-tile-terminology.md
       - "ADR-0003: Two dialects": adr/ADR-0003-two-dialects.md

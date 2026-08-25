@@ -1,77 +1,82 @@
+<!-- docs/concepts/segments-tiles-tasks.md -->
+
 # Segments, Tasks, and Tiles
 
-Swage's entire design hangs on keeping three concepts separate. Most
-GPU-programming pain with ragged data comes from collapsing them into one.
+Swage keeps program meaning, schedulable work, and physical execution
+separate. The order matters: begin with the segment, derive tasks, then map
+each task to a fixed hardware step.
 
-## Segment — the semantic unit
+One runtime-length segment retains its logical dense meaning. Qualification
+may derive one direct task or several ordered partial tasks plus a merge task;
+the task is the policy-bearing work unit. Each task executes through a fixed
+32-thread warp or 128-thread CTA step. The execution shape is not a
+runtime-sized register array, and it does not change the segment's meaning.
 
-A **segment** is a logical, runtime-sized, internally dense data object:
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![A segment mapped to policy-bearing tasks and fixed GPU steps](../assets/diagrams/segments-tasks-tiles.svg)
+
+</div>
+
+*Segment meaning, task policy, and fixed execution shape stay distinct. [Open the full-size figure](../assets/diagrams/segments-tasks-tiles.svg).*
+
+## Segment: the semantic unit
+
+A segment is one logical, runtime-sized, internally dense slice:
 
 ```text
 segment i = values[offsets[i] : offsets[i + 1]]
 ```
 
-Segments are what the programmer thinks about. A ragged softmax is "for
-every segment: subtract the max, exponentiate, normalize" — no mention of
-warps, blocks, or padding. Segment lengths are unknown at compile time,
-may be zero, and may be wildly skewed within one launch.
+Segment lengths are runtime values. They may be zero and may differ greatly
+within one batch. In native IR, `!swage.segment<f32>` carries only the element
+type. The values buffer, offsets buffer, and segment index remain SSA
+operands. A runtime-sized segment is never represented as a runtime-sized
+register array.
 
-In IR, a segment is the value produced by `swage.make_segment`; its type
-`!swage.segment<f32>` carries only the element type. Which buffer, which
-offsets, which index — that is runtime information and lives in SSA
-operands, never in the type (see ADR-0002 and DESIGN.md).
+The semantic program uses logical coordinates. GPU thread and block IDs do
+not appear in the `swage` dialect.
 
-## Tile — the physical unit
+## Task: the schedulable bridge
 
-A **tile** is a fixed-size physical unit — `tile<32xf32>`,
-`tile<128xf32>`, `tile<256xf32>` — processed by a warp or CTA. Tiles are
-what GPUs are good at: statically-shaped loads, register allocation,
-coalesced access, warp-synchronous reductions. Everything the hardware
-executes is ultimately a tile-shaped operation.
+A task is a unit that a runtime can schedule for a segment. One semantic
+segment may require one task or several tasks. A task can represent direct
+work, a chunk of a long segment, a partial result, or a merge.
 
-## Task — the schedulable bridge
+Current private M8 identity-sum qualification derives:
 
-A **task** is a unit of execution the runtime can schedule. Tasks are how
-variable-sized segments meet fixed-size tiles. A task may represent:
+- one direct warp task for a segment of at most 32 elements;
+- one direct CTA task for a segment from 33 through 4096 elements;
+- ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
-- one short segment,
-- several short segments *packed* into one tile,
-- one medium segment,
-- one *chunk* of a long segment,
-- a partial reduction, a reduction merge, or a normalize/store stage.
+The thresholds are configurable planning limits. Split work is current only
+for the private canonical identity sum. Packing several short segments,
+split max, split softmax, device queues, and persistent scheduling are future
+work.
 
-A long softmax segment might become:
+## Tile: the physical step
 
-```text
-partial_max(segment=7, range=0:512)     partial_max(segment=7, range=512:1024)
-merge_max(segment=7)
-partial_sum(segment=7, range=0:512)     partial_sum(segment=7, range=512:1024)
-merge_sum(segment=7)
-normalize(segment=7, range=0:512)       normalize(segment=7, range=512:1024)
-```
+A tile is the fixed physical work shape used while lowering a task. In the
+current qualified identity-sum paths, a warp step uses 32 threads and a CTA
+step uses 128 threads. The 4096-element CTA chunk limit is the number of input
+elements traversed by a task, not the number of threads.
 
-## Logical grid, physical grid, planner
+Some design records use forms such as `tile<32xf32>` as conceptual notation.
+There is no current `tile` type or operation in the Swage dialect. Native
+lowering uses upstream fixed-shape and GPU constructs after semantic
+admission.
 
-The **logical grid** is the semantic domain the Python kernel is written
-against (`sl.segment_id(0)` indexes it). The **physical grid** is the GPU
-task domain actually launched. The **planner** converts segment programs
-plus runtime extents (actual lengths, counts, skew) into tasks and tiles —
-choosing packing, bucketing, partitioning, and static or persistent
-scheduling.
+## Logical and physical grids
 
-The research bet: because the programmer specified *segment-local
-semantics* rather than a schedule, the planner is free to re-derive the
-schedule as the length distribution changes — without the kernel changing.
+The logical grid identifies semantic program instances. The physical grid
+contains the GPU work that is actually launched. Keeping the grids separate
+allows a future planner to change task structure without changing program
+meaning.
 
-## What goes wrong when the levels blur
+The current public Python path uses a logical fixed-block coordinate for
+canonical vector add. The private segmented path proves selected Segment to
+Task to Tile mappings. It does not yet provide a public general planner.
 
-- *Segment = tile* (padding): every segment padded to the longest one;
-  memory and FLOPs wasted on skewed distributions.
-- *Segment = task* (one CTA per segment): tiny segments underutilize
-  entire CTAs; one huge segment serializes the tail of the launch.
-- *Hardware ids in semantics* (thread-level programming): the schedule is
-  frozen into the kernel; changing distribution means rewriting it.
-
-Swage's verifiers enforce the separation mechanically: no thread/block ids
-in the `swage` dialect, no runtime identity in types, no runtime-sized
-register arrays.
+Carry this distinction into [Compiler Pipeline](../architecture/compiler-pipeline.md),
+which shows where semantic IR branches into current lowering paths. Exact
+private task and ABI details live in [Private Qualification](../qualification/private-m4-m8.md).

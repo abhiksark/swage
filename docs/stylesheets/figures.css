@@ -1,0 +1,30 @@
+.doc-figure {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.25rem 0.25rem 0.5rem;
+  scrollbar-gutter: stable;
+}
+
+.md-typeset .doc-figure:focus {
+  outline: 3px solid var(--md-accent-fg-color);
+  outline-offset: 2px;
+}
+
+.doc-figure img {
+  display: block;
+  width: 100%;
+  min-width: 52rem;
+  height: auto;
+  margin: 0;
+}
+
+.doc-wordmark {
+  text-align: center;
+}
+
+.doc-wordmark img {
+  display: block;
+  width: min(100%, 45rem);
+  height: auto;
+  margin: 0 auto 1rem;
+}

@@ -1,0 +1,48 @@
+<!-- docs/assets/diagrams/frontend-boundary.svg -->
+<svg xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1200 680" role="img"
+  aria-labelledby="frontend-boundary-title frontend-boundary-description"
+  font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title id="frontend-boundary-title">Frontend verification and execution boundary</title>
+  <desc id="frontend-boundary-description">Python source passes restricted AST validation and verified semantic MLIR before emit_mlir stops or canonical launch continues to CUDA.</desc>
+  <defs>
+    <marker id="frontend-boundary-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#59636E"/>
+    </marker>
+  </defs>
+  <rect data-role="canvas" x="0" y="0" width="1200" height="680" fill="#FFFDF8"/>
+  <text x="48" y="54" font-size="32" font-weight="750" fill="#17212B" text-anchor="start">Frontend boundary</text>
+  <rect x="60" y="130" width="230" height="126" rx="14" fill="#F5F3ED" stroke="#59636E" stroke-width="2"/>
+  <text x="175" y="170" font-size="17" font-weight="700" fill="#17212B" text-anchor="middle">Python source</text>
+  <text x="175" y="204" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">captured, not executed</text>
+  <rect x="350" y="130" width="230" height="126" rx="14" fill="#F5F3ED" stroke="#59636E" stroke-width="2"/>
+  <text x="465" y="170" font-size="17" font-weight="700" fill="#17212B" text-anchor="middle">restricted AST</text>
+  <text x="465" y="204" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">fail closed</text>
+  <text x="465" y="229" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">source-located errors</text>
+  <line x1="294" y1="193" x2="340" y2="193" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <rect x="640" y="130" width="230" height="126" rx="14" fill="#F5F3ED" stroke="#59636E" stroke-width="2"/>
+  <text x="755" y="170" font-size="17" font-weight="700" fill="#17212B" text-anchor="middle">verified semantic MLIR</text>
+  <text x="755" y="204" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">one production IR</text>
+  <line x1="584" y1="193" x2="630" y2="193" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <line x1="870" y1="193" x2="930" y2="193" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <rect x="940" y="130" width="210" height="126" rx="14" fill="#DDF4EB" stroke="#00664B" stroke-width="2"/>
+  <text x="1045" y="170" font-size="18" font-weight="700" fill="#17212B" text-anchor="middle">frontend gate</text>
+  <text x="1045" y="204" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">module verified</text>
+  <line x1="1045" y1="256" x2="1045" y2="320" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <line x1="1045" y1="320" x2="820" y2="340" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <line x1="1045" y1="320" x2="1085" y2="340" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <rect x="650" y="350" width="340" height="154" rx="14" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
+  <rect x="674" y="370" width="174" height="38" rx="19" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
+  <text x="761" y="396" font-size="16" font-weight="750" fill="#00689D" text-anchor="middle">NO GPU NEEDED</text>
+  <text x="820" y="438" font-size="22" font-weight="750" fill="#17212B" text-anchor="middle">emit_mlir()</text>
+  <text x="820" y="470" font-size="17" font-weight="500" fill="#00689D" text-anchor="middle">compile-only stop</text>
+  <rect x="1010" y="350" width="150" height="154" rx="14" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
+  <rect x="1024" y="370" width="122" height="38" rx="19" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
+  <text x="1085" y="396" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">PUBLIC M3</text>
+  <text x="1085" y="438" font-size="22" font-weight="750" fill="#17212B" text-anchor="middle">launch()</text>
+  <text x="1085" y="470" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">canonical only</text>
+  <line x1="1045" y1="504" x2="1045" y2="558" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
+  <rect x="865" y="570" width="295" height="72" rx="14" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
+  <text x="1012" y="600" font-size="18" font-weight="700" fill="#17212B" text-anchor="middle">native compile -> CUDA</text>
+  <text x="1012" y="626" font-size="16" font-weight="500" fill="#A94500" text-anchor="middle">nonzero target gate: sm_80+</text>
+</svg>

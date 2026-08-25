@@ -38,10 +38,10 @@ start before all stage-one descriptors. Validation rejects malformed counts,
 ranges, descriptor counts, scratch indices, and i32 narrowing before returning
 any descriptor.
 
-The private materialization boundary returns four flat i32 arrays: direct warp
-segment IDs, direct CTA segment IDs, partial `[begin, end]` records, and merge
-`[segment_id, partial_begin, partial_end]` records. This adds no operation,
-type, policy, or public Python API.
+The private materialization boundary returns direct work, ordered partial
+work, and final merge work without adding an operation, type, policy, or
+public Python API. Exact record layouts live in
+[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
 
 The partial and merge lowering passes are available only through private
 compiler factories. They are intentionally not registered as public
@@ -49,22 +49,12 @@ compiler factories. They are intentionally not registered as public
 
 ### Private GPU execution
 
-The partial kernel uses 128 threads and this ABI:
-
-```text
-values*, partial_ranges*, scratch*, value_count:i32, partial_count:i32
-```
-
-Each block reduces one explicit absolute input range and writes one unique
-scratch slot. The merge kernel also uses 128 threads and this ABI:
-
-```text
-scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
-```
-
-Each block reduces one compact scratch range and thread zero writes the final
-segment result once. Both kernels reuse the existing three-pointer, two-i32
-CUDA Driver launch marshaller and the current PyTorch stream.
+Each partial block reduces one explicit absolute input range and writes one
+unique scratch slot. Each merge block reduces one compact scratch range, and
+one thread writes the final segment result once. Both kernels reuse the
+existing segmented CUDA Driver launch boundary and the current PyTorch
+stream. Their exact private ABIs live in
+[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
 
 Pure `warp` and `cta` preparation continues to execute every segment as a
 correctness control. Mixed execution submits direct fused work, partial CTAs,

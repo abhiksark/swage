@@ -52,17 +52,11 @@ another dependency.
 
 The existing segmented-reduction GPU conversion gains optional internal task
 ID indirection while preserving direct segment-ID mode. Task mode admits only
-the M6 identity segmented sum and uses this private ABI, in order:
-
-```text
-values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
-```
-
-The x-block ID indexes `task_ids`; the loaded value is the original segment
-ID used for offset loads and the output store. The reduction body remains the
-existing block-stride emitter. M7 compiles one pure-warp kernel with 32
-threads and one pure-CTA kernel with 128 threads. A private driver helper
-launches four pointers and two i32 counts.
+the M6 identity segmented sum. The x-block ID selects the original segment ID
+used for offset loads and the output store, while the reduction body remains
+the existing block-stride emitter. M7 compiles distinct pure-warp and pure-CTA
+kernels. The exact private task ABI lives in
+[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
 
 ### Classifier integration and launch ordering
 
@@ -131,7 +125,7 @@ general benchmark infrastructure, a release, or unrelated M1 work.
 
 - M7 measures the scheduling decision without widening the semantic or public
   runtime surface.
-- Both pure policies use the same task-ID ABI, so the benchmark compares
-  policy execution rather than different host contracts.
+- Both pure policies use the same host contract, so the benchmark compares
+  policy execution rather than different interfaces.
 - Long segments still run in one CTA and short segments still use one whole
   warp. More general task decomposition remains future work.

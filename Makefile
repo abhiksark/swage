@@ -1,7 +1,7 @@
 # Convenience wrappers around the real commands. Advanced users can run the
 # underlying scripts and tools directly; see CONTRIBUTING.md.
 
-.PHONY: setup build test test-cpu lint docs
+.PHONY: setup build test test-cpu lint diagrams docs
 
 setup:
 	pip install -e ".[dev]"
@@ -19,5 +19,10 @@ test-cpu:
 lint:
 	ruff check .
 
+diagrams:
+	python3 scripts/render_docs_diagrams.py
+
 docs:
+	python3 scripts/render_docs_diagrams.py --check
 	mkdocs build --strict
+	python3 scripts/check_docs_site.py site
