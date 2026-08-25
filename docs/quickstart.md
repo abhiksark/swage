@@ -81,9 +81,12 @@ sed -n '1,120p' "$SWAGE_DUMP_DIR"/*.mlir
 sed -n '1,80p' "$SWAGE_DUMP_DIR"/*.ptx
 ```
 
-Run the example a second time to exercise cache verification and reuse. The
-exact call contract is in [Public Python API](reference/public-python-api.md),
-and the cache and stream rules are in
+On an identified clean checkout with its LLVM pin, run the example a second
+time to exercise persistent-cache verification and reuse. A dirty or
+unidentified build instead reuses compiled work only within the current
+process. The exact call contract is in
+[Public Python API](reference/public-python-api.md), and the cache and stream
+rules are in
 [Runtime and Environment](reference/runtime-environment.md).
 
 ## Continue

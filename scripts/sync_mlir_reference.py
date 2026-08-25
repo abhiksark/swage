@@ -60,6 +60,10 @@ def sync_references(
     """Write or check committed fragments against MLIR documentation output."""
     rendered = {}
     errors = []
+    expected_names = {output_name for _, output_name in REFERENCE_FILES}
+    existing = {
+        path.name: path for path in output_dir.glob("*.inc") if path.is_file()
+    }
     for input_path, output_name in REFERENCE_FILES:
         source = build_dir / input_path
         if not source.is_file():
@@ -79,6 +83,8 @@ def sync_references(
                 and output.read_bytes() != rendered[output_name]
             ):
                 errors.append(f"stale committed output: {output}")
+        for name in sorted(existing.keys() - expected_names):
+            errors.append(f"orphaned committed output: {existing[name]}")
         return errors
 
     if errors:
@@ -86,6 +92,8 @@ def sync_references(
     output_dir.mkdir(parents=True, exist_ok=True)
     for _, output_name in REFERENCE_FILES:
         (output_dir / output_name).write_bytes(rendered[output_name])
+    for name in existing.keys() - expected_names:
+        existing[name].unlink()
     return []
 
 

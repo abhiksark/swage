@@ -28,7 +28,7 @@ gh project field-create "$N" --owner abhiksark \
   --single-select-options "none,some,high"
 ```
 
-Add each open issue:
+Add at most 100 open issues:
 
 ```bash
 gh issue list --repo abhiksark/swage --state open --limit 100 \

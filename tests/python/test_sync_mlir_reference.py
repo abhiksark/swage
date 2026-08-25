@@ -169,6 +169,40 @@ def test_check_reports_stale_fragments_without_writes(tmp_path):
     }
 
 
+def test_check_rejects_orphans_and_write_removes_only_fragments(tmp_path):
+    """Reject orphaned fragments without touching unrelated entries."""
+    sync = _load_sync_module()
+    build_dir = tmp_path / "build"
+    output_dir = tmp_path / "output"
+    _write_inputs(build_dir)
+    assert sync.sync_references(build_dir, output_dir) == []
+    orphan = output_dir / "old-reference.inc"
+    unrelated = output_dir / "README.md"
+    non_file = output_dir / "cache.inc"
+    orphan.write_text("orphan\n", encoding="utf-8")
+    unrelated.write_text("keep\n", encoding="utf-8")
+    non_file.mkdir()
+    before = {
+        path.name: path.read_bytes()
+        for path in output_dir.iterdir()
+        if path.is_file()
+    }
+
+    assert sync.sync_references(build_dir, output_dir, check=True) == [
+        f"orphaned committed output: {orphan}"
+    ]
+    assert before == {
+        path.name: path.read_bytes()
+        for path in output_dir.iterdir()
+        if path.is_file()
+    }
+
+    assert sync.sync_references(build_dir, output_dir) == []
+    assert not orphan.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep\n"
+    assert non_file.is_dir()
+
+
 def test_check_accepts_hand_written_fixtures(tmp_path):
     """Accept committed fragments that match hand-written fixtures."""
     sync = _load_sync_module()
