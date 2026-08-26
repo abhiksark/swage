@@ -78,3 +78,24 @@ def test_rejects_a_block_size_that_differs_from_the_vector_shape():
             block_size=64,
             target="sm_80",
         )
+
+
+def test_rejects_function_symbols_ptx_cannot_represent():
+    """Fail with a diagnostic instead of aborting in the NVPTX printer."""
+    from mlir_swage import ir
+    from mlir_swage.dialects import swage as swage_dialect
+
+    source = _emit().operation.get_asm(enable_debug_info=False)
+    renamed = source.replace("@add_kernel", '@"añadir"')
+    with ir.Context() as context:
+        swage_dialect.register_dialects(context)
+        module = ir.Module.parse(renamed)
+        with pytest.raises(
+            ValueError, match="not a valid PTX identifier"
+        ):
+            native_swage._compile_ptx(
+                module,
+                kernel_name="añadir",
+                block_size=128,
+                target="sm_80",
+            )

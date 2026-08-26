@@ -219,3 +219,13 @@ def test_calling_a_decorated_kernel_points_to_launch():
 
     with pytest.raises(RuntimeError, match=r"use kernel\.launch\(\)"):
         kernel()
+
+
+def test_non_ascii_kernel_names_are_rejected_at_capture():
+    """Refuse names PTX cannot represent before any native work happens."""
+    with pytest.raises(
+        sw.CompilationError, match="kernel name must be an ASCII identifier"
+    ):
+        @sw.jit
+        def añadir(x_ptr):
+            return

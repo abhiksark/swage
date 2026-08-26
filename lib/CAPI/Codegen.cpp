@@ -63,6 +63,17 @@ enum class KernelKind {
   SplitMergeReduction,
 };
 
+/// The NVPTX assembly printer calls report_fatal_error on symbols it cannot
+/// print, which aborts the embedding process, so names must be rejected here
+/// while a diagnostic is still possible.
+bool isPTXIdentifier(llvm::StringRef name) {
+  auto isFollowing = [](char character) {
+    return llvm::isAlnum(character) || character == '_' || character == '$';
+  };
+  return !name.empty() && !llvm::isDigit(name.front()) &&
+         llvm::all_of(name, isFollowing);
+}
+
 bool isSupportedTarget(llvm::StringRef target) {
   llvm::StringRef digits = target.consume_front("sm_") ? target : "";
   if (digits.size() < 2 || digits.size() > 3 ||
@@ -124,6 +135,14 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   MLIRContext *context = module->getContext();
   if (!module->lookupSymbol<func::FuncOp>(kernelName))
     return source.emitError("kernel_name does not name the module function");
+  WalkResult invalidName = source.walk([](func::FuncOp function) {
+    if (isPTXIdentifier(function.getName()))
+      return WalkResult::advance();
+    function.emitError("function name is not a valid PTX identifier");
+    return WalkResult::interrupt();
+  });
+  if (invalidName.wasInterrupted())
+    return failure();
 
   registerBuiltinDialectTranslation(*context);
   registerGPUDialectTranslation(*context);

@@ -62,6 +62,11 @@ class _Kernel:
             )
         self.function = parsed.body[0]
         functools.update_wrapper(self, function)
+        if not (self.__name__.isascii() and self.__name__.isidentifier()):
+            self._raise(
+                self.function,
+                "kernel name must be an ASCII identifier",
+            )
         for decorator in self.function.decorator_list:
             is_jit = (
                 isinstance(decorator, ast.Name) and decorator.id == "jit"
