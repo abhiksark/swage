@@ -10,7 +10,10 @@ from lit.llvm import llvm_config
 
 config.name = "SWAGE"
 
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+# The internal shell keeps the suite independent of the host shell and of
+# the execute_external option that lit 23 removed. Every RUN line here uses
+# only pipes, `not`, and 2>&1, which the internal shell handles natively.
+config.test_format = lit.formats.ShTest()
 
 config.suffixes = [".mlir"]
 
