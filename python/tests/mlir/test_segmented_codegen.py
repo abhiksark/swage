@@ -543,6 +543,22 @@ def test_ragged_softmax_reductions_use_disjoint_workgroup_buffers():
         assert ptx.count("ex2.approx.f32") == 2
 
 
+def test_rejects_unsupported_sm_values_before_the_backend_runs():
+    """Refuse unknown chips instead of aborting in instruction selection."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        with pytest.raises(
+            ValueError, match="not a processor supported by the pinned LLVM"
+        ):
+            native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name="segmented_sum",
+                block_size=128,
+                target="sm_99",
+            )
+
+
 def test_rejects_an_unverified_module_with_a_diagnostic():
     """Surface verifier errors instead of walking malformed regions."""
     from mlir_swage.dialects import func as func_dialect

@@ -69,6 +69,28 @@ def test_rejects_invalid_nvptx_targets(target):
         )
 
 
+@pytest.mark.parametrize("target", ["sm_85", "sm_99", "sm_119"])
+def test_rejects_sm_values_the_pinned_llvm_does_not_support(target):
+    """Fail at admission instead of emitting PTX no driver can load."""
+    with pytest.raises(
+        ValueError, match="not a processor supported by the pinned LLVM"
+    ):
+        native_swage._compile_ptx(
+            _emit(),
+            kernel_name="add_kernel",
+            block_size=128,
+            target=target,
+        )
+
+
+def test_compiles_for_the_newest_supported_sm():
+    """Keep the admission edge chips compiling, not just sm_80."""
+    _, ptx = native_swage._compile_ptx(
+        _emit(), kernel_name="add_kernel", block_size=128, target="sm_121"
+    )
+    assert ".target sm_121" in ptx
+
+
 def test_rejects_a_block_size_that_differs_from_the_vector_shape():
     """Keep the launch block and semantic vector width identical."""
     with pytest.raises(ValueError, match="vector width 128 does not match"):

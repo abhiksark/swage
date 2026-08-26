@@ -18,8 +18,11 @@ work.
 
 For `n == 0`, the required grid is `(0,)`, and the validated launch returns
 without compilation, cache access, module loading, or enqueue. Other launches
-target the active device exactly and admit `sm_80` through `sm_129`; a device
-below compute capability 8.0 is rejected during compilation. The runtime then
+target the active device exactly and admit the NVPTX processors that the
+pinned LLVM release defines, currently `sm_80`, `sm_86`, `sm_87`, `sm_88`,
+`sm_89`, `sm_90`, `sm_100`, `sm_101`, `sm_103`, `sm_110`, `sm_120`, and
+`sm_121`; a device below compute capability 8.0, or one the pinned release
+does not define, is rejected during compilation. The runtime then
 emits semantic MLIR, lowers and emits PTX in process through LLVM NVPTX, loads
 the module through `libcuda.so.1`, and enqueues asynchronously on the current
 PyTorch CUDA stream.

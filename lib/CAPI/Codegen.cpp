@@ -75,13 +75,37 @@ bool isPTXIdentifier(llvm::StringRef name) {
          llvm::all_of(name, isFollowing);
 }
 
-bool isSupportedTarget(llvm::StringRef target) {
+bool isSupportedTarget(llvm::StringRef target, unsigned &value) {
   llvm::StringRef digits = target.consume_front("sm_") ? target : "";
   if (digits.size() < 2 || digits.size() > 3 ||
       !llvm::all_of(digits, llvm::isDigit))
     return false;
-  unsigned value = 0;
   return !digits.getAsInteger(10, value) && value >= 80 && value <= 129;
+}
+
+/// The admitted subset of the NVPTX processors defined by the pinned LLVM
+/// release (llvm/lib/Target/NVPTX/NVPTX.td in llvmorg-22.1.8). An unknown
+/// processor is only a warning to the MC layer, which then falls back to a
+/// subtarget that either aborts instruction selection or emits PTX no
+/// driver can load. Revisit when cmake/llvm-version.txt moves.
+bool isPinnedProcessor(unsigned value) {
+  switch (value) {
+  case 80:
+  case 86:
+  case 87:
+  case 88:
+  case 89:
+  case 90:
+  case 100:
+  case 101:
+  case 103:
+  case 110:
+  case 120:
+  case 121:
+    return true;
+  default:
+    return false;
+  }
 }
 
 /// Replace libdevice calls with LLVM intrinsics the NVPTX backend lowers
@@ -126,9 +150,13 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          int64_t blockSize, llvm::StringRef target,
                          KernelKind kind, bool useTaskIds, bool fusedMixed,
                          std::string &lowered, std::string &ptx) {
-  if (!isSupportedTarget(target))
+  unsigned smValue = 0;
+  if (!isSupportedTarget(target, smValue))
     return source.emitError(
         "target must match sm_<major><minor> and be sm_80 or newer");
+  if (!isPinnedProcessor(smValue))
+    return source.emitError("target ")
+           << target << " is not a processor supported by the pinned LLVM";
   if (blockSize <= 0)
     return source.emitError("block_size must be a positive integer");
   // The pass manager verifies only after each pass, never before the first
