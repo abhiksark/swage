@@ -579,6 +579,44 @@ def test_fixed_width_kernels_carry_reqntid_128(compiler):
         assert ".reqntid 128, 1, 1" in ptx
 
 
+BYSTANDER_MODULE = SEGMENTED_SUM.rstrip().removesuffix("}") + """
+  func.func @bystander(%x: i32) -> i32 {
+    return %x : i32
+  }
+}
+"""
+
+
+def test_kernel_name_must_match_the_compiled_kernel():
+    """Reject a name mismatch at compile time, not at module load."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(BYSTANDER_MODULE)
+        with pytest.raises(
+            ValueError, match="does not match the compiled kernel"
+        ):
+            native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name="bystander",
+                block_size=128,
+                target="sm_80",
+            )
+
+
+def test_kernel_name_matching_survives_bystander_functions():
+    """Compile the swage function when kernel_name names it correctly."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(BYSTANDER_MODULE)
+        _, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            block_size=128,
+            target="sm_80",
+        )
+        assert ".entry segmented_sum" in ptx
+
+
 def test_rejects_unsupported_sm_values_before_the_backend_runs():
     """Refuse unknown chips instead of aborting in instruction selection."""
     with ir.Context() as context:

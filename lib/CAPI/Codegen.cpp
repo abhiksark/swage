@@ -220,6 +220,22 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (std::distance(gpuModules.begin(), gpuModules.end()) != 1)
     return source.emitError("lowering did not produce exactly one GPU module");
   gpu::GPUModuleOp gpuModule = *gpuModules.begin();
+  // The passes compile the function containing swage operations, not the
+  // function kernelName selected; a mismatch must fail here rather than at
+  // cuModuleGetFunction, two layers away from the mistake.
+  std::string expectedKernel = kernelName.str();
+  if (kind == KernelKind::SplitPartialReduction)
+    expectedKernel += "__partial";
+  else if (kind == KernelKind::SplitMergeReduction)
+    expectedKernel += "__merge";
+  llvm::StringRef compiledKernel;
+  for (LLVM::LLVMFuncOp function : gpuModule.getOps<LLVM::LLVMFuncOp>())
+    if (!function.isExternal())
+      compiledKernel = function.getName();
+  if (compiledKernel != expectedKernel)
+    return source.emitError("kernel_name '")
+           << kernelName << "' does not match the compiled kernel '"
+           << compiledKernel << "'";
   if (failed(replaceLibdeviceCalls(gpuModule)))
     return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
