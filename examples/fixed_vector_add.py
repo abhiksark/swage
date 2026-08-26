@@ -7,7 +7,8 @@ import torch
 
 
 @sw.jit
-def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Add two vectors elementwise under a bounds mask."""
     pid = sl.program_id(0)
     offsets = pid * BLOCK + sl.arange(0, BLOCK)
     mask = offsets < n

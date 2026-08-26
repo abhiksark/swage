@@ -360,7 +360,15 @@ class _Emitter:
         self.symbols = {}
 
     def emit(self):
-        for statement in self.kernel.function.body[:-1]:
+        body = self.kernel.function.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and type(body[0].value.value) is str
+        ):
+            body = body[1:]
+        for statement in body[:-1]:
             if isinstance(statement, ast.Return):
                 self._error(
                     statement,
@@ -385,11 +393,9 @@ class _Emitter:
                     )
                 with self.ir.InsertionPoint(function.add_entry_block()):
                     self._bind_arguments(function.arguments)
-                    for statement in self.kernel.function.body:
+                    for statement in body:
                         self._statement(statement)
-                    if not self.kernel.function.body or not isinstance(
-                        self.kernel.function.body[-1], ast.Return
-                    ):
+                    if not body or not isinstance(body[-1], ast.Return):
                         self.func.ReturnOp([], loc=location)
             try:
                 verified = module.operation.verify()

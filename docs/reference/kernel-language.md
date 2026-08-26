@@ -23,6 +23,7 @@ Kernel bodies are parsed from source with `inspect.getsource`,
 
 The body accepts:
 
+- an optional leading docstring;
 - single-name assignment, such as `offsets = ...`;
 - `sl.store(...)` as an expression statement;
 - an optional final bare `return`.

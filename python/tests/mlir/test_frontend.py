@@ -593,3 +593,36 @@ def test_oversized_integer_literals_have_source_located_diagnostics():
         oversized_literal_kernel.python_function
     )[1] + 4
     assert f"{__file__}:{line}:" in str(caught.value)
+
+
+@sw.jit
+def documented_kernel(x_ptr, n, BLOCK: sl.constexpr):
+    """Copy x through a masked load and store."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    sl.store(x_ptr + offsets, x, mask=mask)
+
+
+@sw.jit
+def docstring_only_kernel(x_ptr):
+    """Do nothing; the docstring is the whole body."""
+
+
+def test_kernels_accept_a_leading_docstring():
+    """Compile documented kernels; a docstring has no semantic effect."""
+    module = documented_kernel.emit_mlir(
+        signature={"x_ptr": sl.pointer(sl.float32), "n": sl.int32},
+        constexprs={"BLOCK": 8},
+    )
+    assert "func.func @documented_kernel" in str(module)
+
+
+def test_a_docstring_only_kernel_emits_an_empty_function():
+    """Treat a docstring-only body exactly like an empty body."""
+    module = docstring_only_kernel.emit_mlir(
+        signature={"x_ptr": sl.pointer(sl.float32)}, constexprs={}
+    )
+    assert "func.func @docstring_only_kernel" in str(module)
+    assert "return" in str(module)
