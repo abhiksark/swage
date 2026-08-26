@@ -567,3 +567,29 @@ def test_internal_mlir_verification_error_is_source_located(monkeypatch):
     assert str(caught.value).endswith(
         "add_kernel: emitted MLIR failed verification"
     )
+
+
+@sw.jit
+def oversized_literal_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    offsets = offsets + 18446744073709551617
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    sl.store(x_ptr + offsets, x, mask=mask)
+
+
+def test_oversized_integer_literals_have_source_located_diagnostics():
+    """Bound body literals like constexprs instead of leaking a TypeError."""
+    with pytest.raises(
+        sw.CompilationError, match="integer literal must fit signed 64-bit"
+    ) as caught:
+        oversized_literal_kernel.emit_mlir(
+            signature={"x_ptr": sl.pointer(sl.float32), "n": sl.int32},
+            constexprs={"BLOCK": 8},
+        )
+
+    line = inspect.getsourcelines(
+        oversized_literal_kernel.python_function
+    )[1] + 4
+    assert f"{__file__}:{line}:" in str(caught.value)

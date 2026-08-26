@@ -35,7 +35,7 @@ other statement forms are unsupported.
 The accepted expression forms are:
 
 - a bound name;
-- an integer literal;
+- an integer literal that fits signed 64-bit;
 - `+` for index arithmetic, pointer plus offset vector, or two f32 vectors;
 - `*` for index arithmetic;
 - one signed less-than comparison between an index-offset vector and an i32

@@ -710,6 +710,8 @@ class _Emitter:
         return {keyword.arg: keyword.value for keyword in node.keywords}
 
     def _index_constant(self, value, node):
+        if not -(1 << 63) <= value <= (1 << 63) - 1:
+            self._error(node, "integer literal must fit signed 64-bit")
         result = self.arith.ConstantOp(
             self.index, value, loc=self._location(node)
         ).result
