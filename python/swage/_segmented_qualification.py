@@ -110,23 +110,21 @@ def _validate_shapes(
 ):
     """Validate tensor shapes against one of the two output ABIs."""
     torch = _runtime._import_torch()
-    for name, tensor in (
-        ("values", values),
-        ("offsets", offsets),
-        ("output", output),
-    ):
+    # Allow None output for pre-allocation validation (#60)
+    tensors_to_check = [("values", values), ("offsets", offsets)]
+    if output is not None:
+        tensors_to_check.append(("output", output))
+    for name, tensor in tensors_to_check:
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
-    for name, tensor in (("values", values), ("output", output)):
+    for name, tensor in tensors_to_check:
+        if name == "offsets":
+            continue
         if tensor.dtype != torch.float32:
             raise TypeError(f"{name} must have dtype torch.float32")
     if offsets.dtype != torch.int32:
         raise TypeError("offsets must have dtype torch.int32")
-    for name, tensor in (
-        ("values", values),
-        ("offsets", offsets),
-        ("output", output),
-    ):
+    for name, tensor in tensors_to_check:
         if tensor.dim() != 1:
             raise TypeError(f"{name} must have rank one")
         if not tensor.is_contiguous():
@@ -134,9 +132,11 @@ def _validate_shapes(
 
     value_count = values.numel()
     host_offsets = offsets.detach().cpu().tolist()
-    segment_count = validate_offsets(host_offsets, value_count, output.numel())
-    _validate_disjoint("values", values, output)
-    _validate_disjoint("offsets", offsets, output)
+    output_size = output.numel() if output is not None else 0
+    segment_count = validate_offsets(host_offsets, value_count, output_size)
+    if output is not None:
+        _validate_disjoint("values", values, output)
+        _validate_disjoint("offsets", offsets, output)
     if not require_cuda:
         return value_count, segment_count, host_offsets
     if not torch.cuda.is_available():
@@ -859,9 +859,10 @@ def _execute(module_text):
 def cpu_oracle(values, offsets, kind):
     """Execute the sequential reduction lowering with the MLIR runner."""
     torch = _runtime._import_torch()
+    # Validate before allocating to avoid torch.empty(-1) on empty offsets (#60)
+    _validate_tensors(values, offsets, None, require_cuda=False)
     segment_count = offsets.numel() - 1 if offsets.dim() == 1 else 0
     output = torch.empty(segment_count, dtype=torch.float32)
-    _validate_tensors(values, offsets, output, require_cuda=False)
     printed = _execute(
         _runner_module(
             values,
