@@ -541,3 +541,46 @@ def test_ragged_softmax_reductions_use_disjoint_workgroup_buffers():
         assert ptx.count(".shared .align") == 2
         assert ".extern .func" not in ptx
         assert ptx.count("ex2.approx.f32") == 2
+
+
+def test_rejects_an_unverified_module_with_a_diagnostic():
+    """Surface verifier errors instead of walking malformed regions."""
+    from mlir_swage.dialects import func as func_dialect
+    from mlir_swage.dialects import memref as memref_dialect
+
+    with ir.Context() as context, ir.Location.unknown():
+        swage.register_dialects(context)
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            f32 = ir.F32Type.get()
+            i32 = ir.IntegerType.get_signless(32)
+            dynamic = ir.ShapedType.get_dynamic_size()
+            values_type = ir.MemRefType.get([dynamic], f32)
+            offsets_type = ir.MemRefType.get([dynamic], i32)
+            function = func_dialect.FuncOp(
+                "segmented_sum",
+                ([values_type, offsets_type, values_type, i32, i32], []),
+            )
+            with ir.InsertionPoint(function.add_entry_block()):
+                segment_id = swage.SegmentIdOp(ir.IndexType.get(), 0)
+                segment = swage.MakeSegmentOp(
+                    ir.Type.parse("!swage.segment<f32>"),
+                    function.arguments[0],
+                    function.arguments[1],
+                    segment_id,
+                )
+                kind = ir.Attribute.parse("#swage.reduction_kind<sum>")
+                # The region is left empty, so the module never verifies.
+                reduce = swage.ReduceOp(f32, segment, [], kind)
+                memref_dialect.StoreOp(
+                    reduce.result, function.arguments[2], [segment_id]
+                )
+                func_dialect.ReturnOp([])
+
+        with pytest.raises(ValueError, match="region"):
+            native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name="segmented_sum",
+                block_size=128,
+                target="sm_80",
+            )

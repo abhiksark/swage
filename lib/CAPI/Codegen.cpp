@@ -25,6 +25,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVM/ModuleToObject.h"
@@ -130,6 +131,11 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
         "target must match sm_<major><minor> and be sm_80 or newer");
   if (blockSize <= 0)
     return source.emitError("block_size must be a positive integer");
+  // The pass manager verifies only after each pass, never before the first
+  // one, so an unverified module would reach pass code that dereferences
+  // region internals.
+  if (failed(verify(source)))
+    return failure();
 
   OwningOpRef<ModuleOp> module = source.clone();
   MLIRContext *context = module->getContext();
@@ -329,6 +335,8 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
     return mlirLogicalResultFailure();
 
   ModuleOp source = unwrap(module);
+  if (failed(verify(source)))
+    return mlirLogicalResultFailure();
   OwningOpRef<ModuleOp> planned = source.clone();
   PassManager manager(source.getContext());
   manager.addPass(

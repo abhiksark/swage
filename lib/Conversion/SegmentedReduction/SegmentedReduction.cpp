@@ -65,7 +65,13 @@ RegionOpStatus classifyRegionOperation(Operation &operation) {
 /// argument per capture, admitted operations only, and an f32 yield.
 LogicalResult verifyRegion(Operation *owner, Region &region,
                            unsigned captureCount) {
+  // Malformed IR that bypassed the dialect verifier must fail here rather
+  // than reach the unchecked dereferences below.
+  if (!region.hasOneBlock())
+    return owner->emitError("segment region requires exactly one block");
   Block &body = region.front();
+  if (!body.mightHaveTerminator())
+    return owner->emitError("segment region must yield an f32 value");
   if (body.getNumArguments() != 1 + captureCount ||
       llvm::any_of(body.getArgumentTypes(),
                    [](Type type) { return !type.isF32(); }))
