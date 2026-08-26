@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
@@ -191,6 +192,9 @@ void buildKernel(ModuleOp module, func::FuncOp source, int64_t blockSize) {
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
+  kernel->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
+                  builder.getDenseI32ArrayAttr(
+                      {static_cast<int32_t>(blockSize), 1, 1}));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -245,12 +249,16 @@ public:
 
   void getDependentDialects(DialectRegistry &registry) const final {
     registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
-                    scf::SCFDialect>();
+                    NVVM::NVVMDialect, scf::SCFDialect>();
   }
 
   void runOnOperation() final {
     if (blockSize <= 0) {
       getOperation().emitError("block-size must be a positive integer");
+      return signalPassFailure();
+    }
+    if (blockSize > 1024) {
+      getOperation().emitError("block-size must be at most 1024");
       return signalPassFailure();
     }
     auto functions = llvm::to_vector(getOperation().getOps<func::FuncOp>());

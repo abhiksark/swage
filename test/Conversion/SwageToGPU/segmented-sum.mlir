@@ -22,6 +22,7 @@ module {
 // CHECK-NOT: swage.
 // CHECK: gpu.module @segmented_sum_module
 // CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
+// CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
 // CHECK: %[[SID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[SEGMENTS:.*]] = arith.index_cast %[[SEGMENT_COUNT]] : i32 to index

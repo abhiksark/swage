@@ -1157,3 +1157,51 @@ def test_rejects_softmax_output_aliasing_offsets():
 
     with pytest.raises(ValueError, match="must not overlap the offsets buffer"):
         launch_softmax_gpu(host_values.cuda(), offsets, output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_mismatched_blockdim_fails_at_launch_instead_of_wrong_sums():
+    """Turn a launch-geometry mismatch into a driver error via reqntid."""
+    from mlir_swage import ir
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from mlir_swage.dialects import swage as swage_dialect
+    from swage import _runtime
+    from swage._segmented_qualification import _semantic_module
+
+    values = torch.ones(256, device="cuda")
+    offsets = torch.tensor([0, 256], dtype=torch.int32, device="cuda")
+    output = torch.zeros(1, device="cuda")
+    major, minor = torch.cuda.get_device_capability()
+    with ir.Context() as context:
+        swage_dialect.register_dialects(context)
+        module = ir.Module.parse(_semantic_module("sum"))
+        _, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            block_size=128,
+            target=f"sm_{major}{minor}",
+        )
+
+    driver = _runtime._get_driver()
+    _, function = driver.load(ptx, "segmented_sum")
+    stream = torch.cuda.current_stream()
+    arguments = (
+        values.data_ptr(),
+        offsets.data_ptr(),
+        output.data_ptr(),
+        256,
+        1,
+    )
+
+    with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
+        driver.launch_segmented(
+            function, (1,), 64, stream.cuda_stream, arguments
+        )
+
+    driver.launch_segmented(
+        function, (1,), 128, stream.cuda_stream, arguments
+    )
+    torch.cuda.synchronize()
+    assert output.item() == 256.0

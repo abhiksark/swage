@@ -83,6 +83,25 @@ def test_rejects_sm_values_the_pinned_llvm_does_not_support(target):
         )
 
 
+def test_fixed_kernels_pin_their_launch_width_with_reqntid():
+    """Make a mismatched blockDim a launch error, not a wrong result."""
+    _, ptx = native_swage._compile_ptx(
+        _emit(), kernel_name="add_kernel", block_size=128, target="sm_80"
+    )
+    assert ".reqntid 128, 1, 1" in ptx
+
+
+def test_rejects_a_block_size_above_the_hardware_limit():
+    """1024 is the CUDA block ceiling; anything larger can never launch."""
+    with pytest.raises(ValueError, match="at most 1024"):
+        native_swage._compile_ptx(
+            _emit(),
+            kernel_name="add_kernel",
+            block_size=2048,
+            target="sm_80",
+        )
+
+
 def test_compiles_for_the_newest_supported_sm():
     """Keep the admission edge chips compiling, not just sm_80."""
     _, ptx = native_swage._compile_ptx(

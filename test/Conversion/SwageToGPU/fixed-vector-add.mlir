@@ -33,6 +33,7 @@ module {
 // CHECK-NOT: vector.
 // CHECK: gpu.module @add_kernel_module
 // CHECK: gpu.func @add_kernel(%[[X:[^,]+]]: !llvm.ptr, %[[Y:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[N:[^)]+]]: i32) kernel
+// CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
 // CHECK: %[[BLOCK:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: scf.if

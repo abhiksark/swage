@@ -543,6 +543,42 @@ def test_ragged_softmax_reductions_use_disjoint_workgroup_buffers():
         assert ptx.count("ex2.approx.f32") == 2
 
 
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_segmented_kernels_pin_their_launch_width_with_reqntid(block_size):
+    """Make a mismatched blockDim a launch error, not a wrong sum."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        _, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            block_size=block_size,
+            target="sm_80",
+        )
+        assert f".reqntid {block_size}, 1, 1" in ptx
+
+
+@pytest.mark.parametrize(
+    "compiler",
+    [
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+        "_compile_fused_segmented_reduction_ptx",
+    ],
+)
+def test_fixed_width_kernels_carry_reqntid_128(compiler):
+    """The split and fused ABIs hardcode 128 threads; the PTX must too."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        _, ptx = getattr(native_swage, compiler)(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+        assert ".reqntid 128, 1, 1" in ptx
+
+
 def test_rejects_unsupported_sm_values_before_the_backend_runs():
     """Refuse unknown chips instead of aborting in instruction selection."""
     with ir.Context() as context:

@@ -159,6 +159,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
            << target << " is not a processor supported by the pinned LLVM";
   if (blockSize <= 0)
     return source.emitError("block_size must be a positive integer");
+  if (blockSize > 1024)
+    return source.emitError("block_size must be at most 1024");
   // The pass manager verifies only after each pass, never before the first
   // one, so an unverified module would reach pass code that dereferences
   // region internals.
