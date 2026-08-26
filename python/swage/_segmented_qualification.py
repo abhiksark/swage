@@ -859,7 +859,7 @@ def _execute(module_text):
 def cpu_oracle(values, offsets, kind):
     """Execute the sequential reduction lowering with the MLIR runner."""
     torch = _runtime._import_torch()
-    segment_count = offsets.numel() - 1 if offsets.dim() == 1 else 0
+    segment_count = max(offsets.numel() - 1, 0)
     output = torch.empty(segment_count, dtype=torch.float32)
     _validate_tensors(values, offsets, output, require_cuda=False)
     printed = _execute(

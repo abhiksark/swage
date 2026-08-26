@@ -90,6 +90,15 @@ def test_rejects_malformed_offsets(offsets, value_count, output_count, message):
         _validate_offsets(offsets, value_count, output_count)
 
 
+def test_cpu_oracle_rejects_empty_offsets_with_the_validator_message():
+    """Fail closed on empty offsets instead of allocating a -1 tensor."""
+    values = torch.randn(4, dtype=torch.float32)
+    offsets = torch.tensor([], dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="at least the initial zero"):
+        cpu_oracle(values, offsets, "sum")
+
+
 @pytest.mark.parametrize("count", [-1, 1 << 31])
 def test_rejects_counts_outside_i32(count):
     """Keep explicit value and segment counts inside the CUDA ABI."""
