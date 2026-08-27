@@ -25,8 +25,12 @@ public gate.
 Read the guide in this order:
 
 1. [Ragged Data](ragged-data.md): the storage model behind everything.
-2. [Execution Model](execution-model.md): segments, tasks, and tiles, and
-   how execution machinery grows from them.
+2. [Writing Kernels](writing-kernels.md): capture, the kernel language,
+   and compile-only emission.
+3. [Launching Kernels](launching.md): what happens between `launch()`
+   and the GPU.
+4. [Execution Model](execution-model.md): segments, tasks, and tiles,
+   and how execution machinery grows from them.
 
 Continue with [Ragged Data](ragged-data.md), or jump to the
 [API reference](../reference/index.md) for exact contracts.

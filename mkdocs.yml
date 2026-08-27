@@ -65,6 +65,8 @@ nav:
   - User guide:
       - user-guide/index.md
       - Ragged Data: user-guide/ragged-data.md
+      - Writing Kernels: user-guide/writing-kernels.md
+      - Launching Kernels: user-guide/launching.md
       - Execution Model: user-guide/execution-model.md
   - API reference:
       - reference/index.md

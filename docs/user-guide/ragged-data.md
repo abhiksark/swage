@@ -55,6 +55,6 @@ A segment is runtime-sized. A task is derived work. A tile is a fixed
 physical step. Keeping the levels separate prevents the runtime shape from
 leaking into semantic types or hard-coding GPU indices into the program.
 
-Continue with [Execution Model](execution-model.md) for the invariants
-behind each level and the current qualification boundary, or jump ahead
-to [Internals](../internals/index.md) for the machinery drawn in full.
+Continue with [Writing Kernels](writing-kernels.md) to put the model on
+the page, or jump ahead to [Execution Model](execution-model.md) for the
+invariants behind each level.
