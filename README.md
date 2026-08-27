@@ -79,11 +79,11 @@ does not independently emit MLIR or execute kernels.
 
 - [Installation](docs/getting-started/installation.md)
 - [Quickstart](docs/getting-started/quickstart.md)
-- [Swage, Visually](docs/user-guide/ragged-data.md)
+- [User Guide](docs/user-guide/index.md)
 - [Compiler Pipeline](docs/internals/compiler-pipeline.md)
-- [Public Python API](docs/reference/swage.md)
+- [API Reference](docs/reference/index.md)
 - [Internals](docs/internals/index.md)
-- [Verification Evidence](docs/internals/verification.md)
+- [Verification](docs/internals/verification.md)
 - [DESIGN.md](DESIGN.md), [ROADMAP.md](ROADMAP.md), and
   [CONTRIBUTING.md](CONTRIBUTING.md)
 

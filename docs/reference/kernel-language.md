@@ -88,6 +88,6 @@ plus offset addresses. It emits standard `arith`, `func`, `memref`, and
 
 This language is the public fixed-block subset. The segment
 operations present in native MLIR are not exposed as Python language symbols.
-Continue with [Public Python API](swage.md) for input modes and
+Continue with [swage](swage.md) for input modes and
 launch validation, or [Swage Dialect](../internals/swage-dialect.md) for the native
 semantic IR boundary.

@@ -38,6 +38,6 @@ definitions in `include/swage/Dialect/Swage/IR`.
 
 --8<-- "docs/reference/_generated/swage-ops.inc"
 
-Continue with [Segments, Tasks, and Tiles](../user-guide/execution-model.md)
+Continue with [Execution Model](../user-guide/execution-model.md)
 for the semantic model, or [Compiler Tools and Passes](compiler-tools.md) for
 the registered lowering surface.

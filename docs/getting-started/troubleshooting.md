@@ -80,5 +80,5 @@ reconfigure only the affected Swage build directory, then pass matching
 toolchain.
 
 Once setup works, the [Quickstart](quickstart.md) exercises the supported
-path. Exact launch and cache contracts live in [Public Python API](../reference/swage.md)
+path. Exact launch and cache contracts live in [swage](../reference/swage.md)
 and [Runtime and Environment](../reference/runtime-environment.md).

@@ -33,7 +33,7 @@ verify before it crosses the frontend boundary.
 
 The exact accepted source forms live in [Kernel Language](../reference/kernel-language.md).
 The compile-only and execution call contracts live in
-[Public Python API](../reference/swage.md).
+[swage](../reference/swage.md).
 
 ## Semantic MLIR boundary
 
@@ -99,6 +99,6 @@ and the current stream.
 
 *What Swage owns against upstream MLIR and LLVM, and PyTorch. [Open the full-size figure](../assets/figures/ownership-map.svg).*
 
-Continue with [Compiler Tools and Passes](../internals/compiler-tools.md) for
-the command-line surface, or [Verification Evidence](../internals/verification.md)
+Continue with [Compiler Tools and Passes](compiler-tools.md) for
+the command-line surface, or [Verification](verification.md)
 to audit the executable gates for each branch.

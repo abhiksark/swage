@@ -1,6 +1,6 @@
 <!-- docs/internals/benchmarks.md -->
 
-# Measured Performance
+# Benchmarks
 
 !!! warning "Recorded evidence"
 
@@ -91,6 +91,6 @@ Triton's autotuning stack.
   baseline. The snapshot records the full sweep; Swage claims no
   vector-add win.
 
-Continue with [Verification Evidence](verification.md) for the executable
+Continue with [Verification](verification.md) for the executable
 proof behind each boundary, or [Task Execution](task-execution.md) for
 the execution contracts these measurements exercise.
