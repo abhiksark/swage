@@ -3,6 +3,7 @@
 
 import ast
 import functools
+import hashlib
 import inspect
 import textwrap
 from collections.abc import Mapping
@@ -61,6 +62,17 @@ class _Kernel:
                 f"{function.__name__}: expected one function definition"
             )
         self.function = parsed.body[0]
+        self.source_digest = hashlib.sha256(
+            ast.dump(self.function, include_attributes=False).encode()
+        ).hexdigest()
+        self.parameter_names = [
+            argument.arg for argument in self.function.args.args
+        ]
+        self.constexpr_names = {
+            argument.arg
+            for argument in self.function.args.args
+            if _is_constexpr_annotation(argument.annotation)
+        }
         functools.update_wrapper(self, function)
         if not (self.__name__.isascii() and self.__name__.isidentifier()):
             self._raise(
@@ -144,34 +156,10 @@ class _Kernel:
         if any(not isinstance(key, str) for key in constexprs):
             self._raise(self.function, "constexprs keys must be strings")
 
-        syntax_arguments = self.function.args
-        if syntax_arguments.posonlyargs:
-            self._raise(
-                syntax_arguments.posonlyargs[0],
-                "positional-only parameters are unsupported",
-            )
-        if syntax_arguments.kwonlyargs:
-            self._raise(
-                syntax_arguments.kwonlyargs[0],
-                "keyword-only parameters are unsupported",
-            )
-        if syntax_arguments.vararg:
-            self._raise(
-                syntax_arguments.vararg,
-                "variadic positional parameters are unsupported",
-            )
-        if syntax_arguments.kwarg:
-            self._raise(
-                syntax_arguments.kwarg,
-                "variadic keyword parameters are unsupported",
-            )
+        self._require_plain_parameters()
 
-        parameters = [argument.arg for argument in syntax_arguments.args]
-        constexpr_names = {
-            argument.arg
-            for argument in syntax_arguments.args
-            if _is_constexpr_annotation(argument.annotation)
-        }
+        parameters = self.parameter_names
+        constexpr_names = self.constexpr_names
         runtime_parameters = [
             name for name in parameters if name not in constexpr_names
         ]
@@ -307,6 +295,29 @@ class _Kernel:
                 f"unsupported argument for parameter '{name}': {reason}",
             )
         return signature
+
+    def _require_plain_parameters(self):
+        syntax_arguments = self.function.args
+        if syntax_arguments.posonlyargs:
+            self._raise(
+                syntax_arguments.posonlyargs[0],
+                "positional-only parameters are unsupported",
+            )
+        if syntax_arguments.kwonlyargs:
+            self._raise(
+                syntax_arguments.kwonlyargs[0],
+                "keyword-only parameters are unsupported",
+            )
+        if syntax_arguments.vararg:
+            self._raise(
+                syntax_arguments.vararg,
+                "variadic positional parameters are unsupported",
+            )
+        if syntax_arguments.kwarg:
+            self._raise(
+                syntax_arguments.kwarg,
+                "variadic keyword parameters are unsupported",
+            )
 
     def _require_keys(self, label, actual, expected):
         if actual == expected:

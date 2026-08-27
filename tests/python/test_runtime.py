@@ -290,9 +290,9 @@ def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
     )
     key_data = {"kernel": "add_kernel", "target": "sm_86"}
 
-    first = _runtime._compile_cached(object(), key_data, "add_kernel", 128)
+    first = _runtime._compile_cached(key_data, "add_kernel", 128, object)
     _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached(object(), key_data, "add_kernel", 128)
+    second = _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
     assert first == second
     assert len(calls) == 1
@@ -302,7 +302,7 @@ def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
     (entry / "kernel.ptx").write_text("corrupt")
     _runtime._ptx_cache.clear()
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _runtime._compile_cached(object(), key_data, "add_kernel", 128)
+        _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
 
 def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
@@ -324,13 +324,13 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
     (entry / "metadata.json").symlink_to(target)
 
     with pytest.raises(RuntimeError, match="symlink"):
-        _runtime._compile_cached(object(), key_data, "add_kernel", 128)
+        _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
     (entry / "metadata.json").unlink()
     (entry / "metadata.json").write_text("{}")
     (entry / "metadata.json").chmod(0o606)
     with pytest.raises(RuntimeError, match="world-writable"):
-        _runtime._compile_cached(object(), key_data, "add_kernel", 128)
+        _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
 
 def test_dirty_build_uses_only_process_cache(tmp_path, monkeypatch):
@@ -350,8 +350,8 @@ def test_dirty_build_uses_only_process_cache(tmp_path, monkeypatch):
         lambda *_args: calls.append(True) or ("lowered", "ptx"),
     )
 
-    first = _runtime._compile_cached(object(), {"kernel": "add"}, "add", 128)
-    second = _runtime._compile_cached(object(), {"kernel": "add"}, "add", 128)
+    first = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
+    second = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
 
     assert first == second
     assert len(calls) == 1
@@ -531,3 +531,104 @@ def test_driver_error_contains_stable_name_code_and_text():
         ),
     ):
         driver._call("cuBad")
+
+
+def test_compiler_identity_is_cached_per_process(monkeypatch):
+    """Spawn the git subprocesses once, not twice per launch."""
+    import subprocess
+
+    from swage import _runtime
+
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="abc\n",
+                                           stderr="")
+
+    monkeypatch.setattr(_runtime.subprocess, "run", fake_run)
+    _runtime._identity_cache = None
+    results = [_runtime._cached_identity() for _ in range(3)]
+    assert results[0] == results[1] == results[2]
+    assert len(commands) == 2
+
+
+def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
+    """Tests that fake the identity must see their fake, not stale cache."""
+    from swage import _runtime
+
+    _runtime._identity_cache = None
+    _runtime._cached_identity()
+    fake = {"revision": "r", "clean": True, "llvm": "l"}
+    monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
+    assert _runtime._cached_identity() == fake
+
+
+def test_warm_launch_emits_mlir_only_once(monkeypatch):
+    """Skip AST-to-MLIR emission entirely on a specialization-cache hit."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _Driver()
+    emissions = []
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(
+        add_kernel,
+        "emit_mlir",
+        lambda **_kwargs: emissions.append(1) or object(),
+    )
+    monkeypatch.setattr(
+        _runtime,
+        "_compile_native",
+        lambda *_args, **_kwargs: ("lowered", "ptx"),
+    )
+    fake = {"revision": None, "clean": False, "llvm": None}
+    monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _runtime._identity_cache = None
+    _runtime._ptx_cache.clear()
+    _runtime._loaded_functions.clear()
+
+    for _ in range(3):
+        add_kernel.launch(
+            arguments=_arguments(torch),
+            constexprs={"BLOCK": 128},
+            grid=(2,),
+        )
+
+    assert len(emissions) == 1
+    assert len(driver.launches) == 3
+
+
+def test_device_fact_cache_is_isolated_per_torch_module(monkeypatch):
+    """Never let one process's device cache leak across torch modules."""
+    from swage import _runtime
+
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(
+        _runtime,
+        "_compile_cached",
+        lambda *_args, **_kwargs: _runtime._Artifact(
+            key="cache-key", lowered="lowered", ptx="ptx"
+        ),
+    )
+    _runtime._loaded_functions.clear()
+
+    big_torch, _ = _fake_torch(max_threads=1024)
+    monkeypatch.setitem(sys.modules, "torch", big_torch)
+    monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
+    add_kernel.launch(
+        arguments=_arguments(big_torch),
+        constexprs={"BLOCK": 1024},
+        grid=(1,),
+    )
+
+    small_torch, _ = _fake_torch(max_threads=512)
+    monkeypatch.setitem(sys.modules, "torch", small_torch)
+    with pytest.raises(ValueError, match="exceeds device limit"):
+        add_kernel.launch(
+            arguments=_arguments(small_torch),
+            constexprs={"BLOCK": 1024},
+            grid=(1,),
+        )

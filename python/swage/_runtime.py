@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import weakref
 from collections.abc import Mapping
 from typing import NamedTuple
 
@@ -22,6 +23,11 @@ _compile_lock = threading.Lock()
 _ptx_cache = {}
 _loaded_functions = {}
 _driver = None
+_identity_cache = None
+# Device facts cannot change within a process, but tests inject fresh fake
+# torch modules, so the cache is scoped to the torch module object.
+_device_facts_cache = weakref.WeakKeyDictionary()
+_stream_objects = {}
 
 
 class _Artifact(NamedTuple):
@@ -51,15 +57,25 @@ def launch(kernel, *, arguments, constexprs, grid):
     if spec.n == 0:
         return None
 
-    module = kernel.emit_mlir(arguments=arguments, constexprs=constexprs)
-    specialization = _specialization_data(
-        kernel,
-        descriptors=spec.descriptors,
-        constexprs=constexprs,
-        target=spec.target,
-    )
+    memo = kernel.__dict__.setdefault("_specialization_memo", {})
+    identity = _cached_identity()
+    entry = memo.get((spec.block, spec.target))
+    if entry is None or entry[2] is not identity:
+        specialization = _specialization_data(
+            kernel,
+            descriptors=spec.descriptors,
+            constexprs=constexprs,
+            target=spec.target,
+        )
+        entry = (specialization, _cache_key(specialization), identity)
+        memo[(spec.block, spec.target)] = entry
+    specialization, key, _ = entry
     artifact = _compile_cached(
-        module, specialization, kernel.__name__, spec.block
+        specialization,
+        kernel.__name__,
+        spec.block,
+        lambda: kernel.emit_mlir(arguments=arguments, constexprs=constexprs),
+        key=key,
     )
     _write_dumps(artifact)
     driver = _get_driver()
@@ -150,40 +166,82 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
                 f"argument '{name}' must be on the current CUDA device"
             )
 
-    runtime_types, _ = kernel._validate_inputs(None, arguments, constexprs)
-    descriptors = tuple(
-        "i32" if runtime_types[name] is language.int32 else "ptr<f32>"
-        for name in runtime_names
-    )
-    if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
-        raise TypeError("M3 launch requires three f32 pointers and one i32")
+    # The tensor and scalar checks above already pin the exact M3 ABI, so
+    # for the canonical annotation shape the descriptors are constants and
+    # re-deriving them through metadata inference would only repeat checks.
+    # Any other annotation shape takes the full path for its diagnostics.
+    kernel._require_plain_parameters()
+    if kernel.constexpr_names == {"BLOCK"}:
+        descriptors = ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
+    else:
+        runtime_types, _ = kernel._validate_inputs(
+            None, arguments, constexprs
+        )
+        descriptors = tuple(
+            "i32" if runtime_types[name] is language.int32 else "ptr<f32>"
+            for name in runtime_names
+        )
+        if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
+            raise TypeError(
+                "M3 launch requires three f32 pointers and one i32"
+            )
 
-    properties = torch.cuda.get_device_properties(current_device)
-    if block > properties.max_threads_per_block:
+    max_threads, target = _device_facts(torch, current_device)
+    if block > max_threads:
         raise ValueError(
-            f"BLOCK {block} exceeds device limit "
-            f"{properties.max_threads_per_block}"
+            f"BLOCK {block} exceeds device limit {max_threads}"
         )
     expected_grid = ((n + block - 1) // block,)
     if grid != expected_grid:
         raise ValueError(f"grid must equal {expected_grid} for n and BLOCK")
-    major, minor = torch.cuda.get_device_capability(current_device)
-    stream = torch.cuda.current_stream()
+    stream = _current_stream(torch, current_device)
     return _LaunchSpec(
         tensors,
         n,
         block,
         grid,
-        f"sm_{major}{minor}",
+        target,
         stream,
         descriptors,
     )
 
 
+def _device_facts(torch, index):
+    """Cached (max threads, sm target) per device for this torch module."""
+    per_torch = _device_facts_cache.get(torch)
+    if per_torch is None:
+        per_torch = {}
+        _device_facts_cache[torch] = per_torch
+    facts = per_torch.get(index)
+    if facts is None:
+        properties = torch.cuda.get_device_properties(index)
+        major, minor = torch.cuda.get_device_capability(index)
+        facts = (properties.max_threads_per_block, f"sm_{major}{minor}")
+        per_torch[index] = facts
+    return facts
+
+
+def _current_stream(torch, index):
+    """The current stream, without rebuilding the object when unchanged."""
+    raw_stream = getattr(
+        getattr(torch, "_C", None), "_cuda_getCurrentRawStream", None
+    )
+    if raw_stream is None:
+        return torch.cuda.current_stream()
+    handle = raw_stream(index)
+    cached = _stream_objects.get((index, handle))
+    if cached is None:
+        cached = torch.cuda.current_stream(index)
+        _stream_objects[(index, handle)] = cached
+    return cached
+
+
 def _specialization_data(kernel, *, descriptors, constexprs, target):
-    identity = _compiler_identity()
-    normalized_source = ast.dump(kernel.function, include_attributes=False)
-    source_digest = hashlib.sha256(normalized_source.encode()).hexdigest()
+    identity = _cached_identity()
+    source_digest = getattr(kernel, "source_digest", None)
+    if source_digest is None:
+        normalized_source = ast.dump(kernel.function, include_attributes=False)
+        source_digest = hashlib.sha256(normalized_source.encode()).hexdigest()
     block = constexprs["BLOCK"]
     return {
         "source": source_digest,
@@ -224,6 +282,19 @@ def _compiler_identity():
     return {"revision": revision, "clean": not dirty, "llvm": llvm}
 
 
+def _cached_identity():
+    """Return `_compiler_identity()` computed once per process.
+
+    The identity spawns two git subprocesses, which dominated launch cost
+    when derived on every call. The cache is keyed on the identity function
+    itself so a monkeypatched `_compiler_identity` is always honored.
+    """
+    global _identity_cache
+    if _identity_cache is None or _identity_cache[0] is not _compiler_identity:
+        _identity_cache = (_compiler_identity, _compiler_identity())
+    return _identity_cache[1]
+
+
 def _cache_key(specialization):
     encoded = json.dumps(
         specialization, sort_keys=True, separators=(",", ":")
@@ -231,13 +302,20 @@ def _cache_key(specialization):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _compile_cached(module, specialization, kernel_name, block_size):
-    key = _cache_key(specialization)
+def _compile_cached(specialization, kernel_name, block_size, emit, *,
+                    key=None):
+    """Return the artifact for one specialization, emitting only on a miss.
+
+    `emit` is a zero-argument callable producing the semantic module; it is
+    deferred so a warm launch never pays for AST-to-MLIR emission.
+    """
+    if key is None:
+        key = _cache_key(specialization)
     with _compile_lock:
         cached = _ptx_cache.get(key)
         if cached is not None:
             return cached
-        identity = _compiler_identity()
+        identity = _cached_identity()
         persistent = bool(
             identity["revision"] and identity["clean"] and identity["llvm"]
         )
@@ -250,7 +328,7 @@ def _compile_cached(module, specialization, kernel_name, block_size):
             "compute_capability", specialization.get("target")
         )
         lowered, ptx = _compile_native(
-            module, kernel_name, block_size, target
+            emit(), kernel_name, block_size, target
         )
         artifact = _Artifact(key, lowered, ptx)
         if persistent:
