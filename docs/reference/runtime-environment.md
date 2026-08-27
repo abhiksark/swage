@@ -33,6 +33,11 @@ fallback backend. Loaded functions are reused per specialization and CUDA
 context. Tensor storage remains owned by PyTorch, and submitted tensors are
 retained through `record_stream()`.
 
+Emitted kernels also pin their own launch width: the PTX carries a
+`.reqntid` directive matching the specialized block size, so a launch
+whose block dimension differs from the specialization fails at the driver
+instead of running with the wrong geometry.
+
 Validation fails closed before specialization, compilation, or private
 allocation. Nonzero work specializes and checks the cache, then compiles and
 loads when needed.
@@ -46,11 +51,11 @@ loads when needed.
 *The validated runtime lifecycle, including zero work and stream retention. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
 
 Dispatch reaches the driver through a compiled entry point. The nanobind
-`_launch_kernel` binding splits pointer and scalar arguments once in C++,
-resolves `libcuda.so.1` with `dlopen` once per process, and deliberately
-holds the GIL across the microsecond enqueue. When the compiled bindings
-are absent, a ctypes path submits the same driver call with identical
-behavior and a slower per-launch cost.
+`_launch_kernel` binding builds the driver argument array without
+per-launch ctypes marshalling, resolves `libcuda.so.1` with `dlopen` once
+per process, and deliberately holds the GIL across the microsecond
+enqueue. When the compiled bindings are absent, a ctypes path submits the
+same driver call with the same error shape and a slower per-launch cost.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -82,7 +87,7 @@ corrupt, or specialization-mismatched entries are rejected.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Key composition feeding cache verification with rejected entries recompiled](../assets/figures/specialization-key-cache.svg)
+![Key composition feeding cache verification, where rejected entries raise and a plain miss recompiles](../assets/figures/specialization-key-cache.svg)
 
 </div>
 

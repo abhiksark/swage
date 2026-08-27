@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/dispatch-ladder.svg -->
-<!-- source-sha256: 65f2e94a3532dc5bc9506b44a049065dc2de2bdbe9ac6a331c2370e771c9c7e5 -->
+<!-- source-sha256: eefeeac9d6156d70e78b94ffd63d6631a9f73c27f532ef7bd64966d185c659de -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="446.55" height="289.65" viewBox="0 0 446.55 289.65" role="img" aria-labelledby="dispatch-ladder-title dispatch-ladder-description">
 <title id="dispatch-ladder-title">Warm dispatch cost ladder</title>
 <desc id="dispatch-ladder-description">Log-scale bars follow warm per-launch dispatch cost from the baseline host path through the cached and compiled launchers, beside the Triton and torch dispatch costs.</desc>

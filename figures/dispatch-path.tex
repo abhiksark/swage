@@ -26,7 +26,7 @@
 \node[anchor=west, font=\small\ttfamily, text=swink] at (0.15, -2.6)
   {\detokenize{nanobind _launch_kernel}};
 \node[anchor=west, font=\scriptsize, text=swink] at (0.15, -3.15)
-  {pointers and scalars split once in C++};
+  {no per-launch ctypes marshalling};
 \node[anchor=west, font=\scriptsize, text=swink] at (0.15, -3.6)
   {dlopen libcuda.so.1, resolved once per process};
 \node[anchor=west, font=\scriptsize, text=swink] at (0.15, -4.05)
@@ -49,9 +49,9 @@
 \node[anchor=west, font=\scriptsize, text=swink] at (7.15, -3.6)
   {(for example a package without the built};
 \node[anchor=west, font=\scriptsize, text=swink] at (7.15, -4.0)
-  {extension); behavior is identical, dispatch};
+  {extension); same call and error shape,};
 \node[anchor=west, font=\scriptsize, text=swink] at (7.15, -4.4)
-  {is slower per launch};
+  {slower per launch};
 \draw[swarrow] (9.2, -0.75) -- (9.8, -1.62)
   node[midway, right=2pt, font=\tiny, text=swmuted]
   {compiled bindings are absent};

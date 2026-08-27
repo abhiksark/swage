@@ -66,7 +66,7 @@ values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![A 32-thread warp tile with a shuffle tree beside a 128-thread CTA tile striding chunks](../assets/figures/warp-vs-cta-tiles.svg)
+![A 32-thread warp tile with an xor shuffle butterfly beside a 128-thread CTA tile striding chunks](../assets/figures/warp-vs-cta-tiles.svg)
 
 </div>
 

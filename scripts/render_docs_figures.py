@@ -54,10 +54,10 @@ FIGURES = (
         name="warp-vs-cta-tiles",
         title="Direct warp and CTA tile shapes",
         description=(
-            "A 32-thread warp tile reduces one short segment through a "
-            "shuffle tree, while a 128-thread CTA tile strides one "
-            "longer segment in block-stride chunks before a shared "
-            "block reduction."
+            "A 32-thread warp tile reduces one short segment through "
+            "an xor shuffle butterfly, while a 128-thread CTA tile "
+            "strides one longer segment in block-stride chunks before "
+            "a shared block reduction."
         ),
     ),
     FigureSpec(
@@ -75,7 +75,8 @@ FIGURES = (
         description=(
             "The specialization key fields hash into one digest that "
             "selects a cache entry, which is verified before module "
-            "load or rejected and recompiled in process."
+            "load; a rejected entry raises while a plain miss "
+            "compiles in process."
         ),
     ),
     FigureSpec(

@@ -61,23 +61,28 @@
 \draw[swarrow, draw=swgreen] (verify.south) -- (load.north)
   node[midway, right=1pt, font=\tiny, text=swmuted] {pass};
 
-% Rejection and recompilation.
+% Rejection is terminal: the launch raises and nothing recompiles.
 \node[swbox, draw=sworange, fill=sworangefill, minimum width=4.9cm,
-      minimum height=1.5cm] (reject) at (13.4, -4.15) {};
-\node[font=\scriptsize, text=sworange, align=center] at (13.4, -3.75)
+      minimum height=1.7cm] (reject) at (13.4, -4.15) {};
+\node[font=\scriptsize, text=sworange, align=center] at (13.4, -3.68)
   {rejected entries stop the cache path:};
-\node[font=\tiny, text=sworange, align=center] at (13.4, -4.15)
+\node[font=\tiny, text=sworange, align=center] at (13.4, -4.05)
   {symlinked, world-writable, incomplete,};
-\node[font=\tiny, text=sworange, align=center] at (13.4, -4.5)
+\node[font=\tiny, text=sworange, align=center] at (13.4, -4.38)
   {unreadable, corrupt, or mismatched};
+\node[font=\tiny, text=sworange, align=center] at (13.4, -4.72)
+  {(the launch raises; nothing recompiles)};
 \draw[swarrow, draw=sworange] (verify.east) -- (reject.west)
   node[midway, above=0pt, font=\tiny, text=swmuted] {fail};
 
+% Only a plain miss reaches in-process compilation.
 \node[swbox, minimum width=5.6cm, minimum height=0.62cm]
-  (compile) at (13.7, -5.6) {};
-\node[font=\scriptsize, text=swink] at (13.7, -5.6)
+  (compile) at (13.7, -5.9) {};
+\node[font=\scriptsize, text=swink] at (13.7, -5.9)
   {compile in process, atomic mode-0600 write};
-\draw[swarrow, draw=sworange] (reject.south) -- (compile.north);
+\draw[swarrow] (lookup.east) -- (16.9, -2.5) -- (16.9, -5.9)
+  -- (compile.east)
+  node[near start, above=0pt, font=\tiny, text=swmuted] {miss};
 \draw[swarrow] (compile.west) -- (load.east);
 
 % Scope note.

@@ -23,7 +23,9 @@ REQUIRED_LABELS = {
     "warp-vs-cta-tiles": (
         "32-thread warp tile",
         "128-thread CTA tile",
-        "shuffle reduction tree",
+        "xor shuffle butterfly",
+        "offsets 1, 2, 4, 8, 16",
+        "every lane holds the total",
         "block-stride chunks",
         "up to 32 elements",
         "33 to 4096 elements",
@@ -55,6 +57,8 @@ REQUIRED_LABELS = {
         "LLVM version",
         "verified before module load",
         "rejected",
+        "raises",
+        "miss",
     ),
     "dispatch-path": (
         "_launch_kernel",
@@ -264,6 +268,12 @@ def test_perf_snapshot_is_wellformed_and_sourced():
         assert stage["median"] > 0
         assert "provenance" in stage or stage["q1"] <= stage["q3"]
     assert "provenance" in snapshot["cold_start_ms"]
+    sizes = [row["n"] for row in snapshot["vadd_graph_us"]]
+    assert sizes == [2**e for e in range(14, 27, 2)]
+    for row in snapshot["vadd_graph_us"]:
+        for impl in ("swage", "triton", "torch"):
+            cell = row[impl]
+            assert 0 < cell["q1"] <= cell["median"] <= cell["q3"]
 
 
 def _toolchain_missing():

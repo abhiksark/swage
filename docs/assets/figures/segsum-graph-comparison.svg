@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/segsum-graph-comparison.svg -->
-<!-- source-sha256: 395f9b0588b3775c0495c621a4c4f4bbd25369b439bc878e0f272ca9d2ba0832 -->
+<!-- source-sha256: 1708a425e6678e2d5a1679863b9450bf6d7230bd95b6ba168eff57c1891ba957 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="466.6" height="347.76" viewBox="0 0 466.6 347.76" role="img" aria-labelledby="segsum-graph-comparison-title segsum-graph-comparison-description">
 <title id="segsum-graph-comparison-title">Segmented sum under graph timing</title>
 <desc id="segsum-graph-comparison-description">Grouped bars compare graph-replay medians for the best Swage policy, the tuned Triton baseline, and torch segment_reduce across seven segment distributions on an RTX 5090.</desc>
