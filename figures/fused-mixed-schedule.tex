@@ -9,8 +9,8 @@
 % Header.
 \node[swtitle] at (0, 1.15) {Fused mixed-policy schedule};
 \node[swsubtitle] at (0, 0.5)
-  {One launch covers every task; \detokenize{task_ids} maps each block
-   to its segments.};
+  {One launch covers every task; {\ttfamily\detokenize{task_ids}} maps
+   each block to its segments.};
 
 % Task list: warp tasks first, then CTA tasks.
 \node[anchor=west, font=\small\ttfamily, text=swink] at (0, -0.35)
@@ -25,11 +25,11 @@
 }
 \draw[decorate, decoration={brace, mirror, amplitude=4pt}, swgreen,
       line width=0.9pt] (2.24, -0.72) -- (6.86, -0.72);
-\node[font=\scriptsize, text=swgreen] at (4.55, -1.12)
+\node[font=\scriptsize\ttfamily, text=swgreen] at (4.55, -1.12)
   {\detokenize{warp_task_count = 6}};
 \draw[decorate, decoration={brace, mirror, amplitude=4pt}, swpurple,
       line width=0.9pt] (6.92, -0.72) -- (9.2, -0.72);
-\node[font=\scriptsize, text=swpurple] at (8.06, -1.12)
+\node[font=\scriptsize\ttfamily, text=swpurple] at (8.06, -1.12)
   {\detokenize{cta_task_count = 3}};
 
 % Grid of blocks: warp blocks carry four slots, CTA blocks carry one.

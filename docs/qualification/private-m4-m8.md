@@ -48,6 +48,14 @@ elements, and the default CTA chunk limit is 4096 elements. The host
 classifier validates signed i32 counts and monotonic offsets before producing
 stable descriptors. M6 does not execute a policy.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Per-segment lengths classified into warp, CTA, and split task lists](../assets/figures/plan-classification.svg)
+
+</div>
+
+*SwagePlan classification buckets, including the M8 split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
+
 ## M7 direct warp and CTA execution
 
 Pure warp and pure CTA qualification use this task-ID ABI:

@@ -36,6 +36,15 @@ REQUIRED_LABELS = {
         "warp_task_count",
         "cta_task_count",
     ),
+    "plan-classification": (
+        "swage_plan.classify",
+        "empty",
+        "warp",
+        "cta",
+        "split",
+        "four task lists",
+        "INT32_MAX >= cta chunk >= warp max > 0",
+    ),
 }
 
 

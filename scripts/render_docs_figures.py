@@ -59,6 +59,15 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="plan-classification",
+        title="SwagePlan classification",
+        description=(
+            "Observed segment lengths flow through the empty, warp, "
+            "CTA, and split buckets into four task lists, under the "
+            "validated planning-limit invariant."
+        ),
+    ),
+    FigureSpec(
         name="fused-mixed-schedule",
         title="Fused mixed-policy schedule",
         description=(
