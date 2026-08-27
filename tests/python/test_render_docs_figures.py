@@ -52,6 +52,17 @@ REQUIRED_LABELS = {
         "four task lists",
         "INT32_MAX >= cta chunk >= warp max > 0",
     ),
+    "ownership-map": (
+        "Swage owns",
+        "upstream MLIR and LLVM own",
+        "PyTorch owns",
+        "semantic operations",
+        "fail-closed admission",
+        "GPU lowering infrastructure",
+        "NVPTX emission",
+        "current stream",
+        "one launch crosses the domains",
+    ),
     "m5-softmax-phases": (
         "one CTA per segment",
         "maximum",

@@ -62,6 +62,15 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="ownership-map",
+        title="Ownership map",
+        description=(
+            "Three lanes separate what Swage owns from what upstream "
+            "MLIR and LLVM own and what PyTorch owns, with one launch "
+            "traced across the domains."
+        ),
+    ),
+    FigureSpec(
         name="m5-softmax-phases",
         title="Stable softmax in one CTA",
         description=(
