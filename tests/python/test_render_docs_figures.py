@@ -45,6 +45,25 @@ REQUIRED_LABELS = {
         "four task lists",
         "INT32_MAX >= cta chunk >= warp max > 0",
     ),
+    "specialization-key-cache": (
+        "specialization key",
+        "normalized source",
+        "ordered ABI descriptors",
+        "exact compute capability",
+        "Swage revision",
+        "LLVM version",
+        "verified before module load",
+        "rejected",
+    ),
+    "dispatch-path": (
+        "_launch_kernel",
+        "nanobind",
+        "dlopen libcuda.so.1",
+        "GIL held across the enqueue",
+        "ctypes fallback",
+        "compiled bindings are absent",
+        "current PyTorch stream",
+    ),
 }
 
 

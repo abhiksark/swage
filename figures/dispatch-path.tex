@@ -1,0 +1,68 @@
+% figures/dispatch-path.tex
+% The two launch dispatch lanes: compiled nanobind launcher and the
+% ctypes fallback, both enqueueing on the current PyTorch stream.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}[x=1cm, y=1cm]
+
+% Header.
+\node[swtitle] at (0, 1.15) {Launch dispatch lanes};
+\node[swsubtitle] at (0, 0.5)
+  {Both lanes submit the same driver call; the lane is fixed once
+   when the driver wrapper loads.};
+
+% The validated launch entering dispatch.
+\node[swbox, minimum width=8.6cm, minimum height=0.7cm]
+  (entry) at (6.4, -0.4) {};
+\node[font=\small, text=swink] at (6.4, -0.4)
+  {validated launch: function, grid, block, stream, arguments};
+
+% Compiled lane.
+\node[swbox, draw=swblue, fill=swbluefill,
+      fit={(0, -4.7) (6.0, -1.7)}, inner sep=8pt] (native) {};
+\node[anchor=west, font=\bfseries, text=swblue] at (0.15, -2.05)
+  {compiled lane (fast path)};
+\node[anchor=west, font=\small\ttfamily, text=swink] at (0.15, -2.6)
+  {\detokenize{nanobind _launch_kernel}};
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -3.15)
+  {pointers and scalars split once in C++};
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -3.6)
+  {dlopen libcuda.so.1, resolved once per process};
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -4.05)
+  {GIL held across the enqueue (microseconds,};
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -4.45)
+  {no reacquisition convoys under contention)};
+\draw[swarrow, draw=swblue] (3.6, -0.75) -- (3.0, -1.62)
+  node[midway, left=2pt, font=\tiny, text=swmuted]
+  {bindings import};
+
+% Fallback lane.
+\node[swbox, fit={(7.0, -4.7) (13.0, -1.7)}, inner sep=8pt]
+  (fallback) {};
+\node[anchor=west, font=\bfseries, text=swmuted] at (7.15, -2.05)
+  {ctypes fallback};
+\node[anchor=west, font=\scriptsize, text=swink] at (7.15, -2.6)
+  {same CUDA Driver entry point through ctypes};
+\node[anchor=west, font=\scriptsize, text=swink] at (7.15, -3.15)
+  {taken when the compiled bindings are absent};
+\node[anchor=west, font=\scriptsize, text=swink] at (7.15, -3.6)
+  {(for example a package without the built};
+\node[anchor=west, font=\scriptsize, text=swink] at (7.15, -4.0)
+  {extension); behavior is identical, dispatch};
+\node[anchor=west, font=\scriptsize, text=swink] at (7.15, -4.4)
+  {is slower per launch};
+\draw[swarrow] (9.2, -0.75) -- (9.8, -1.62)
+  node[midway, right=2pt, font=\tiny, text=swmuted]
+  {compiled bindings are absent};
+
+% Both lanes reach the same asynchronous enqueue.
+\node[swbox, draw=swgreen, fill=swgreenfill, minimum width=10.2cm,
+      minimum height=0.7cm] (enqueue) at (6.4, -5.7) {};
+\node[font=\small, text=swgreen] at (6.4, -5.7)
+  {cuLaunchKernel on the current PyTorch stream, asynchronous};
+\draw[swarrow, draw=swblue] (3.0, -4.78) -- (3.6, -5.32);
+\draw[swarrow] (9.8, -4.78) -- (9.2, -5.32);
+
+\end{tikzpicture}
+\end{document}

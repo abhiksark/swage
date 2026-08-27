@@ -45,6 +45,21 @@ loads when needed.
 
 *The validated runtime lifecycle, including zero work and stream retention. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
 
+Dispatch reaches the driver through a compiled entry point. The nanobind
+`_launch_kernel` binding splits pointer and scalar arguments once in C++,
+resolves `libcuda.so.1` with `dlopen` once per process, and deliberately
+holds the GIL across the microsecond enqueue. When the compiled bindings
+are absent, a ctypes path submits the same driver call with identical
+behavior and a slower per-launch cost.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![The compiled nanobind launch lane beside the ctypes fallback lane](../assets/figures/dispatch-path.svg)
+
+</div>
+
+*The two launch dispatch lanes and when each is taken. [Open the full-size figure](../assets/figures/dispatch-path.svg).*
+
 ## Specialization and cache
 
 The specialization key contains normalized source, kernel name, ordered ABI
@@ -64,6 +79,14 @@ Each persistent entry contains `metadata.json`, `lowered.mlir`, and
 Cache directories use user-only permissions; files use mode `0600` and are
 replaced atomically. Symlinked, world-writable, incomplete, unreadable,
 corrupt, or specialization-mismatched entries are rejected.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Key composition feeding cache verification with rejected entries recompiled](../assets/figures/specialization-key-cache.svg)
+
+</div>
+
+*Specialization key fields and the verify-or-reject cache path. [Open the full-size figure](../assets/figures/specialization-key-cache.svg).*
 
 ## Debug dumps
 

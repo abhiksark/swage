@@ -68,6 +68,25 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="specialization-key-cache",
+        title="Specialization key and cache verification",
+        description=(
+            "The specialization key fields hash into one digest that "
+            "selects a cache entry, which is verified before module "
+            "load or rejected and recompiled in process."
+        ),
+    ),
+    FigureSpec(
+        name="dispatch-path",
+        title="Launch dispatch lanes",
+        description=(
+            "A validated launch enqueues through the compiled nanobind "
+            "launcher when the bindings import, or through the ctypes "
+            "fallback otherwise; both submit the same driver call on "
+            "the current PyTorch stream."
+        ),
+    ),
+    FigureSpec(
         name="fused-mixed-schedule",
         title="Fused mixed-policy schedule",
         description=(
