@@ -1,6 +1,12 @@
-<!-- docs/concepts/swage-visual-guide.md -->
+<!-- docs/user-guide/ragged-data.md -->
 
-# Swage, Visually
+# Ragged Data
+
+Variable-sized, internally dense segments appear in ragged softmax rows,
+jagged batches, and graph neighborhoods. Fixed GPU work shapes handle
+regular data well, but padding and one-shape scheduling waste work or
+create load imbalance on ragged inputs. Everything in Swage grows from how
+it stores and names this data.
 
 Swage starts with ragged storage: one dense values buffer plus offsets that
 divide it into logical segments. In the concrete example below, offsets
@@ -19,6 +25,8 @@ padding or gaps to the values buffer.
 *Dense ragged storage, including a repeated offset and empty segment. [Open the full-size figure](../assets/diagrams/ragged-storage.svg).*
 
 ## Three questions, three levels
+
+The rest of this guide follows one ladder of questions:
 
 ```text
 Segment: What logical data and computation does one program instance mean?
@@ -47,10 +55,6 @@ to be qualified separately. Today, that separation is public for canonical
 fixed vector add and privately qualified for selected segmented modules.
 General public segmented execution remains planned.
 
-Continue with [Segments, Tasks, and Tiles](segments-tiles-tasks.md) for the
-invariants and current qualification boundary. Then use
-[Compiler Pipeline](../architecture/compiler-pipeline.md) to follow the
-implemented data flow. The tile shapes, schedules, and classification behind
-these levels are drawn in [Private M4 to M8](../qualification/private-m4-m8.md),
-and the recorded numbers live in
-[Measured Performance](../qualification/performance.md).
+Continue with [Writing Kernels](writing-kernels.md) to put the model on
+the page, or jump ahead to [Execution Model](execution-model.md) for the
+invariants behind each level.

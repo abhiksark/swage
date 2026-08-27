@@ -4,7 +4,7 @@
   aria-labelledby="compiler-pipeline-title compiler-pipeline-description"
   font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="compiler-pipeline-title">Swage compiler pipeline</title>
-  <desc id="compiler-pipeline-description">Verified semantic MLIR enters three admitted branches. Public M3, the private M4/M5 GPU: one CTA / segment path, and private M6-M8 GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. The M4/M5 sequential CPU oracle exits separately through SCF and memref.</desc>
+  <desc id="compiler-pipeline-description">Verified semantic MLIR enters three admitted branches. The public fixed-block branch, the private direct segmented GPU: one CTA / segment path, and GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. The direct segmented sequential CPU oracle exits separately through SCF and memref.</desc>
   <defs>
     <marker id="compiler-pipeline-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#59636E"/>
@@ -16,21 +16,21 @@
   <text x="600" y="139" font-size="22" font-weight="750" fill="#17212B" text-anchor="middle">verified semantic MLIR</text>
   <line x1="600" y1="168" x2="600" y2="215" stroke="#59636E" stroke-width="3"/>
   <rect x="55" y="245" width="330" height="180" rx="14" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
-  <rect x="77" y="265" width="180" height="38" rx="19" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
-  <text x="167" y="291" font-size="16" font-weight="750" fill="#00689D" text-anchor="middle">PUBLIC M3</text>
-  <text x="220" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">M3 fixed block</text>
+  <rect x="77" y="265" width="250" height="38" rx="19" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
+  <text x="202" y="291" font-size="16" font-weight="750" fill="#00689D" text-anchor="middle">PUBLIC TODAY</text>
+  <text x="220" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">fixed-block vector add</text>
   <text x="220" y="384" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">canonical vector add</text>
   <text x="220" y="414" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">fixed-block GPU conversion</text>
   <rect x="420" y="245" width="330" height="180" rx="14" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
-  <rect x="442" y="265" width="180" height="38" rx="19" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
-  <text x="532" y="291" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">PRIVATE M4-M5</text>
-  <text x="585" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">M4 / M5 segmented direct</text>
+  <rect x="442" y="265" width="250" height="38" rx="19" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
+  <text x="567" y="291" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">PRIVATE QUALIFICATION</text>
+  <text x="585" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">segmented direct</text>
   <text x="585" y="384" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">sum, max, stable softmax</text>
   <text x="585" y="414" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">two qualified paths</text>
   <rect x="785" y="245" width="330" height="180" rx="14" fill="#DDF4EB" stroke="#00664B" stroke-width="2"/>
-  <rect x="807" y="265" width="180" height="38" rx="19" fill="#DDF4EB" stroke="#00664B" stroke-width="2"/>
-  <text x="897" y="291" font-size="16" font-weight="750" fill="#00664B" text-anchor="middle">PRIVATE M6-M8</text>
-  <text x="950" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">M6-M8 SwagePlan</text>
+  <rect x="807" y="265" width="250" height="38" rx="19" fill="#DDF4EB" stroke="#00664B" stroke-width="2"/>
+  <text x="932" y="291" font-size="16" font-weight="750" fill="#00664B" text-anchor="middle">PRIVATE QUALIFICATION</text>
+  <text x="950" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">SwagePlan direct + split</text>
   <text x="950" y="384" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">classification companion</text>
   <text x="950" y="414" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">direct or split identity sum</text>
   <line x1="600" y1="215" x2="220" y2="235" stroke="#59636E" stroke-width="3" marker-end="url(#compiler-pipeline-arrow)"/>

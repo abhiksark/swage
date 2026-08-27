@@ -1,10 +1,16 @@
-<!-- docs/reference/compiler-tools.md -->
+<!-- docs/internals/compiler-tools.md -->
 
 # Compiler Tools and Passes
 
 Swage provides one optimizer driver and a small registered pass surface. The
-split partial and merge conversions used by private M8 qualification are
-compiler factories, not command-line passes.
+split partial and merge conversions used by private split qualification are
+compiler factories, not command-line passes. As a first roundtrip,
+`swage-opt` can parse, verify, and print a test module from the native
+MLIR surface, which is broader than the public Python kernel language:
+
+```bash
+./build/bin/swage-opt test/Dialect/Swage/roundtrip.mlir
+```
 
 ## `swage-opt`
 
@@ -24,8 +30,8 @@ passes.
 
 | Pass argument | Options | Current admitted purpose |
 |---|---|---|
-| `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical M3 fixed vector-add shape to one GPU x-thread per lane |
-| `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused M5 program to sequential SCF and memref operations |
+| `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
+| `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required positive `block-size`; optional `use-task-ids`; optional `fused-mixed` | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for the canonical identity segmented sum |
 
@@ -42,12 +48,12 @@ task graph or inspect runtime offset contents.
 ## Private compiler factories
 
 Native runtime code also constructs split partial and split merge lowering
-passes directly. These factories admit only the private M8 identity-sum
+passes directly. These factories admit only the private split identity-sum
 shape and emit 512-thread partial or merge kernels. They are intentionally
 not registered as `swage-opt` arguments.
 
 The driver and passes expose the tested compiler surface, not a general
-optimizer pipeline. Continue with [Compiler Pipeline](../architecture/compiler-pipeline.md)
+optimizer pipeline. Continue with [Compiler Pipeline](compiler-pipeline.md)
 for data flow, [Swage Dialect](swage-dialect.md) for semantic operations, or
-[Private Qualification](../qualification/private-m4-m8.md) for admitted
+[Segmented Reductions](segmented-reductions.md) for admitted
 segmented modules and ABIs.

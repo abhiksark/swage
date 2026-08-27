@@ -41,7 +41,7 @@ any descriptor.
 The private materialization boundary returns direct work, ordered partial
 work, and final merge work without adding an operation, type, policy, or
 public Python API. Exact record layouts live in
-[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
+[Split Execution](../internals/split-execution.md).
 
 The partial and merge lowering passes are available only through private
 compiler factories. They are intentionally not registered as public
@@ -54,7 +54,7 @@ unique scratch slot. Each merge block reduces one compact scratch range, and
 one thread writes the final segment result once. Both kernels reuse the
 existing segmented CUDA Driver launch boundary and the current PyTorch
 stream. Their exact private ABIs live in
-[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
+[Split Execution](../internals/split-execution.md).
 
 Pure `warp` and `cta` preparation continues to execute every segment as a
 correctness control. Mixed execution submits direct fused work, partial CTAs,

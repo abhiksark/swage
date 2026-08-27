@@ -1,4 +1,4 @@
-<!-- docs/reference/swage-dialect.md -->
+<!-- docs/internals/swage-dialect.md -->
 
 # Swage Dialect
 
@@ -27,7 +27,7 @@ range.
 
 The type and operations parse, print, and verify independently of whether a
 particular lowering admits them. Current segmented lowering supports a
-narrower private subset described in [Private Qualification](../qualification/private-m4-m8.md).
+narrower private subset described in [Segmented Reductions](segmented-reductions.md).
 
 ## Generated reference boundary
 
@@ -38,6 +38,6 @@ definitions in `include/swage/Dialect/Swage/IR`.
 
 --8<-- "docs/reference/_generated/swage-ops.inc"
 
-Continue with [Segments, Tasks, and Tiles](../concepts/segments-tiles-tasks.md)
+Continue with [Execution Model](../user-guide/execution-model.md)
 for the semantic model, or [Compiler Tools and Passes](compiler-tools.md) for
 the registered lowering surface.

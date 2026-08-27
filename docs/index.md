@@ -8,10 +8,11 @@
 
 # Swage
 
-Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. Its public
-execution boundary is one canonical fixed vector-add kernel. The wider
-segment compiler exists as private qualification machinery or planned work,
-not as public segmented Python syntax.
+Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
+how one segment-local program can keep its meaning while task derivation
+changes with runtime segment lengths. Its public execution boundary is one
+canonical fixed vector-add kernel; the wider segment compiler exists as
+private qualification machinery or planned work.
 
 !!! warning "Pre-alpha boundary"
 
@@ -33,15 +34,15 @@ compiler build output. Native wheel packaging remains deferred.
 
 ## Private qualification
 
-- M4 segmented sum and max through a sequential CPU oracle and one CTA per
+- Segmented sum and max through a sequential CPU oracle and one CTA per
   segment on NVIDIA GPUs.
-- M5 stable ragged softmax through the same private CPU and one-CTA GPU
+- Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
-- M6 to M8 canonical identity-sum planning, direct warp and CTA execution,
-  fused mixed execution, and split-CTA partial and merge execution.
+- Canonical identity-sum planning, direct warp and CTA execution, fused
+  mixed execution, and split-CTA partial and merge execution.
 
-These paths have tests and recorded qualification evidence. They do not widen
-the public Python language or launch contract.
+These paths have tests and recorded qualification evidence. They do not
+widen the public Python language or launch contract.
 
 ## Planned
 
@@ -50,12 +51,7 @@ the public Python language or launch contract.
 - Split max and split softmax.
 - Device queues, persistent scheduling, and broader policy selection.
 
-The three lanes below are status boundaries, not fallback paths. Public today
-contains Python capture, compile-only `emit_mlir()`, and canonical M3 fixed
-vector-add `launch()`. Private qualification contains the tested M4 to M8
-segmented compiler and runtime evidence, but it is not a public API. Planned
-work contains a public segmented API, packed work, split max and softmax, and
-persistent scheduling.
+The three lanes are status boundaries, not fallback paths.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -67,12 +63,46 @@ persistent scheduling.
 
 ## Choose a path
 
-| Goal | Start here |
-|---|---|
-| Install or run the supported example | [Installation](getting-started/installation.md), then [Quickstart](quickstart.md) |
-| Learn the segment model | [Swage, Visually](concepts/swage-visual-guide.md), then [Segments, Tasks, and Tiles](concepts/segments-tiles-tasks.md) |
-| Contribute to the compiler | [Compiler Pipeline](architecture/compiler-pipeline.md), [Compiler Tools and Passes](reference/compiler-tools.md), and [Contributing](https://github.com/abhiksark/swage/blob/main/CONTRIBUTING.md) |
-| Audit qualification claims | [Private M4 to M8 Qualification](qualification/private-m4-m8.md) and [Verification Evidence](qualification/evidence.md) |
+<div class="grid cards" markdown>
 
-For exact public call contracts, use [Public Python API](reference/public-python-api.md).
-For the rationale behind a boundary, use the [ADR Index](decisions/index.md).
+-   **Getting started**
+
+    ---
+
+    Install the package, build the pinned toolchain, and run the
+    supported example end to end.
+
+    [Installation](getting-started/installation.md)
+
+-   **User guide**
+
+    ---
+
+    The ideas behind Swage: ragged data, writing and launching kernels,
+    and the execution model.
+
+    [Start the guide](user-guide/index.md)
+
+-   **API reference**
+
+    ---
+
+    Exact public contracts for the package, the kernel language, and
+    the runtime.
+
+    [Open the reference](reference/index.md)
+
+-   **Internals**
+
+    ---
+
+    The compiler and runtime machinery behind the public surface, with
+    its qualification evidence.
+
+    [Read the internals](internals/index.md)
+
+</div>
+
+Continue with [Installation](getting-started/installation.md). For the
+rationale behind a boundary, use the [ADR index](decisions/index.md);
+for the exact public call surface, use [swage](reference/swage.md).

@@ -32,6 +32,6 @@ gates belong in the roadmap.
 - [ADR-0016: M7 fused mixed-policy schedule](../adr/ADR-0016-m7-fused-mixed-policy-schedule.md)
 - [ADR-0017: M8 private split-CTA reductions](../adr/ADR-0017-m8-private-split-cta-reductions.md)
 
-Start with [Compiler Pipeline](../architecture/compiler-pipeline.md) when you
+Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the
 rationale.

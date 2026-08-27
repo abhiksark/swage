@@ -30,16 +30,16 @@ The current pre-alpha release is `v0.5.1`.
 
 ### Private qualification
 
-- M4 and M5 qualify canonical segmented sum, max, and stable ragged softmax
+- Canonical segmented sum, max, and stable ragged softmax are qualified
   through sequential CPU oracles and one-CTA GPU paths.
-- M6 to M8 qualify one canonical identity segmented sum through host
+- One canonical identity segmented sum is qualified through host
   classification, direct warp and CTA work, one fused mixed kernel, and
   split-CTA partial and merge kernels.
-- The frozen M7 NVIDIA RTX A6000 `sm_86` record has a
+- The frozen NVIDIA RTX A6000 `sm_86` mixed-policy record has a
   mixed-to-best-pure ratio of `0.939394`, below its predeclared `1.05` limit.
-- M8 exact and nontrivial f32 split sums match PyTorch and the CPU oracle on
-  NVIDIA RTX A6000 `sm_86`. M8 is a correctness result and does not retune the
-  M7 benchmark.
+- Exact and nontrivial f32 split sums match PyTorch and the CPU oracle on
+  NVIDIA RTX A6000 `sm_86`. Split execution is a correctness result and does
+  not retune the frozen benchmark.
 
 ### Planned
 
@@ -78,12 +78,12 @@ does not independently emit MLIR or execute kernels.
 ## Documentation
 
 - [Installation](docs/getting-started/installation.md)
-- [Quickstart](docs/quickstart.md)
-- [Swage, Visually](docs/concepts/swage-visual-guide.md)
-- [Compiler Pipeline](docs/architecture/compiler-pipeline.md)
-- [Public Python API](docs/reference/public-python-api.md)
-- [Private M4 to M8 Qualification](docs/qualification/private-m4-m8.md)
-- [Verification Evidence](docs/qualification/evidence.md)
+- [Quickstart](docs/getting-started/quickstart.md)
+- [User Guide](docs/user-guide/index.md)
+- [Compiler Pipeline](docs/internals/compiler-pipeline.md)
+- [API Reference](docs/reference/index.md)
+- [Internals](docs/internals/index.md)
+- [Verification](docs/internals/verification.md)
 - [DESIGN.md](DESIGN.md), [ROADMAP.md](ROADMAP.md), and
   [CONTRIBUTING.md](CONTRIBUTING.md)
 

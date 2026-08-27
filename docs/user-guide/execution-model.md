@@ -1,6 +1,6 @@
-<!-- docs/concepts/segments-tiles-tasks.md -->
+<!-- docs/user-guide/execution-model.md -->
 
-# Segments, Tasks, and Tiles
+# Execution Model
 
 Swage keeps program meaning, schedulable work, and physical execution
 separate. The order matters: begin with the segment, derive tasks, then map
@@ -44,7 +44,7 @@ A task is a unit that a runtime can schedule for a segment. One semantic
 segment may require one task or several tasks. A task can represent direct
 work, a chunk of a long segment, a partial result, or a merge.
 
-Current private M8 identity-sum qualification derives:
+Current private identity-sum qualification derives:
 
 - one direct warp task for a segment of at most 32 elements;
 - one direct CTA task for a segment from 33 through 4096 elements;
@@ -79,6 +79,21 @@ The current public Python path uses a logical fixed-block coordinate for
 canonical vector add. The private segmented path proves selected Segment to
 Task to Tile mappings. It does not yet provide a public general planner.
 
-Carry this distinction into [Compiler Pipeline](../architecture/compiler-pipeline.md),
-which shows where semantic IR branches into current lowering paths. Exact
-private task and ABI details live in [Private Qualification](../qualification/private-m4-m8.md).
+## From model to machinery
+
+Every level of this model has qualified machinery behind it, all of it
+private qualification rather than public API:
+
+- The three fixed tiles and their reductions are drawn in
+  [Task Execution](../internals/task-execution.md) and
+  [Split Execution](../internals/split-execution.md).
+- The classifier that turns observed lengths into warp, CTA, and split
+  tasks under the 32 and 4096 element defaults is drawn in
+  [Task Planning](../internals/planning.md).
+- The recorded performance of these choices lives in
+  [Benchmarks](../internals/benchmarks.md).
+
+Continue with the [API reference](../reference/index.md) for the exact
+contracts behind this guide, or
+[Compiler Pipeline](../internals/compiler-pipeline.md) for where semantic
+IR branches into the current lowering paths.

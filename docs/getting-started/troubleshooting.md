@@ -79,6 +79,6 @@ reconfigure only the affected Swage build directory, then pass matching
 `MLIR_DIR` and `LLVM_DIR` paths. Do not update the project pin to fit a local
 toolchain.
 
-Once setup works, the [Quickstart](../quickstart.md) exercises the supported
-path. Exact launch and cache contracts live in [Public Python API](../reference/public-python-api.md)
+Once setup works, the [Quickstart](quickstart.md) exercises the supported
+path. Exact launch and cache contracts live in [swage](../reference/swage.md)
 and [Runtime and Environment](../reference/runtime-environment.md).

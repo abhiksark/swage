@@ -10,8 +10,8 @@ variable-sized dense segment programs into fixed-tile GPU tasks.
 - `README.md`: current status; what works vs. what is planned
 - `DESIGN.md`: architecture and invariants
 - `ROADMAP.md`: phase gates and their status
-- `docs/concepts/segments-tiles-tasks.md`: the Segment/Task/Tile model
-- `docs/architecture/compiler-pipeline.md`: the lowering pipeline
+- `docs/user-guide/execution-model.md`: the Segment/Task/Tile model
+- `docs/internals/compiler-pipeline.md`: the lowering pipeline
 
 ## Non-negotiable rules
 
@@ -79,6 +79,6 @@ known limitations; follow-up issue.
 `swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
 build-tree `PYTHONPATH`. The bindings require an MLIR install built with
 Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
-is an error. `emit_mlir()` remains compile-only. M3 execution is available
+is an error. `emit_mlir()` remains compile-only. Public execution is available
 only through keyword-only `launch()` for the canonical fixed vector add, with
 strict CUDA tensor, ABI, block, and grid validation.

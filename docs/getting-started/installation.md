@@ -88,5 +88,5 @@ asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install without Python
 bindings, configuration fails instead of silently omitting the package.
 
 Installation is complete when the relevant build and test commands succeed.
-Continue with the [Quickstart](../quickstart.md), or use
+Continue with the [Quickstart](quickstart.md), or use
 [Troubleshooting](troubleshooting.md) when a tool or package cannot be found.

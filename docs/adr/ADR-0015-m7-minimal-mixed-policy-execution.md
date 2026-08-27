@@ -56,7 +56,7 @@ the M6 identity segmented sum. The x-block ID selects the original segment ID
 used for offset loads and the output store, while the reduction body remains
 the existing block-stride emitter. M7 compiles distinct pure-warp and pure-CTA
 kernels. The exact private task ABI lives in
-[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
+[Task Execution](../internals/task-execution.md).
 
 ### Classifier integration and launch ordering
 
