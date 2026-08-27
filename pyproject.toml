@@ -27,6 +27,7 @@ Repository = "https://github.com/abhiksark/swage"
 [project.optional-dependencies]
 dev = ["build", "hatchling", "lit", "pytest", "ruff"]
 docs = ["mkdocs", "mkdocs-material"]
+figures = ["pymupdf"]
 pytorch = ["torch>=2.6"]
 
 [tool.hatch.version]

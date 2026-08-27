@@ -66,6 +66,19 @@ duplicate keyword arguments are rejected.
 `sl.constexpr` values must be signed 64-bit integers. Vector operations
 require `BLOCK`.
 
+These calls compose into one launch geometry. The grid holds
+`ceil(n / BLOCK)` blocks of `BLOCK` threads, each block computes
+`gid = program_id(0) * BLOCK + arange(0, BLOCK)`, and the mask retires
+lanes at or beyond `n`.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![One grid of fixed blocks, one expanded block, and masked tail lanes](../assets/figures/fixed-block-thread-map.svg)
+
+</div>
+
+*The fixed-block launch contract behind `program_id`, `arange`, and masks. [Open the full-size figure](../assets/figures/fixed-block-thread-map.svg).*
+
 ## Supported value categories
 
 The emitter tracks only i32 scalar parameters, index scalars, index vectors,

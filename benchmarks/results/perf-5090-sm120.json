@@ -1,0 +1,171 @@
+{
+  "benchmark": "rtx5090-dispatch-and-segmented-graph-campaign",
+  "recorded_at": "2026-08-27",
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "compute_capability": "sm_120",
+    "nvidia_driver": "580.173.02",
+    "cuda_driver": "13.0",
+    "pytorch": "2.13.0+cu130",
+    "triton": "3.7.1",
+    "notes": "co-tenant GPU; graph timings replay 32 captured launches"
+  },
+  "source": {
+    "branch": "perf/faster-than-triton",
+    "revisions": ["b9689c6", "d961316", "2c75233"],
+    "raw_log": "campaign archive results.jsonl (1355 rows) and RESULTS.md; not committed",
+    "triton_baseline": "per-segment kernel, BLOCK=256 num_warps=8, best of the swept and autotuned configurations (raw-log impl name triton-naive)"
+  },
+  "aggregation": {
+    "rule": "median of the three per-run medians; q1 and q3 are medians of the per-run quartiles",
+    "segsum_graph_us_runs": ["graphs2-r1", "graphs2-r2", "graphs2-r3"],
+    "dispatch_call_us_runs": ["baseline-r1..r3", "o1-batched-r1..r3", "clauncher-r1..r3"],
+    "dispatch_case": "vadd n=2^14, warm launch",
+    "vadd_triton_rule": "per run, the best autotuned configuration for that run; runs may select different blocks",
+    "win_bar": "a stable win requires at least a 10 percent median improvement over the best baseline across the three runs"
+  },
+  "segsum_graph_us": [
+    {
+      "distribution": "uniform-8",
+      "segments": 32768,
+      "swage": {"policy": "plain", "block": 64, "median": 16.0, "q1": 16.0, "q3": 16.1},
+      "triton": {"median": 21.0, "q1": 21.0, "q3": 21.1},
+      "torch": {"median": 22.5, "q1": 22.4, "q3": 22.5}
+    },
+    {
+      "distribution": "uniform-24",
+      "segments": 16384,
+      "swage": {"policy": "plain", "block": 64, "median": 8.4, "q1": 8.4, "q3": 8.4},
+      "triton": {"median": 11.1, "q1": 11.1, "q3": 11.1},
+      "torch": {"median": 12.1, "q1": 12.1, "q3": 12.2}
+    },
+    {
+      "distribution": "uniform-512",
+      "segments": 4096,
+      "swage": {"policy": "plain", "block": 128, "median": 3.1, "q1": 3.1, "q3": 3.1},
+      "triton": {"median": 3.8, "q1": 3.8, "q3": 3.8},
+      "torch": {"median": 4.8, "q1": 4.8, "q3": 4.8}
+    },
+    {
+      "distribution": "uniform-4k",
+      "segments": 512,
+      "swage": {"policy": "plain", "block": 256, "median": 2.6, "q1": 2.6, "q3": 2.7},
+      "triton": {"median": 2.5, "q1": 2.5, "q3": 2.5},
+      "torch": {"median": 3.2, "q1": 3.2, "q3": 3.2}
+    },
+    {
+      "distribution": "zipf",
+      "segments": 12000,
+      "swage": {"policy": "plain", "block": 128, "median": 7.4, "q1": 7.4, "q3": 7.5},
+      "triton": {"median": 8.9, "q1": 8.9, "q3": 9.0},
+      "torch": {"median": 9.9, "q1": 9.8, "q3": 9.9}
+    },
+    {
+      "distribution": "bimodal",
+      "segments": 12048,
+      "swage": {
+        "policy": "mixed",
+        "median": 5.3,
+        "provenance": "RESULTS.md headline table, one captured mixed sequence (O5); the verdict row records 5.2; the triplicated plain-128 kernel measures 10.6"
+      },
+      "triton": {"median": 10.7, "q1": 10.7, "q3": 10.7},
+      "torch": {"median": 10.1, "q1": 10.1, "q3": 10.1}
+    },
+    {
+      "distribution": "few-huge",
+      "segments": 8196,
+      "swage": {
+        "policy": "mixed",
+        "median": 4.8,
+        "provenance": "RESULTS.md headline table, one captured mixed sequence (O5); the triplicated plain-512 kernel measures 26.0"
+      },
+      "triton": {"median": 34.7, "q1": 34.6, "q3": 34.9},
+      "torch": {"median": 17.2, "q1": 17.1, "q3": 17.3}
+    }
+  ],
+  "vadd_graph_us": [
+    {
+      "n": 16384,
+      "swage": {"median": 0.86, "q1": 0.84, "q3": 0.89},
+      "triton": {"median": 0.86, "q1": 0.85, "q3": 0.89},
+      "torch": {"median": 0.97, "q1": 0.93, "q3": 1.0}
+    },
+    {
+      "n": 65536,
+      "swage": {"median": 0.86, "q1": 0.86, "q3": 0.87},
+      "triton": {"median": 0.93, "q1": 0.92, "q3": 0.96},
+      "torch": {"median": 1.01, "q1": 0.99, "q3": 1.06}
+    },
+    {
+      "n": 262144,
+      "swage": {"median": 1.38, "q1": 1.37, "q3": 1.4},
+      "triton": {"median": 1.19, "q1": 1.18, "q3": 1.26},
+      "torch": {"median": 1.27, "q1": 1.25, "q3": 1.3}
+    },
+    {
+      "n": 1048576,
+      "swage": {"median": 3.17, "q1": 3.16, "q3": 3.19},
+      "triton": {"median": 2.49, "q1": 2.48, "q3": 2.52},
+      "torch": {"median": 2.54, "q1": 2.53, "q3": 2.55}
+    },
+    {
+      "n": 4194304,
+      "swage": {"median": 7.16, "q1": 7.14, "q3": 7.17},
+      "triton": {"median": 7.01, "q1": 6.97, "q3": 7.04},
+      "torch": {"median": 8.04, "q1": 8.04, "q3": 8.05}
+    },
+    {
+      "n": 16777216,
+      "swage": {"median": 114.0, "q1": 113.8, "q3": 114.14},
+      "triton": {"median": 115.41, "q1": 115.28, "q3": 115.73},
+      "torch": {"median": 114.98, "q1": 114.7, "q3": 115.39}
+    },
+    {
+      "n": 67108864,
+      "swage": {"median": 509.96, "q1": 509.88, "q3": 510.29},
+      "triton": {"median": 510.47, "q1": 510.31, "q3": 510.67},
+      "torch": {"median": 511.18, "q1": 511.01, "q3": 511.27}
+    }
+  ],
+  "dispatch_call_us": [
+    {
+      "stage": "baseline per-launch host path",
+      "impl": "swage",
+      "median": 7714.5,
+      "q1": 7034.1,
+      "q3": 8803.2
+    },
+    {
+      "stage": "cached identity and emit-on-miss (O1)",
+      "impl": "swage",
+      "median": 36.1,
+      "q1": 33.8,
+      "q3": 39.0
+    },
+    {
+      "stage": "compiled nanobind launcher",
+      "impl": "swage",
+      "median": 24.7,
+      "q1": 24.5,
+      "q3": 25.3
+    },
+    {
+      "stage": "compiled-C launcher",
+      "impl": "triton",
+      "median": 20.4,
+      "q1": 20.2,
+      "q3": 20.8
+    },
+    {
+      "stage": "torch.add dispatch",
+      "impl": "torch",
+      "median": 14.0,
+      "provenance": "campaign summary prose; not recorded in the raw log"
+    }
+  ],
+  "cold_start_ms": {
+    "swage": 144,
+    "triton": 1116,
+    "provenance": "one fresh-process first vector-add launch each (O6); single measurement"
+  }
+}

@@ -1,7 +1,7 @@
 # Convenience wrappers around the real commands. Advanced users can run the
 # underlying scripts and tools directly; see CONTRIBUTING.md.
 
-.PHONY: setup build test test-cpu lint diagrams docs
+.PHONY: setup build test test-cpu lint diagrams figures docs
 
 setup:
 	pip install -e ".[dev]"
@@ -22,7 +22,11 @@ lint:
 diagrams:
 	python3 scripts/render_docs_diagrams.py
 
+figures:
+	python3 scripts/render_docs_figures.py
+
 docs:
 	python3 scripts/render_docs_diagrams.py --check
+	python3 scripts/render_docs_figures.py --check
 	mkdocs build --strict
 	python3 scripts/check_docs_site.py site

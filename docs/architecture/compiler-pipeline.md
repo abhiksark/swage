@@ -82,11 +82,20 @@ selection, packing, queues, or persistent scheduling.
 ## Ownership boundary
 
 Swage currently owns semantic operations, fail-closed admission, the narrow
-planning record, host descriptor materialization, and the dedicated
-conversions required by qualified paths. Upstream MLIR and LLVM own ordinary
+planning record, host descriptor materialization, the dedicated conversions
+required by qualified paths, and the launch runtime's validation, cache, and
+dispatch. Upstream MLIR and LLVM own ordinary
 arithmetic, control flow, memory operations, GPU lowering infrastructure,
 LLVM IR, and NVPTX emission. PyTorch owns tensors, the active CUDA context,
 and the current stream.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Three ownership lanes with one launch traced across the domains](../assets/figures/ownership-map.svg)
+
+</div>
+
+*What Swage owns against upstream MLIR and LLVM, and PyTorch. [Open the full-size figure](../assets/figures/ownership-map.svg).*
 
 Continue with [Compiler Tools and Passes](../reference/compiler-tools.md) for
 the command-line surface, or [Verification Evidence](../qualification/evidence.md)

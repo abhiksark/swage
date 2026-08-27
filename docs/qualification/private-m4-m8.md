@@ -37,6 +37,14 @@ or newer because the path uses native `exp2`. The runner validates host-visible
 offset metadata, capacity, and output disjointness. Empty segments perform no
 map-store writes.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Three block-stride passes per segment separated by uniform all-reduce operations](../assets/figures/m5-softmax-phases.svg)
+
+</div>
+
+*The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/m5-softmax-phases.svg).*
+
 ## M6 planning gate
 
 `--swage-to-plan` admits only a capture-free, map-free, single-stage identity
@@ -48,6 +56,14 @@ elements, and the default CTA chunk limit is 4096 elements. The host
 classifier validates signed i32 counts and monotonic offsets before producing
 stable descriptors. M6 does not execute a policy.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Per-segment lengths classified into warp, CTA, and split task lists](../assets/figures/plan-classification.svg)
+
+</div>
+
+*SwagePlan classification buckets, including the M8 split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
+
 ## M7 direct warp and CTA execution
 
 Pure warp and pure CTA qualification use this task-ID ABI:
@@ -55,6 +71,14 @@ Pure warp and pure CTA qualification use this task-ID ABI:
 ```text
 values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
 ```
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![A 32-thread warp tile with an xor shuffle butterfly, a 128-thread CTA tile striding passes, and a 512-thread split tile covering one chunk](../assets/figures/warp-vs-cta-tiles.svg)
+
+</div>
+
+*Fixed physical tile shapes for warp, CTA, and split tasks under the default M6 and M8 limits. [Open the full-size figure](../assets/figures/warp-vs-cta-tiles.svg).*
 
 The warp kernel uses 32 threads. The CTA kernel uses 128 threads. Fused mixed
 execution uses one 128-thread kernel and this ABI:
@@ -68,10 +92,19 @@ Each initial block contains four independent one-segment warp slots. CTA
 tasks follow at one segment per block. An empty task set enqueues no kernel.
 The M7 qualification is limited to canonical identity sum.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![One fused launch covering four-per-block warp tasks then one-per-block CTA tasks](../assets/figures/fused-mixed-schedule.svg)
+
+</div>
+
+*The one-launch fused schedule and its task-ID indirection. [Open the full-size figure](../assets/figures/fused-mixed-schedule.svg).*
+
 The frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
-for fused mixed execution. The mixed-to-best-pure ratio is `0.939394`, which
-passes the predeclared maximum of `1.05`. The committed raw record is
+for fused mixed execution. The fused schedule it measures is the one drawn
+above. The mixed-to-best-pure ratio is `0.939394`, which passes the
+predeclared maximum of `1.05`. The committed raw record is
 [`benchmarks/results/m7-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/m7-a6000-sm86.json).
 
 ## M8 split-CTA identity sum
@@ -111,8 +144,9 @@ Merge ABI:
 scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
 ```
 
-Both kernels use 128 threads. Partial ranges are absolute half-open input
-ranges, and each partial writes one unique scratch slot. Merge records carry a
+Both kernels use 512 threads, sized so one 4096-element chunk fully
+occupies a CTA at eight elements per thread. Partial ranges are absolute
+half-open input ranges, and each partial writes one unique scratch slot. Merge records carry a
 segment ID and a compact half-open scratch range; thread zero writes the final
 segment result once.
 
@@ -126,5 +160,7 @@ M8 does not implement packed warps, split max, split softmax, device queues,
 persistent scheduling, public segment syntax, or public segmented launch.
 
 Continue with [Verification Evidence](evidence.md) for the executable proof
-behind each boundary, or [SwagePlan Dialect](../reference/swage-plan-dialect.md)
-for the private planning IR surface.
+behind each boundary, [Measured Performance](performance.md) for the
+recorded RTX 5090 campaign, or the
+[SwagePlan Dialect](../reference/swage-plan-dialect.md) for the private
+planning IR surface.

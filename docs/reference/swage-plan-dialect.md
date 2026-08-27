@@ -21,6 +21,8 @@ records. The dialect does not define packed-warp policies, queues, dependency
 execution, persistent scheduling, or a general task-range lowering.
 
 There is no public `mlir_swage.dialects.swage_plan` Python module contract.
+The classification buckets and task lists that materialization produces are
+drawn in [Private Qualification](../qualification/private-m4-m8.md).
 
 ## Generated reference boundary
 

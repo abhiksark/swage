@@ -1,0 +1,76 @@
+% figures/ownership-map.tex
+% Ownership lanes: Swage, upstream MLIR and LLVM, and PyTorch, with
+% one launch traced across the three domains.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}[x=1cm, y=1cm,
+  ownchip/.style={swcell, minimum height=0.52cm, inner xsep=8pt,
+    rounded corners=4pt, font=\scriptsize}]
+
+% Header.
+\node[swtitle] at (0, 1.15) {Ownership map};
+\node[swsubtitle] at (0, 0.5)
+  {How much of the pipeline is Swage: three domains, no second
+   production IR.};
+
+% Swage lane.
+\node[swbox, draw=swblue, fit={(0, -2.3) (15.6, -0.3)},
+      inner sep=8pt] {};
+\node[anchor=west, font=\bfseries, text=swblue] at (0.15, -0.65)
+  {Swage owns};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (0.15, -1.3) {semantic operations};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (4.05, -1.3) {fail-closed admission};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (8.15, -1.3) {narrow planning record};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (0.15, -1.95) {host descriptor materialization};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (5.75, -1.95) {dedicated conversions};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (9.85, -1.95) {runtime validation, cache, dispatch};
+
+% Upstream lane.
+\node[swbox, fit={(0, -4.6) (15.6, -2.6)}, inner sep=8pt] {};
+\node[anchor=west, font=\bfseries, text=swmuted] at (0.15, -2.95)
+  {upstream MLIR and LLVM own};
+\node[ownchip, fill=swgrayfill, draw=swline, anchor=west]
+  at (0.15, -3.6) {arithmetic, control flow, memory};
+\node[ownchip, fill=swgrayfill, draw=swline, anchor=west]
+  at (5.9, -3.6) {GPU lowering infrastructure};
+\node[ownchip, fill=swgrayfill, draw=swline, anchor=west]
+  at (0.15, -4.25) {LLVM IR};
+\node[ownchip, fill=swgrayfill, draw=swline, anchor=west]
+  at (2.15, -4.25) {NVPTX emission};
+
+% PyTorch lane.
+\node[swbox, draw=swpurple, fit={(0, -6.25) (15.6, -4.9)},
+      inner sep=8pt] {};
+\node[anchor=west, font=\bfseries, text=swpurple] at (0.15, -5.25)
+  {PyTorch owns};
+\node[ownchip, fill=swpurplefill, draw=swpurple, anchor=west]
+  at (0.15, -5.9) {tensors};
+\node[ownchip, fill=swpurplefill, draw=swpurple, anchor=west]
+  at (2.05, -5.9) {the active CUDA context};
+\node[ownchip, fill=swpurplefill, draw=swpurple, anchor=west]
+  at (6.55, -5.9) {the current stream};
+
+% One launch crosses the three domains in order.
+\node[anchor=west, font=\small, text=swink] at (0, -7.15)
+  {one launch crosses the domains:};
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (0, -7.85) {capture, admit, validate};
+\draw[swarrow] (4.35, -7.85) -- (4.75, -7.85);
+\node[ownchip, fill=swgrayfill, draw=swline, anchor=west]
+  at (4.85, -7.85) {lower to LLVM and PTX};
+\draw[swarrow] (9.05, -7.85) -- (9.45, -7.85);
+\node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
+  at (9.55, -7.85) {cache, load, dispatch};
+\draw[swarrow] (13.5, -7.85) -- (13.9, -7.85);
+\node[ownchip, fill=swpurplefill, draw=swpurple, anchor=west]
+  at (14.0, -7.85) {execute on the current stream};
+
+\end{tikzpicture}
+\end{document}

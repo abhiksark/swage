@@ -50,4 +50,7 @@ General public segmented execution remains planned.
 Continue with [Segments, Tasks, and Tiles](segments-tiles-tasks.md) for the
 invariants and current qualification boundary. Then use
 [Compiler Pipeline](../architecture/compiler-pipeline.md) to follow the
-implemented data flow.
+implemented data flow. The tile shapes, schedules, and classification behind
+these levels are drawn in [Private M4 to M8](../qualification/private-m4-m8.md),
+and the recorded numbers live in
+[Measured Performance](../qualification/performance.md).

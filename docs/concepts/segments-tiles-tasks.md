@@ -9,8 +9,9 @@ each task to a fixed hardware step.
 One runtime-length segment retains its logical dense meaning. Qualification
 may derive one direct task or several ordered partial tasks plus a merge task;
 the task is the policy-bearing work unit. Each task executes through a fixed
-32-thread warp or 128-thread CTA step. The execution shape is not a
-runtime-sized register array, and it does not change the segment's meaning.
+32-thread warp, 128-thread CTA, or 512-thread split step. The execution
+shape is not a runtime-sized register array, and it does not change the
+segment's meaning.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -57,9 +58,10 @@ work.
 ## Tile: the physical step
 
 A tile is the fixed physical work shape used while lowering a task. In the
-current qualified identity-sum paths, a warp step uses 32 threads and a CTA
-step uses 128 threads. The 4096-element CTA chunk limit is the number of input
-elements traversed by a task, not the number of threads.
+current qualified identity-sum paths, a warp step uses 32 threads, a CTA
+step uses 128 threads, and a split partial or merge step uses 512 threads.
+The 4096-element CTA chunk limit is the number of input elements traversed
+by a task, not the number of threads.
 
 Some design records use forms such as `tile<32xf32>` as conceptual notation.
 There is no current `tile` type or operation in the Swage dialect. Native

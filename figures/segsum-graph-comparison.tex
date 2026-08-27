@@ -1,0 +1,53 @@
+% figures/segsum-graph-comparison.tex
+% Grouped bars of graph_us medians for segmented sum: best Swage
+% policy vs the tuned Triton baseline vs torch segment_reduce.
+% Series data is generated from benchmarks/results/perf-5090-sm120.json
+% into figure-data.tex by scripts/render_docs_figures.py.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}
+
+% Header.
+\node[swtitle] at (0.1, 9.6) {Segmented sum under graph timing};
+\node[swsubtitle] at (0.1, 8.95)
+  {{\ttfamily\detokenize{graph_us}} medians on an RTX 5090, best
+   policy per distribution; lower is better.};
+
+\begin{axis}[
+  anchor=south west, at={(0.1cm, 0.6cm)},
+  ybar=2pt, bar width=8.5pt,
+  width=16.4cm, height=8.0cm,
+  symbolic x coords={uniform-8, uniform-24, uniform-512, uniform-4k,
+    zipf, bimodal, few-huge},
+  xtick=data,
+  x tick label style={font=\scriptsize, text=swink},
+  ymin=0, ymax=44,
+  ylabel={median microseconds},
+  ylabel style={font=\scriptsize, text=swink},
+  ymajorgrids, grid style={draw=swline, opacity=0.25},
+  axis line style={draw=swline},
+  y tick label style={font=\scriptsize, text=swink},
+  legend style={font=\scriptsize, draw=swline, fill=swcanvas,
+    at={(0.03, 0.97)}, anchor=north west},
+  legend cell align=left,
+  nodes near coords,
+  every node near coord/.append style={font=\tiny, text=swink,
+    rotate=90, anchor=west, /pgf/number format/.cd, fixed,
+    precision=1, fixed zerofill},
+]
+\input{figure-data.tex}
+\end{axis}
+
+% Reading notes.
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.1, -0.5)
+  {swage wins six of seven; uniform-4k is parity, nominally triton
+   (triton 2.5 vs swage 2.6)};
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.1, -0.95)
+  {the bimodal and few-huge swage bars time one
+   captured mixed sequence; the other bars are};
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.1, -1.4)
+  {medians of three independent runs};
+
+\end{tikzpicture}
+\end{document}
