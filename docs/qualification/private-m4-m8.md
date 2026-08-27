@@ -37,6 +37,14 @@ or newer because the path uses native `exp2`. The runner validates host-visible
 offset metadata, capacity, and output disjointness. Empty segments perform no
 map-store writes.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Three block-stride passes per segment separated by uniform all-reduce operations](../assets/figures/m5-softmax-phases.svg)
+
+</div>
+
+*The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/m5-softmax-phases.svg).*
+
 ## M6 planning gate
 
 `--swage-to-plan` admits only a capture-free, map-free, single-stage identity

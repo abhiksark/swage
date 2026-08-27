@@ -61,6 +61,16 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="m5-softmax-phases",
+        title="Stable softmax in one CTA",
+        description=(
+            "One CTA sweeps its segment three times, for the maximum, "
+            "the shifted exponential sum, and the normalizing stores, "
+            "with uniform all-reduce operations acting as both "
+            "broadcast and phase barrier."
+        ),
+    ),
+    FigureSpec(
         name="plan-classification",
         title="SwagePlan classification",
         description=(

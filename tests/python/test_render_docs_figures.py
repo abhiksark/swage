@@ -48,6 +48,18 @@ REQUIRED_LABELS = {
         "four task lists",
         "INT32_MAX >= cta chunk >= warp max > 0",
     ),
+    "m5-softmax-phases": (
+        "one CTA per segment",
+        "maximum",
+        "shifted exponential sum",
+        "normalize and store",
+        "gpu.all_reduce",
+        "broadcast and the phase barrier",
+        "recomputed in the terminal store",
+        "mapped segments are never materialized",
+        "exp2((x - max) * log2(e))",
+        "empty segments run the identities and store nothing",
+    ),
     "specialization-key-cache": (
         "specialization key",
         "normalized source",
