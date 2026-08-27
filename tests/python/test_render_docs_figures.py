@@ -19,6 +19,23 @@ REQUIRED_LABELS = {
         "masked",
         "public M3",
     ),
+    "warp-vs-cta-tiles": (
+        "32-thread warp tile",
+        "128-thread CTA tile",
+        "shuffle reduction tree",
+        "block-stride chunks",
+        "up to 32 elements",
+        "33 to 4096 elements",
+    ),
+    "fused-mixed-schedule": (
+        "one 128-thread block",
+        "four independent warp slots",
+        "task_ids",
+        "warp tasks: four per block",
+        "CTA tasks: one per block",
+        "warp_task_count",
+        "cta_task_count",
+    ),
 }
 
 
@@ -103,23 +120,28 @@ def test_committed_svgs_are_current_stamped_and_accessible():
 def test_check_reports_missing_stale_and_orphaned_outputs(tmp_path):
     """Check mode diagnoses every drift class and never writes."""
     module = _load_renderer()
-    spec = module.FIGURES[0]
-    committed = module.OUTPUT_DIR / f"{spec.name}.svg"
-
     missing = module.render_figures(tmp_path, check=True)
-    assert missing == [f"missing generated figure: {tmp_path}/{spec.name}.svg"]
+    assert missing == sorted(
+        f"missing generated figure: {tmp_path}/{spec.name}.svg"
+        for spec in module.FIGURES
+    )
 
-    stale_path = tmp_path / f"{spec.name}.svg"
-    lines = committed.read_text().splitlines(keepends=True)
+    for spec in module.FIGURES:
+        committed = module.OUTPUT_DIR / f"{spec.name}.svg"
+        (tmp_path / f"{spec.name}.svg").write_bytes(committed.read_bytes())
+    stale_path = tmp_path / f"{module.FIGURES[0].name}.svg"
+    lines = stale_path.read_text().splitlines(keepends=True)
     lines[1] = f"<!-- source-sha256: {'0' * 64} -->\n"
     stale_path.write_text("".join(lines))
     orphan = tmp_path / "stray.svg"
     orphan.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>\n")
     errors = module.render_figures(tmp_path, check=True)
-    assert errors == [
-        f"orphaned generated figure: {orphan}",
-        f"stale generated figure: {stale_path}",
-    ]
+    assert errors == sorted(
+        [
+            f"orphaned generated figure: {orphan}",
+            f"stale generated figure: {stale_path}",
+        ]
+    )
     assert orphan.exists()
     assert stale_path.read_text() == "".join(lines)
 

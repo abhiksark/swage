@@ -1,0 +1,104 @@
+% figures/warp-vs-cta-tiles.tex
+% M7 physical tile shapes: 32-thread warp tile with shuffle tree beside
+% the 128-thread CTA tile striding block-stride chunks.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}[x=1cm, y=1cm]
+
+% Header.
+\node[swtitle] at (0, 1.3) {Direct warp and CTA tile shapes};
+\node[swsubtitle] at (0, 0.65)
+  {One fixed physical tile per task; the segment length picks the
+   policy.};
+
+% ---------------------------------------------------------------- warp
+\node[swbox, fit={(0, -7.3) (7.6, -0.2)}, inner sep=8pt] {};
+\node[anchor=west, font=\bfseries, text=swblue] at (0.15, -0.55)
+  {32-thread warp tile};
+\node[swtag, draw=swblue, fill=swbluefill, text=swblue, anchor=east]
+  at (7.5, -0.55) {up to 32 elements};
+
+% One short segment feeding the warp lanes.
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.15, -1.05)
+  {one segment (13 elements)};
+\foreach \i in {0,...,12} {
+  \node[swcell, minimum width=0.19cm, minimum height=0.3cm,
+        fill=swbluefill, draw=swblue] at (0.25 + \i * 0.22, -1.45) {};
+}
+\node[anchor=west, font=\scriptsize, text=swmuted] at (3.35, -1.45)
+  {lanes 13..31 masked};
+
+% Shuffle reduction tree: 32 lanes, offsets 16, 8, 4, 2, 1.
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -2.0)
+  {shuffle reduction tree, offsets 16, 8, 4, 2, 1};
+\foreach \l in {0,...,31} {
+  \fill[swblue] (0.25 + \l * 0.22, -2.4) circle (0.045);
+}
+\foreach \s/\o in {1/16, 2/8, 3/4, 4/2, 5/1} {
+  \pgfmathtruncatemacro{\last}{\o - 1}
+  \foreach \l in {0,...,\last} {
+    \draw[swline, line width=0.5pt, opacity=0.85]
+      ({0.25 + (\l + \o) * 0.22}, {-2.4 - (\s - 1) * 0.8})
+      -- ({0.25 + \l * 0.22}, {-2.4 - \s * 0.8});
+    \draw[swblue, line width=0.5pt]
+      ({0.25 + \l * 0.22}, {-2.4 - (\s - 1) * 0.8})
+      -- ({0.25 + \l * 0.22}, {-2.4 - \s * 0.8});
+    \fill[swblue] ({0.25 + \l * 0.22}, {-2.4 - \s * 0.8})
+      circle (0.045);
+  }
+}
+\node[anchor=west, font=\scriptsize, text=swink] at (0.15, -6.9)
+  {lane 0 writes output[segment]};
+\draw[swarrow, draw=swblue] (0.25, -6.45) -- (0.25, -6.72);
+
+% ----------------------------------------------------------------- cta
+\node[swbox, fit={(8.6, -7.3) (16.2, -0.2)}, inner sep=8pt] {};
+\node[anchor=west, font=\bfseries, text=swpurple] at (8.75, -0.55)
+  {128-thread CTA tile};
+\node[swtag, draw=swpurple, fill=swpurplefill, text=swpurple,
+      anchor=east] at (16.1, -0.55) {33 to 4096 elements};
+
+% One longer segment split into block-stride chunks.
+\node[anchor=west, font=\scriptsize, text=swmuted] at (8.75, -1.05)
+  {one segment (600 elements)};
+\foreach \c/\lab in {0/{chunk 0}, 1/{chunk 1}, 2/{chunk 2}, 3/{chunk 3}} {
+  \node[swcell, minimum width=1.4cm, minimum height=0.3cm,
+        fill=swpurplefill, draw=swpurple]
+    (chunk\c) at (9.55 + \c * 1.55, -1.45) {};
+  \node[font=\tiny, text=swpurple] at (9.55 + \c * 1.55, -1.45) {\lab};
+}
+\node[swcell, minimum width=0.8cm, minimum height=0.3cm,
+      fill=swpurplefill, draw=swpurple, dashed]
+  (chunktail) at (15.55, -1.45) {};
+\node[font=\tiny, text=swpurple] at (15.55, -1.45) {tail};
+
+% The thread block revisits chunks in a block-stride loop.
+\node[swbox, fill=swpurplefill, draw=swpurple,
+      minimum width=4.4cm, minimum height=0.8cm]
+  (ctablock) at (12.4, -3.4) {};
+\node[font=\small, text=swpurple] at (12.4, -3.25)
+  {128 threads (4 warps)};
+\node[font=\tiny, text=swmuted] at (12.4, -3.62)
+  {threads 0..127 stride the segment};
+\foreach \c in {0,...,3} {
+  \draw[swarrow, draw=swpurple]
+    (10.6 + \c * 1.2, -2.98) -- (chunk\c.south);
+}
+\draw[swarrow, draw=swpurple, dashed] (14.6, -2.98) -- (chunktail.south);
+
+% Block reduction and the single writer.
+\node[swbox, fill=swgrayfill, minimum width=4.4cm,
+      minimum height=0.55cm] (blockred) at (12.4, -4.75) {};
+\node[font=\scriptsize, text=swink] at (12.4, -4.75)
+  {shared block reduction over 128 partials};
+\draw[swarrow, draw=swpurple] (ctablock.south) -- (blockred.north);
+\node[anchor=west, font=\scriptsize, text=swink] at (8.75, -5.7)
+  {block-stride chunks: chunk c covers elements};
+\node[anchor=west, font=\scriptsize, text=swink] at (8.75, -6.1)
+  {[c * 128, c * 128 + 128) within the segment};
+\node[anchor=west, font=\scriptsize, text=swink] at (8.75, -6.9)
+  {thread 0 writes output[segment]};
+
+\end{tikzpicture}
+\end{document}

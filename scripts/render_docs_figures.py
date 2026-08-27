@@ -48,6 +48,26 @@ FIGURES = (
             "two masked tail lanes."
         ),
     ),
+    FigureSpec(
+        name="warp-vs-cta-tiles",
+        title="Direct warp and CTA tile shapes",
+        description=(
+            "A 32-thread warp tile reduces one short segment through a "
+            "shuffle tree, while a 128-thread CTA tile strides one "
+            "longer segment in block-stride chunks before a shared "
+            "block reduction."
+        ),
+    ),
+    FigureSpec(
+        name="fused-mixed-schedule",
+        title="Fused mixed-policy schedule",
+        description=(
+            "One 128-thread launch covers six warp tasks at four "
+            "independent slots per block, then three CTA tasks at one "
+            "segment per block, with task_ids mapping blocks to "
+            "segments."
+        ),
+    ),
 )
 
 
