@@ -19,7 +19,7 @@ REQUIRED_LABELS = {
         "gid = program_id(0) * BLOCK + arange(0, BLOCK)",
         "mask = gid < n",
         "masked",
-        "public M3",
+        "public launch contract",
     ),
     "warp-vs-cta-tiles": (
         "32-thread warp tile",
