@@ -51,7 +51,7 @@ struct CudaLauncher {
 const CudaLauncher &cudaLauncher() {
   static const CudaLauncher launcher = [] {
     CudaLauncher resolved;
-    void *library = dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
+    void *library = dlopen("libcuda.so.1", RTLD_NOW);
     if (!library)
       return resolved;
     resolved.launch = reinterpret_cast<CudaLauncher::LaunchFn>(
@@ -191,6 +191,10 @@ materializeSegmentedPlan(nb::object moduleObject,
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
 
+  // The GIL is deliberately held across cuLaunchKernel: the enqueue is
+  // microseconds, the driver never re-enters Python, and releasing it per
+  // launch makes contended multithreaded dispatch an order of magnitude
+  // slower through GIL reacquisition convoys.
   swageM.def(
       "_launch_kernel",
       [](uint64_t function, int64_t gridX, int64_t blockX, uint64_t stream,

@@ -682,7 +682,16 @@ def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
     from swage import _runtime
 
     _stub_cuda_library(monkeypatch)
+    # Blocking the parent is not enough: a fully dotted module already in
+    # sys.modules is returned without consulting the parent, so drop any
+    # cached binding modules for the duration of the test as well.
     monkeypatch.setitem(sys.modules, "mlir_swage", None)
+    monkeypatch.delitem(
+        sys.modules,
+        "mlir_swage._mlir_libs._swageDialectsNanobind",
+        raising=False,
+    )
+    monkeypatch.delitem(sys.modules, "mlir_swage._mlir_libs", raising=False)
 
     driver = _runtime._CudaDriver()
     assert driver._native_launch is None

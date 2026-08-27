@@ -537,7 +537,7 @@ class _CudaDriver:
             )
 
             self._native_launch = native_swage._launch_kernel
-        except Exception:
+        except ImportError:
             self._native_launch = None
 
     def _call(self, name, *arguments):
