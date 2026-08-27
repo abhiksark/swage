@@ -43,8 +43,8 @@ Python source or native test IR
 verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
-        +-- private M4/M5 segmented qualification
-        +-- private M6 to M8 identity-sum planning and execution
+        +-- private direct segmented qualification
+        +-- private identity-sum planning and split execution
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -85,8 +85,8 @@ CTA policies, one opaque task-range result, and one classification operation
 for an admitted identity segmented sum.
 
 Compiler passes do not inspect runtime offset contents. Host classification
-validates that metadata before producing stable direct or split records. M8
-split-CTA execution is task decomposition under the CTA policy, not a new
+validates that metadata before producing stable direct or split records.
+Split-CTA execution is task decomposition under the CTA policy, not a new
 policy.
 
 General cost inference, schedule selection, packed warps, queues, dependency
@@ -129,8 +129,8 @@ bindings against an MLIR install without Python bindings is an error.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add plus private M4 to
-  M8 runtime qualification on a real NVIDIA device.
+- The trusted GPU workflow covers public fixed vector add plus private
+  segmented runtime qualification on a real NVIDIA device.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 

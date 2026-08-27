@@ -59,8 +59,8 @@ bindings are enabled against an incompatible install.
 - Native dialects and lowering: work under `include/swage/`, `lib/`, and
   `test/`. Run `ninja -C build check-swage`; run C++ or binding targets when
   their code changes.
-- Runtime: public execution remains canonical fixed vector add. M4 to M8
-  segmented helpers are private qualification. Runtime changes require the
+- Runtime: public execution remains canonical fixed vector add.
+  Segmented helpers are private qualification. Runtime changes require the
   hosted tests and, where CUDA behavior changes, trusted GPU evidence.
 - Benchmarks: preserve frozen inputs and gates. Prepare outside timing and
   commit raw evidence with the exact hardware and revision.

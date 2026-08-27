@@ -31,7 +31,7 @@ does not imply split max or split softmax.
 
 </div>
 
-*Private M8 ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/m8-split-lifecycle.svg).*
+*Private ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/m8-split-lifecycle.svg).*
 
 Partial ABI:
 
@@ -53,11 +53,11 @@ segment result once.
 
 Mixed execution submits direct fused work, all partial CTAs, then all merge
 CTAs on one current stream. Empty phases are skipped. If no split exists, the
-M7 one-launch path remains unchanged. Exact all-one and tolerant nontrivial
+direct one-launch path remains unchanged. Exact all-one and tolerant nontrivial
 f32 cases match PyTorch and the sequential CPU oracle on NVIDIA RTX A6000
 `sm_86`.
 
-M8 does not implement packed warps, split max, split softmax, device queues,
+Split execution does not implement packed warps, split max, split softmax, device queues,
 persistent scheduling, public segment syntax, or public segmented launch.
 
 Continue with [Verification](verification.md) for the executable

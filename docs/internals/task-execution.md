@@ -23,7 +23,7 @@ values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
 
 </div>
 
-*Fixed physical tile shapes for warp, CTA, and split tasks under the default M6 and M8 limits. [Open the full-size figure](../assets/figures/warp-vs-cta-tiles.svg).*
+*Fixed physical tile shapes for warp, CTA, and split tasks under the default planning limits. [Open the full-size figure](../assets/figures/warp-vs-cta-tiles.svg).*
 
 The warp kernel uses 32 threads. The CTA kernel uses 128 threads. Fused mixed
 execution uses one 128-thread kernel and this ABI:
@@ -35,7 +35,7 @@ warp_task_count:i32, cta_task_count:i32
 
 Each initial block contains four independent one-segment warp slots. CTA
 tasks follow at one segment per block. An empty task set enqueues no kernel.
-The M7 qualification is limited to canonical identity sum.
+This qualification is limited to canonical identity sum.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 

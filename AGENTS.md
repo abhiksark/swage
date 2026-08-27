@@ -79,6 +79,6 @@ known limitations; follow-up issue.
 `swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
 build-tree `PYTHONPATH`. The bindings require an MLIR install built with
 Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
-is an error. `emit_mlir()` remains compile-only. M3 execution is available
+is an error. `emit_mlir()` remains compile-only. Public execution is available
 only through keyword-only `launch()` for the canonical fixed vector add, with
 strict CUDA tensor, ABI, block, and grid validation.

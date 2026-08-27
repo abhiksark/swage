@@ -9,7 +9,7 @@ none of them is a public API.
 *Qualified under the M5 gate on NVIDIA RTX A6000 (`sm_86`);
 see [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md) and [ADR-0013](../adr/ADR-0013-m5-fusion-and-map-store-abi.md).*
 
-M5 retains the five-argument ABI. It admits ordered f32 reduction captures,
+The softmax path retains the five-argument ABI. It admits ordered f32 reduction captures,
 single-consumer map chains, and exactly one scalar store or map-store
 terminal. The stable softmax module performs maximum, shifted exponential
 sum, and normalize/store phases. Maps are fused into their consumer.

@@ -16,7 +16,7 @@ The current dialect contains only:
 
 The operation verifies its symbol, input ABI, limits, and policy list. Runtime
 offset contents remain unknown to compiler passes. Private materialization
-uses validated host metadata to construct direct segment IDs and M8 split
+uses validated host metadata to construct direct segment IDs and split
 records. The dialect does not define packed-warp policies, queues, dependency
 execution, persistent scheduling, or a general task-range lowering.
 
@@ -34,5 +34,5 @@ The detailed dialect and operation reference is generated from TableGen in
 --8<-- "docs/reference/_generated/swage-plan-ops.inc"
 
 Continue with [Task Execution](task-execution.md) for
-the M6 to M8 execution boundary or [Compiler Tools and Passes](compiler-tools.md)
+the qualified execution boundary or [Compiler Tools and Passes](compiler-tools.md)
 for the registered planning pass.

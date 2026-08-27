@@ -33,11 +33,11 @@ compiler build output. Native wheel packaging remains deferred.
 
 ## Private qualification
 
-- M4 segmented sum and max through a sequential CPU oracle and one CTA per
+- Segmented sum and max through a sequential CPU oracle and one CTA per
   segment on NVIDIA GPUs.
-- M5 stable ragged softmax through the same private CPU and one-CTA GPU
+- Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
-- M6 to M8 canonical identity-sum planning, direct warp and CTA execution,
+- Canonical identity-sum planning, direct warp and CTA execution,
   fused mixed execution, and split-CTA partial and merge execution.
 
 These paths have tests and recorded qualification evidence. They do not widen
@@ -51,8 +51,8 @@ the public Python language or launch contract.
 - Device queues, persistent scheduling, and broader policy selection.
 
 The three lanes below are status boundaries, not fallback paths. Public today
-contains Python capture, compile-only `emit_mlir()`, and canonical M3 fixed
-vector-add `launch()`. Private qualification contains the tested M4 to M8
+contains Python capture, compile-only `emit_mlir()`, and the canonical
+fixed vector-add `launch()`. Private qualification contains the tested
 segmented compiler and runtime evidence, but it is not a public API. Planned
 work contains a public segmented API, packed work, split max and softmax, and
 persistent scheduling.

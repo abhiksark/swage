@@ -44,7 +44,7 @@ A task is a unit that a runtime can schedule for a segment. One semantic
 segment may require one task or several tasks. A task can represent direct
 work, a chunk of a long segment, a partial result, or a merge.
 
-Current private M8 identity-sum qualification derives:
+Current private identity-sum qualification derives:
 
 - one direct warp task for a segment of at most 32 elements;
 - one direct CTA task for a segment from 33 through 4096 elements;

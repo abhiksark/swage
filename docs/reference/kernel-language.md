@@ -86,7 +86,7 @@ boolean vectors, f32 vectors, f32 pointer descriptors, and transient pointer
 plus offset addresses. It emits standard `arith`, `func`, `memref`, and
 `vector` operations around the logical `swage.program_id` operation.
 
-This language is the public M2 and M3 fixed-block subset. The segment
+This language is the public fixed-block subset. The segment
 operations present in native MLIR are not exposed as Python language symbols.
 Continue with [Public Python API](swage.md) for input modes and
 launch validation, or [Swage Dialect](../internals/swage-dialect.md) for the native

@@ -16,7 +16,7 @@ function and adds a private companion with `swage_plan.classify`.
 The default legal policy order is warp then CTA. The default warp limit is 32
 elements, and the default CTA chunk limit is 4096 elements. The host
 classifier validates signed i32 counts and monotonic offsets before producing
-stable descriptors. M6 does not execute a policy.
+stable descriptors. The planning gate does not execute a policy.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -24,7 +24,7 @@ stable descriptors. M6 does not execute a policy.
 
 </div>
 
-*SwagePlan classification buckets, including the M8 split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
+*SwagePlan classification buckets, including the split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
 
 Continue with [Task Execution](task-execution.md) for the qualified
 warp, CTA, and fused paths, or the
