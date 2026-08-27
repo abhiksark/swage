@@ -82,10 +82,12 @@ Triton's autotuning stack.
   and torch (about 14).
 - uniform-4k segmented sum is parity, nominally Triton (2.5 versus
   2.6 microseconds).
-- Vector add is parity within noise at every measured size under graph
-  timing, except a stable Swage loss at exactly n = 2^20 (3.2 versus
-  2.5 microseconds). There is no vector-add win to claim in either
-  direction.
+- Vector add under graph timing shows two stable Swage losses: n = 2^18
+  (1.38 versus 1.19 microseconds, about 16 percent) and n = 2^20 (3.17
+  versus 2.49, about 27 percent). The other measured sizes are within a
+  few percent, including a 7 percent Swage edge at n = 2^16 that stays
+  below the campaign's 10 percent win bar. The snapshot records the
+  full sweep; no vector-add win is claimed in either direction.
 
 Continue with [Verification Evidence](evidence.md) for the executable
 proof behind each boundary, or [Private M4 to M8](private-m4-m8.md) for

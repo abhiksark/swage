@@ -43,7 +43,7 @@ task graph or inspect runtime offset contents.
 
 Native runtime code also constructs split partial and split merge lowering
 passes directly. These factories admit only the private M8 identity-sum
-shape and emit 128-thread partial or merge kernels. They are intentionally
+shape and emit 512-thread partial or merge kernels. They are intentionally
 not registered as `swage-opt` arguments.
 
 The driver and passes expose the tested compiler surface, not a general

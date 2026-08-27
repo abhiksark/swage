@@ -20,7 +20,8 @@
     "rule": "median of the three per-run medians; q1 and q3 are medians of the per-run quartiles",
     "segsum_graph_us_runs": ["graphs2-r1", "graphs2-r2", "graphs2-r3"],
     "dispatch_call_us_runs": ["baseline-r1..r3", "o1-batched-r1..r3", "clauncher-r1..r3"],
-    "dispatch_case": "vadd n=2^14, warm launch"
+    "dispatch_case": "vadd n=2^14, warm launch",
+    "vadd_triton_rule": "per run, the best autotuned configuration for that run; runs may select different blocks"
   },
   "segsum_graph_us": [
     {
@@ -79,6 +80,50 @@
       },
       "triton": {"median": 34.7, "q1": 34.6, "q3": 34.9},
       "torch": {"median": 17.2, "q1": 17.1, "q3": 17.3}
+    }
+  ],
+  "vadd_graph_us": [
+    {
+      "n": 16384,
+      "swage": {"median": 0.86, "q1": 0.84, "q3": 0.89},
+      "triton": {"median": 0.86, "q1": 0.85, "q3": 0.89},
+      "torch": {"median": 0.97, "q1": 0.93, "q3": 1.0}
+    },
+    {
+      "n": 65536,
+      "swage": {"median": 0.86, "q1": 0.86, "q3": 0.87},
+      "triton": {"median": 0.93, "q1": 0.92, "q3": 0.96},
+      "torch": {"median": 1.01, "q1": 0.99, "q3": 1.06}
+    },
+    {
+      "n": 262144,
+      "swage": {"median": 1.38, "q1": 1.37, "q3": 1.4},
+      "triton": {"median": 1.19, "q1": 1.18, "q3": 1.26},
+      "torch": {"median": 1.27, "q1": 1.25, "q3": 1.3}
+    },
+    {
+      "n": 1048576,
+      "swage": {"median": 3.17, "q1": 3.16, "q3": 3.19},
+      "triton": {"median": 2.49, "q1": 2.48, "q3": 2.52},
+      "torch": {"median": 2.54, "q1": 2.53, "q3": 2.55}
+    },
+    {
+      "n": 4194304,
+      "swage": {"median": 7.16, "q1": 7.14, "q3": 7.17},
+      "triton": {"median": 7.01, "q1": 6.97, "q3": 7.04},
+      "torch": {"median": 8.04, "q1": 8.04, "q3": 8.05}
+    },
+    {
+      "n": 16777216,
+      "swage": {"median": 114.0, "q1": 113.8, "q3": 114.14},
+      "triton": {"median": 115.41, "q1": 115.28, "q3": 115.73},
+      "torch": {"median": 114.98, "q1": 114.7, "q3": 115.39}
+    },
+    {
+      "n": 67108864,
+      "swage": {"median": 509.96, "q1": 509.88, "q3": 510.29},
+      "triton": {"median": 510.47, "q1": 510.31, "q3": 510.67},
+      "torch": {"median": 511.18, "q1": 511.01, "q3": 511.27}
     }
   ],
   "dispatch_call_us": [
