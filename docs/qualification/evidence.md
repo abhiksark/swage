@@ -6,6 +6,14 @@ Status claims are grounded in executable tests and committed artifacts. This
 matrix identifies the smallest evidence source for each current boundary and
 does not turn private qualification into public API.
 
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![One semantic module executed on the GPU path, the CPU oracle, and PyTorch, feeding a differential comparison](../assets/figures/oracle-topology.svg)
+
+</div>
+
+*The comparison topology behind every correctness claim. [Open the full-size figure](../assets/figures/oracle-topology.svg).*
+
 | Boundary | Status | Primary evidence | Applicable command |
 |---|---|---|---|
 | Pure `swage` wheel contents and native-package exclusion | Public today | `tests/python/test_packaging.py` | `python -m pytest tests/python/test_packaging.py -q` |

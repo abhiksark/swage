@@ -62,6 +62,16 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="oracle-topology",
+        title="One module, three executions",
+        description=(
+            "One verified semantic module runs on the GPU path, the "
+            "sequential CPU oracle, and the PyTorch reference, and "
+            "every correctness claim is a differential comparison "
+            "between them."
+        ),
+    ),
+    FigureSpec(
         name="ownership-map",
         title="Ownership map",
         description=(

@@ -1,0 +1,63 @@
+% figures/oracle-topology.tex
+% Every correctness claim compares one semantic module executed three
+% ways: GPU path, sequential CPU oracle, and PyTorch reference.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}[x=1cm, y=1cm]
+
+% Header.
+\node[swtitle] at (0, 1.15) {One module, three executions};
+\node[swsubtitle] at (0, 0.5)
+  {Every correctness claim is a differential comparison, never a
+   single trusted run.};
+
+% The shared input.
+\node[swbox, minimum width=7.6cm, minimum height=0.7cm]
+  (module) at (6.9, -0.4) {};
+\node[font=\small, text=swink] at (6.9, -0.4)
+  {one semantic module (verified swage MLIR)};
+
+% Three executions of the same module.
+\node[swbox, fill=swgrayfill, minimum width=4.2cm,
+      minimum height=1.15cm] (cpu) at (2.2, -2.5) {};
+\node[font=\scriptsize, text=swink] at (2.2, -2.3)
+  {sequential CPU oracle};
+\node[font=\tiny, text=swmuted] at (2.2, -2.72)
+  {SCF and memref via mlir-runner};
+\node[swbox, draw=swblue, fill=swbluefill, minimum width=4.2cm,
+      minimum height=1.15cm] (gpu) at (6.9, -2.5) {};
+\node[font=\scriptsize, text=swblue] at (6.9, -2.3)
+  {GPU path};
+\node[font=\tiny, text=swmuted] at (6.9, -2.72)
+  {admitted branch, PTX on the device};
+\node[swbox, draw=swpurple, fill=swpurplefill, minimum width=4.2cm,
+      minimum height=1.15cm] (torch) at (11.6, -2.5) {};
+\node[font=\scriptsize, text=swpurple] at (11.6, -2.3)
+  {PyTorch reference};
+\node[font=\tiny, text=swmuted] at (11.6, -2.72)
+  {eager reference computation};
+\draw[swarrow] (5.0, -0.78) -- (cpu.north);
+\draw[swarrow] (6.9, -0.78) -- (gpu.north);
+\draw[swarrow] (8.8, -0.78) -- (torch.north);
+
+% The comparisons.
+\node[swbox, draw=swgreen, fill=swgreenfill, minimum width=8.2cm,
+      minimum height=1.1cm] (compare) at (6.9, -4.9) {};
+\node[font=\scriptsize, text=swgreen] at (6.9, -4.72)
+  {differential comparison};
+\node[font=\tiny, text=swmuted] at (6.9, -5.12)
+  {exact for all-one cases, tolerant for nontrivial f32};
+\draw[swarrow] (cpu.south) -- (4.2, -4.55);
+\draw[swarrow] (gpu.south) -- (gpu.south |- compare.north);
+\draw[swarrow] (torch.south) -- (9.6, -4.55);
+
+% Documented divergences from the PyTorch reference.
+\node[anchor=west, font=\small, text=swmuted] at (0, -6.15)
+  {documented divergences from PyTorch:
+   empty max is negative infinity, and};
+\node[anchor=west, font=\small, text=swmuted] at (0, -6.7)
+  {max uses NaN-propagating max semantics};
+
+\end{tikzpicture}
+\end{document}

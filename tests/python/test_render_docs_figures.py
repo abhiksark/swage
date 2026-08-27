@@ -52,6 +52,15 @@ REQUIRED_LABELS = {
         "four task lists",
         "INT32_MAX >= cta chunk >= warp max > 0",
     ),
+    "oracle-topology": (
+        "one semantic module",
+        "sequential CPU oracle",
+        "PyTorch reference",
+        "GPU path",
+        "differential comparison",
+        "empty max is negative infinity",
+        "NaN-propagating max",
+    ),
     "ownership-map": (
         "Swage owns",
         "upstream MLIR and LLVM own",
