@@ -4,7 +4,13 @@
 
 Swage provides one optimizer driver and a small registered pass surface. The
 split partial and merge conversions used by private split qualification are
-compiler factories, not command-line passes.
+compiler factories, not command-line passes. As a first roundtrip,
+`swage-opt` can parse, verify, and print a test module from the native
+MLIR surface, which is broader than the public Python kernel language:
+
+```bash
+./build/bin/swage-opt test/Dialect/Swage/roundtrip.mlir
+```
 
 ## `swage-opt`
 
