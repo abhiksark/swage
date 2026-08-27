@@ -67,7 +67,7 @@ duplicate keyword arguments are rejected.
 require `BLOCK`.
 
 These calls compose into one launch geometry. The grid holds
-`ceil(n / BLOCK)` blocks of `BLOCK` threads, each thread computes
+`ceil(n / BLOCK)` blocks of `BLOCK` threads, each block computes
 `gid = program_id(0) * BLOCK + arange(0, BLOCK)`, and the mask retires
 lanes at or beyond `n`.
 

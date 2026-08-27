@@ -103,8 +103,8 @@ The M7 qualification is limited to canonical identity sum.
 The frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
 for fused mixed execution. The fused schedule it measures is the one drawn
-above. The mixed-to-best-pure ratio is `0.939394`, which
-passes the predeclared maximum of `1.05`. The committed raw record is
+above. The mixed-to-best-pure ratio is `0.939394`, which passes the
+predeclared maximum of `1.05`. The committed raw record is
 [`benchmarks/results/m7-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/m7-a6000-sm86.json).
 
 ## M8 split-CTA identity sum
@@ -146,8 +146,7 @@ scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
 
 Both kernels use 512 threads, sized so one 4096-element chunk fully
 occupies a CTA at eight elements per thread. Partial ranges are absolute
-half-open input
-ranges, and each partial writes one unique scratch slot. Merge records carry a
+half-open input ranges, and each partial writes one unique scratch slot. Merge records carry a
 segment ID and a compact half-open scratch range; thread zero writes the final
 segment result once.
 
@@ -161,7 +160,7 @@ M8 does not implement packed warps, split max, split softmax, device queues,
 persistent scheduling, public segment syntax, or public segmented launch.
 
 Continue with [Verification Evidence](evidence.md) for the executable proof
-behind each boundary, [Measured Performance](performance.md) for the recorded
-RTX 5090 campaign, or
-[SwagePlan Dialect](../reference/swage-plan-dialect.md)
-for the private planning IR surface.
+behind each boundary, [Measured Performance](performance.md) for the
+recorded RTX 5090 campaign, or the
+[SwagePlan Dialect](../reference/swage-plan-dialect.md) for the private
+planning IR surface.

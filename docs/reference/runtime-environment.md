@@ -52,7 +52,7 @@ loads when needed.
 
 Dispatch reaches the driver through a compiled entry point. The nanobind
 `_launch_kernel` binding builds the driver argument array without
-per-launch ctypes marshalling, resolves `libcuda.so.1` with `dlopen` once
+per-launch ctypes marshaling, resolves `libcuda.so.1` with `dlopen` once
 per process, and deliberately holds the GIL across the microsecond
 enqueue. When the compiled bindings are absent, a ctypes path submits the
 same driver call with the same error shape and a slower per-launch cost.
