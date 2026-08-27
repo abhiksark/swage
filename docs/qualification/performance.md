@@ -39,6 +39,24 @@ Three timing methods separate host dispatch cost from kernel quality:
 
 *How each timing method sees dispatch and kernel time. [Open the full-size figure](../assets/figures/timing-methods.svg).*
 
+## Segmented sum under graph timing
+
+Under graph replay, the best Swage policy per distribution beats
+`torch.segment_reduce` on all seven distributions and the tuned Triton
+baseline on six of seven. The uniform-4k row is parity, nominally
+Triton at 2.6 versus 2.5 microseconds. The bimodal and few-huge Swage
+bars time one captured mixed sequence, the planner's fused warp launch
+plus the 512-thread split kernels; their provenance fields in the
+snapshot record the single-sequence caveat.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Grouped bars of graph-replay medians for Swage, Triton, and torch across seven distributions](../assets/figures/segsum-graph-comparison.svg)
+
+</div>
+
+*Segmented sum graph-replay medians per distribution; lower is better. [Open the full-size figure](../assets/figures/segsum-graph-comparison.svg).*
+
 Continue with [Verification Evidence](evidence.md) for the executable
 proof behind each boundary, or [Private M4 to M8](private-m4-m8.md) for
 the execution contracts these measurements exercise.

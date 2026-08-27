@@ -75,6 +75,16 @@ REQUIRED_LABELS = {
         "CUDA-graph replay",
         "host removed",
     ),
+    "segsum-graph-comparison": (
+        "graph_us",
+        "RTX 5090",
+        "swage",
+        "triton",
+        "torch",
+        "lower is better",
+        "captured mixed sequence",
+        "figure-data.tex",
+    ),
 }
 
 
@@ -183,6 +193,22 @@ def test_check_reports_missing_stale_and_orphaned_outputs(tmp_path):
     )
     assert orphan.exists()
     assert stale_path.read_text() == "".join(lines)
+
+
+def test_chart_data_includes_match_the_snapshot():
+    """Generated chart data reproduces the committed snapshot values."""
+    module = _load_renderer()
+    snapshot = json.loads(module.SNAPSHOT_PATH.read_text())
+    by_name = {spec.name: spec for spec in module.FIGURES}
+    segsum = by_name["segsum-graph-comparison"]
+    assert segsum.data == ("benchmarks/results/perf-5090-sm120.json",)
+    include = module.chart_include(segsum)
+    assert include == module.chart_include(segsum)
+    for row in snapshot["segsum_graph_us"]:
+        for impl in ("swage", "triton", "torch"):
+            median = row[impl]["median"]
+            coordinate = f"({row['distribution']},{median:.1f})"
+            assert coordinate in include, coordinate
 
 
 def test_perf_snapshot_is_wellformed_and_sourced():

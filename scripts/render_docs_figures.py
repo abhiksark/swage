@@ -13,6 +13,7 @@ integration verifies freshness without a TeX toolchain.
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -97,6 +98,17 @@ FIGURES = (
         ),
     ),
     FigureSpec(
+        name="segsum-graph-comparison",
+        title="Segmented sum under graph timing",
+        description=(
+            "Grouped bars compare graph-replay medians for the best "
+            "Swage policy, the tuned Triton baseline, and torch "
+            "segment_reduce across seven segment distributions on an "
+            "RTX 5090."
+        ),
+        data=("benchmarks/results/perf-5090-sm120.json",),
+    ),
+    FigureSpec(
         name="fused-mixed-schedule",
         title="Fused mixed-policy schedule",
         description=(
@@ -119,6 +131,39 @@ def tectonic_binary() -> str | None:
     return None
 
 
+def _load_snapshot() -> dict:
+    """Load the committed performance snapshot."""
+    return json.loads(SNAPSHOT_PATH.read_text())
+
+
+def _series_line(rows: list, impl: str, style: str) -> str:
+    """Build one pgfplots series from snapshot rows for one impl."""
+    coordinates = " ".join(
+        f"({row['distribution']},{row[impl]['median']:.1f})" for row in rows
+    )
+    return f"\\addplot[{style}] coordinates {{{coordinates}}};\n"
+
+
+def _segsum_include() -> str:
+    """Generate the segmented-sum chart series from the snapshot."""
+    rows = _load_snapshot()["segsum_graph_us"]
+    styles = (
+        ("swage", "ybar, fill=swbluefill, draw=swblue"),
+        ("triton", "ybar, fill=sworangefill, draw=sworange"),
+        ("torch", "ybar, fill=swpurplefill, draw=swpurple"),
+    )
+    lines = [_series_line(rows, impl, style) for impl, style in styles]
+    lines.append("\\legend{swage, triton (tuned), torch (CUB)}\n")
+    return "".join(lines)
+
+
+def chart_include(spec: FigureSpec) -> str | None:
+    """Return the generated data include for one chart figure."""
+    if spec.name == "segsum-graph-comparison":
+        return _segsum_include()
+    return None
+
+
 def figure_digest(spec: FigureSpec) -> str:
     """Hash the source closure that defines one rendered figure."""
     hasher = hashlib.sha256()
@@ -129,6 +174,10 @@ def figure_digest(spec: FigureSpec) -> str:
         relative = path.relative_to(REPO_ROOT).as_posix()
         hasher.update(f"{relative}:{len(payload)}:".encode())
         hasher.update(payload)
+    include = chart_include(spec)
+    if include is not None:
+        hasher.update(b"figure-data.tex:")
+        hasher.update(include.encode())
     return hasher.hexdigest()
 
 
@@ -181,6 +230,9 @@ def _render_figure(spec: FigureSpec, tectonic: str) -> bytes:
         workdir = Path(scratch)
         shutil.copy(SOURCE_DIR / PREAMBLE_NAME, workdir)
         shutil.copy(SOURCE_DIR / f"{spec.name}.tex", workdir)
+        include = chart_include(spec)
+        if include is not None:
+            (workdir / "figure-data.tex").write_text(include)
         environment = dict(os.environ, SOURCE_DATE_EPOCH="0")
         completed = subprocess.run(
             [
