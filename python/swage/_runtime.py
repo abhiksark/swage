@@ -477,6 +477,8 @@ def _write_dumps(artifact):
 class _CudaDriver:
     """Small lazy wrapper around the Linux CUDA Driver API."""
 
+    _native_launch = None
+
     def __init__(self):
         try:
             self.library = ctypes.CDLL("libcuda.so.1")
@@ -526,6 +528,17 @@ class _CudaDriver:
             ctypes.POINTER(ctypes.c_char_p),
         ]
         self.library.cuGetErrorString.restype = ctypes.c_int
+        # The compiled launcher skips per-launch ctypes marshalling; the
+        # ctypes path stays as the fallback when the build-tree bindings
+        # are absent (for example a wheel install reading a warm cache).
+        try:
+            from mlir_swage._mlir_libs._swageDialectsNanobind import (
+                swage as native_swage,
+            )
+
+            self._native_launch = native_swage._launch_kernel
+        except ImportError:
+            self._native_launch = None
 
     def _call(self, name, *arguments):
         result = getattr(self.library, name)(*arguments)
@@ -576,12 +589,24 @@ class _CudaDriver:
         return module.value, function.value
 
     def launch(self, function, grid, block, stream, arguments):
+        if self._native_launch is not None:
+            self._native_launch(
+                function, grid[0], block, stream,
+                arguments[:3], (arguments[3],),
+            )
+            return
         values = [ctypes.c_void_p(value) for value in arguments[:3]]
         values.append(ctypes.c_int32(arguments[3]))
         self._launch(function, grid, block, stream, values)
 
     def launch_segmented(self, function, grid, block, stream, arguments):
         """Launch the internal three-pointer, two-count M4 ABI."""
+        if self._native_launch is not None:
+            self._native_launch(
+                function, grid[0], block, stream,
+                arguments[:3], arguments[3:],
+            )
+            return
         values = [ctypes.c_void_p(value) for value in arguments[:3]]
         values.extend(ctypes.c_int32(value) for value in arguments[3:])
         self._launch(function, grid, block, stream, values)
@@ -590,6 +615,12 @@ class _CudaDriver:
         self, function, grid, block, stream, arguments
     ):
         """Launch the internal four-pointer, two-count M7 task ABI."""
+        if self._native_launch is not None:
+            self._native_launch(
+                function, grid[0], block, stream,
+                arguments[:4], arguments[4:],
+            )
+            return
         values = [ctypes.c_void_p(value) for value in arguments[:4]]
         values.extend(ctypes.c_int32(value) for value in arguments[4:])
         self._launch(function, grid, block, stream, values)
