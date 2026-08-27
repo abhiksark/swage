@@ -65,9 +65,9 @@ bindings are enabled against an incompatible install.
 - Benchmarks: preserve frozen inputs and gates. Prepare outside timing and
   commit raw evidence with the exact hardware and revision.
 
-Start with [Compiler Pipeline](docs/architecture/compiler-pipeline.md), then
-use [Compiler Tools and Passes](docs/reference/compiler-tools.md) and
-[Verification Evidence](docs/qualification/evidence.md) for the affected
+Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
+use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and
+[Verification Evidence](docs/internals/verification.md) for the affected
 surface.
 
 ## Pull requests

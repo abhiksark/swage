@@ -31,7 +31,7 @@ steps respectively.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
-[`docs/concepts/segments-tiles-tasks.md`](docs/concepts/segments-tiles-tasks.md)
+[`docs/user-guide/execution-model.md`](docs/user-guide/execution-model.md)
 for the current and planned boundary.
 
 ## Compiler architecture
@@ -61,7 +61,7 @@ construction path.
 The current fixed-block frontend and public execution subset are deliberately
 narrow. Native segmented modules exercise a separate private qualification
 surface. The canonical pipeline and links to exact references live in
-[`docs/architecture/compiler-pipeline.md`](docs/architecture/compiler-pipeline.md).
+[`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
 
 ## Semantic invariants
 
@@ -135,7 +135,7 @@ bindings against an MLIR install without Python bindings is an error.
   is not retuned after a failed gate.
 
 The claim-to-test mapping lives in
-[`docs/qualification/evidence.md`](docs/qualification/evidence.md).
+[`docs/internals/verification.md`](docs/internals/verification.md).
 
 ## Dependency policy
 

@@ -42,6 +42,8 @@ markdown_extensions:
       permalink: true
 plugins:
   - search
+hooks:
+  - scripts/mkdocs_redirect_pages.py
 extra_css:
   - stylesheets/figures.css
 validation:
@@ -58,24 +60,30 @@ nav:
   - Home: index.md
   - Getting started:
       - Installation: getting-started/installation.md
-      - Quickstart: quickstart.md
+      - Quickstart: getting-started/quickstart.md
       - Troubleshooting: getting-started/troubleshooting.md
-  - Concepts:
-      - Swage, Visually: concepts/swage-visual-guide.md
-      - Segments, Tasks, and Tiles: concepts/segments-tiles-tasks.md
-  - Architecture:
-      - Compiler pipeline: architecture/compiler-pipeline.md
-  - Reference:
-      - Public Python API: reference/public-python-api.md
+  - User guide:
+      - user-guide/index.md
+      - Ragged Data: user-guide/ragged-data.md
+      - Execution Model: user-guide/execution-model.md
+  - API reference:
+      - reference/index.md
+      - swage: reference/swage.md
       - Kernel Language: reference/kernel-language.md
-      - Swage Dialect: reference/swage-dialect.md
-      - SwagePlan Dialect: reference/swage-plan-dialect.md
-      - Compiler Tools and Passes: reference/compiler-tools.md
       - Runtime and Environment: reference/runtime-environment.md
-  - Qualification:
-      - Private M4 to M8: qualification/private-m4-m8.md
-      - Verification Evidence: qualification/evidence.md
-      - Measured Performance: qualification/performance.md
+  - Internals:
+      - internals/index.md
+      - Compiler Pipeline: internals/compiler-pipeline.md
+      - Swage Dialect: internals/swage-dialect.md
+      - Segmented Reductions: internals/segmented-reductions.md
+      - Ragged Softmax: internals/ragged-softmax.md
+      - Task Planning: internals/planning.md
+      - Task Execution: internals/task-execution.md
+      - Split Execution: internals/split-execution.md
+      - SwagePlan Dialect: internals/swage-plan-dialect.md
+      - Compiler Tools and Passes: internals/compiler-tools.md
+      - Verification: internals/verification.md
+      - Benchmarks: internals/benchmarks.md
   - Decisions:
       - ADR Index: decisions/index.md
       - "ADR-0001: Python AST directly to MLIR": adr/ADR-0001-python-ast-directly-to-mlir.md

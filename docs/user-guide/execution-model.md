@@ -1,4 +1,4 @@
-<!-- docs/concepts/segments-tiles-tasks.md -->
+<!-- docs/user-guide/execution-model.md -->
 
 # Segments, Tasks, and Tiles
 
@@ -79,6 +79,6 @@ The current public Python path uses a logical fixed-block coordinate for
 canonical vector add. The private segmented path proves selected Segment to
 Task to Tile mappings. It does not yet provide a public general planner.
 
-Carry this distinction into [Compiler Pipeline](../architecture/compiler-pipeline.md),
+Carry this distinction into [Compiler Pipeline](../internals/compiler-pipeline.md),
 which shows where semantic IR branches into current lowering paths. Exact
-private task and ABI details live in [Private Qualification](../qualification/private-m4-m8.md).
+private task and ABI details live in [Segmented Reductions](../internals/segmented-reductions.md).

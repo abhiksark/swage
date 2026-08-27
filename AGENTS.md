@@ -10,8 +10,8 @@ variable-sized dense segment programs into fixed-tile GPU tasks.
 - `README.md`: current status; what works vs. what is planned
 - `DESIGN.md`: architecture and invariants
 - `ROADMAP.md`: phase gates and their status
-- `docs/concepts/segments-tiles-tasks.md`: the Segment/Task/Tile model
-- `docs/architecture/compiler-pipeline.md`: the lowering pipeline
+- `docs/user-guide/execution-model.md`: the Segment/Task/Tile model
+- `docs/internals/compiler-pipeline.md`: the lowering pipeline
 
 ## Non-negotiable rules
 

@@ -30,7 +30,7 @@ verified before loading, and loaded modules remain scoped to their CUDA
 context.
 
 The exact public call surface lives in
-[Public Python API](../reference/public-python-api.md). Current validation,
+[Public Python API](../reference/swage.md). Current validation,
 target, zero-work, stream, retention, and cache contracts live in
 [Runtime and Environment](../reference/runtime-environment.md).
 

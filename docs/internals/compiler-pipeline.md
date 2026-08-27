@@ -1,4 +1,4 @@
-<!-- docs/architecture/compiler-pipeline.md -->
+<!-- docs/internals/compiler-pipeline.md -->
 
 # Compiler Pipeline
 
@@ -32,7 +32,7 @@ verify before it crosses the frontend boundary.
 
 The exact accepted source forms live in [Kernel Language](../reference/kernel-language.md).
 The compile-only and execution call contracts live in
-[Public Python API](../reference/public-python-api.md).
+[Public Python API](../reference/swage.md).
 
 ## Semantic MLIR boundary
 
@@ -42,8 +42,8 @@ maps and reductions remain symbolic until an admitted lowering handles them.
 Ordinary arithmetic, loops, buffers, and backend operations use upstream
 dialects.
 
-[Swage Dialect](../reference/swage-dialect.md) owns the current operation and
-type surface. [SwagePlan Dialect](../reference/swage-plan-dialect.md) owns the
+[Swage Dialect](../internals/swage-dialect.md) owns the current operation and
+type surface. [SwagePlan Dialect](../internals/swage-plan-dialect.md) owns the
 small private planning surface.
 
 ## Public M3 branch
@@ -64,8 +64,9 @@ native qualification, not the public Python frontend. One conversion creates
 a sequential CPU correctness oracle. Another creates one CTA per segment and
 continues through upstream GPU, NVVM, LLVM, and NVPTX stages.
 
-Exact admitted module shapes and internal ABIs live only in
-[Private M4 to M8 Qualification](../qualification/private-m4-m8.md).
+Exact admitted module shapes and internal ABIs live in
+[Segmented Reductions](segmented-reductions.md) and
+[Ragged Softmax](ragged-softmax.md).
 
 ## Private M6 to M8 branch
 
@@ -97,6 +98,6 @@ and the current stream.
 
 *What Swage owns against upstream MLIR and LLVM, and PyTorch. [Open the full-size figure](../assets/figures/ownership-map.svg).*
 
-Continue with [Compiler Tools and Passes](../reference/compiler-tools.md) for
-the command-line surface, or [Verification Evidence](../qualification/evidence.md)
+Continue with [Compiler Tools and Passes](../internals/compiler-tools.md) for
+the command-line surface, or [Verification Evidence](../internals/verification.md)
 to audit the executable gates for each branch.

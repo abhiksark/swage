@@ -1,4 +1,4 @@
-<!-- docs/reference/public-python-api.md -->
+<!-- docs/reference/swage.md -->
 
 # Public Python API
 

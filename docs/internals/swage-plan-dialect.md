@@ -1,4 +1,4 @@
-<!-- docs/reference/swage-plan-dialect.md -->
+<!-- docs/internals/swage-plan-dialect.md -->
 
 # SwagePlan Dialect
 
@@ -22,7 +22,7 @@ execution, persistent scheduling, or a general task-range lowering.
 
 There is no public `mlir_swage.dialects.swage_plan` Python module contract.
 The classification buckets and task lists that materialization produces are
-drawn in [Private Qualification](../qualification/private-m4-m8.md).
+drawn in [Task Planning](planning.md).
 
 ## Generated reference boundary
 
@@ -33,6 +33,6 @@ The detailed dialect and operation reference is generated from TableGen in
 
 --8<-- "docs/reference/_generated/swage-plan-ops.inc"
 
-Continue with [Private Qualification](../qualification/private-m4-m8.md) for
+Continue with [Task Execution](task-execution.md) for
 the M6 to M8 execution boundary or [Compiler Tools and Passes](compiler-tools.md)
 for the registered planning pass.

@@ -1,4 +1,4 @@
-<!-- docs/quickstart.md -->
+<!-- docs/getting-started/quickstart.md -->
 
 # Quickstart
 
@@ -7,7 +7,7 @@ compile-only and CPU test paths work without a GPU. CUDA execution requires
 the native build, CUDA-enabled PyTorch, an NVIDIA GPU, and the installed CUDA
 driver. The example launches nonzero work. Exact target-admission and zero-work
 rules live in
-[Runtime and Environment](reference/runtime-environment.md).
+[Runtime and Environment](../reference/runtime-environment.md).
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
@@ -16,15 +16,15 @@ through native compilation to CUDA.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Frontend validation, compile-only emission, and canonical launch branches](assets/diagrams/frontend-boundary.svg)
+![Frontend validation, compile-only emission, and canonical launch branches](../assets/diagrams/frontend-boundary.svg)
 
 </div>
 
-*The verified frontend boundary and its two public outcomes. [Open the full-size figure](assets/diagrams/frontend-boundary.svg).*
+*The verified frontend boundary and its two public outcomes. [Open the full-size figure](../assets/diagrams/frontend-boundary.svg).*
 
 ## Prepare the checkout
 
-Follow [Installation](getting-started/installation.md) to install the Python
+Follow [Installation](installation.md) to install the Python
 package and build the pinned LLVM/MLIR toolchain plus Swage.
 
 Confirm the environment and fast Python tier:
@@ -50,7 +50,7 @@ ninja -C build check-swage-python
 ```
 
 This is a native MLIR surface. It is broader than the current public Python
-kernel language. See [Swage Dialect](reference/swage-dialect.md) for that
+kernel language. See [Swage Dialect](../internals/swage-dialect.md) for that
 boundary.
 
 ## Execute fixed vector add
@@ -85,15 +85,15 @@ On an identified clean checkout with its LLVM pin, run the example a second
 time to exercise persistent-cache verification and reuse. A dirty or
 unidentified build instead reuses compiled work only within the current
 process. The exact call contract is in
-[Public Python API](reference/public-python-api.md), and the cache and stream
+[Public Python API](../reference/swage.md), and the cache and stream
 rules are in
-[Runtime and Environment](reference/runtime-environment.md).
+[Runtime and Environment](../reference/runtime-environment.md).
 
 ## Continue
 
-- Read [Kernel Language](reference/kernel-language.md) before changing the
+- Read [Kernel Language](../reference/kernel-language.md) before changing the
   Python kernel.
-- Read [Compiler Pipeline](architecture/compiler-pipeline.md) before changing
+- Read [Compiler Pipeline](../internals/compiler-pipeline.md) before changing
   native lowering.
-- Use [Troubleshooting](getting-started/troubleshooting.md) when a package,
+- Use [Troubleshooting](troubleshooting.md) when a package,
   binding, tool, or CUDA component cannot be found.

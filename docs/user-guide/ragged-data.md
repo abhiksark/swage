@@ -1,4 +1,4 @@
-<!-- docs/concepts/swage-visual-guide.md -->
+<!-- docs/user-guide/ragged-data.md -->
 
 # Swage, Visually
 
@@ -47,10 +47,10 @@ to be qualified separately. Today, that separation is public for canonical
 fixed vector add and privately qualified for selected segmented modules.
 General public segmented execution remains planned.
 
-Continue with [Segments, Tasks, and Tiles](segments-tiles-tasks.md) for the
+Continue with [Segments, Tasks, and Tiles](execution-model.md) for the
 invariants and current qualification boundary. Then use
-[Compiler Pipeline](../architecture/compiler-pipeline.md) to follow the
+[Compiler Pipeline](../internals/compiler-pipeline.md) to follow the
 implemented data flow. The tile shapes, schedules, and classification behind
-these levels are drawn in [Private M4 to M8](../qualification/private-m4-m8.md),
+these levels are drawn in [Internals](../internals/index.md),
 and the recorded numbers live in
-[Measured Performance](../qualification/performance.md).
+[Measured Performance](../internals/benchmarks.md).

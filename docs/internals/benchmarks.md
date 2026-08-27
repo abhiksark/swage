@@ -1,4 +1,4 @@
-<!-- docs/qualification/performance.md -->
+<!-- docs/internals/benchmarks.md -->
 
 # Measured Performance
 
@@ -91,6 +91,6 @@ Triton's autotuning stack.
   baseline. The snapshot records the full sweep; Swage claims no
   vector-add win.
 
-Continue with [Verification Evidence](evidence.md) for the executable
-proof behind each boundary, or [Private M4 to M8](private-m4-m8.md) for
+Continue with [Verification Evidence](verification.md) for the executable
+proof behind each boundary, or [Task Execution](task-execution.md) for
 the execution contracts these measurements exercise.

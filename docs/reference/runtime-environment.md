@@ -122,7 +122,7 @@ optional components are absent and reports them as unavailable.
 The package backend field describes what is built into the installed Python
 package. It does not detect a separate build-tree `mlir_swage` package.
 
-Continue with [Public Python API](public-python-api.md) for the public call
+Continue with [Public Python API](swage.md) for the public call
 surface, [Troubleshooting](../getting-started/troubleshooting.md) for common
-boundary failures, or [Verification Evidence](../qualification/evidence.md)
+boundary failures, or [Verification Evidence](../internals/verification.md)
 for the tests behind runtime claims.

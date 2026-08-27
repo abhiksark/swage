@@ -78,12 +78,12 @@ does not independently emit MLIR or execute kernels.
 ## Documentation
 
 - [Installation](docs/getting-started/installation.md)
-- [Quickstart](docs/quickstart.md)
-- [Swage, Visually](docs/concepts/swage-visual-guide.md)
-- [Compiler Pipeline](docs/architecture/compiler-pipeline.md)
-- [Public Python API](docs/reference/public-python-api.md)
-- [Private M4 to M8 Qualification](docs/qualification/private-m4-m8.md)
-- [Verification Evidence](docs/qualification/evidence.md)
+- [Quickstart](docs/getting-started/quickstart.md)
+- [Swage, Visually](docs/user-guide/ragged-data.md)
+- [Compiler Pipeline](docs/internals/compiler-pipeline.md)
+- [Public Python API](docs/reference/swage.md)
+- [Internals](docs/internals/index.md)
+- [Verification Evidence](docs/internals/verification.md)
 - [DESIGN.md](DESIGN.md), [ROADMAP.md](ROADMAP.md), and
   [CONTRIBUTING.md](CONTRIBUTING.md)
 

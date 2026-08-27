@@ -1,4 +1,4 @@
-<!-- docs/reference/compiler-tools.md -->
+<!-- docs/internals/compiler-tools.md -->
 
 # Compiler Tools and Passes
 
@@ -47,7 +47,7 @@ shape and emit 512-thread partial or merge kernels. They are intentionally
 not registered as `swage-opt` arguments.
 
 The driver and passes expose the tested compiler surface, not a general
-optimizer pipeline. Continue with [Compiler Pipeline](../architecture/compiler-pipeline.md)
+optimizer pipeline. Continue with [Compiler Pipeline](../internals/compiler-pipeline.md)
 for data flow, [Swage Dialect](swage-dialect.md) for semantic operations, or
-[Private Qualification](../qualification/private-m4-m8.md) for admitted
+[Segmented Reductions](segmented-reductions.md) for admitted
 segmented modules and ABIs.

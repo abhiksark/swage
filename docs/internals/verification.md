@@ -1,4 +1,4 @@
-<!-- docs/qualification/evidence.md -->
+<!-- docs/internals/verification.md -->
 
 # Verification Evidence
 
@@ -35,7 +35,7 @@ The trusted GPU workflow runs only on `main` through the self-hosted
 cannot establish a new GPU result without executing that workflow or an
 equivalent recorded qualification. Recorded evidence is a citation status,
 not a boundary status: the snapshot row upgrades nothing, and its numbers
-are presented on [Measured Performance](performance.md).
+are presented on [Measured Performance](benchmarks.md).
 
 For milestone acceptance and release mapping, continue with
 [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md). For

@@ -69,10 +69,10 @@ persistent scheduling.
 
 | Goal | Start here |
 |---|---|
-| Install or run the supported example | [Installation](getting-started/installation.md), then [Quickstart](quickstart.md) |
-| Learn the segment model | [Swage, Visually](concepts/swage-visual-guide.md), then [Segments, Tasks, and Tiles](concepts/segments-tiles-tasks.md) |
-| Contribute to the compiler | [Compiler Pipeline](architecture/compiler-pipeline.md), [Compiler Tools and Passes](reference/compiler-tools.md), and [Contributing](https://github.com/abhiksark/swage/blob/main/CONTRIBUTING.md) |
-| Audit qualification claims | [Private M4 to M8 Qualification](qualification/private-m4-m8.md) and [Verification Evidence](qualification/evidence.md) |
+| Install or run the supported example | [Installation](getting-started/installation.md), then [Quickstart](getting-started/quickstart.md) |
+| Learn the segment model | [Swage, Visually](user-guide/ragged-data.md), then [Segments, Tasks, and Tiles](user-guide/execution-model.md) |
+| Contribute to the compiler | [Compiler Pipeline](internals/compiler-pipeline.md), [Compiler Tools and Passes](internals/compiler-tools.md), and [Contributing](https://github.com/abhiksark/swage/blob/main/CONTRIBUTING.md) |
+| Audit qualification claims | [Internals](internals/index.md) and [Verification Evidence](internals/verification.md) |
 
-For exact public call contracts, use [Public Python API](reference/public-python-api.md).
+For exact public call contracts, use [Public Python API](reference/swage.md).
 For the rationale behind a boundary, use the [ADR Index](decisions/index.md).
