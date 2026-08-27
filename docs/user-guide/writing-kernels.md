@@ -9,13 +9,14 @@ normative in [Kernel Language](../reference/kernel-language.md).
 
 ## Capture, not execution
 
-`@swage.jit` reads the function source, parses it, and validates it
-against the restricted kernel language. The body never runs as Python:
-there is no tracing, no example input, and no hidden execution. What
-comes back is a kernel object whose only public methods are
-`emit_mlir()` and `launch()`; calling the kernel directly raises. The
-kernel language symbols in `swage.language` are markers with the same
-property: outside a captured kernel they raise instead of computing.
+`@swage.jit` reads and parses the function source. The body never runs
+as Python: there is no tracing, no example input, and no hidden
+execution, and the restricted kernel language is enforced when the
+kernel is emitted or launched. What comes back is a kernel object whose
+only public methods are `emit_mlir()` and `launch()`; calling the
+kernel directly raises. The four symbolic functions in `swage.language`
+share that property and raise outside a captured kernel; the types and
+markers work anywhere.
 
 Capture is fail closed. Anything outside the accepted grammar, a loop,
 an unsupported operator, a stray keyword argument, fails at decoration
@@ -23,6 +24,8 @@ or emission time with a source-located `CompilationError` naming the
 file, line, and column. Nothing partial survives.
 
 ## The canonical kernel, line by line
+
+Capture itself needs only the published wheel (wheel-only tier):
 
 ```python
 import swage as sw

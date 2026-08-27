@@ -9,10 +9,14 @@ semantic versioning (`0.x`; anything may change).
 ### Added
 
 - Generated TikZ figure atlas covering the GPU execution approaches, and a
-  Measured Performance page backed by a committed RTX 5090 snapshot.
+  benchmarks page backed by a committed RTX 5090 snapshot.
 
 ### Changed
 
+- The documentation site is restructured into getting started, user guide,
+  API reference, internals, and decisions sections; milestone codenames
+  moved out of user-facing prose, and every previously published URL
+  redirects to its new location.
 - Split partial and merge kernels use 512 threads, sized so one
   4096-element chunk fully occupies a CTA at eight elements per thread.
 - Warm launches dispatch through a compiled nanobind entry point that

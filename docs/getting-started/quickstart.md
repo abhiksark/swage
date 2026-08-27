@@ -7,7 +7,8 @@ capture to a verified CUDA result. Capture works on a wheel-only install,
 emitting MLIR requires the native build, and the launch at the end
 requires a CUDA GPU. The committed
 [`examples/fixed_vector_add.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_add.py)
-contains the same walkthrough as one runnable script.
+contains this walkthrough as one runnable script, using metadata
+inference in place of the explicit signature.
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
@@ -43,8 +44,9 @@ export PYTHONPATH=build/python_packages
 ## Write the kernel
 
 A Swage kernel is ordinary-looking Python that is captured, never
-executed. The decorator parses the source, validates it against the
-restricted kernel language, and returns a kernel object:
+executed. The decorator reads the source and returns a kernel object;
+the body is validated against the restricted kernel language when the
+kernel is emitted or launched:
 
 ```python
 import swage as sw
@@ -120,7 +122,7 @@ The exact rules live in
 ## Inspect compiler artifacts
 
 Use an isolated directory for cache and debug artifacts, then run the
-committed example with dumps enabled:
+committed example with dumps enabled (CUDA GPU tier):
 
 ```bash
 export SWAGE_WALKTHROUGH_DIR="$(mktemp -d)"

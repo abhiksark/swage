@@ -598,7 +598,7 @@ def compiler_pipeline() -> bytes:
     )
     for x, status, heading, body, color, fill in branches:
         svg.box(x, 245, 330, 180, fill=fill, stroke=color)
-        svg.status_tag(x + 22, 265, 240, status, color=color, fill=fill)
+        svg.status_tag(x + 22, 265, 250, status, color=color, fill=fill)
         svg.text(x + 165, 344, heading, size=19, weight=750, anchor="middle")
         svg.multiline(
             x + 165,

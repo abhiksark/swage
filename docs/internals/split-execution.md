@@ -47,18 +47,17 @@ scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
 
 Both kernels use 512 threads, sized so one 4096-element chunk fully
 occupies a CTA at eight elements per thread. Partial ranges are absolute
-half-open input ranges, and each partial writes one unique scratch slot. Merge records carry a
-segment ID and a compact half-open scratch range; thread zero writes the final
-segment result once.
+half-open input ranges, and each partial writes one unique scratch slot.
+Merge records carry a segment ID and a compact half-open scratch range;
+thread zero writes the final segment result once.
 
-Mixed execution submits direct fused work, all partial CTAs, then all merge
-CTAs on one current stream. Empty phases are skipped. If no split exists, the
-direct one-launch path remains unchanged. Exact all-one and tolerant nontrivial
-f32 cases match PyTorch and the sequential CPU oracle on NVIDIA RTX A6000
-`sm_86`.
+If no split exists, the direct one-launch path remains unchanged. Exact
+all-one and tolerant nontrivial f32 cases match PyTorch and the
+sequential CPU oracle on NVIDIA RTX A6000 `sm_86`.
 
-Split execution does not implement packed warps, split max, split softmax, device queues,
-persistent scheduling, public segment syntax, or public segmented launch.
+Split execution does not implement packed warps, split max, split
+softmax, device queues, persistent scheduling, public segment syntax,
+or public segmented launch.
 
 Continue with [Verification](verification.md) for the executable
 proof behind these claims, or [Benchmarks](benchmarks.md) for the

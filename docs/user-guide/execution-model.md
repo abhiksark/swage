@@ -93,6 +93,7 @@ private qualification rather than public API:
 - The recorded performance of these choices lives in
   [Benchmarks](../internals/benchmarks.md).
 
-Continue with [Compiler Pipeline](../internals/compiler-pipeline.md) for
-where semantic IR branches into the current lowering paths, or return to
-the [User Guide index](index.md).
+Continue with the [API reference](../reference/index.md) for the exact
+contracts behind this guide, or
+[Compiler Pipeline](../internals/compiler-pipeline.md) for where semantic
+IR branches into the current lowering paths.

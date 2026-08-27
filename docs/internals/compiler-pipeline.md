@@ -99,6 +99,7 @@ and the current stream.
 
 *What Swage owns against upstream MLIR and LLVM, and PyTorch. [Open the full-size figure](../assets/figures/ownership-map.svg).*
 
-Continue with [Compiler Tools and Passes](compiler-tools.md) for
-the command-line surface, or [Verification](verification.md)
-to audit the executable gates for each branch.
+Continue with [Swage Dialect](swage-dialect.md) for the semantic
+surface, [Compiler Tools and Passes](compiler-tools.md) for the
+command-line surface, or [Verification](verification.md) to audit the
+executable gates for each branch.

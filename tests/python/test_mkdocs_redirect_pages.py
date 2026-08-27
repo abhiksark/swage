@@ -28,6 +28,17 @@ def test_redirects_cover_only_moved_pages_with_existing_targets():
         assert (REPO_ROOT / "docs" / new).is_file(), new
 
 
+def test_stub_urls_never_shadow_a_published_page():
+    """No redirect stub may overwrite a real page's built output."""
+    module = _load_hook()
+    published = set()
+    for path in (REPO_ROOT / "docs").rglob("*.md"):
+        relative = path.relative_to(REPO_ROOT / "docs").as_posix()
+        published.add(module.page_url(relative))
+    for old in module.REDIRECTS:
+        assert module.page_url(old) not in published, old
+
+
 def test_page_urls_follow_directory_url_rules():
     """Markdown paths map to the directory URLs mkdocs publishes."""
     module = _load_hook()

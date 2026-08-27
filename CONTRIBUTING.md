@@ -67,7 +67,7 @@ bindings are enabled against an incompatible install.
 
 Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
 use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and
-[Verification Evidence](docs/internals/verification.md) for the affected
+[Verification](docs/internals/verification.md) for the affected
 surface.
 
 ## Pull requests

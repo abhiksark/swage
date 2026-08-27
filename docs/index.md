@@ -103,6 +103,6 @@ The three lanes are status boundaries, not fallback paths.
 
 </div>
 
-For the rationale behind a boundary, use the
-[ADR index](decisions/index.md). For the exact public call surface, use
-[swage](reference/swage.md).
+Continue with [Installation](getting-started/installation.md). For the
+rationale behind a boundary, use the [ADR index](decisions/index.md);
+for the exact public call surface, use [swage](reference/swage.md).

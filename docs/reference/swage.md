@@ -17,9 +17,9 @@ published wheel captures kernels and reports the environment on its own.
 swage.jit(function)
 ```
 
-Capture a Python function as a non-executing Swage kernel. The function
-body is parsed and validated against the restricted kernel language; it
-never runs as Python.
+Capture a Python function as a non-executing Swage kernel. The source is
+read and stored; the body never runs as Python and is validated against
+the restricted kernel language when the kernel is emitted or launched.
 
 Parameters
 :   `function`: the kernel function to capture. Ordinary positional
@@ -31,8 +31,10 @@ Returns
     kernel is not directly callable.
 
 Raises
-:   `CompilationError`: the source is outside the accepted kernel
-    language. The message carries the file, line, and column.
+:   `CompilationError`: the source cannot be captured, for example
+    unreadable or ambiguous source, stacked decorators, or a non-ASCII
+    kernel name. Kernel-language violations in the body surface later,
+    at `emit_mlir()` or `launch()`, with the file, line, and column.
 :   `RuntimeError`: the returned kernel is called directly.
 
 Example
@@ -141,7 +143,9 @@ Raises
 
 Validation, target admission, zero-work, cache, stream, and retention
 rules are normative in
-[Runtime and Environment](runtime-environment.md).
+[Runtime and Environment](runtime-environment.md). There is no public
+`emit_ptx()` method, no CPU execution fallback, and no public segmented
+launch.
 
 ## swage.CompilationError
 
