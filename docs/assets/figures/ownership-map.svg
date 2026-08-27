@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/ownership-map.svg -->
-<!-- source-sha256: d1b64e194a72f3dd1e6df3c184ae8942e17b1c088a47fac981dac3703a182560 -->
+<!-- source-sha256: 4768ccd293480e39297ea3a6e32fe43cb04c60bb39767b2e095086557d7dc9d4 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="546.32" height="292.38" viewBox="0 0 546.32 292.38" role="img" aria-labelledby="ownership-map-title ownership-map-description">
 <title id="ownership-map-title">Ownership map</title>
 <desc id="ownership-map-description">Three lanes separate what Swage owns from what upstream MLIR and LLVM own and what PyTorch owns, with one launch traced across the domains.</desc>

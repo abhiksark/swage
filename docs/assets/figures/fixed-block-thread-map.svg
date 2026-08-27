@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/fixed-block-thread-map.svg -->
-<!-- source-sha256: 93d026940cf8c4098daf8fa445d383ccaaefa84a88136c5338e76ab441b171d9 -->
+<!-- source-sha256: 5e7987e11266448f9bdbf83f7111ab85dbf2ad576b475db85800d31012cde73d -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="510.52" height="254.2" viewBox="0 0 510.52 254.2" role="img" aria-labelledby="fixed-block-thread-map-title fixed-block-thread-map-description">
 <title id="fixed-block-thread-map-title">Fixed-block launch geometry</title>
 <desc id="fixed-block-thread-map-description">A 22-element input covered by three 8-thread blocks, with the third block expanded to show global indices and the two masked tail lanes.</desc>

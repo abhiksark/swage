@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/segsum-graph-comparison.svg -->
-<!-- source-sha256: 1708a425e6678e2d5a1679863b9450bf6d7230bd95b6ba168eff57c1891ba957 -->
+<!-- source-sha256: 0b893420677519492c34622615709bcf8b9d74b43c6862907a9c13ede30f1f17 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="466.6" height="347.76" viewBox="0 0 466.6 347.76" role="img" aria-labelledby="segsum-graph-comparison-title segsum-graph-comparison-description">
 <title id="segsum-graph-comparison-title">Segmented sum under graph timing</title>
 <desc id="segsum-graph-comparison-description">Grouped bars compare graph-replay medians for the best Swage policy, the tuned Triton baseline, and torch segment_reduce across seven segment distributions on an RTX 5090.</desc>
@@ -517,16 +517,26 @@
 <use data-text="o" xlink:href="#font_4_29" transform="matrix(6.973848,0,0,-6.973848,248.21128,307.62879)" fill="#4b5563"/>
 <use data-text="n" xlink:href="#font_4_28" transform="matrix(6.973848,0,0,-6.973848,252.1794,307.62879)" fill="#4b5563"/>
 <use data-text="(" xlink:href="#font_4_1" transform="matrix(6.973848,0,0,-6.973848,259.26484,307.62879)" fill="#4b5563"/>
-<use data-text="2" xlink:href="#font_4_7" transform="matrix(6.973848,0,0,-6.973848,262.37519,307.62879)" fill="#4b5563"/>
-<use data-text="." xlink:href="#font_4_5" transform="matrix(6.973848,0,0,-6.973848,266.3433,307.62879)" fill="#4b5563"/>
-<use data-text="6" xlink:href="#font_4_10" transform="matrix(6.973848,0,0,-6.973848,268.59584,307.62879)" fill="#4b5563"/>
-<use data-text="v" xlink:href="#font_4_36" transform="matrix(6.973848,0,0,-6.973848,275.2489,307.62879)" fill="#4b5563"/>
-<use data-text="s" xlink:href="#font_4_33" transform="matrix(6.973848,0,0,-6.973848,279.43324,307.62879)" fill="#4b5563"/>
-<use data-text="2" xlink:href="#font_4_7" transform="matrix(6.973848,0,0,-6.973848,285.27729,307.62879)" fill="#4b5563"/>
-<use data-text="." xlink:href="#font_4_5" transform="matrix(6.973848,0,0,-6.973848,289.24543,307.62879)" fill="#4b5563"/>
-<use data-text="5" xlink:href="#font_4_9" transform="matrix(6.973848,0,0,-6.973848,291.498,307.62879)" fill="#4b5563"/>
-<use data-text=")" xlink:href="#font_4_2" transform="matrix(6.973848,0,0,-6.973848,295.4661,307.62879)" fill="#4b5563"/>
-<use data-text="." xlink:href="#font_4_5" transform="matrix(6.973848,0,0,-6.973848,298.57643,307.62879)" fill="#4b5563"/>
+<use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,262.37519,307.62879)" fill="#4b5563"/>
+<use data-text="r" xlink:href="#font_4_32" transform="matrix(6.973848,0,0,-6.973848,265.4855,307.62879)" fill="#4b5563"/>
+<use data-text="i" xlink:href="#font_4_24" transform="matrix(6.973848,0,0,-6.973848,268.59584,307.62879)" fill="#4b5563"/>
+<use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,270.8484,307.62879)" fill="#4b5563"/>
+<use data-text="o" xlink:href="#font_4_29" transform="matrix(6.973848,0,0,-6.973848,273.95875,307.62879)" fill="#4b5563"/>
+<use data-text="n" xlink:href="#font_4_28" transform="matrix(6.973848,0,0,-6.973848,277.92686,307.62879)" fill="#4b5563"/>
+<use data-text="2" xlink:href="#font_4_7" transform="matrix(6.973848,0,0,-6.973848,285.01228,307.62879)" fill="#4b5563"/>
+<use data-text="." xlink:href="#font_4_5" transform="matrix(6.973848,0,0,-6.973848,288.9804,307.62879)" fill="#4b5563"/>
+<use data-text="5" xlink:href="#font_4_9" transform="matrix(6.973848,0,0,-6.973848,291.23298,307.62879)" fill="#4b5563"/>
+<use data-text="v" xlink:href="#font_4_36" transform="matrix(6.973848,0,0,-6.973848,297.88603,307.62879)" fill="#4b5563"/>
+<use data-text="s" xlink:href="#font_4_33" transform="matrix(6.973848,0,0,-6.973848,302.0703,307.62879)" fill="#4b5563"/>
+<use data-text="s" xlink:href="#font_4_33" transform="matrix(6.973848,0,0,-6.973848,307.91444,307.62879)" fill="#4b5563"/>
+<use data-text="w" xlink:href="#font_4_37" transform="matrix(6.973848,0,0,-6.973848,311.07356,307.62879)" fill="#4b5563"/>
+<use data-text="a" xlink:href="#font_4_16" transform="matrix(6.973848,0,0,-6.973848,316.555,307.62879)" fill="#4b5563"/>
+<use data-text="g" xlink:href="#font_4_22" transform="matrix(6.973848,0,0,-6.973848,320.52314,307.62879)" fill="#4b5563"/>
+<use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,324.49128,307.62879)" fill="#4b5563"/>
+<use data-text="2" xlink:href="#font_4_7" transform="matrix(6.973848,0,0,-6.973848,330.7119,307.62879)" fill="#4b5563"/>
+<use data-text="." xlink:href="#font_4_5" transform="matrix(6.973848,0,0,-6.973848,334.68006,307.62879)" fill="#4b5563"/>
+<use data-text="6" xlink:href="#font_4_10" transform="matrix(6.973848,0,0,-6.973848,336.93263,307.62879)" fill="#4b5563"/>
+<use data-text=")" xlink:href="#font_4_2" transform="matrix(6.973848,0,0,-6.973848,340.9007,307.62879)" fill="#4b5563"/>
 <use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,39.90941,320.36537)" fill="#4b5563"/>
 <use data-text="h" xlink:href="#font_4_23" transform="matrix(6.973848,0,0,-6.973848,43.019746,320.36537)" fill="#4b5563"/>
 <use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,47.420244,320.36537)" fill="#4b5563"/>

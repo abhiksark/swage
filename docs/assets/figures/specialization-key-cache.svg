@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/specialization-key-cache.svg -->
-<!-- source-sha256: d648863f709e96c5d99c8699e566375eba8c71e206dd01c797a9be5b53d2486a -->
+<!-- source-sha256: c45b7060722f38a832261deb9f9c45079fdc34f7524784fa6d5b949b3fc800cc -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="514.47" height="256.51" viewBox="0 0 514.47 256.51" role="img" aria-labelledby="specialization-key-cache-title specialization-key-cache-description">
 <title id="specialization-key-cache-title">Specialization key and cache verification</title>
 <desc id="specialization-key-cache-description">The specialization key fields hash into one digest that selects a cache entry, which is verified before module load; a rejected entry raises while a plain miss compiles in process.</desc>

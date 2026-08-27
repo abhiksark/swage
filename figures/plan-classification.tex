@@ -32,7 +32,7 @@
 \draw[swarrow] (0.95, -1.15) -- (0.95, -1.69);
 \foreach \row/\cond in {%
     0/{length at most warp max (32)},
-    1/{length at most cta chunk (4096)},
+    1/{length at most CTA chunk (4096)},
     2/{otherwise: split}} {
   \node[swbox, minimum width=5.3cm, minimum height=0.62cm]
     (cond\row) at (2.65, {-2.0 - \row * 1.15}) {};
@@ -50,7 +50,7 @@
   {four task lists (descriptors in segment order)};
 \foreach \row/\name/\body/\col/\fil in {%
     0/{warp tasks}/{[0, 1, 2]}/swgreen/swgreenfill,
-    1/{cta tasks}/{[3, 4]}/swpurple/swpurplefill,
+    1/{CTA tasks}/{[3, 4]}/swpurple/swpurplefill,
     2/{partial tasks}/{[5 chunk 0, 5 chunk 1, 5 chunk 2]}/%
       sworange/sworangefill} {
   \node[swbox, draw=\col, fill=\fil, minimum width=6.5cm,

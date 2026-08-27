@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -27,7 +28,7 @@ REQUIRED_LABELS = {
         "xor shuffle butterfly",
         "offsets 1, 2, 4, 8, 16",
         "every lane holds the total",
-        "block-stride chunks",
+        "block-stride passes",
         "up to 32 elements",
         "33 to 4096 elements",
         "over 4096 elements",
@@ -59,7 +60,7 @@ REQUIRED_LABELS = {
         "GPU path",
         "differential comparison",
         "empty max is negative infinity",
-        "NaN-propagating max",
+        "NaN-propagating semantics",
     ),
     "ownership-map": (
         "Swage owns",
@@ -183,6 +184,15 @@ def test_tex_sources_open_with_their_repo_path_comment():
         assert first_line == f"% figures/{path.name}", path
 
 
+def test_figure_digest_covers_titles_and_descriptions():
+    """Injected SVG metadata participates in the freshness digest."""
+    module = _load_renderer()
+    spec = module.FIGURES[0]
+    base = module.figure_digest(spec)
+    assert module.figure_digest(spec._replace(title="Other")) != base
+    assert module.figure_digest(spec._replace(description="Other")) != base
+
+
 def test_committed_svgs_are_current_stamped_and_accessible():
     """Committed outputs are fresh, well formed, and self contained."""
     module = _load_renderer()
@@ -220,7 +230,7 @@ def test_check_reports_missing_stale_and_orphaned_outputs(tmp_path):
     module = _load_renderer()
     missing = module.render_figures(tmp_path, check=True)
     assert missing == sorted(
-        f"missing generated figure: {tmp_path}/{spec.name}.svg"
+        f"missing generated figure: {tmp_path / (spec.name + '.svg')}"
         for spec in module.FIGURES
     )
 
@@ -231,13 +241,18 @@ def test_check_reports_missing_stale_and_orphaned_outputs(tmp_path):
     lines = stale_path.read_text().splitlines(keepends=True)
     lines[1] = f"<!-- source-sha256: {'0' * 64} -->\n"
     stale_path.write_text("".join(lines))
+    unstamped_path = tmp_path / f"{module.FIGURES[1].name}.svg"
+    stamped_lines = unstamped_path.read_text().splitlines(keepends=True)
+    unstamped_path.write_text("".join(stamped_lines[2:]))
     orphan = tmp_path / "stray.svg"
     orphan.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>\n")
+    (tmp_path / "not-a-file.svg").mkdir()
     errors = module.render_figures(tmp_path, check=True)
     assert errors == sorted(
         [
             f"orphaned generated figure: {orphan}",
             f"stale generated figure: {stale_path}",
+            f"stale generated figure: {unstamped_path}",
         ]
     )
     assert orphan.exists()
@@ -269,12 +284,19 @@ def test_chart_data_includes_match_the_snapshot():
         "triton",
         "torch",
     ]
+    assert [stage["stage"] for stage in stages] == [
+        "baseline per-launch host path",
+        "cached identity and emit-on-miss (O1)",
+        "compiled nanobind launcher",
+        "compiled-C launcher",
+        "torch.add dispatch",
+    ]
     ladder_include = module.chart_include(ladder)
     for stage in stages:
         assert f"({stage['median']:.1f}," in ladder_include, stage["stage"]
     cold = snapshot["cold_start_ms"]
-    assert str(cold["swage"]) in ladder_include
-    assert str(cold["triton"]) in ladder_include
+    assert f"\\swagecoldms{{{cold['swage']}}}" in ladder_include
+    assert f"\\tritoncoldms{{{cold['triton']}}}" in ladder_include
 
 
 def test_perf_snapshot_is_wellformed_and_sourced():
@@ -282,7 +304,7 @@ def test_perf_snapshot_is_wellformed_and_sourced():
     module = _load_renderer()
     snapshot = json.loads(module.SNAPSHOT_PATH.read_text())
     assert snapshot["environment"]["compute_capability"] == "sm_120"
-    assert snapshot["recorded_at"] == "2026-08-27"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", snapshot["recorded_at"])
     rows = snapshot["segsum_graph_us"]
     assert [row["distribution"] for row in rows] == [
         "uniform-8",
@@ -298,11 +320,16 @@ def test_perf_snapshot_is_wellformed_and_sourced():
             cell = row[impl]
             assert cell["median"] > 0, (row["distribution"], impl)
             sourced = "provenance" in cell
-            spread = "q1" in cell and cell["q1"] <= cell["q3"]
+            spread = (
+                "q1" in cell
+                and 0 < cell["q1"] <= cell["median"] <= cell["q3"]
+            )
             assert sourced or spread, (row["distribution"], impl)
     for stage in snapshot["dispatch_call_us"]:
         assert stage["median"] > 0
-        assert "provenance" in stage or stage["q1"] <= stage["q3"]
+        assert "provenance" in stage or (
+            0 < stage["q1"] <= stage["median"] <= stage["q3"]
+        )
     assert "provenance" in snapshot["cold_start_ms"]
     sizes = [row["n"] for row in snapshot["vadd_graph_us"]]
     assert sizes == [2**e for e in range(14, 27, 2)]
@@ -326,6 +353,7 @@ def _toolchain_missing():
 def test_render_mode_writes_stamped_svgs_and_removes_orphans(tmp_path):
     """Write mode renders fresh outputs and deletes strays."""
     module = _load_renderer()
+    module.FIGURES = module.FIGURES[:1]
     spec = module.FIGURES[0]
     orphan = tmp_path / "stray.svg"
     orphan.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>\n")

@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/fused-mixed-schedule.svg -->
-<!-- source-sha256: fa3abe3032430792e621a9769e870850bc02aa6e6ee5020b3bc91eb3a16ca880 -->
+<!-- source-sha256: 14f7a3a6458c8026f2d754f45f3833489ec3d54e433fda13c7cb1346786f2cdb -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="394.35" height="256.51" viewBox="0 0 394.35 256.51" role="img" aria-labelledby="fused-mixed-schedule-title fused-mixed-schedule-description">
 <title id="fused-mixed-schedule-title">Fused mixed-policy schedule</title>
 <desc id="fused-mixed-schedule-description">One 128-thread launch covers six warp tasks at four independent slots per block, then three CTA tasks at one segment per block, with task_ids mapping blocks to segments.</desc>

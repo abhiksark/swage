@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/oracle-topology.svg -->
-<!-- source-sha256: bb9c9554aae27704fc41375504e4e4cb357aa0577ad432fe76fa32472e37dfbe -->
+<!-- source-sha256: 01798e5451041656d901e28937150e7cd0d92360983313ed65cfc898125181c4 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="408.52" height="259.34" viewBox="0 0 408.52 259.34" role="img" aria-labelledby="oracle-topology-title oracle-topology-description">
 <title id="oracle-topology-title">One module, three executions</title>
 <desc id="oracle-topology-description">One verified semantic module runs on the GPU path, the sequential CPU oracle, and the PyTorch reference, and every correctness claim is a differential comparison between them.</desc>
@@ -542,16 +542,13 @@
 <use data-text="i" xlink:href="#font_2_24" transform="matrix(8.966376,0,0,-8.966376,110.433879,244.31583)" fill="#4b5563"/>
 <use data-text="n" xlink:href="#font_2_27" transform="matrix(8.966376,0,0,-8.966376,112.99826,244.31583)" fill="#4b5563"/>
 <use data-text="g" xlink:href="#font_2_22" transform="matrix(8.966376,0,0,-8.966376,118.11806,244.31583)" fill="#4b5563"/>
-<use data-text="m" xlink:href="#font_2_26" transform="matrix(8.966376,0,0,-8.966376,125.79328,244.31583)" fill="#4b5563"/>
-<use data-text="a" xlink:href="#font_2_17" transform="matrix(8.966376,0,0,-8.966376,133.47747,244.31583)" fill="#4b5563"/>
-<use data-text="x" xlink:href="#font_2_36" transform="matrix(8.966376,0,0,-8.966376,138.08618,244.31583)" fill="#4b5563"/>
-<use data-text="s" xlink:href="#font_2_31" transform="matrix(8.966376,0,0,-8.966376,146.02143,244.31583)" fill="#4b5563"/>
-<use data-text="e" xlink:href="#font_2_20" transform="matrix(8.966376,0,0,-8.966376,149.65282,244.31583)" fill="#4b5563"/>
-<use data-text="m" xlink:href="#font_2_26" transform="matrix(8.966376,0,0,-8.966376,153.75046,244.31583)" fill="#4b5563"/>
-<use data-text="a" xlink:href="#font_2_17" transform="matrix(8.966376,0,0,-8.966376,161.43463,244.31583)" fill="#4b5563"/>
-<use data-text="n" xlink:href="#font_2_27" transform="matrix(8.966376,0,0,-8.966376,166.04337,244.31583)" fill="#4b5563"/>
-<use data-text="t" xlink:href="#font_2_32" transform="matrix(8.966376,0,0,-8.966376,170.91211,244.31583)" fill="#4b5563"/>
-<use data-text="i" xlink:href="#font_2_24" transform="matrix(8.966376,0,0,-8.966376,174.49866,244.31583)" fill="#4b5563"/>
-<use data-text="c" xlink:href="#font_2_18" transform="matrix(8.966376,0,0,-8.966376,177.06304,244.31583)" fill="#4b5563"/>
-<use data-text="s" xlink:href="#font_2_31" transform="matrix(8.966376,0,0,-8.966376,181.16068,244.31583)" fill="#4b5563"/>
+<use data-text="s" xlink:href="#font_2_31" transform="matrix(8.966376,0,0,-8.966376,125.79328,244.31583)" fill="#4b5563"/>
+<use data-text="e" xlink:href="#font_2_20" transform="matrix(8.966376,0,0,-8.966376,129.42467,244.31583)" fill="#4b5563"/>
+<use data-text="m" xlink:href="#font_2_26" transform="matrix(8.966376,0,0,-8.966376,133.5223,244.31583)" fill="#4b5563"/>
+<use data-text="a" xlink:href="#font_2_17" transform="matrix(8.966376,0,0,-8.966376,141.20648,244.31583)" fill="#4b5563"/>
+<use data-text="n" xlink:href="#font_2_27" transform="matrix(8.966376,0,0,-8.966376,145.8152,244.31583)" fill="#4b5563"/>
+<use data-text="t" xlink:href="#font_2_32" transform="matrix(8.966376,0,0,-8.966376,150.6929,244.31583)" fill="#4b5563"/>
+<use data-text="i" xlink:href="#font_2_24" transform="matrix(8.966376,0,0,-8.966376,154.27945,244.31583)" fill="#4b5563"/>
+<use data-text="c" xlink:href="#font_2_18" transform="matrix(8.966376,0,0,-8.966376,156.84384,244.31583)" fill="#4b5563"/>
+<use data-text="s" xlink:href="#font_2_31" transform="matrix(8.966376,0,0,-8.966376,160.94147,244.31583)" fill="#4b5563"/>
 </svg>

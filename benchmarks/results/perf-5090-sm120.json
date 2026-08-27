@@ -21,7 +21,8 @@
     "segsum_graph_us_runs": ["graphs2-r1", "graphs2-r2", "graphs2-r3"],
     "dispatch_call_us_runs": ["baseline-r1..r3", "o1-batched-r1..r3", "clauncher-r1..r3"],
     "dispatch_case": "vadd n=2^14, warm launch",
-    "vadd_triton_rule": "per run, the best autotuned configuration for that run; runs may select different blocks"
+    "vadd_triton_rule": "per run, the best autotuned configuration for that run; runs may select different blocks",
+    "win_bar": "a stable win requires at least a 10 percent median improvement over the best baseline across the three runs"
   },
   "segsum_graph_us": [
     {

@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/timing-methods.svg -->
-<!-- source-sha256: 7b371cfaaa3e6e9a2e5c60c8e4f963496a8255036d7dcf99652191bc80d7c017 -->
+<!-- source-sha256: 456312be8b47be6330a6694b811441d2fc0d511a077fb79c770f5bfc6c6f6fa4 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="478.97" height="295.38" viewBox="0 0 478.97 295.38" role="img" aria-labelledby="timing-methods-title timing-methods-description">
 <title id="timing-methods-title">Three timing methods</title>
 <desc id="timing-methods-description">Timelines contrast synchronized per-call wall clock, batched CUDA-event timing with the launcher still visible, and CUDA-graph replay with the host removed.</desc>

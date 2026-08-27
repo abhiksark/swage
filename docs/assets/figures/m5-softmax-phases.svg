@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/m5-softmax-phases.svg -->
-<!-- source-sha256: 24efeb0bd4da9e5ccc9865737299bc506a5fc2d360565c52cf34f2428ec63b60 -->
+<!-- source-sha256: 23b414cf73276720dbab2d8a6c657858d8917dc6c4524cd23084939a8052e7bc -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="469.31" height="317.48" viewBox="0 0 469.31 317.48" role="img" aria-labelledby="m5-softmax-phases-title m5-softmax-phases-description">
 <title id="m5-softmax-phases-title">Stable softmax in one CTA</title>
 <desc id="m5-softmax-phases-description">One CTA sweeps its segment three times, for the maximum, the shifted exponential sum, and the normalizing stores, with uniform all-reduce operations acting as both broadcast and phase barrier.</desc>

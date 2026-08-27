@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/dispatch-path.svg -->
-<!-- source-sha256: e6f34ebbe8af398b24a18dec143b88236dd7bdee59a2b9d406136e40ed3a318b -->
+<!-- source-sha256: 97f705997149aa54b9da9a69b93821b957ec4000d09929c5e3779a81b9fce566 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="410.75" height="234.09" viewBox="0 0 410.75 234.09" role="img" aria-labelledby="dispatch-path-title dispatch-path-description">
 <title id="dispatch-path-title">Launch dispatch lanes</title>
 <desc id="dispatch-path-description">A validated launch enqueues through the compiled nanobind launcher when the bindings import, or through the ctypes fallback otherwise; both submit the same driver call on the current PyTorch stream.</desc>
@@ -358,10 +358,9 @@
 <use data-text="h" xlink:href="#font_5_22" transform="matrix(6.973848,0,0,-6.973848,117.99829,143.19954)" fill="#17212b"/>
 <use data-text="a" xlink:href="#font_5_15" transform="matrix(6.973848,0,0,-6.973848,122.39879,143.19954)" fill="#17212b"/>
 <use data-text="l" xlink:href="#font_5_25" transform="matrix(6.973848,0,0,-6.973848,126.36691,143.19954)" fill="#17212b"/>
-<use data-text="l" xlink:href="#font_5_25" transform="matrix(6.973848,0,0,-6.973848,128.61946,143.19954)" fill="#17212b"/>
-<use data-text="i" xlink:href="#font_5_23" transform="matrix(6.973848,0,0,-6.973848,130.87201,143.19954)" fill="#17212b"/>
-<use data-text="n" xlink:href="#font_5_27" transform="matrix(6.973848,0,0,-6.973848,133.12458,143.19954)" fill="#17212b"/>
-<use data-text="g" xlink:href="#font_5_21" transform="matrix(6.973848,0,0,-6.973848,137.52507,143.19954)" fill="#17212b"/>
+<use data-text="i" xlink:href="#font_5_23" transform="matrix(6.973848,0,0,-6.973848,128.61946,143.19954)" fill="#17212b"/>
+<use data-text="n" xlink:href="#font_5_27" transform="matrix(6.973848,0,0,-6.973848,130.87201,143.19954)" fill="#17212b"/>
+<use data-text="g" xlink:href="#font_5_21" transform="matrix(6.973848,0,0,-6.973848,135.27252,143.19954)" fill="#17212b"/>
 <use data-text="d" xlink:href="#font_5_18" transform="matrix(6.973848,0,0,-6.973848,26.152714,155.95594)" fill="#17212b"/>
 <use data-text="l" xlink:href="#font_5_25" transform="matrix(6.973848,0,0,-6.973848,30.553212,155.95594)" fill="#17212b"/>
 <use data-text="o" xlink:href="#font_5_28" transform="matrix(6.973848,0,0,-6.973848,32.805765,155.95594)" fill="#17212b"/>

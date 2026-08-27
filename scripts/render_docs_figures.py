@@ -1,14 +1,17 @@
 # scripts/render_docs_figures.py
 """Render the TikZ figure atlas used by the documentation.
 
-Render mode compiles each `figures/*.tex` source with the local
+Render mode compiles each manifest figure's TeX source with the local
 `tectonic` binary, converts the PDF to SVG with PyMuPDF, injects
 accessibility metadata, and stamps the output with a digest of its
-sources. It renders only missing or stale outputs and removes orphans.
+source closure, including the manifest title and description and any
+generated chart data. It renders only missing or stale outputs and
+removes orphaned SVG files.
 
-Check mode needs only the standard library: it recomputes each source
-digest and compares it with the committed stamp, so continuous
-integration verifies freshness without a TeX toolchain.
+Check mode needs only the standard library: it recomputes each digest,
+compares it with the committed stamp, and reports missing, stale, and
+orphaned outputs, so continuous integration verifies freshness without
+a TeX toolchain.
 """
 
 import argparse
@@ -27,7 +30,6 @@ SOURCE_DIR = REPO_ROOT / "figures"
 OUTPUT_DIR = REPO_ROOT / "docs/assets/figures"
 PREAMBLE_NAME = "common-preamble.tex"
 SNAPSHOT_PATH = REPO_ROOT / "benchmarks/results/perf-5090-sm120.json"
-FALLBACK_TECTONIC = Path.home() / ".local/bin/tectonic"
 STAMP_PATTERN = re.compile(r"<!-- source-sha256: ([0-9a-f]{64}) -->")
 
 
@@ -94,9 +96,10 @@ FIGURES = (
         name="plan-classification",
         title="SwagePlan classification",
         description=(
-            "Observed segment lengths flow through the empty, warp, "
-            "CTA, and split buckets into four task lists, under the "
-            "validated planning-limit invariant."
+            "Observed segment lengths flow through the warp, CTA, and "
+            "split rules into four task lists under the validated "
+            "planning-limit invariant, with empty segments classified "
+            "as warp tasks."
         ),
     ),
     FigureSpec(
@@ -167,8 +170,12 @@ def tectonic_binary() -> str | None:
     found = shutil.which("tectonic")
     if found:
         return found
-    if FALLBACK_TECTONIC.is_file():
-        return str(FALLBACK_TECTONIC)
+    try:
+        fallback = Path.home() / ".local/bin/tectonic"
+    except RuntimeError:
+        return None
+    if fallback.is_file():
+        return str(fallback)
     return None
 
 
@@ -234,8 +241,10 @@ def chart_include(spec: FigureSpec) -> str | None:
     return None
 
 
-def figure_digest(spec: FigureSpec) -> str:
+def figure_digest(spec: FigureSpec, *, include: str | None = None) -> str:
     """Hash the source closure that defines one rendered figure."""
+    if include is None:
+        include = chart_include(spec)
     hasher = hashlib.sha256()
     paths = [SOURCE_DIR / PREAMBLE_NAME, SOURCE_DIR / f"{spec.name}.tex"]
     paths += [REPO_ROOT / entry for entry in spec.data]
@@ -244,7 +253,8 @@ def figure_digest(spec: FigureSpec) -> str:
         relative = path.relative_to(REPO_ROOT).as_posix()
         hasher.update(f"{relative}:{len(payload)}:".encode())
         hasher.update(payload)
-    include = chart_include(spec)
+    hasher.update(b"metadata:")
+    hasher.update(f"{spec.title}\n{spec.description}".encode())
     if include is not None:
         hasher.update(b"figure-data.tex:")
         hasher.update(include.encode())
@@ -266,10 +276,14 @@ def _pdf_to_svg(pdf_path: Path) -> str:
         return document[0].get_svg_image()
 
 
-def _finalize_svg(spec: FigureSpec, markup: str) -> bytes:
+def _finalize_svg(spec: FigureSpec, markup: str, digest: str) -> bytes:
     """Inject header comments and accessible metadata into raw SVG."""
-    start = markup.index("<svg")
-    opening_end = markup.index(">", start)
+    start = markup.find("<svg")
+    if start == -1:
+        raise RuntimeError("converted output has no svg root")
+    opening_end = markup.find(">", start)
+    if opening_end == -1:
+        raise RuntimeError("converted output has no svg opening tag")
     prefix = spec.name
     injected = (
         f' role="img" aria-labelledby="{prefix}-title '
@@ -289,18 +303,19 @@ def _finalize_svg(spec: FigureSpec, markup: str) -> bytes:
     )
     header = (
         f"<!-- docs/assets/figures/{spec.name}.svg -->\n"
-        f"<!-- source-sha256: {figure_digest(spec)} -->\n"
+        f"<!-- source-sha256: {digest} -->\n"
     )
     return (header + body.rstrip("\n") + "\n").encode()
 
 
-def _render_figure(spec: FigureSpec, tectonic: str) -> bytes:
+def _render_figure(
+    spec: FigureSpec, tectonic: str, include: str | None, digest: str
+) -> bytes:
     """Compile one figure source to finalized SVG bytes."""
     with tempfile.TemporaryDirectory() as scratch:
         workdir = Path(scratch)
         shutil.copy(SOURCE_DIR / PREAMBLE_NAME, workdir)
         shutil.copy(SOURCE_DIR / f"{spec.name}.tex", workdir)
-        include = chart_include(spec)
         if include is not None:
             (workdir / "figure-data.tex").write_text(include)
         environment = dict(os.environ, SOURCE_DATE_EPOCH="0")
@@ -322,7 +337,7 @@ def _render_figure(spec: FigureSpec, tectonic: str) -> bytes:
                 f"tectonic failed for {spec.name}: {completed.stderr[-2000:]}"
             )
         markup = _pdf_to_svg(workdir / f"{spec.name}.pdf")
-    return _finalize_svg(spec, markup)
+    return _finalize_svg(spec, markup, digest)
 
 
 def _committed_digest(path: Path) -> str | None:
@@ -339,33 +354,40 @@ def render_figures(output_dir: Path, *, check: bool = False) -> list[str]:
     """Render or verify the figure atlas and report drift diagnostics."""
     errors = []
     expected = {f"{spec.name}.svg" for spec in FIGURES}
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(output_dir.glob("*.svg")):
-        if path.name in expected:
-            continue
-        if check:
-            errors.append(f"orphaned generated figure: {path}")
-        else:
-            path.unlink()
+    if not check:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if output_dir.is_dir():
+        for path in sorted(output_dir.glob("*.svg")):
+            if path.name in expected or not path.is_file():
+                continue
+            if check:
+                errors.append(f"orphaned generated figure: {path}")
+            else:
+                path.unlink()
     tectonic = tectonic_binary()
     for spec in FIGURES:
         path = output_dir / f"{spec.name}.svg"
-        digest = figure_digest(spec)
-        stamped = _committed_digest(path)
-        if stamped == digest:
+        include = chart_include(spec)
+        digest = figure_digest(spec, include=include)
+        if _committed_digest(path) == digest:
             continue
         if check:
-            if stamped is None:
-                errors.append(f"missing generated figure: {path}")
-            else:
+            if path.is_file():
                 errors.append(f"stale generated figure: {path}")
+            else:
+                errors.append(f"missing generated figure: {path}")
             continue
         if tectonic is None:
             errors.append(
                 f"cannot render {spec.name}: tectonic binary not found"
             )
             continue
-        path.write_bytes(_render_figure(spec, tectonic))
+        try:
+            path.write_bytes(
+                _render_figure(spec, tectonic, include, digest)
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            errors.append(f"cannot render {spec.name}: {error}")
     return sorted(errors)
 
 

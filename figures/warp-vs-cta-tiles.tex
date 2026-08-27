@@ -63,10 +63,10 @@
 \node[swtag, draw=swpurple, fill=swpurplefill, text=swpurple,
       anchor=east] at (16.1, -0.55) {33 to 4096 elements};
 
-% One longer segment split into block-stride chunks.
+% One longer segment covered by block-stride passes.
 \node[anchor=west, font=\scriptsize, text=swmuted] at (8.75, -1.05)
   {one segment (600 elements)};
-\foreach \c/\lab in {0/{chunk 0}, 1/{chunk 1}, 2/{chunk 2}, 3/{chunk 3}} {
+\foreach \c/\lab in {0/{pass 0}, 1/{pass 1}, 2/{pass 2}, 3/{pass 3}} {
   \node[swcell, minimum width=1.4cm, minimum height=0.3cm,
         fill=swpurplefill, draw=swpurple]
     (chunk\c) at (9.55 + \c * 1.55, -1.45) {};
@@ -98,7 +98,7 @@
   {shared block reduction over 128 partials};
 \draw[swarrow, draw=swpurple] (ctablock.south) -- (blockred.north);
 \node[anchor=west, font=\scriptsize, text=swink] at (8.75, -5.7)
-  {block-stride chunks: chunk c covers elements};
+  {block-stride passes: pass c covers elements};
 \node[anchor=west, font=\scriptsize, text=swink] at (8.75, -6.1)
   {[c * 128, c * 128 + 128) within the segment};
 \node[anchor=west, font=\scriptsize, text=swink] at (8.75, -6.9)
