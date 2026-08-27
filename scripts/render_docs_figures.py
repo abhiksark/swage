@@ -52,12 +52,13 @@ FIGURES = (
     ),
     FigureSpec(
         name="warp-vs-cta-tiles",
-        title="Direct warp and CTA tile shapes",
+        title="Warp, CTA, and split tile shapes",
         description=(
             "A 32-thread warp tile reduces one short segment through "
-            "an xor shuffle butterfly, while a 128-thread CTA tile "
-            "strides one longer segment in block-stride chunks before "
-            "a shared block reduction."
+            "an xor shuffle butterfly, a 128-thread CTA tile strides "
+            "one longer segment before a shared block reduction, and "
+            "512-thread split tiles cover the 4096-element chunks of "
+            "an oversized segment."
         ),
     ),
     FigureSpec(

@@ -23,12 +23,16 @@ REQUIRED_LABELS = {
     "warp-vs-cta-tiles": (
         "32-thread warp tile",
         "128-thread CTA tile",
+        "512-thread split tile",
         "xor shuffle butterfly",
         "offsets 1, 2, 4, 8, 16",
         "every lane holds the total",
         "block-stride chunks",
         "up to 32 elements",
         "33 to 4096 elements",
+        "over 4096 elements",
+        "8 elements per thread",
+        "one merge CTA",
     ),
     "fused-mixed-schedule": (
         "one 128-thread block",

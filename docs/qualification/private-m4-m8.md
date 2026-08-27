@@ -74,11 +74,11 @@ values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![A 32-thread warp tile with an xor shuffle butterfly beside a 128-thread CTA tile striding chunks](../assets/figures/warp-vs-cta-tiles.svg)
+![A 32-thread warp tile with an xor shuffle butterfly, a 128-thread CTA tile striding chunks, and a 512-thread split tile covering one chunk](../assets/figures/warp-vs-cta-tiles.svg)
 
 </div>
 
-*Fixed physical tile shapes for direct warp and CTA tasks under the default M6 limits. [Open the full-size figure](../assets/figures/warp-vs-cta-tiles.svg).*
+*Fixed physical tile shapes for warp, CTA, and split tasks under the default M6 and M8 limits. [Open the full-size figure](../assets/figures/warp-vs-cta-tiles.svg).*
 
 The warp kernel uses 32 threads. The CTA kernel uses 128 threads. Fused mixed
 execution uses one 128-thread kernel and this ABI:
