@@ -218,8 +218,9 @@ def capability_boundary() -> bytes:
     svg = Svg(
         "capability-boundary.svg",
         "Swage capability boundary",
-        "Three separate lanes distinguish the public M3 surface, private M4 "
-        "to M8 qualification, and planned segmented APIs.",
+        "Three separate lanes distinguish the public fixed vector-add "
+        "surface, private segmented qualification, and planned segmented "
+        "APIs.",
         height=650,
     )
     svg.text(48, 54, "Capability boundary", size=32, weight=750)
@@ -235,7 +236,7 @@ def capability_boundary() -> bytes:
             "PUBLIC TODAY",
             "blue",
             "blue_fill",
-            ("Python capture", "emit_mlir()", "M3 launch()"),
+            ("Python capture", "emit_mlir()", "launch()"),
             "canonical fixed vector add only",
             False,
         ),
@@ -244,7 +245,7 @@ def capability_boundary() -> bytes:
             "PRIVATE QUALIFICATION",
             "purple",
             "purple_fill",
-            ("M4-M5 semantics", "M6-M8 planning", "GPU evidence"),
+            ("segment semantics", "planning + split", "GPU evidence"),
             "not a public API",
             False,
         ),
@@ -327,7 +328,7 @@ def frontend_boundary() -> bytes:
 
     svg.box(1010, 350, 150, 154, fill="purple_fill", stroke="purple")
     svg.status_tag(
-        1024, 370, 122, "PUBLIC M3", color="purple", fill="purple_fill"
+        1024, 370, 122, "PUBLIC", color="purple", fill="purple_fill"
     )
     svg.text(1085, 438, "launch()", size=22, weight=750, anchor="middle")
     svg.text(
@@ -547,10 +548,12 @@ def compiler_pipeline() -> bytes:
     svg = Svg(
         "compiler-pipeline.svg",
         "Swage compiler pipeline",
-        "Verified semantic MLIR enters three admitted branches. Public M3, "
-        "the private M4/M5 GPU: one CTA / segment path, and private M6-M8 "
+        "Verified semantic MLIR enters three admitted branches. The public "
+        "fixed-block branch, the private direct segmented "
+        "GPU: one CTA / segment path, and "
         "GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. "
-        "The M4/M5 sequential CPU oracle exits separately through SCF and "
+        "The direct segmented sequential CPU oracle exits separately through "
+        "SCF and "
         "memref.",
         height=850,
     )
@@ -570,24 +573,24 @@ def compiler_pipeline() -> bytes:
     branches = (
         (
             55,
-            "PUBLIC M3",
-            "M3 fixed block",
+            "PUBLIC TODAY",
+            "fixed-block vector add",
             ("canonical vector add", "fixed-block GPU conversion"),
             "blue",
             "blue_fill",
         ),
         (
             420,
-            "PRIVATE M4-M5",
-            "M4 / M5 segmented direct",
+            "PRIVATE QUALIFICATION",
+            "segmented direct",
             ("sum, max, stable softmax", "two qualified paths"),
             "purple",
             "purple_fill",
         ),
         (
             785,
-            "PRIVATE M6-M8",
-            "M6-M8 SwagePlan",
+            "PRIVATE QUALIFICATION",
+            "SwagePlan direct + split",
             ("classification companion", "direct or split identity sum"),
             "green",
             "green_fill",
@@ -595,7 +598,7 @@ def compiler_pipeline() -> bytes:
     )
     for x, status, heading, body, color, fill in branches:
         svg.box(x, 245, 330, 180, fill=fill, stroke=color)
-        svg.status_tag(x + 22, 265, 180, status, color=color, fill=fill)
+        svg.status_tag(x + 22, 265, 240, status, color=color, fill=fill)
         svg.text(x + 165, 344, heading, size=19, weight=750, anchor="middle")
         svg.multiline(
             x + 165,
@@ -678,16 +681,16 @@ def compiler_pipeline() -> bytes:
 
 
 def m8_split_lifecycle() -> bytes:
-    """Render the private M8 partial and merge ownership lifecycle."""
+    """Render the private split partial and merge ownership lifecycle."""
     svg = Svg(
         "m8-split-lifecycle.svg",
-        "Private M8 split CTA identity-sum lifecycle",
+        "Private split CTA identity-sum lifecycle",
         "An oversized segment is divided into ordered absolute input ranges, "
         "each partial writes one scratch slot, and one merge writes output "
         "once.",
         height=760,
     )
-    svg.text(48, 54, "Private M8 split lifecycle", size=32, weight=750)
+    svg.text(48, 54, "Private split lifecycle", size=32, weight=750)
     svg.status_tag(
         900, 28, 245, "identity sum only", color="purple", fill="purple_fill"
     )

@@ -44,9 +44,9 @@ REQUIRED_LABELS = {
     ),
     "compiler-pipeline.svg": (
         "verified semantic MLIR",
-        "M3 fixed block",
-        "M4 / M5 segmented direct",
-        "M6-M8 SwagePlan",
+        "fixed-block vector add",
+        "segmented direct",
+        "SwagePlan direct + split",
         "GPU / SCF / NVVM / LLVM",
         "CUDA Driver API",
         "sequential CPU oracle",

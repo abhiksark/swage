@@ -38,7 +38,7 @@
   <text x="820" y="470" font-size="17" font-weight="500" fill="#00689D" text-anchor="middle">compile-only stop</text>
   <rect x="1010" y="350" width="150" height="154" rx="14" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
   <rect x="1024" y="370" width="122" height="38" rx="19" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
-  <text x="1085" y="396" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">PUBLIC M3</text>
+  <text x="1085" y="396" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">PUBLIC</text>
   <text x="1085" y="438" font-size="22" font-weight="750" fill="#17212B" text-anchor="middle">launch()</text>
   <text x="1085" y="470" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">canonical only</text>
   <line x1="1045" y1="504" x2="1045" y2="558" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
