@@ -20,17 +20,88 @@
 #include "nanobind/stl/tuple.h"
 #include "nanobind/stl/vector.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include <dlfcn.h>
+
 namespace nb = nanobind;
 
 namespace {
 
 enum class PTXKind { Fixed, Segmented, Fused, SplitPartial, SplitMerge };
+
+/// CUDA driver entry points resolved at runtime. The extension must not
+/// link against libcuda: CPU-only builds and CI have no driver, and the
+/// Python ctypes wrapper stays as the fallback dispatch path.
+struct CudaLauncher {
+  using LaunchFn = int (*)(void *, unsigned, unsigned, unsigned, unsigned,
+                           unsigned, unsigned, unsigned, void *, void **,
+                           void **);
+  using ErrorTextFn = int (*)(int, const char **);
+  LaunchFn launch = nullptr;
+  ErrorTextFn errorName = nullptr;
+  ErrorTextFn errorString = nullptr;
+};
+
+const CudaLauncher &cudaLauncher() {
+  static const CudaLauncher launcher = [] {
+    CudaLauncher resolved;
+    void *library = dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
+    if (!library)
+      return resolved;
+    resolved.launch = reinterpret_cast<CudaLauncher::LaunchFn>(
+        dlsym(library, "cuLaunchKernel"));
+    resolved.errorName = reinterpret_cast<CudaLauncher::ErrorTextFn>(
+        dlsym(library, "cuGetErrorName"));
+    resolved.errorString = reinterpret_cast<CudaLauncher::ErrorTextFn>(
+        dlsym(library, "cuGetErrorString"));
+    return resolved;
+  }();
+  return launcher;
+}
+
+void launchKernel(uint64_t function, int64_t gridX, int64_t blockX,
+                  uint64_t stream, std::vector<uint64_t> &pointers,
+                  std::vector<int32_t> &scalars) {
+  constexpr size_t maxArguments = 16;
+  const CudaLauncher &launcher = cudaLauncher();
+  if (!launcher.launch)
+    throw std::runtime_error(
+        "CUDA Driver library libcuda.so.1 is unavailable");
+  if (gridX <= 0 || gridX > int64_t(UINT32_MAX))
+    throw nb::value_error("grid_x must be a positive u32");
+  if (blockX <= 0 || blockX > 1024)
+    throw nb::value_error("block_x must be in 1..1024");
+  if (pointers.size() + scalars.size() > maxArguments)
+    throw nb::value_error("too many kernel arguments");
+  std::array<void *, maxArguments> parameters;
+  size_t index = 0;
+  for (uint64_t &pointer : pointers)
+    parameters[index++] = &pointer;
+  for (int32_t &scalar : scalars)
+    parameters[index++] = &scalar;
+  int result = launcher.launch(
+      reinterpret_cast<void *>(function), static_cast<unsigned>(gridX), 1, 1,
+      static_cast<unsigned>(blockX), 1, 1, 0,
+      reinterpret_cast<void *>(stream), parameters.data(), nullptr);
+  if (result == 0)
+    return;
+  const char *name = nullptr;
+  const char *text = nullptr;
+  if (launcher.errorName)
+    launcher.errorName(result, &name);
+  if (launcher.errorString)
+    launcher.errorString(result, &text);
+  throw std::runtime_error(
+      std::string("CUDA Driver cuLaunchKernel failed: ") +
+      (name ? name : "unknown") + " (" + std::to_string(result) + "): " +
+      (text ? text : "unknown"));
+}
 
 MlirModule unwrapModule(nb::object moduleObject) {
   std::optional<nb::object> capsule =
@@ -119,6 +190,15 @@ materializeSegmentedPlan(nb::object moduleObject,
 
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
+
+  swageM.def(
+      "_launch_kernel",
+      [](uint64_t function, int64_t gridX, int64_t blockX, uint64_t stream,
+         std::vector<uint64_t> pointers, std::vector<int32_t> scalars) {
+        launchKernel(function, gridX, blockX, stream, pointers, scalars);
+      },
+      nb::arg("function"), nb::arg("grid_x"), nb::arg("block_x"),
+      nb::arg("stream"), nb::arg("pointers"), nb::arg("scalars"));
 
   swageM.def(
       "register_dialects",

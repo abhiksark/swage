@@ -119,3 +119,51 @@ def test_launch_rejects_invalid_runtime_inputs():
             constexprs={"BLOCK": limit + 1},
             grid=(1,),
         )
+
+
+def test_native_launcher_runs_the_fixed_kernel():
+    """Dispatch one launch through the compiled path, not ctypes."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    n, block = 1000, 128
+    x = torch.randn(n, device="cuda")
+    y = torch.randn(n, device="cuda")
+    output = torch.full((n,), -777.0, device="cuda")
+    module = add_kernel.emit_mlir(
+        arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": n},
+        constexprs={"BLOCK": block},
+    )
+    major, minor = torch.cuda.get_device_capability()
+    _, ptx = native_swage._compile_ptx(
+        module, kernel_name="add_kernel", block_size=block,
+        target=f"sm_{major}{minor}",
+    )
+    driver = _runtime._get_driver()
+    _, function = driver.load(ptx, "add_kernel")
+
+    native_swage._launch_kernel(
+        function,
+        (n + block - 1) // block,
+        block,
+        torch.cuda.current_stream().cuda_stream,
+        (x.data_ptr(), y.data_ptr(), output.data_ptr()),
+        (n,),
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, x + y)
+
+
+def test_native_launcher_surfaces_driver_errors():
+    """Report a failed cuLaunchKernel with the stable message shape."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    torch.zeros(1, device="cuda")
+    with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
+        native_swage._launch_kernel(
+            0, 1, 128, torch.cuda.current_stream().cuda_stream, (0,), (0,)
+        )

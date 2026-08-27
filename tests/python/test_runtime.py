@@ -632,3 +632,59 @@ def test_device_fact_cache_is_isolated_per_torch_module(monkeypatch):
             constexprs={"BLOCK": 1024},
             grid=(1,),
         )
+
+
+def _stub_cuda_library(monkeypatch):
+    from swage import _runtime
+
+    monkeypatch.setattr(
+        _runtime.ctypes,
+        "CDLL",
+        lambda _name: mock.MagicMock(
+            **{"cuLaunchKernel.return_value": 0}
+        ),
+    )
+
+
+def test_driver_prefers_the_native_launcher_when_available(monkeypatch):
+    """Dispatch through the compiled launcher when the bindings exist."""
+    from swage import _runtime
+
+    _stub_cuda_library(monkeypatch)
+    calls = []
+    native = types.ModuleType("_swageDialectsNanobind")
+    native.swage = types.SimpleNamespace(
+        _launch_kernel=lambda *arguments: calls.append(arguments)
+    )
+    libs = types.ModuleType("mlir_swage._mlir_libs")
+    libs._swageDialectsNanobind = native
+    monkeypatch.setitem(sys.modules, "mlir_swage._mlir_libs", libs)
+    monkeypatch.setitem(
+        sys.modules, "mlir_swage._mlir_libs._swageDialectsNanobind", native
+    )
+
+    driver = _runtime._CudaDriver()
+    driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
+    driver.launch_segmented(7, (4,), 128, 9, (0x1, 0x2, 0x3, 60, 4))
+    driver.launch_segmented_tasks(7, (5,), 32, 9, (1, 2, 3, 4, 60, 5))
+    driver.launch_segmented_mixed(7, (6,), 128, 9, (1, 2, 3, 4, 60, 5, 1))
+
+    assert calls == [
+        (7, 3, 128, 9, (0x1, 0x2, 0x3), (129,)),
+        (7, 4, 128, 9, (0x1, 0x2, 0x3), (60, 4)),
+        (7, 5, 32, 9, (1, 2, 3, 4), (60, 5)),
+        (7, 6, 128, 9, (1, 2, 3, 4), (60, 5, 1)),
+    ]
+
+
+def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
+    """Keep the ctypes path working when mlir_swage is absent."""
+    from swage import _runtime
+
+    _stub_cuda_library(monkeypatch)
+    monkeypatch.setitem(sys.modules, "mlir_swage", None)
+
+    driver = _runtime._CudaDriver()
+    assert driver._native_launch is None
+    driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
+    assert driver.library.cuLaunchKernel.called
