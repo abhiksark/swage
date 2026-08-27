@@ -136,7 +136,9 @@ Merge ABI:
 scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
 ```
 
-Both kernels use 128 threads. Partial ranges are absolute half-open input
+Both kernels use 512 threads, sized so one 4096-element chunk fully
+occupies a CTA at eight elements per thread. Partial ranges are absolute
+half-open input
 ranges, and each partial writes one unique scratch slot. Merge records carry a
 segment ID and a compact half-open scratch range; thread zero writes the final
 segment result once.

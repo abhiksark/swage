@@ -57,8 +57,9 @@ work.
 ## Tile: the physical step
 
 A tile is the fixed physical work shape used while lowering a task. In the
-current qualified identity-sum paths, a warp step uses 32 threads and a CTA
-step uses 128 threads. The 4096-element CTA chunk limit is the number of input
+current qualified identity-sum paths, a warp step uses 32 threads, a CTA
+step uses 128 threads, and a split partial or merge step uses 512 threads.
+The 4096-element CTA chunk limit is the number of input
 elements traversed by a task, not the number of threads.
 
 Some design records use forms such as `tile<32xf32>` as conceptual notation.
