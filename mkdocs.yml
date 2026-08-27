@@ -71,6 +71,7 @@ nav:
   - API reference:
       - reference/index.md
       - swage: reference/swage.md
+      - swage.language: reference/swage-language.md
       - Kernel Language: reference/kernel-language.md
       - Runtime and Environment: reference/runtime-environment.md
   - Internals:

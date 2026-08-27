@@ -9,6 +9,7 @@ disagree, the reference is normative.
 | Page | Scope |
 |---|---|
 | [swage](swage.md) | Package exports: `jit`, kernel objects, `emit_mlir`, `launch`, exceptions, `swage.env` |
+| [swage.language](swage-language.md) | The symbolic kernel-language exports |
 | [Kernel Language](kernel-language.md) | The accepted Python source grammar |
 | [Runtime and Environment](runtime-environment.md) | Launch validation, targets, cache, streams, and diagnostics |
 
