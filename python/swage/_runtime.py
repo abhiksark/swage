@@ -1,5 +1,5 @@
 # python/swage/_runtime.py
-"""Minimal CUDA Driver runtime for the M3 fixed vector-add subset."""
+"""Minimal CUDA Driver runtime for the canonical fixed vector-add subset."""
 
 import ast
 import ctypes
@@ -130,12 +130,14 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
     parameter_names = [argument.arg for argument in kernel.function.args.args]
     if parameter_names != ["x_ptr", "y_ptr", "output_ptr", "n", "BLOCK"]:
         raise ValueError(
-            "M3 launch requires x_ptr, y_ptr, output_ptr, n, and BLOCK "
+            "launch requires x_ptr, y_ptr, output_ptr, n, and BLOCK "
             "parameters"
         )
     runtime_names = parameter_names[:4]
     if set(arguments) != set(runtime_names):
-        raise ValueError("arguments must contain exactly the M3 parameters")
+        raise ValueError(
+            "arguments must contain exactly x_ptr, y_ptr, output_ptr, and n"
+        )
     if set(constexprs) != {"BLOCK"}:
         raise ValueError("constexprs must contain exactly BLOCK")
 
@@ -166,7 +168,7 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
                 f"argument '{name}' must be on the current CUDA device"
             )
 
-    # The tensor and scalar checks above already pin the exact M3 ABI, so
+    # The tensor and scalar checks above already pin the exact launch ABI, so
     # for the canonical annotation shape the descriptors are constants and
     # re-deriving them through metadata inference would only repeat checks.
     # Any other annotation shape takes the full path for its diagnostics.
@@ -183,7 +185,7 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
         )
         if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
             raise TypeError(
-                "M3 launch requires three f32 pointers and one i32"
+                "launch requires three f32 pointers and one i32"
             )
 
     max_threads, target = _device_facts(torch, current_device)

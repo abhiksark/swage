@@ -99,7 +99,7 @@ class _Kernel:
         )
 
     def launch(self, *, arguments, constexprs, grid):
-        """Asynchronously launch the M3 fixed vector-add subset."""
+        """Asynchronously launch the canonical fixed vector-add subset."""
         from ._runtime import launch
 
         return launch(

@@ -1,5 +1,5 @@
 # examples/fixed_vector_add.py
-"""Emit semantic MLIR and execute the M3 fixed vector-add kernel."""
+"""Emit semantic MLIR and execute the canonical fixed vector-add kernel."""
 
 import swage as sw
 import swage.language as sl
