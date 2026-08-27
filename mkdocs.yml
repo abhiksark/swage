@@ -57,6 +57,7 @@ nav:
   - Qualification:
       - Private M4 to M8: qualification/private-m4-m8.md
       - Verification Evidence: qualification/evidence.md
+      - Measured Performance: qualification/performance.md
   - Decisions:
       - ADR Index: decisions/index.md
       - "ADR-0001: Python AST directly to MLIR": adr/ADR-0001-python-ast-directly-to-mlir.md

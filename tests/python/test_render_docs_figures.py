@@ -2,6 +2,7 @@
 """Validate the TikZ figure atlas without requiring a TeX toolchain."""
 
 import importlib.util
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -63,6 +64,16 @@ REQUIRED_LABELS = {
         "ctypes fallback",
         "compiled bindings are absent",
         "current PyTorch stream",
+    ),
+    "timing-methods": (
+        "call_us",
+        "kernel_us",
+        "graph_us",
+        "synchronized wall clock",
+        "32 back-to-back launches",
+        "launcher still visible",
+        "CUDA-graph replay",
+        "host removed",
     ),
 }
 
@@ -172,6 +183,35 @@ def test_check_reports_missing_stale_and_orphaned_outputs(tmp_path):
     )
     assert orphan.exists()
     assert stale_path.read_text() == "".join(lines)
+
+
+def test_perf_snapshot_is_wellformed_and_sourced():
+    """The committed campaign snapshot is complete and auditable."""
+    module = _load_renderer()
+    snapshot = json.loads(module.SNAPSHOT_PATH.read_text())
+    assert snapshot["environment"]["compute_capability"] == "sm_120"
+    assert snapshot["recorded_at"] == "2026-08-27"
+    rows = snapshot["segsum_graph_us"]
+    assert [row["distribution"] for row in rows] == [
+        "uniform-8",
+        "uniform-24",
+        "uniform-512",
+        "uniform-4k",
+        "zipf",
+        "bimodal",
+        "few-huge",
+    ]
+    for row in rows:
+        for impl in ("swage", "triton", "torch"):
+            cell = row[impl]
+            assert cell["median"] > 0, (row["distribution"], impl)
+            sourced = "provenance" in cell
+            spread = "q1" in cell and cell["q1"] <= cell["q3"]
+            assert sourced or spread, (row["distribution"], impl)
+    for stage in snapshot["dispatch_call_us"]:
+        assert stage["median"] > 0
+        assert "provenance" in stage or stage["q1"] <= stage["q3"]
+    assert "provenance" in snapshot["cold_start_ms"]
 
 
 def _toolchain_missing():

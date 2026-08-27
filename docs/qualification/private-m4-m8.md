@@ -153,5 +153,7 @@ M8 does not implement packed warps, split max, split softmax, device queues,
 persistent scheduling, public segment syntax, or public segmented launch.
 
 Continue with [Verification Evidence](evidence.md) for the executable proof
-behind each boundary, or [SwagePlan Dialect](../reference/swage-plan-dialect.md)
+behind each boundary, [Measured Performance](performance.md) for the recorded
+RTX 5090 campaign, or
+[SwagePlan Dialect](../reference/swage-plan-dialect.md)
 for the private planning IR surface.

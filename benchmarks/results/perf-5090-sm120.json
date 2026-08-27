@@ -1,0 +1,125 @@
+{
+  "benchmark": "rtx5090-dispatch-and-segmented-graph-campaign",
+  "recorded_at": "2026-08-27",
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "compute_capability": "sm_120",
+    "nvidia_driver": "580.173.02",
+    "cuda_driver": "13.0",
+    "pytorch": "2.13.0+cu130",
+    "triton": "3.7.1",
+    "notes": "co-tenant GPU; graph timings replay 32 captured launches"
+  },
+  "source": {
+    "branch": "perf/faster-than-triton",
+    "revisions": ["b9689c6", "d961316", "2c75233"],
+    "raw_log": "campaign archive results.jsonl (1355 rows) and RESULTS.md; not committed",
+    "triton_baseline": "per-segment kernel, BLOCK=256 num_warps=8, best of the swept and autotuned configurations (raw-log impl name triton-naive)"
+  },
+  "aggregation": {
+    "rule": "median of the three per-run medians; q1 and q3 are medians of the per-run quartiles",
+    "segsum_graph_us_runs": ["graphs2-r1", "graphs2-r2", "graphs2-r3"],
+    "dispatch_call_us_runs": ["baseline-r1..r3", "o1-batched-r1..r3", "clauncher-r1..r3"],
+    "dispatch_case": "vadd n=2^14, warm launch"
+  },
+  "segsum_graph_us": [
+    {
+      "distribution": "uniform-8",
+      "segments": 32768,
+      "swage": {"policy": "plain", "block": 64, "median": 16.0, "q1": 16.0, "q3": 16.1},
+      "triton": {"median": 21.0, "q1": 21.0, "q3": 21.1},
+      "torch": {"median": 22.5, "q1": 22.4, "q3": 22.5}
+    },
+    {
+      "distribution": "uniform-24",
+      "segments": 16384,
+      "swage": {"policy": "plain", "block": 64, "median": 8.4, "q1": 8.4, "q3": 8.4},
+      "triton": {"median": 11.1, "q1": 11.1, "q3": 11.1},
+      "torch": {"median": 12.1, "q1": 12.1, "q3": 12.2}
+    },
+    {
+      "distribution": "uniform-512",
+      "segments": 4096,
+      "swage": {"policy": "plain", "block": 128, "median": 3.1, "q1": 3.1, "q3": 3.1},
+      "triton": {"median": 3.8, "q1": 3.8, "q3": 3.8},
+      "torch": {"median": 4.8, "q1": 4.8, "q3": 4.8}
+    },
+    {
+      "distribution": "uniform-4k",
+      "segments": 512,
+      "swage": {"policy": "plain", "block": 256, "median": 2.6, "q1": 2.6, "q3": 2.7},
+      "triton": {"median": 2.5, "q1": 2.5, "q3": 2.5},
+      "torch": {"median": 3.2, "q1": 3.2, "q3": 3.2}
+    },
+    {
+      "distribution": "zipf",
+      "segments": 12000,
+      "swage": {"policy": "plain", "block": 128, "median": 7.4, "q1": 7.4, "q3": 7.5},
+      "triton": {"median": 8.9, "q1": 8.9, "q3": 9.0},
+      "torch": {"median": 9.9, "q1": 9.8, "q3": 9.9}
+    },
+    {
+      "distribution": "bimodal",
+      "segments": 12048,
+      "swage": {
+        "policy": "mixed",
+        "median": 5.3,
+        "provenance": "RESULTS.md headline table, one captured mixed sequence (O5); the verdict row records 5.2; the triplicated plain-128 kernel measures 10.6"
+      },
+      "triton": {"median": 10.7, "q1": 10.7, "q3": 10.7},
+      "torch": {"median": 10.1, "q1": 10.1, "q3": 10.1}
+    },
+    {
+      "distribution": "few-huge",
+      "segments": 8196,
+      "swage": {
+        "policy": "mixed",
+        "median": 4.8,
+        "provenance": "RESULTS.md headline table, one captured mixed sequence (O5); the triplicated plain-512 kernel measures 26.0"
+      },
+      "triton": {"median": 34.7, "q1": 34.6, "q3": 34.9},
+      "torch": {"median": 17.2, "q1": 17.1, "q3": 17.3}
+    }
+  ],
+  "dispatch_call_us": [
+    {
+      "stage": "baseline per-launch host path",
+      "impl": "swage",
+      "median": 7714.5,
+      "q1": 7034.1,
+      "q3": 8803.2
+    },
+    {
+      "stage": "cached identity and emit-on-miss (O1)",
+      "impl": "swage",
+      "median": 36.1,
+      "q1": 33.8,
+      "q3": 39.0
+    },
+    {
+      "stage": "compiled nanobind launcher",
+      "impl": "swage",
+      "median": 24.7,
+      "q1": 24.5,
+      "q3": 25.3
+    },
+    {
+      "stage": "compiled-C launcher",
+      "impl": "triton",
+      "median": 20.4,
+      "q1": 20.2,
+      "q3": 20.8
+    },
+    {
+      "stage": "torch.add dispatch",
+      "impl": "torch",
+      "median": 14.0,
+      "provenance": "campaign summary prose; not recorded in the raw log"
+    }
+  ],
+  "cold_start_ms": {
+    "swage": 144,
+    "triton": 1116,
+    "provenance": "one fresh-process first vector-add launch each (O6); single measurement"
+  }
+}

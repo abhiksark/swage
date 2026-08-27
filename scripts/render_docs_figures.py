@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).parents[1]
 SOURCE_DIR = REPO_ROOT / "figures"
 OUTPUT_DIR = REPO_ROOT / "docs/assets/figures"
 PREAMBLE_NAME = "common-preamble.tex"
+SNAPSHOT_PATH = REPO_ROOT / "benchmarks/results/perf-5090-sm120.json"
 FALLBACK_TECTONIC = Path.home() / ".local/bin/tectonic"
 STAMP_PATTERN = re.compile(r"<!-- source-sha256: ([0-9a-f]{64}) -->")
 
@@ -84,6 +85,15 @@ FIGURES = (
             "launcher when the bindings import, or through the ctypes "
             "fallback otherwise; both submit the same driver call on "
             "the current PyTorch stream."
+        ),
+    ),
+    FigureSpec(
+        name="timing-methods",
+        title="Three timing methods",
+        description=(
+            "Timelines contrast synchronized per-call wall clock, "
+            "batched CUDA-event timing with the launcher still "
+            "visible, and CUDA-graph replay with the host removed."
         ),
     ),
     FigureSpec(
