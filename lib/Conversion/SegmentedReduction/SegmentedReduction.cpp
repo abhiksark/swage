@@ -744,7 +744,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 }
 
 void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
-  constexpr int64_t blockSize = 128;
+  // 512 threads per split CTA: wide enough to stream oversized
+  // segments at memory bandwidth, still fully occupied by one 4096-element
+  // chunk (8 elements per thread).
+  constexpr int64_t blockSize = 512;
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   std::string suffix = merge ? "__merge" : "__partial";

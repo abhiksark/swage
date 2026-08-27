@@ -226,7 +226,7 @@ def test_fused_mixed_lowering_rejects_non_planning_program():
     ],
 )
 def test_compiles_deterministic_split_cta_kernels(compiler, entry):
-    """Emit each private three-pointer, two-i32 split ABI at 128 threads."""
+    """Emit each private three-pointer, two-i32 split ABI at 512 threads."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
@@ -250,7 +250,7 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 3
         assert signature.group(1).count("i32") == 2
-        assert "llvm.mlir.constant(128 : index)" in lowered
+        assert "llvm.mlir.constant(512 : index)" in lowered
         assert "nvvm.barrier0" in lowered
         assert ptx.count(".param .u64") == 3
         assert ptx.count(".param .u32") == 2
@@ -559,15 +559,15 @@ def test_segmented_kernels_pin_their_launch_width_with_reqntid(block_size):
 
 
 @pytest.mark.parametrize(
-    "compiler",
+    ("compiler", "width"),
     [
-        "_compile_split_partial_reduction_ptx",
-        "_compile_split_merge_reduction_ptx",
-        "_compile_fused_segmented_reduction_ptx",
+        ("_compile_split_partial_reduction_ptx", 512),
+        ("_compile_split_merge_reduction_ptx", 512),
+        ("_compile_fused_segmented_reduction_ptx", 128),
     ],
 )
-def test_fixed_width_kernels_carry_reqntid_128(compiler):
-    """The split and fused ABIs hardcode 128 threads; the PTX must too."""
+def test_fixed_width_kernels_carry_their_reqntid(compiler, width):
+    """The split and fused ABIs hardcode widths; the PTX must agree."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
@@ -576,7 +576,7 @@ def test_fixed_width_kernels_carry_reqntid_128(compiler):
             kernel_name="segmented_sum",
             target="sm_80",
         )
-        assert ".reqntid 128, 1, 1" in ptx
+        assert f".reqntid {width}, 1, 1" in ptx
 
 
 BYSTANDER_MODULE = SEGMENTED_SUM.rstrip().removesuffix("}") + """

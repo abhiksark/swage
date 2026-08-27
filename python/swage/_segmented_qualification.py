@@ -15,6 +15,7 @@ from . import _runtime
 _I32_LIMIT = 1 << 31
 _WARP_BLOCK = 32
 _CTA_BLOCK = 128
+_SPLIT_BLOCK = 512
 _CTA_CHUNK_ELEMENTS = 4096
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
@@ -610,7 +611,7 @@ def _prepare_planned_sum(
             driver.launch_segmented(
                 partial_function,
                 (partial_count,),
-                _CTA_BLOCK,
+                _SPLIT_BLOCK,
                 stream.cuda_stream,
                 (
                     values.data_ptr(),
@@ -625,7 +626,7 @@ def _prepare_planned_sum(
             driver.launch_segmented(
                 merge_function,
                 (merge_count,),
-                _CTA_BLOCK,
+                _SPLIT_BLOCK,
                 stream.cuda_stream,
                 (
                     scratch.data_ptr(),

@@ -476,9 +476,9 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     direct, partial, merge = driver.launches
     assert direct[2:4] == ((2,), 128)
     assert direct[5][5:] == (2, 1)
-    assert partial[2:4] == ((4,), 128)
+    assert partial[2:4] == ((4,), 512)
     assert partial[5][3:] == (offsets[-1], 4)
-    assert merge[2:4] == ((2,), 128)
+    assert merge[2:4] == ((2,), 512)
     assert merge[5][3:] == (4, 2)
     assert [data for data, _ in descriptor_tensors] == [
         [0, 4, 1],

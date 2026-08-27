@@ -343,7 +343,7 @@ MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
                         KernelKind::SplitPartialReduction, false, false,
                         lowered, ptx)))
     return mlirLogicalResultFailure();
@@ -360,7 +360,7 @@ MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
                         KernelKind::SplitMergeReduction, false, false, lowered,
                         ptx)))
     return mlirLogicalResultFailure();
