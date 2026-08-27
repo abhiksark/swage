@@ -57,6 +57,36 @@ snapshot record the single-sequence caveat.
 
 *Segmented sum graph-replay medians per distribution; lower is better. [Open the full-size figure](../assets/figures/segsum-graph-comparison.svg).*
 
+## Dispatch cost
+
+The campaign reduced warm per-launch dispatch from 7714.5 to 36.1
+microseconds by caching the compiler identity and skipping emission on
+cache hits, then to 24.7 microseconds through the compiled nanobind
+launcher. Triton's compiled-C launcher measures 20.4 microseconds and
+torch dispatch about 14, so pure dispatch narrowed but was not won.
+Cold start went the other way: the first vector-add launch in a fresh
+process took 144 milliseconds for Swage against 1116 milliseconds for
+Triton's autotuning stack.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Log-scale bars following warm dispatch cost across the campaign stages](../assets/figures/dispatch-ladder.svg)
+
+</div>
+
+*The warm dispatch ladder and the cold-start comparison. [Open the full-size figure](../assets/figures/dispatch-ladder.svg).*
+
+## Honest losses
+
+- Pure warm dispatch stays with Triton (20.4 versus 24.7 microseconds)
+  and torch (about 14).
+- uniform-4k segmented sum is parity, nominally Triton (2.5 versus
+  2.6 microseconds).
+- Vector add is parity within noise at every measured size under graph
+  timing, except a stable Swage loss at exactly n = 2^20 (3.2 versus
+  2.5 microseconds). There is no vector-add win to claim in either
+  direction.
+
 Continue with [Verification Evidence](evidence.md) for the executable
 proof behind each boundary, or [Private M4 to M8](private-m4-m8.md) for
 the execution contracts these measurements exercise.

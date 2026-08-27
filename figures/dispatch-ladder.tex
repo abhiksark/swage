@@ -1,0 +1,58 @@
+% figures/dispatch-ladder.tex
+% Warm per-launch dispatch cost on a log scale: the swage host-path
+% ladder beside the Triton and torch dispatch costs, with cold start.
+% Series data is generated from benchmarks/results/perf-5090-sm120.json
+% into figure-data.tex by scripts/render_docs_figures.py.
+\documentclass[tikz,border=10pt]{standalone}
+\input{common-preamble.tex}
+\begin{document}
+\begin{tikzpicture}
+
+% Header.
+\node[swtitle] at (0.1, 8.15) {Warm dispatch cost ladder};
+\node[swsubtitle] at (0.1, 7.5)
+  {{\ttfamily\detokenize{call_us}} per warm vector-add launch
+   (n = 16384), log scale; lower is better.};
+
+\input{figure-data.tex}
+\begin{axis}[
+  anchor=south west, at={(4.6cm, 1.2cm)},
+  xbar, bar width=11pt,
+  width=11.6cm, height=5.9cm,
+  xmode=log, xmin=8, xmax=40000,
+  log origin=infty,
+  point meta=rawx,
+  log ticks with fixed point,
+  xtick={10, 100, 1000, 10000},
+  xlabel={median microseconds, log scale},
+  xlabel style={font=\scriptsize, text=swink},
+  x tick label style={font=\scriptsize, text=swink},
+  ymin=-0.7, ymax=4.7,
+  ytick={0, 1, 2, 3, 4},
+  yticklabels={
+    {torch: add dispatch},
+    {triton: compiled-C launcher},
+    {swage: compiled nanobind launcher},
+    {swage: cached identity, emit on miss},
+    {swage: baseline host path}},
+  y tick label style={font=\scriptsize, text=swink},
+  xmajorgrids, grid style={draw=swline, opacity=0.25},
+  axis line style={draw=swline},
+  nodes near coords,
+  every node near coord/.append style={font=\tiny, text=swink,
+    anchor=west, xshift=2pt, /pgf/number format/.cd, fixed,
+    precision=1, fixed zerofill, 1000 sep={}},
+]
+\dispatchplots
+\end{axis}
+
+% Reading notes.
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.1, -0.35)
+  {the compiled launcher closed most of the swage gap; triton keeps
+   the pure dispatch edge (narrowed, not won)};
+\node[anchor=west, font=\scriptsize, text=swmuted] at (0.1, -0.8)
+  {cold start, one fresh process each: swage \swagecoldms{} ms vs
+   triton \tritoncoldms{} ms first launch};
+
+\end{tikzpicture}
+\end{document}

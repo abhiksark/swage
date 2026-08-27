@@ -85,6 +85,15 @@ REQUIRED_LABELS = {
         "captured mixed sequence",
         "figure-data.tex",
     ),
+    "dispatch-ladder": (
+        "call_us",
+        "log scale",
+        "compiled nanobind launcher",
+        "compiled-C launcher",
+        "cold start",
+        "narrowed, not won",
+        "figure-data.tex",
+    ),
 }
 
 
@@ -209,6 +218,23 @@ def test_chart_data_includes_match_the_snapshot():
             median = row[impl]["median"]
             coordinate = f"({row['distribution']},{median:.1f})"
             assert coordinate in include, coordinate
+
+    ladder = by_name["dispatch-ladder"]
+    assert ladder.data == ("benchmarks/results/perf-5090-sm120.json",)
+    stages = snapshot["dispatch_call_us"]
+    assert [stage["impl"] for stage in stages] == [
+        "swage",
+        "swage",
+        "swage",
+        "triton",
+        "torch",
+    ]
+    ladder_include = module.chart_include(ladder)
+    for stage in stages:
+        assert f"({stage['median']:.1f}," in ladder_include, stage["stage"]
+    cold = snapshot["cold_start_ms"]
+    assert str(cold["swage"]) in ladder_include
+    assert str(cold["triton"]) in ladder_include
 
 
 def test_perf_snapshot_is_wellformed_and_sourced():

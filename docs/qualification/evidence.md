@@ -18,6 +18,7 @@ does not turn private qualification into public API.
 | Pure and fused mixed identity-sum correctness | Private M7 qualification | `python/tests/mlir/test_segmented_runtime.py` | trusted GPU workflow |
 | Frozen mixed-policy performance gate | Private M7 qualification | `benchmarks/results/m7-a6000-sm86.json`, `tests/python/test_benchmark_m7_mixed_sum.py` | `python -m pytest tests/python/test_benchmark_m7_mixed_sum.py -q` |
 | Split coverage, ordering, failures, and f32 parity | Private M8 qualification | `unittests/TaskClassifierTest.cpp`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage-unit`; trusted GPU workflow |
+| Recorded RTX 5090 dispatch and segmented campaign | Recorded evidence | `benchmarks/results/perf-5090-sm120.json`, [Measured Performance](performance.md) | Not re-executable in CI |
 | Public segmented syntax and execution | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | Roadmap M9 and M10 gates | No passing gate yet |
 

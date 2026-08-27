@@ -109,6 +109,16 @@ FIGURES = (
         data=("benchmarks/results/perf-5090-sm120.json",),
     ),
     FigureSpec(
+        name="dispatch-ladder",
+        title="Warm dispatch cost ladder",
+        description=(
+            "Log-scale bars follow warm per-launch dispatch cost from "
+            "the baseline host path through the cached and compiled "
+            "launchers, beside the Triton and torch dispatch costs."
+        ),
+        data=("benchmarks/results/perf-5090-sm120.json",),
+    ),
+    FigureSpec(
         name="fused-mixed-schedule",
         title="Fused mixed-policy schedule",
         description=(
@@ -157,10 +167,39 @@ def _segsum_include() -> str:
     return "".join(lines)
 
 
+def _dispatch_include() -> str:
+    """Generate the dispatch-ladder series from the snapshot."""
+    snapshot = _load_snapshot()
+    stages = snapshot["dispatch_call_us"]
+    styles = {
+        "swage": "xbar, bar shift=0pt, fill=swbluefill, draw=swblue",
+        "triton": "xbar, bar shift=0pt, fill=sworangefill, draw=sworange",
+        "torch": "xbar, bar shift=0pt, fill=swpurplefill, draw=swpurple",
+    }
+    total = len(stages)
+    lines = ["\\newcommand{\\dispatchplots}{%\n"]
+    for impl in ("swage", "triton", "torch"):
+        coordinates = " ".join(
+            f"({stage['median']:.1f},{total - 1 - index})"
+            for index, stage in enumerate(stages)
+            if stage["impl"] == impl
+        )
+        lines.append(
+            f"\\addplot[{styles[impl]}] coordinates {{{coordinates}}};\n"
+        )
+    lines.append("}\n")
+    cold = snapshot["cold_start_ms"]
+    lines.append(f"\\def\\swagecoldms{{{cold['swage']}}}\n")
+    lines.append(f"\\def\\tritoncoldms{{{cold['triton']}}}\n")
+    return "".join(lines)
+
+
 def chart_include(spec: FigureSpec) -> str | None:
     """Return the generated data include for one chart figure."""
     if spec.name == "segsum-graph-comparison":
         return _segsum_include()
+    if spec.name == "dispatch-ladder":
+        return _dispatch_include()
     return None
 
 
