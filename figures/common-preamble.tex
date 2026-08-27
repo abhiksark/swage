@@ -1,0 +1,48 @@
+% figures/common-preamble.tex
+% Shared setup for the TikZ documentation figures. Colors mirror the
+% palette in scripts/render_docs_diagrams.py so both atlases match.
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta}
+\usetikzlibrary{backgrounds}
+\usetikzlibrary{calc}
+\usetikzlibrary{decorations.pathreplacing}
+\usetikzlibrary{fit}
+\usetikzlibrary{positioning}
+
+\definecolor{swcanvas}{HTML}{FFFDF8}
+\definecolor{swpanel}{HTML}{F5F3ED}
+\definecolor{swink}{HTML}{17212B}
+\definecolor{swmuted}{HTML}{4B5563}
+\definecolor{swline}{HTML}{59636E}
+\definecolor{swblue}{HTML}{00689D}
+\definecolor{swbluefill}{HTML}{DCEFFD}
+\definecolor{swpurple}{HTML}{8E4775}
+\definecolor{swpurplefill}{HTML}{F7E2EF}
+\definecolor{sworange}{HTML}{A94500}
+\definecolor{sworangefill}{HTML}{FCE5DC}
+\definecolor{swgreen}{HTML}{00664B}
+\definecolor{swgreenfill}{HTML}{DDF4EB}
+\definecolor{swgrayfill}{HTML}{EEF0F2}
+
+\pagecolor{swcanvas}
+\AtBeginDocument{\color{swink}}
+
+\tikzset{
+  swcell/.style={
+    draw, minimum width=0.46cm, minimum height=0.46cm, inner sep=0pt,
+    line width=0.7pt, rounded corners=1pt},
+  swbox/.style={
+    draw=swline, fill=swpanel, rounded corners=6pt, line width=0.9pt},
+  swarrow/.style={-{Stealth[length=6pt]}, draw=swline, line width=1pt},
+  swtag/.style={
+    draw, rounded corners=8pt, line width=0.9pt,
+    font=\bfseries\scriptsize, inner xsep=8pt, inner ysep=4pt},
+  swtitle/.style={anchor=west, font=\Large\bfseries, text=swink},
+  swsubtitle/.style={anchor=west, font=\small, text=swmuted},
+  swcode/.style={font=\small\ttfamily, text=swink},
+  every picture/.style={line cap=round},
+}
