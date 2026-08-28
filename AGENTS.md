@@ -5,17 +5,27 @@
 Swage is a Python-embedded MLIR/LLVM GPU compiler that lowers
 variable-sized dense segment programs into fixed-tile GPU tasks.
 
-## Required reading
+## Task routing
 
-- `README.md`: current status; what works vs. what is planned
-- `DESIGN.md`: architecture and invariants
-- `ROADMAP.md`: phase gates and their status
-- `docs/user-guide/execution-model.md`: the Segment/Task/Tile model
-- `docs/internals/compiler-pipeline.md`: the lowering pipeline
+Read this file for every task, then open only the smallest relevant guide:
+
+- Python, frontend, bindings, and related tests:
+  [python/AGENTS.md](python/AGENTS.md).
+- MLIR, C++, TableGen, and compiler tools: [lib/AGENTS.md](lib/AGENTS.md).
+- lit and FileCheck work: [test/AGENTS.md](test/AGENTS.md).
+- Current or planned status claims: [README.md](README.md) and
+  [ROADMAP.md](ROADMAP.md).
+- Architecture or lowering changes: [DESIGN.md](DESIGN.md) plus the relevant
+  [execution model](docs/user-guide/execution-model.md) or
+  [compiler pipeline](docs/internals/compiler-pipeline.md).
+- Commands, contribution workflow, and completion reporting:
+  [CONTRIBUTING.md](CONTRIBUTING.md). For claim-specific evidence, use
+  [verification.md](docs/internals/verification.md).
 
 ## Non-negotiable rules
 
 - Preserve semantic correctness before performance.
+- Inspect the worktree before editing and preserve all unrelated changes.
 - Do not claim planned features are implemented, in code, docs, or
   reports. Tests and executable examples are the source of truth.
 - Do not add Triton as a dependency or copy Triton implementation code.
@@ -33,52 +43,8 @@ variable-sized dense segment programs into fixed-tile GPU tasks.
 - Do not add placeholder directories, empty passes, or scaffold "for
   later".
 
-## Standard commands
-
-```bash
-# Python (no LLVM build required)
-python -m pytest tests/python -q
-ruff check .
-
-# MLIR components (requires the pinned LLVM; ~1 hour once)
-./scripts/fetch_llvm.sh
-./scripts/build_llvm.sh
-./scripts/build_swage.sh          # configure + build + check-swage
-ninja -C build check-swage        # lit suite only, after a build exists
-
-# Native Python bindings (requires bindings-enabled pinned LLVM/MLIR)
-ninja -C build check-swage-python
-
-# Real CUDA runtime tests (requires a CUDA-enabled PyTorch installation)
-PYTHONPATH=build/python_packages python -m pytest -q \
-    python/tests/mlir/test_runtime.py
-
-# Environment diagnostics
-python -m swage.env
-```
-
-## Change protocol
-
-1. Read the nearest `AGENTS.md` and the relevant design docs.
-2. Run baseline tests for the area you touch.
-3. Make one coherent change.
-4. Add or update tests with the change.
-5. Run the smallest relevant test first, then the full applicable tier.
-6. Report exactly what was and was not executed.
-7. Leave the working tree clean when committing is part of the task.
-
 ## Status reporting
 
 Every completed task reports: files changed; whether semantic behavior
 changed; tests run / passed / skipped; GPU architecture used (if any);
 known limitations; follow-up issue.
-
-## Native Python bindings
-
-`mlir_swage` is imported from `build/python_packages`, not from the
-`swage-compiler` pip package. Use `check-swage-python` so CMake supplies the
-build-tree `PYTHONPATH`. The bindings require an MLIR install built with
-Python bindings; `SWAGE_PYTHON_BINDINGS=ON` against an incompatible install
-is an error. `emit_mlir()` remains compile-only. Public execution is available
-only through keyword-only `launch()` for the canonical fixed vector add, with
-strict CUDA tensor, ABI, block, and grid validation.
