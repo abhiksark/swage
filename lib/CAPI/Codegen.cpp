@@ -146,10 +146,20 @@ LogicalResult replaceLibdeviceCalls(gpu::GPUModuleOp gpuModule) {
   return failure(remaining.wasInterrupted());
 }
 
-LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
-                         int64_t blockSize, llvm::StringRef target,
-                         KernelKind kind, bool useTaskIds, bool fusedMixed,
-                         std::string &lowered, std::string &ptx) {
+LogicalResult verifyPTXFunctionNames(ModuleOp source) {
+  WalkResult invalidName = source.walk([](func::FuncOp function) {
+    if (isPTXIdentifier(function.getName()))
+      return WalkResult::advance();
+    function.emitError("function name is not a valid PTX identifier");
+    return WalkResult::interrupt();
+  });
+  return failure(invalidName.wasInterrupted());
+}
+
+LogicalResult validateCompileRequest(ModuleOp source,
+                                     llvm::StringRef kernelName,
+                                     int64_t blockSize,
+                                     llvm::StringRef target) {
   unsigned smValue = 0;
   if (!isSupportedTarget(target, smValue))
     return source.emitError(
@@ -166,24 +176,16 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   // region internals.
   if (failed(verify(source)))
     return failure();
-
-  OwningOpRef<ModuleOp> module = source.clone();
-  MLIRContext *context = module->getContext();
-  if (!module->lookupSymbol<func::FuncOp>(kernelName))
+  if (!source.lookupSymbol<func::FuncOp>(kernelName))
     return source.emitError("kernel_name does not name the module function");
-  WalkResult invalidName = source.walk([](func::FuncOp function) {
-    if (isPTXIdentifier(function.getName()))
-      return WalkResult::advance();
-    function.emitError("function name is not a valid PTX identifier");
-    return WalkResult::interrupt();
-  });
-  if (invalidName.wasInterrupted())
-    return failure();
+  return verifyPTXFunctionNames(source);
+}
 
-  registerBuiltinDialectTranslation(*context);
-  registerGPUDialectTranslation(*context);
-  registerLLVMDialectTranslation(*context);
-  registerNVVMDialectTranslation(*context);
+void registerCodegenInterfaces(MLIRContext &context) {
+  registerBuiltinDialectTranslation(context);
+  registerGPUDialectTranslation(context);
+  registerLLVMDialectTranslation(context);
+  registerNVVMDialectTranslation(context);
 
   DialectRegistry registry;
   arith::registerConvertArithToLLVMInterface(registry);
@@ -195,65 +197,97 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   registerConvertNVVMToLLVMInterface(registry);
   ub::registerConvertUBToLLVMInterface(registry);
   vector::registerConvertVectorToLLVMInterface(registry);
-  context->appendDialectRegistry(registry);
+  context.appendDialectRegistry(registry);
+}
 
-  PassManager manager(context);
-  if (kind == KernelKind::FixedBlock) {
+void addKernelLoweringPass(PassManager &manager, KernelKind kind,
+                           int64_t blockSize, bool useTaskIds,
+                           bool fusedMixed) {
+  switch (kind) {
+  case KernelKind::FixedBlock:
     manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
-  } else if (kind == KernelKind::SegmentedReduction) {
+    return;
+  case KernelKind::SegmentedReduction:
     manager.addPass(swage::createSegmentedReductionToGPUPass(
         blockSize, useTaskIds, fusedMixed));
-  } else if (kind == KernelKind::SplitPartialReduction) {
+    return;
+  case KernelKind::SplitPartialReduction:
     manager.addPass(swage::createSplitPartialReductionToGPUPass());
-  } else {
+    return;
+  case KernelKind::SplitMergeReduction:
     manager.addPass(swage::createSplitMergeReductionToGPUPass());
+    return;
   }
+}
+
+void configureCodegenPasses(PassManager &manager, KernelKind kind,
+                            int64_t blockSize, bool useTaskIds,
+                            bool fusedMixed) {
+  addKernelLoweringPass(manager, kind, blockSize, useTaskIds, fusedMixed);
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
   options.indexBitwidth = 64;
   gpuManager.addPass(createConvertGpuOpsToNVVMOps(options));
-  if (failed(manager.run(*module)))
+}
+
+FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
+                                       KernelKind kind, int64_t blockSize,
+                                       bool useTaskIds, bool fusedMixed) {
+  PassManager manager(module.getContext());
+  configureCodegenPasses(manager, kind, blockSize, useTaskIds, fusedMixed);
+  if (failed(manager.run(module)))
     return failure();
 
-  auto gpuModules = module->getOps<gpu::GPUModuleOp>();
-  if (std::distance(gpuModules.begin(), gpuModules.end()) != 1)
-    return source.emitError("lowering did not produce exactly one GPU module");
-  gpu::GPUModuleOp gpuModule = *gpuModules.begin();
-  // The passes compile the function containing swage operations, not the
-  // function kernelName selected; a mismatch must fail here rather than at
-  // cuModuleGetFunction, two layers away from the mistake.
-  std::string expectedKernel = kernelName.str();
+  auto gpuModules = module.getOps<gpu::GPUModuleOp>();
+  if (std::distance(gpuModules.begin(), gpuModules.end()) != 1) {
+    source.emitError("lowering did not produce exactly one GPU module");
+    return failure();
+  }
+  return *gpuModules.begin();
+}
+
+std::string expectedKernelName(llvm::StringRef kernelName, KernelKind kind) {
+  std::string expected = kernelName.str();
   if (kind == KernelKind::SplitPartialReduction)
-    expectedKernel += "__partial";
+    expected += "__partial";
   else if (kind == KernelKind::SplitMergeReduction)
-    expectedKernel += "__merge";
+    expected += "__merge";
+  return expected;
+}
+
+LogicalResult verifyCompiledKernel(ModuleOp source, gpu::GPUModuleOp gpuModule,
+                                   llvm::StringRef kernelName,
+                                   KernelKind kind) {
   llvm::StringRef compiledKernel;
   for (LLVM::LLVMFuncOp function : gpuModule.getOps<LLVM::LLVMFuncOp>())
     if (!function.isExternal())
       compiledKernel = function.getName();
-  if (compiledKernel != expectedKernel)
+  if (compiledKernel != expectedKernelName(kernelName, kind))
     return source.emitError("kernel_name '")
            << kernelName << "' does not match the compiled kernel '"
            << compiledKernel << "'";
-  if (failed(replaceLibdeviceCalls(gpuModule)))
-    return failure();
-  gpuModule.setTargetsAttr(ArrayAttr::get(
-      context,
-      {NVVM::NVVMTargetAttr::get(context, 2, "nvptx64-nvidia-cuda", target)}));
+  return success();
+}
 
+void printLoweredModule(ModuleOp module, std::string &lowered) {
   llvm::raw_string_ostream loweredStream(lowered);
-  module->print(loweredStream, OpPrintingFlags());
+  module.print(loweredStream, OpPrintingFlags());
   loweredStream.flush();
+}
 
-  static llvm::once_flag initializeNVPTXOnce;
-  llvm::call_once(initializeNVPTXOnce, []() {
+void initializeNVPTX() {
+  static llvm::once_flag initializeOnce;
+  llvm::call_once(initializeOnce, []() {
     LLVMInitializeNVPTXTarget();
     LLVMInitializeNVPTXTargetInfo();
     LLVMInitializeNVPTXTargetMC();
     LLVMInitializeNVPTXAsmPrinter();
   });
+}
 
+LogicalResult emitPTX(ModuleOp source, gpu::GPUModuleOp gpuModule,
+                      llvm::StringRef target, std::string &ptx) {
   constexpr llvm::StringLiteral triple = "nvptx64-nvidia-cuda";
   llvm::LLVMContext llvmContext;
   std::unique_ptr<llvm::Module> llvmModule = translateModuleToLLVMIR(
@@ -280,6 +314,35 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
     return failure();
   ptx.assign(generated->begin(), generated->end());
   return success();
+}
+
+LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
+                         int64_t blockSize, llvm::StringRef target,
+                         KernelKind kind, bool useTaskIds, bool fusedMixed,
+                         std::string &lowered, std::string &ptx) {
+  if (failed(validateCompileRequest(source, kernelName, blockSize, target)))
+    return failure();
+
+  OwningOpRef<ModuleOp> module = source.clone();
+  MLIRContext *context = module->getContext();
+  registerCodegenInterfaces(*context);
+  FailureOr<gpu::GPUModuleOp> loweredGPU =
+      lowerToGPU(source, *module, kind, blockSize, useTaskIds, fusedMixed);
+  if (failed(loweredGPU))
+    return failure();
+  gpu::GPUModuleOp gpuModule = *loweredGPU;
+  // The passes compile the function containing swage operations, not the
+  // function kernelName selected; reject a mismatch before module loading.
+  if (failed(verifyCompiledKernel(source, gpuModule, kernelName, kind)) ||
+      failed(replaceLibdeviceCalls(gpuModule)))
+    return failure();
+  gpuModule.setTargetsAttr(ArrayAttr::get(
+      context,
+      {NVVM::NVVMTargetAttr::get(context, 2, "nvptx64-nvidia-cuda", target)}));
+
+  printLoweredModule(*module, lowered);
+  initializeNVPTX();
+  return emitPTX(source, gpuModule, target, ptx);
 }
 
 } // namespace

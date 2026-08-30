@@ -1,12 +1,12 @@
-<!-- docs/assets/diagrams/m8-split-lifecycle.svg -->
+<!-- docs/assets/diagrams/split-lifecycle.svg -->
 <svg xmlns="http://www.w3.org/2000/svg"
   viewBox="0 0 1200 760" role="img"
-  aria-labelledby="m8-split-lifecycle-title m8-split-lifecycle-description"
+  aria-labelledby="split-lifecycle-title split-lifecycle-description"
   font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-  <title id="m8-split-lifecycle-title">Private split CTA identity-sum lifecycle</title>
-  <desc id="m8-split-lifecycle-description">An oversized segment is divided into ordered absolute input ranges, each partial writes one scratch slot, and one merge writes output once.</desc>
+  <title id="split-lifecycle-title">Private split CTA identity-sum lifecycle</title>
+  <desc id="split-lifecycle-description">An oversized segment is divided into ordered absolute input ranges, each partial writes one scratch slot, and one merge writes output once.</desc>
   <defs>
-    <marker id="m8-split-lifecycle-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <marker id="split-lifecycle-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#59636E"/>
     </marker>
   </defs>
@@ -23,25 +23,25 @@
   <text x="210" y="312" font-size="18" font-weight="750" fill="#17212B" text-anchor="middle">partial 0</text>
   <text x="210" y="345" font-size="18" font-weight="500" fill="#17212B" text-anchor="middle">[100, 4196)</text>
   <text x="210" y="382" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">unique scratch writer -> scratch[0]</text>
-  <line x1="210" y1="214" x2="210" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
+  <line x1="210" y1="214" x2="210" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
   <rect x="405" y="275" width="310" height="132" rx="14" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
   <text x="560" y="312" font-size="18" font-weight="750" fill="#17212B" text-anchor="middle">partial 1</text>
   <text x="560" y="345" font-size="18" font-weight="500" fill="#17212B" text-anchor="middle">[4196, 8292)</text>
   <text x="560" y="382" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">unique scratch writer -> scratch[1]</text>
-  <line x1="560" y1="214" x2="560" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
+  <line x1="560" y1="214" x2="560" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
   <rect x="755" y="275" width="310" height="132" rx="14" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
   <text x="910" y="312" font-size="18" font-weight="750" fill="#17212B" text-anchor="middle">partial 2</text>
   <text x="910" y="345" font-size="18" font-weight="500" fill="#17212B" text-anchor="middle">[8292, 9500)</text>
   <text x="910" y="382" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">unique scratch writer -> scratch[2]</text>
-  <line x1="910" y1="214" x2="910" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
-  <line x1="210" y1="407" x2="490" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
-  <line x1="560" y1="407" x2="600" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
-  <line x1="910" y1="407" x2="710" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
+  <line x1="910" y1="214" x2="910" y2="265" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
+  <line x1="210" y1="407" x2="490" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
+  <line x1="560" y1="407" x2="600" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
+  <line x1="910" y1="407" x2="710" y2="475" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
   <rect x="355" y="490" width="490" height="112" rx="14" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
   <text x="600" y="530" font-size="20" font-weight="750" fill="#17212B" text-anchor="middle">merge record</text>
   <text x="600" y="562" font-size="18" font-weight="500" fill="#17212B" text-anchor="middle">segment 7, compact scratch range [0, 3)</text>
   <text x="600" y="588" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">one merge CTA</text>
-  <line x1="600" y1="602" x2="600" y2="635" stroke="#59636E" stroke-width="3" marker-end="url(#m8-split-lifecycle-arrow)"/>
+  <line x1="600" y1="602" x2="600" y2="635" stroke="#59636E" stroke-width="3" marker-end="url(#split-lifecycle-arrow)"/>
   <rect x="430" y="650" width="340" height="70" rx="14" fill="#DDF4EB" stroke="#00664B" stroke-width="2"/>
   <text x="600" y="680" font-size="20" font-weight="750" fill="#17212B" text-anchor="middle">output[7]</text>
   <text x="600" y="705" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">one final writer</text>

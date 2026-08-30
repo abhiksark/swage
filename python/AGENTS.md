@@ -20,6 +20,6 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
   `ninja -C build check-swage-python`, which sets the build-tree
   `PYTHONPATH` for `mlir_swage`.
 - `mlir_swage` is not a wheel or public `swage.ir` API. PyTorch remains
-  optional for explicit compile-only emission. M3 execution is available only
+  optional for explicit compile-only emission. Execution is available only
   through the explicit fixed vector-add `launch()` boundary; direct kernel
   calls remain unavailable.

@@ -11,6 +11,8 @@ work.
 - Preserve semantic correctness before performance.
 - Follow the root and nearest scoped `AGENTS.md` files.
 - Do not claim planned behavior as implemented.
+- Keep internal milestone codenames in the roadmap, maintainer planning, and
+  compatibility redirects; use capability names in project surfaces.
 - Add tests with behavior changes and run the applicable tier.
 - Keep the LLVM pin unchanged outside a dedicated compatibility change.
 - Do not add Triton, a second production IR, or silent backend fallback.

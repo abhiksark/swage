@@ -1,5 +1,5 @@
-<!-- docs/adr/ADR-0014-m6-minimal-swage-plan-gate.md -->
-# ADR-0014: M6 minimal SwagePlan gate
+<!-- docs/adr/ADR-0014-minimal-swage-plan-gate.md -->
+# ADR-0014: Minimal SwagePlan gate
 
 - Status: accepted
 - Date: 2026-08-23
@@ -7,17 +7,18 @@
 ## Context
 
 ADR-0003 separates segment semantics in `swage` from scheduling decisions in
-`swage_plan`. M6 needs the smallest executable proof of that boundary without
-claiming general scheduling or changing the public frontend and launch
-contracts. The proof must preserve an admitted semantic kernel, describe its
-legal policies at compile time, and classify runtime segment metadata without
+`swage_plan`. The compiler needs the smallest executable proof of that
+boundary without claiming general scheduling or changing the public frontend
+and launch contracts. The proof must preserve an admitted semantic kernel,
+describe its legal policies at compile time, and classify runtime segment
+metadata without
 executing either policy.
 
 ## Decision
 
 ### Planning dialect boundary
 
-The M6 planning dialect contains only:
+The private planning dialect contains only:
 
 - `#swage_plan.policy<warp|cta>` for the two legal policies;
 - `!swage_plan.task_range` for one runtime-produced descriptor range;
@@ -65,8 +66,8 @@ Runtime:
 - selects warp or CTA from the actual segment length;
 - returns stable task descriptors or an error without fallback.
 
-M6 does not lower either policy to GPU execution and does not dispatch the
-returned task range.
+This compile-only boundary does not lower either policy to GPU execution or
+dispatch the returned task range.
 
 ### Host classifier contract
 
@@ -96,7 +97,7 @@ does not fall back to another policy or backend.
 
 ## Acceptance boundary
 
-M6 is accepted when tests prove all of the following:
+The boundary is accepted when tests prove all of the following:
 
 - the policy attribute, task-range type, and classify operation round-trip and
   reject invalid forms;
@@ -112,7 +113,7 @@ M6 is accepted when tests prove all of the following:
 
 ## Explicit deferrals
 
-M6 does not add:
+This decision does not add:
 
 - the Issue #13 `task`, `pack`, `partition`, or `make_task` dialect surface;
 - packed warps, split CTAs, partial reductions, or merges;
@@ -120,7 +121,7 @@ M6 does not add:
 - ragged-softmax planning;
 - public frontend, emission, or launch support;
 - releases or tags;
-- unrelated M1 backlog work.
+- unrelated semantic-dialect backlog work.
 
 ## Consequences
 
@@ -128,7 +129,7 @@ M6 does not add:
   one semantic program shape.
 - Runtime metadata controls policy selection without placing runtime segment
   identity in types or hardware indices in semantic IR.
-- M6 establishes no performance claim because it performs no mixed-policy GPU
-  execution or benchmark comparison.
-- Later milestones must extend this contract explicitly rather than treating
+- This boundary establishes no performance claim because it performs no
+  mixed-policy GPU execution or benchmark comparison.
+- Later changes must extend this contract explicitly rather than treating
   deferred policies or execution as implied support.

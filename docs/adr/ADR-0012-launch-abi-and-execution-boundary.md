@@ -1,18 +1,18 @@
-# ADR-0012: M3 launch ABI and execution boundary
+# ADR-0012: Fixed vector-add launch ABI and execution boundary
 
 - Status: accepted
 - Date: 2026-08-20
 
 ## Context
 
-M3 needs one executable kernel without turning the fixed-block frontend into
-a general CUDA runtime. The boundary must preserve PyTorch ownership of CUDA
-devices, contexts, streams, and tensor storage while keeping the base package
-usable without PyTorch or a GPU.
+The first execution boundary needs one executable kernel without turning the
+fixed-block frontend into a general CUDA runtime. The boundary must preserve
+PyTorch ownership of CUDA devices, contexts, streams, and tensor storage while
+keeping the base package usable without PyTorch or a GPU.
 
 ## Decision
 
-M3 exposes one deliberately narrow, keyword-only execution boundary for the
+Swage exposes one deliberately narrow, keyword-only execution boundary for the
 canonical one-dimensional fixed vector add. Lowering maps each vector lane to
 one GPU x-thread and emits PTX in process through the pinned LLVM NVPTX
 backend. Unsupported semantic shapes and ABIs fail before translation.
@@ -38,8 +38,8 @@ target, zero-work, stream, retention, and cache contracts live in
 
 - The deterministic PTX compiler is an internal binding used by the runtime,
   not a public `emit_ptx()` API.
-- M3 intentionally supports one fixed vector-add ABI. Segmented execution
-  remains outside the public runtime.
+- The public runtime intentionally supports one fixed vector-add ABI.
+  Segmented execution remains outside the public runtime.
 - Driver diagnostics report the actual CUDA driver version separately from
   the CUDA version used to build PyTorch.
 - Cache entries specialize the compiler inputs and target architecture, never

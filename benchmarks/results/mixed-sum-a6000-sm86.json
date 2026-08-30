@@ -1,5 +1,5 @@
 {
-  "benchmark": "m7-minimal-mixed-policy-segmented-sum",
+  "benchmark": "frozen-mixed-policy-segmented-sum",
   "configuration": {
     "cta_block": 128,
     "distribution": "bimodal",

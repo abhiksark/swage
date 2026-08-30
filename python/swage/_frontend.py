@@ -136,13 +136,43 @@ class _Kernel:
         return emitter.emit()
 
     def _validate_inputs(self, signature, arguments, constexprs):
+        runtime_values, runtime_label = self._select_runtime_inputs(
+            signature, arguments
+        )
+        self._validate_input_mappings(
+            runtime_values, runtime_label, constexprs
+        )
+        parameters, constexpr_names, runtime_parameters = (
+            self._partition_parameters(
+                runtime_values, runtime_label, constexprs
+            )
+        )
+        if signature is not None:
+            runtime_types = self._validate_signature(
+                signature, runtime_parameters
+            )
+        else:
+            runtime_types = self._infer_signature(
+                arguments, runtime_parameters
+            )
+        self._validate_constexprs(parameters, constexpr_names, constexprs)
+        return runtime_types, dict(constexprs)
+
+    def _select_runtime_inputs(self, signature, arguments):
+        """Select exactly one explicit or inferred runtime input mode."""
         if (signature is None) == (arguments is None):
             self._raise(
                 self.function,
                 "exactly one of signature or arguments is required",
             )
-        runtime_values = signature if signature is not None else arguments
-        runtime_label = "signature" if signature is not None else "arguments"
+        if signature is not None:
+            return signature, "signature"
+        return arguments, "arguments"
+
+    def _validate_input_mappings(
+        self, runtime_values, runtime_label, constexprs
+    ):
+        """Validate mapping containers and key types in diagnostic order."""
         if not isinstance(runtime_values, Mapping):
             self._raise(
                 self.function, f"{runtime_label} must be a mapping"
@@ -156,8 +186,11 @@ class _Kernel:
         if any(not isinstance(key, str) for key in constexprs):
             self._raise(self.function, "constexprs keys must be strings")
 
+    def _partition_parameters(
+        self, runtime_values, runtime_label, constexprs
+    ):
+        """Validate and return the declared runtime/constexpr partition."""
         self._require_plain_parameters()
-
         parameters = self.parameter_names
         constexpr_names = self.constexpr_names
         runtime_parameters = [
@@ -188,42 +221,36 @@ class _Kernel:
         self._require_keys(
             "constexprs", supplied_constexprs, constexpr_names
         )
+        return parameters, constexpr_names, runtime_parameters
 
-        if signature is not None:
-            runtime_types = self._validate_signature(
-                signature, runtime_parameters
-            )
-        else:
-            runtime_types = self._infer_signature(
-                arguments, runtime_parameters
-            )
-
+    def _validate_constexprs(self, parameters, constexpr_names, constexprs):
+        """Validate static values in source parameter order."""
         for name in parameters:
-            if name not in constexpr_names:
-                continue
-            value = constexprs[name]
-            if name == "BLOCK" and (type(value) is not int or value <= 0):
+            if name in constexpr_names:
+                self._validate_constexpr(name, constexprs[name])
+
+    def _validate_constexpr(self, name, value):
+        """Validate one constexpr value and its MLIR integer bounds."""
+        if name == "BLOCK" and (type(value) is not int or value <= 0):
+            self._raise(
+                self.function,
+                "constexpr 'BLOCK' must be a positive integer",
+            )
+        if type(value) is not int:
+            self._raise(
+                self.function,
+                f"constexpr '{name}' must be an integer",
+            )
+        if not -(1 << 63) <= value <= (1 << 63) - 1:
+            if name != "BLOCK":
                 self._raise(
                     self.function,
-                    "constexpr 'BLOCK' must be a positive integer",
+                    f"constexpr '{name}' must fit signed 64-bit",
                 )
-            if type(value) is not int:
-                self._raise(
-                    self.function,
-                    f"constexpr '{name}' must be an integer",
-                )
-            if not -(1 << 63) <= value <= (1 << 63) - 1:
-                if name != "BLOCK":
-                    self._raise(
-                        self.function,
-                        f"constexpr '{name}' must fit signed 64-bit",
-                    )
-                self._raise(
-                    self.function,
-                    "constexpr 'BLOCK' must fit a signed 64-bit MLIR "
-                    "dimension",
-                )
-        return runtime_types, dict(constexprs)
+            self._raise(
+                self.function,
+                "constexpr 'BLOCK' must fit a signed 64-bit MLIR dimension",
+            )
 
     def _validate_signature(self, signature, runtime_parameters):
         for name in runtime_parameters:

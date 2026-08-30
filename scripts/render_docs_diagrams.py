@@ -36,7 +36,7 @@ OUTPUT_NAMES = (
     "ragged-storage.svg",
     "segments-tasks-tiles.svg",
     "compiler-pipeline.svg",
-    "m8-split-lifecycle.svg",
+    "split-lifecycle.svg",
     "runtime-lifecycle.svg",
 )
 DEFAULT_OUTPUT_DIR = Path(__file__).parents[1] / "docs/assets/diagrams"
@@ -680,10 +680,10 @@ def compiler_pipeline() -> bytes:
     return svg.finish()
 
 
-def m8_split_lifecycle() -> bytes:
+def split_lifecycle() -> bytes:
     """Render the private split partial and merge ownership lifecycle."""
     svg = Svg(
-        "m8-split-lifecycle.svg",
+        "split-lifecycle.svg",
         "Private split CTA identity-sum lifecycle",
         "An oversized segment is divided into ordered absolute input ranges, "
         "each partial writes one scratch slot, and one merge writes output "
@@ -908,7 +908,7 @@ def render_all() -> dict[str, bytes]:
         ragged_storage,
         segments_tasks_tiles,
         compiler_pipeline,
-        m8_split_lifecycle,
+        split_lifecycle,
         runtime_lifecycle,
     )
     return {name: renderer() for name, renderer in zip(OUTPUT_NAMES, renderers)}

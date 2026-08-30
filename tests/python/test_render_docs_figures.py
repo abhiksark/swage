@@ -73,7 +73,7 @@ REQUIRED_LABELS = {
         "current stream",
         "one launch crosses the domains",
     ),
-    "m5-softmax-phases": (
+    "ragged-softmax-phases": (
         "one CTA per segment",
         "maximum",
         "shifted exponential sum",

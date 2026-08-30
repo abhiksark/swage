@@ -8,7 +8,7 @@
 The compile-only Python frontend needs a convenient way to derive its narrow
 runtime signature from the PyTorch values already present in user code. The
 base package must remain usable without PyTorch, and metadata inference must
-not cross into the M3 runtime boundary.
+not cross into the fixed-vector runtime boundary.
 
 ## Decision
 
@@ -38,4 +38,4 @@ or execute a kernel.
 - Import and metadata access failures remain inside the frontend diagnostic
   boundary and identify the optional installation extra.
 - Data pointers, launch validation, specialization, PTX lowering, and CUDA
-  execution remain M3 work.
+  execution remain runtime work.

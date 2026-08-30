@@ -6,9 +6,9 @@ Segments longer than the CTA chunk limit split into ordered partial
 tasks and one merge. This page records the exact internal
 contracts; none of them is a public API.
 
-*Qualified under the M8 gate on NVIDIA RTX A6000 (`sm_86`);
-see [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md) and
-[ADR-0017](../adr/ADR-0017-m8-private-split-cta-reductions.md).*
+*Qualified on NVIDIA RTX A6000 (`sm_86`); see
+[Verification](verification.md) and
+[ADR-0017](../adr/ADR-0017-private-split-cta-reductions.md).*
 
 Segments of at most 32 elements receive one direct warp descriptor. Segments
 from 33 through 4096 elements receive one direct CTA descriptor. A longer
@@ -27,11 +27,11 @@ does not imply split max or split softmax.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Absolute split ranges, unique scratch writers, and one merge writer](../assets/diagrams/m8-split-lifecycle.svg)
+![Absolute split ranges, unique scratch writers, and one merge writer](../assets/diagrams/split-lifecycle.svg)
 
 </div>
 
-*Private ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/m8-split-lifecycle.svg).*
+*Private ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/split-lifecycle.svg).*
 
 Partial ABI:
 

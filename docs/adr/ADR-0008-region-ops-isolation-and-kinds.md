@@ -5,9 +5,9 @@
 
 ## Context
 
-M1 adds the region-based semantic ops `swage.map`, `swage.reduce`,
-`swage.map_store`, and `swage.yield` (issue #1). Two designs needed a
-decision with alternatives:
+The initial semantic dialect adds the region-based operations `swage.map`,
+`swage.reduce`, `swage.map_store`, and `swage.yield` (issue #1). Two designs
+needed a decision with alternatives:
 
 1. How outer SSA values enter a region. The linalg convention (regions
    may reference enclosing values freely, discipline by custom verifier)
@@ -34,7 +34,7 @@ arguments after the element argument, in order:
 `swage.reduce` combines with a `kind` enum — initially `sum`, `max`,
 `min` — while its region is the per-element transform. Every admitted
 kind must be associative and commutative with a known identity; that
-gate is what later licenses split reductions (M8). Identities per
+gate is what later licenses split reductions. Identities per
 element type: `sum` → 0, `max` → −∞ / minimum integer, `min` → +∞ /
 maximum integer.
 
@@ -44,8 +44,8 @@ Semantic contract:
   nothing, `reduce` returns the identity of its kind. This deliberately
   differs from PyTorch, where `max` of an empty tensor errors; oracle
   comparisons must account for it.
-- **Floating max NaNs**: a non-empty f32 `max` reduction propagates NaN. M4
-  lowers both its sequential and CTA combiners with `maximumf`, not
+- **Floating max NaNs**: a non-empty f32 `max` reduction propagates NaN. The
+  private segmented lowering uses `maximumf`, not
   `maxnumf`, and tests the behavior against the CPU oracle and PyTorch.
 - **Effects**: `map` and `reduce` expose only their region's effects, so
   unused instances with pure `arith`/`math` bodies fold away.
@@ -73,4 +73,4 @@ and results are ODS type constraints.
   not a redesign; it is omitted until a consumer exists.
 - The fixed-block ops implied by the vector-add API (`program_id`,
   `arange`, masked load/store) are not part of this op set; their
-  representation is M2's first design question.
+  representation belongs to the fixed-block frontend design.

@@ -6,10 +6,10 @@ Classified warp and CTA tasks execute through fixed tiles, either
 as pure launches or one fused mixed launch. This page records the
 exact internal contracts; none of them is a public API.
 
-*Qualified under the M7 gate on NVIDIA RTX A6000 (`sm_86`);
-see [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md) and
-[ADR-0015](../adr/ADR-0015-m7-minimal-mixed-policy-execution.md) and
-[ADR-0016](../adr/ADR-0016-m7-fused-mixed-policy-schedule.md).*
+*Qualified on NVIDIA RTX A6000 (`sm_86`); see
+[Verification](verification.md),
+[ADR-0015](../adr/ADR-0015-minimal-mixed-policy-execution.md), and
+[ADR-0016](../adr/ADR-0016-fused-mixed-policy-schedule.md).*
 
 Pure warp and pure CTA qualification use this task-ID ABI:
 
@@ -50,7 +50,7 @@ The frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 for fused mixed execution. The fused schedule it measures is the one drawn
 above. The mixed-to-best-pure ratio is `0.939394`, which passes the
 predeclared maximum of `1.05`. The committed raw record is
-[`benchmarks/results/m7-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/m7-a6000-sm86.json).
+[`benchmarks/results/mixed-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/mixed-sum-a6000-sm86.json).
 
 Continue with [Split Execution](split-execution.md) for oversized
 segments, or [Benchmarks](benchmarks.md) for the recorded campaign.

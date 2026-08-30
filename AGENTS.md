@@ -28,6 +28,8 @@ Read this file for every task, then open only the smallest relevant guide:
 - Inspect the worktree before editing and preserve all unrelated changes.
 - Do not claim planned features are implemented, in code, docs, or
   reports. Tests and executable examples are the source of truth.
+- Keep internal milestone codenames in `ROADMAP.md`, maintainer planning, and
+  compatibility redirects. Use capability names everywhere else.
 - Do not add Triton as a dependency or copy Triton implementation code.
 - Do not introduce a second production IR between Python and MLIR
   (ADR-0001).

@@ -1,5 +1,5 @@
-# benchmarks/benchmark_m7_mixed_sum.py
-"""Run the predeclared M7 mixed-policy segmented-sum benchmark."""
+# benchmarks/benchmark_mixed_sum.py
+"""Run the frozen mixed-policy segmented-sum benchmark."""
 
 import argparse
 import json
@@ -42,7 +42,9 @@ def _git_metadata(root):
         text=True,
     ).stdout
     if dirty:
-        raise RuntimeError("M7 benchmark requires a clean source worktree")
+        raise RuntimeError(
+            "mixed-policy benchmark requires a clean source worktree"
+        )
     return {"revision": revision, "worktree_clean": True}
 
 
@@ -143,13 +145,16 @@ def main():
     root = pathlib.Path(__file__).resolve().parents[1]
     source = _git_metadata(root)
     if not torch.cuda.is_available():
-        raise RuntimeError("M7 benchmark requires CUDA-enabled PyTorch")
+        raise RuntimeError(
+            "mixed-policy benchmark requires CUDA-enabled PyTorch"
+        )
     device = torch.cuda.current_device()
     gpu_name = torch.cuda.get_device_name(device)
     capability = torch.cuda.get_device_capability(device)
     if gpu_name != "NVIDIA RTX A6000" or capability != (8, 6):
         raise RuntimeError(
-            "M7 evidence must run on NVIDIA RTX A6000 at sm_86; found "
+            "mixed-policy evidence must run on NVIDIA RTX A6000 at "
+            "sm_86; found "
             f"{gpu_name} at sm_{capability[0]}{capability[1]}"
         )
 
@@ -177,7 +182,7 @@ def main():
     ratio, passed = _evaluate_gate(medians)
     properties = torch.cuda.get_device_properties(device)
     result = {
-        "benchmark": "m7-minimal-mixed-policy-segmented-sum",
+        "benchmark": "frozen-mixed-policy-segmented-sum",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
         "environment": {
@@ -216,7 +221,7 @@ def main():
         )
     )
     if not result["gate"]["passed"]:
-        raise SystemExit("M7 performance gate failed")
+        raise SystemExit("mixed-policy performance gate failed")
 
 
 if __name__ == "__main__":

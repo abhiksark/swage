@@ -27,7 +27,7 @@ installed pin:
   `lib/CAPI/Dialects.cpp`) built on
   `MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Swage, swage)` and its
   `DEFINE` counterpart. No custom type helpers: Python constructs
-  `!swage.segment<T>` by parsing, which suffices until the M2 emitter
+  `!swage.segment<T>` by parsing, which suffices until the direct emitter
   demonstrates a need for `SegmentType.get`.
 - A **self-contained** package `mlir_swage`
   (`MLIR_PYTHON_PACKAGE_PREFIX=mlir_swage`) that embeds the pinned MLIR
@@ -63,7 +63,8 @@ namespace, and Windows/macOS bindings builds.
 
 ## Consequences
 
-- The M2 emitter (#4) imports `mlir_swage` from the build tree via
+- The direct AST-to-MLIR emitter (#4) imports `mlir_swage` from the build
+  tree via
   `PYTHONPATH`; how the pip package `swage-compiler` ships or locates
   the native package is a packaging decision deferred to the wheel ADR.
 - Contributors run `ninja -C build check-swage-python`, which sets

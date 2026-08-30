@@ -6,8 +6,8 @@ Canonical segmented sum and max execute through a sequential CPU
 oracle and a one-CTA GPU path. This page records the exact internal
 contracts; none of them is a public API.
 
-*Qualified under the M4 gate on NVIDIA RTX A6000 (`sm_86`);
-see [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md).*
+*Qualified on NVIDIA RTX A6000 (`sm_86`); see
+[Verification](verification.md) for the executable evidence.*
 
 The admitted semantic module has one axis-zero segment ID, one segment over
 rank-one f32 values and rank-one i32 offsets, one capture-free identity

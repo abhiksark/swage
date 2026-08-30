@@ -1,5 +1,5 @@
 # python/swage/_segmented_qualification.py
-"""Internal M4 qualification runner for native segmented reductions."""
+"""Private qualification runner for native segmented programs."""
 
 import pathlib
 import re

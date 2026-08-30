@@ -10,7 +10,7 @@ EXPECTED_OUTPUTS = {
     "capability-boundary.svg",
     "compiler-pipeline.svg",
     "frontend-boundary.svg",
-    "m8-split-lifecycle.svg",
+    "split-lifecycle.svg",
     "ragged-storage.svg",
     "runtime-lifecycle.svg",
     "segments-tasks-tiles.svg",
@@ -53,7 +53,7 @@ REQUIRED_LABELS = {
         "SCF / memref stop",
         "GPU: one CTA / segment",
     ),
-    "m8-split-lifecycle.svg": (
+    "split-lifecycle.svg": (
         "identity sum only",
         "absolute input ranges",
         "unique scratch writer",

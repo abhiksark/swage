@@ -1,5 +1,5 @@
 # tests/python/test_runtime.py
-"""LLVM-free tests for the M3 CUDA launch boundary."""
+"""LLVM-free tests for the fixed vector-add CUDA launch boundary."""
 
 import ctypes
 import gc

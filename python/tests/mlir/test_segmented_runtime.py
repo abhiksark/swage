@@ -170,7 +170,7 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
 @pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
 @pytest.mark.parametrize("lengths", TASK_CASES)
 def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
-    """Execute every segment through each private M7 task policy."""
+    """Execute every segment through each private direct task policy."""
     offsets = [0]
     for length in lengths:
         offsets.append(offsets[-1] + length)

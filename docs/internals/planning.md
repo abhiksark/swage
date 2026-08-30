@@ -6,9 +6,9 @@ The SwagePlan gate turns an admitted identity segmented sum into
 classified tasks without executing them. This page records the
 exact internal contracts; none of them is a public API.
 
-*Qualified under the compile-only M6 gate; see
-[`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md) and
-[ADR-0014](../adr/ADR-0014-m6-minimal-swage-plan-gate.md).*
+*Qualified through compile-only compiler and classifier tests; see
+[Verification](verification.md) and
+[ADR-0014](../adr/ADR-0014-minimal-swage-plan-gate.md).*
 
 `--swage-to-plan` admits only a capture-free, map-free, single-stage identity
 segmented sum. Admission is read-only. On success it preserves the semantic

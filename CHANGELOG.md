@@ -26,7 +26,7 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
-- Private M8 split-CTA execution for the canonical identity segmented sum.
+- Private split-CTA execution for the canonical identity segmented sum.
   Oversized segments become ordered partial ranges no larger than 4096
   elements followed by one compact scratch-range merge, using fixed 128-thread
   kernels and the existing CUDA Driver launch boundary.
@@ -45,9 +45,9 @@ semantic versioning (`0.x`; anything may change).
 
 ### Notes
 
-- M8 remains a private identity-sum correctness path. It adds no public
-  segmented frontend or launch API, split max or softmax, and no change to the
-  frozen M7 benchmark or its `1.05` gate.
+- Split execution remains a private identity-sum correctness path. It adds no
+  public segmented frontend or launch API, split max or softmax, and no change
+  to the frozen mixed-policy benchmark or its `1.05` gate.
 - Version 0.5.1 is a fix-forward release so tagged documentation and the PyPI
   project description include the current documentation configuration and
   branding. The immutable 0.5.0 release remains unchanged.
@@ -80,7 +80,8 @@ semantic versioning (`0.x`; anything may change).
 - Deterministic in-process lowering of the canonical fixed vector add through
   GPU and NVVM dialects to exact-target LLVM NVPTX output.
 - Keyword-only asynchronous `kernel.launch()` on the current PyTorch CUDA
-  stream, with strict M3 ABI, device, bounds, block, and grid validation.
+  stream, with strict fixed vector-add ABI, device, bounds, block, and grid
+  validation.
 - Lazy `ctypes` CUDA Driver integration for context lookup, module loading,
   function lookup, launch, and stable driver diagnostics without a CUDA
   toolkit or link-time CUDA SDK dependency.
@@ -107,15 +108,15 @@ semantic versioning (`0.x`; anything may change).
   A6000 `sm_86` results match both PyTorch and the CPU oracle across six
   adversarial segment distributions.
 - Minimal `swage_plan` support for warp and CTA policy attributes, an opaque
-  task-range type, and a classify operation. The fail-closed M6 conversion
-  preserves one canonical identity segmented-sum function while adding a
-  private planning companion, and the host classifier emits validated stable
-  descriptors.
-- Private M7 identity-sum preparation that clones the semantic module,
-  consumes its planning threshold, and materializes stable warp and CTA task
-  IDs before compiling or allocating GPU work. Pure schedules use 32-thread
-  warp or 128-thread CTA kernels with the same task-ID ABI.
-- One-launch fused M7 mixed execution with four one-segment warp slots per
+  task-range type, and a classify operation. The fail-closed planning
+  conversion preserves one canonical identity segmented-sum function while
+  adding a private planning companion, and the host classifier emits
+  validated stable descriptors.
+- Private identity-sum preparation that clones the semantic module, consumes
+  its planning threshold, and materializes stable warp and CTA task IDs before
+  compiling or allocating GPU work. Pure schedules use 32-thread warp or
+  128-thread CTA kernels with the same task-ID ABI.
+- One-launch fused mixed execution with four one-segment warp slots per
   initial 128-thread block followed by one block per CTA task. The frozen RTX
   A6000 `sm_86` bimodal benchmark records a `0.939394`
   mixed-to-best-pure ratio, passing the predeclared `1.05` maximum.
@@ -125,15 +126,15 @@ semantic versioning (`0.x`; anything may change).
 ### Notes
 
 - `emit_mlir()` remains compile-only and direct kernel calls remain
-  unavailable. The M3 `launch()` path executes only the canonical
+  unavailable. The `launch()` path executes only the canonical
   one-dimensional fixed vector add with f32 pointers and an i32 length.
-- M4 segmented sum and max are native compiler qualification paths only. They
-  do not add segment primitives to `swage.language` or widen public
+- Segmented sum and max are native compiler qualification paths only. They do
+  not add segment primitives to `swage.language` or widen public
   `kernel.launch()` behavior.
-- M5 ragged softmax is also an internal qualification path. Public segment
+- Ragged softmax is also an internal qualification path. Public segment
   primitives, segmented launch, schedule selection, and multi-CTA execution
   remain planned; `v0.4.0` is eligible but not released.
-- M7 mixed-policy execution remains an internal qualification path for one
+- Mixed-policy execution remains an internal qualification path for one
   canonical identity segmented sum. Version 0.5.0 adds no public segmented
   launch, packed warps, split CTAs, queues, or persistent scheduling.
 - The pip package remains GPU-free at import time. Execution requires Linux,

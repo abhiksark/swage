@@ -83,7 +83,7 @@ FIGURES = (
         ),
     ),
     FigureSpec(
-        name="m5-softmax-phases",
+        name="ragged-softmax-phases",
         title="Stable softmax in one CTA",
         description=(
             "One CTA sweeps its segment three times, for the maximum, "

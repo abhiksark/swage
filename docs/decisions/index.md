@@ -22,15 +22,15 @@ gates belong in the roadmap.
 - [ADR-0009: Python bindings package and CI](../adr/ADR-0009-python-bindings-package-and-ci.md)
 - [ADR-0010: Fixed-block MLIR boundary](../adr/ADR-0010-fixed-block-mlir-boundary.md)
 - [ADR-0011: PyTorch metadata inference](../adr/ADR-0011-pytorch-metadata-inference.md)
-- [ADR-0012: M3 launch ABI and execution boundary](../adr/ADR-0012-m3-launch-abi-and-execution-boundary.md)
+- [ADR-0012: Fixed vector-add launch ABI and execution boundary](../adr/ADR-0012-launch-abi-and-execution-boundary.md)
 
 ## Private segmented qualification
 
-- [ADR-0013: M5 fusion and map-store ABI](../adr/ADR-0013-m5-fusion-and-map-store-abi.md)
-- [ADR-0014: M6 minimal SwagePlan gate](../adr/ADR-0014-m6-minimal-swage-plan-gate.md)
-- [ADR-0015: M7 minimal mixed-policy execution](../adr/ADR-0015-m7-minimal-mixed-policy-execution.md)
-- [ADR-0016: M7 fused mixed-policy schedule](../adr/ADR-0016-m7-fused-mixed-policy-schedule.md)
-- [ADR-0017: M8 private split-CTA reductions](../adr/ADR-0017-m8-private-split-cta-reductions.md)
+- [ADR-0013: Segmented fusion and map-store ABI](../adr/ADR-0013-fusion-and-map-store-abi.md)
+- [ADR-0014: Minimal SwagePlan gate](../adr/ADR-0014-minimal-swage-plan-gate.md)
+- [ADR-0015: Minimal mixed-policy execution](../adr/ADR-0015-minimal-mixed-policy-execution.md)
+- [ADR-0016: Fused mixed-policy schedule](../adr/ADR-0016-fused-mixed-policy-schedule.md)
+- [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
 
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the

@@ -6,8 +6,9 @@ Stable ragged softmax executes all phases in one CTA per segment
 with fused maps. This page records the exact internal contracts;
 none of them is a public API.
 
-*Qualified under the M5 gate on NVIDIA RTX A6000 (`sm_86`);
-see [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md) and [ADR-0013](../adr/ADR-0013-m5-fusion-and-map-store-abi.md).*
+*Qualified on NVIDIA RTX A6000 (`sm_86`); see
+[Verification](verification.md) and
+[ADR-0013](../adr/ADR-0013-fusion-and-map-store-abi.md).*
 
 The softmax path retains the five-argument ABI defined in
 [Segmented Reductions](segmented-reductions.md). It admits ordered f32
@@ -24,11 +25,11 @@ map-store writes.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Three block-stride passes per segment separated by uniform all-reduce operations](../assets/figures/m5-softmax-phases.svg)
+![Three block-stride passes per segment separated by uniform all-reduce operations](../assets/figures/ragged-softmax-phases.svg)
 
 </div>
 
-*The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/m5-softmax-phases.svg).*
+*The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/ragged-softmax-phases.svg).*
 
 Continue with [Task Planning](planning.md) for how segments become
 schedulable tasks.

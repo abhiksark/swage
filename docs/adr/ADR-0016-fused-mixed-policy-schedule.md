@@ -1,5 +1,5 @@
-<!-- docs/adr/ADR-0016-m7-fused-mixed-policy-schedule.md -->
-# ADR-0016: M7 fused mixed-policy schedule
+<!-- docs/adr/ADR-0016-fused-mixed-policy-schedule.md -->
+# ADR-0016: Fused mixed-policy schedule
 
 - Status: accepted
 - Date: 2026-08-24
@@ -22,7 +22,8 @@ mixed schedule is:
 
 The semantic program, task-ID ABI, pure-policy schedules, validation rules,
 and public API boundary remain unchanged. This ADR predeclares the revised
-schedule; it does not establish a performance result or claim M7 completion.
+schedule; it does not establish a performance result or claim qualification
+success.
 
 ## Unchanged benchmark contract
 
@@ -39,24 +40,24 @@ The timing run uses exactly:
 
 Compilation, module loading, classification, and allocation occur before
 timing and are excluded. The committed record at
-`benchmarks/results/m7-a6000-sm86.json` contains every raw sample, environment
-metadata, generated distribution statistics, policy medians, and the mixed
-to best-pure ratio.
+`benchmarks/results/mixed-sum-a6000-sm86.json` contains every raw sample,
+environment metadata, generated distribution statistics, policy medians, and
+the mixed-to-best-pure ratio.
 
-M7 passes only when:
+The performance gate passes only when:
 
 ```text
 mixed_median <= 1.05 * min(pure_warp_median, pure_cta_median)
 ```
 
 If this gate fails, the distribution and policy constants above do not
-change. The implementation must improve or M7 remains open.
+change. The implementation must improve or qualification remains incomplete.
 
 ## Consequences
 
 - Mixed execution has one launch with 128 threads per block and four
   one-segment warp slots per block.
-- The existing two-launch mixed schedule is no longer the predeclared M7
-  schedule.
+- The existing two-launch mixed schedule is no longer the predeclared
+  benchmark schedule.
 - This decision does not add completion documentation or establish a new
   benchmark result.

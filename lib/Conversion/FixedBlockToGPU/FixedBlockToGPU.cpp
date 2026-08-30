@@ -84,7 +84,7 @@ bool hasCanonicalOffsetsAndMask(Value indices, Value mask, Value n,
   return nCast && nCast.getIn() == n;
 }
 
-LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
+LogicalResult verifyFixedVectorAddSignature(func::FuncOp function) {
   FunctionType type = function.getFunctionType();
   if (type.getNumInputs() != 4 || type.getNumResults() != 0 ||
       failed(verifyPointerType(type.getInput(0))) ||
@@ -102,77 +102,124 @@ LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
   if (!function.getBody().hasOneBlock())
     return function.emitError(
         "fixed vector add requires one straight-line block");
+  return success();
+}
 
+struct FixedVectorAddOpCounts {
   unsigned programIds = 0;
   unsigned gathers = 0;
   unsigned scatters = 0;
   unsigned floatAdds = 0;
+};
+
+LogicalResult classifyFixedVectorAddOperation(Operation *op, int64_t blockSize,
+                                              FixedVectorAddOpCounts &counts) {
+  if (failed(verifyVectorWidth(op, blockSize)))
+    return failure();
+  if (auto programId = dyn_cast<ProgramIdOp>(op)) {
+    ++counts.programIds;
+    if (programId.getAxis() != 0)
+      return programId.emitError("only swage.program_id axis 0 is supported");
+  } else if (isa<vector::GatherOp>(op)) {
+    ++counts.gathers;
+  } else if (isa<vector::ScatterOp>(op)) {
+    ++counts.scatters;
+  } else if (auto add = dyn_cast<arith::AddFOp>(op)) {
+    if (isa<VectorType>(add.getType()))
+      ++counts.floatAdds;
+  } else if (!isa<arith::ConstantOp, arith::MulIOp, vector::StepOp,
+                  vector::BroadcastOp, arith::AddIOp, arith::IndexCastOp,
+                  arith::CmpIOp, func::ReturnOp>(op)) {
+    return op->emitError(
+        "operation is unsupported by fixed vector-add lowering");
+  }
+  return success();
+}
+
+LogicalResult collectFixedVectorAddOperations(func::FuncOp function,
+                                              int64_t blockSize,
+                                              FixedVectorAddOpCounts &counts) {
   LogicalResult result = success();
   function.walk([&](Operation *op) {
     if (op == function.getOperation())
       return WalkResult::advance();
-    if (failed(result))
-      return WalkResult::interrupt();
-    if (failed(verifyVectorWidth(op, blockSize))) {
-      result = failure();
-      return WalkResult::interrupt();
-    }
-    if (auto programId = dyn_cast<ProgramIdOp>(op)) {
-      ++programIds;
-      if (programId.getAxis() != 0) {
-        programId.emitError("only swage.program_id axis 0 is supported");
-        result = failure();
-        return WalkResult::interrupt();
-      }
-    } else if (isa<vector::GatherOp>(op)) {
-      ++gathers;
-    } else if (isa<vector::ScatterOp>(op)) {
-      ++scatters;
-    } else if (auto add = dyn_cast<arith::AddFOp>(op)) {
-      if (isa<VectorType>(add.getType()))
-        ++floatAdds;
-    } else if (!isa<arith::ConstantOp, arith::MulIOp, vector::StepOp,
-                    vector::BroadcastOp, arith::AddIOp, arith::IndexCastOp,
-                    arith::CmpIOp, func::ReturnOp>(op)) {
-      op->emitError("operation is unsupported by fixed vector-add lowering");
+    if (failed(classifyFixedVectorAddOperation(op, blockSize, counts))) {
       result = failure();
       return WalkResult::interrupt();
     }
     return WalkResult::advance();
   });
-  if (failed(result))
-    return failure();
-  if (programIds != 1 || gathers != 2 || scatters != 1 || floatAdds != 1)
+  return result;
+}
+
+LogicalResult verifyFixedVectorAddCounts(func::FuncOp function,
+                                         const FixedVectorAddOpCounts &counts) {
+  if (counts.programIds != 1 || counts.gathers != 2 || counts.scatters != 1 ||
+      counts.floatAdds != 1)
     return function.emitError(
         "expected one program_id, two gathers, one f32 add, and one scatter");
+  return success();
+}
 
-  auto gatherOps = llvm::to_vector(function.getOps<vector::GatherOp>());
-  auto scatter = *function.getOps<vector::ScatterOp>().begin();
-  auto add = scatter.getValueToStore().getDefiningOp<arith::AddFOp>();
-  if (!add)
-    return scatter.emitError("scatter value must be the vector f32 add");
-  if (gatherOps[0].getBase() != function.getArgument(0) ||
-      gatherOps[1].getBase() != function.getArgument(1) ||
+LogicalResult verifyFixedVectorAddConnections(func::FuncOp function,
+                                              vector::GatherOp lhsGather,
+                                              vector::GatherOp rhsGather,
+                                              vector::ScatterOp scatter,
+                                              arith::AddFOp add) {
+  if (lhsGather.getBase() != function.getArgument(0) ||
+      rhsGather.getBase() != function.getArgument(1) ||
       scatter.getBase() != function.getArgument(2) ||
-      add.getLhs() != gatherOps[0].getResult() ||
-      add.getRhs() != gatherOps[1].getResult() ||
-      gatherOps[0].getIndices() != gatherOps[1].getIndices() ||
-      gatherOps[0].getIndices() != scatter.getIndices() ||
-      gatherOps[0].getMask() != gatherOps[1].getMask() ||
-      gatherOps[0].getMask() != scatter.getMask())
+      add.getLhs() != lhsGather.getResult() ||
+      add.getRhs() != rhsGather.getResult() ||
+      lhsGather.getIndices() != rhsGather.getIndices() ||
+      lhsGather.getIndices() != scatter.getIndices() ||
+      lhsGather.getMask() != rhsGather.getMask() ||
+      lhsGather.getMask() != scatter.getMask())
     return function.emitError(
         "gathers, add, and scatter do not form a fixed vector add");
-  Value indices = gatherOps[0].getIndices();
-  Value mask = gatherOps[0].getMask();
+  return success();
+}
+
+LogicalResult verifyCanonicalVectorAddAccesses(func::FuncOp function,
+                                               vector::GatherOp lhsGather,
+                                               vector::GatherOp rhsGather,
+                                               vector::ScatterOp scatter,
+                                               int64_t blockSize) {
+  Value indices = lhsGather.getIndices();
+  Value mask = lhsGather.getMask();
   Value programId = (*function.getOps<ProgramIdOp>().begin()).getResult();
-  if (!hasZeroOffsets(gatherOps[0].getOffsets()) ||
-      !hasZeroOffsets(gatherOps[1].getOffsets()) ||
+  if (!hasZeroOffsets(lhsGather.getOffsets()) ||
+      !hasZeroOffsets(rhsGather.getOffsets()) ||
       !hasZeroOffsets(scatter.getOffsets()) ||
       !hasCanonicalOffsetsAndMask(indices, mask, function.getArgument(3),
                                   programId, blockSize))
     return scatter.emitError(
         "fixed vector add must use canonical program offsets and bounds mask");
   return success();
+}
+
+LogicalResult verifyFixedVectorAddDataflow(func::FuncOp function,
+                                           int64_t blockSize) {
+  auto gathers = llvm::to_vector(function.getOps<vector::GatherOp>());
+  auto scatter = *function.getOps<vector::ScatterOp>().begin();
+  auto add = scatter.getValueToStore().getDefiningOp<arith::AddFOp>();
+  if (!add)
+    return scatter.emitError("scatter value must be the vector f32 add");
+  if (failed(verifyFixedVectorAddConnections(function, gathers[0], gathers[1],
+                                             scatter, add)))
+    return failure();
+  return verifyCanonicalVectorAddAccesses(function, gathers[0], gathers[1],
+                                          scatter, blockSize);
+}
+
+LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
+  if (failed(verifyFixedVectorAddSignature(function)))
+    return failure();
+  FixedVectorAddOpCounts counts;
+  if (failed(collectFixedVectorAddOperations(function, blockSize, counts)) ||
+      failed(verifyFixedVectorAddCounts(function, counts)))
+    return failure();
+  return verifyFixedVectorAddDataflow(function, blockSize);
 }
 
 void buildKernel(ModuleOp module, func::FuncOp source, int64_t blockSize) {
@@ -192,9 +239,9 @@ void buildKernel(ModuleOp module, func::FuncOp source, int64_t blockSize) {
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
-                  builder.getDenseI32ArrayAttr(
-                      {static_cast<int32_t>(blockSize), 1, 1}));
+  kernel->setAttr(
+      NVVM::NVVMDialect::getReqntidAttrName(),
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -244,7 +291,7 @@ public:
 
   StringRef getArgument() const final { return "swage-fixed-block-to-gpu"; }
   StringRef getDescription() const final {
-    return "Lower the M3 fixed vector-add subset to one GPU x-thread per lane";
+    return "Lower the fixed vector-add subset to one GPU x-thread per lane";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {

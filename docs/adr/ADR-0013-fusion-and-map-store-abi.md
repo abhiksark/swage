@@ -1,13 +1,14 @@
-# ADR-0013: M5 fusion and map-store ABI
+# ADR-0013: Segmented fusion and map-store ABI
 
 - Status: accepted
 - Date: 2026-08-23
 
 ## Context
 
-M5 must qualify stable ragged softmax without introducing the planned public
-segment frontend, a second production IR, or a general scheduler. The existing
-internal segmented runner and five-argument ABI are sufficient if the compiler
+Stable ragged softmax needs qualification without introducing the planned
+public segment frontend, a second production IR, or a general scheduler. The
+existing internal segmented runner and five-argument ABI are sufficient if the
+compiler
 can execute ordered reductions, fuse segment maps into their consumers, and
 terminate with either one scalar per segment or one value per segment element.
 
@@ -57,12 +58,13 @@ than saved in an intermediate buffer. The semantic program expresses `exp(x)`
 as `math.exp2((x - max) * log2(e))`. GPU code generation replaces the
 unlinked libdevice call with LLVM's native `exp2` intrinsic, which lowers to
 the NVPTX native approximation. NVPTX compilation fails closed for targets
-older than `sm_80`; M5 was qualified on an RTX A6000 at `sm_86`.
+older than `sm_80`; this path was qualified on an RTX A6000 at `sm_86`.
 
 ## Consequences
 
 - The internal runner qualifies ragged softmax against PyTorch and the
-  sequential CPU oracle without widening the public M3 launch contract.
+  sequential CPU oracle without widening the public fixed-vector launch
+  contract.
 - The one-CTA schedule is a qualification schedule, not schedule selection.
   Tiny-segment packing, multi-CTA execution, and persistent scheduling remain
   later work.

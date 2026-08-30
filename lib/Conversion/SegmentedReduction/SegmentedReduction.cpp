@@ -26,7 +26,6 @@
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 
@@ -199,9 +198,7 @@ SmallVector<MapOp> fusionChain(Value segment) {
   return chain;
 }
 
-/// Analyze one canonical segment program without mutating it.
-LogicalResult analyzeSegmentProgram(func::FuncOp function,
-                                    SegmentProgramAnalysis &analysis) {
+LogicalResult verifySegmentedFunctionShape(func::FuncOp function) {
   FunctionType type = function.getFunctionType();
   Builder builder(function.getContext());
   if (type.getNumInputs() != 5 || type.getNumResults() != 0 ||
@@ -216,7 +213,11 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
         "count");
   if (!function.getBody().hasOneBlock())
     return function.emitError("segmented reduction requires one block");
+  return success();
+}
 
+LogicalResult collectSegmentOperations(func::FuncOp function,
+                                       SegmentProgramAnalysis &analysis) {
   for (Operation &operation : function.getBody().front()) {
     if (auto segmentId = dyn_cast<SegmentIdOp>(operation))
       analysis.segmentIds.push_back(segmentId);
@@ -236,6 +237,11 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
       return operation.emitError(
           "operation is unsupported by segmented reduction lowering");
   }
+  return success();
+}
+
+LogicalResult verifySegmentRoot(func::FuncOp function,
+                                SegmentProgramAnalysis &analysis) {
   if (analysis.segmentIds.size() != 1 || analysis.segments.size() != 1 ||
       analysis.reductions.empty() || analysis.returns.size() != 1)
     return function.emitError(
@@ -255,7 +261,10 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
         "segmented reduction requires exactly one output terminal: a "
         "memref.store of a reduction at output[segment_id] or a "
         "swage.map_store into the output");
+  return success();
+}
 
+LogicalResult verifyMapConsumers(SegmentProgramAnalysis &analysis) {
   for (MapOp map : analysis.maps) {
     if (!map.getResult().hasOneUse())
       return map.emitError(
@@ -267,40 +276,43 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
           "swage.map result must have exactly one segment consumer; a mapped "
           "segment is never materialized");
   }
+  return success();
+}
 
-  DenseMap<Operation *, unsigned> stageOf;
-  for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
-    stageOf[reduction.getOperation()] = index;
+LogicalResult verifyOperationCaptures(Operation *operation,
+                                      ValueRange captures) {
+  for (Value capture : captures)
+    if (!capture.getDefiningOp<ReduceOp>() || !capture.getType().isF32())
+      return operation->emitError(
+          "segment captures must be f32 results of a swage.reduce in the "
+          "same function");
+  return success();
+}
 
-  SmallVector<Operation *> capturing;
+LogicalResult verifySegmentCaptures(SegmentProgramAnalysis &analysis) {
   for (MapOp map : analysis.maps)
-    capturing.push_back(map.getOperation());
+    if (failed(verifyOperationCaptures(map, map.getCaptures())))
+      return failure();
   for (ReduceOp reduction : analysis.reductions)
-    capturing.push_back(reduction.getOperation());
+    if (failed(verifyOperationCaptures(reduction, reduction.getCaptures())))
+      return failure();
   for (MapStoreOp mapStore : analysis.mapStores)
-    capturing.push_back(mapStore.getOperation());
-  for (Operation *operation : capturing) {
-    ValueRange captures =
-        llvm::TypeSwitch<Operation *, ValueRange>(operation)
-            .Case<MapOp>([](MapOp map) { return map.getCaptures(); })
-            .Case<ReduceOp>(
-                [](ReduceOp reduce) { return reduce.getCaptures(); })
-            .Case<MapStoreOp>(
-                [](MapStoreOp store) { return store.getCaptures(); });
-    for (Value capture : captures)
-      if (!capture.getDefiningOp<ReduceOp>() || !capture.getType().isF32())
-        return operation->emitError(
-            "segment captures must be f32 results of a swage.reduce in the "
-            "same function");
-  }
+    if (failed(verifyOperationCaptures(mapStore, mapStore.getCaptures())))
+      return failure();
+  return success();
+}
 
+LogicalResult verifyReductionKinds(SegmentProgramAnalysis &analysis) {
   for (ReduceOp reduction : analysis.reductions) {
     ReductionKind kind = reduction.getKind();
     if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
       return reduction.emitError(
           "segmented reduction supports only kind<sum> and kind<max>");
   }
+  return success();
+}
 
+LogicalResult verifySegmentRegions(SegmentProgramAnalysis &analysis) {
   for (MapOp map : analysis.maps)
     if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size())))
       return failure();
@@ -312,7 +324,21 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
     if (failed(verifyRegion(mapStore, mapStore.getBody(),
                             mapStore.getCaptures().size())))
       return failure();
+  return success();
+}
 
+DenseMap<Operation *, unsigned>
+indexReductionStages(SegmentProgramAnalysis &analysis) {
+  DenseMap<Operation *, unsigned> stageOf;
+  for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
+    stageOf[reduction.getOperation()] = index;
+  return stageOf;
+}
+
+LogicalResult
+verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
+                      const DenseMap<Operation *, unsigned> &stageOf) {
+  SegmentIdOp segmentId = analysis.segmentIds.front();
   if (analysis.mapStores.empty()) {
     memref::StoreOp store = analysis.stores.front();
     analysis.storedReduction = store.getValue().getDefiningOp<ReduceOp>();
@@ -328,10 +354,27 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
     return analysis.mapStores.front().emitError(
         "swage.map_store must write the function output buffer");
   }
+  return success();
+}
+
+/// Analyze one canonical segment program without mutating it.
+LogicalResult analyzeSegmentProgram(func::FuncOp function,
+                                    SegmentProgramAnalysis &analysis) {
+  if (failed(verifySegmentedFunctionShape(function)) ||
+      failed(collectSegmentOperations(function, analysis)) ||
+      failed(verifySegmentRoot(function, analysis)) ||
+      failed(verifyMapConsumers(analysis)) ||
+      failed(verifySegmentCaptures(analysis)) ||
+      failed(verifyReductionKinds(analysis)) ||
+      failed(verifySegmentRegions(analysis)))
+    return failure();
+
+  DenseMap<Operation *, unsigned> stageOf = indexReductionStages(analysis);
+  if (failed(verifySegmentTerminal(function, analysis, stageOf)))
+    return failure();
   if (!analysis.returns.front().getOperands().empty())
     return analysis.returns.front().emitError(
         "segmented reduction must return void");
-
   return success();
 }
 
@@ -375,7 +418,7 @@ void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
   }
 }
 
-/// Accept only the M6 identity segmented-sum planning shape.
+/// Accept only the private identity segmented-sum planning shape.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
   if (!analysis.maps.empty())
     return analysis.maps.front().emitError(
@@ -551,9 +594,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
-                  builder.getDenseI32ArrayAttr(
-                      {static_cast<int32_t>(blockSize), 1, 1}));
+  kernel->setAttr(
+      NVVM::NVVMDialect::getReqntidAttrName(),
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -765,9 +808,9 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
       builder, loc, source.getName().str() + suffix, kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
-                  builder.getDenseI32ArrayAttr(
-                      {static_cast<int32_t>(blockSize), 1, 1}));
+  kernel->setAttr(
+      NVVM::NVVMDialect::getReqntidAttrName(),
+      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);

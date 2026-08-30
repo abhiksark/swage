@@ -62,7 +62,7 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
 
 
 def test_compiles_identity_sum_with_task_id_indirection():
-    """Load original segment IDs through the private M7 task ABI."""
+    """Load original segment IDs through the private task-ID ABI."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)

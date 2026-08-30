@@ -27,6 +27,18 @@ REDIRECTS = {
     "qualification/private-m4-m8.md": "internals/index.md",
     "qualification/evidence.md": "internals/verification.md",
     "qualification/performance.md": "internals/benchmarks.md",
+    "adr/ADR-0012-m3-launch-abi-and-execution-boundary.md":
+        "adr/ADR-0012-launch-abi-and-execution-boundary.md",
+    "adr/ADR-0013-m5-fusion-and-map-store-abi.md":
+        "adr/ADR-0013-fusion-and-map-store-abi.md",
+    "adr/ADR-0014-m6-minimal-swage-plan-gate.md":
+        "adr/ADR-0014-minimal-swage-plan-gate.md",
+    "adr/ADR-0015-m7-minimal-mixed-policy-execution.md":
+        "adr/ADR-0015-minimal-mixed-policy-execution.md",
+    "adr/ADR-0016-m7-fused-mixed-policy-schedule.md":
+        "adr/ADR-0016-fused-mixed-policy-schedule.md",
+    "adr/ADR-0017-m8-private-split-cta-reductions.md":
+        "adr/ADR-0017-private-split-cta-reductions.md",
 }
 
 _STUB = """<!doctype html>

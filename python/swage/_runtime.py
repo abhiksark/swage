@@ -113,7 +113,8 @@ def _import_torch():
     return torch
 
 
-def _validate_launch(kernel, arguments, constexprs, grid, torch):
+def _validate_launch_call(kernel, arguments, constexprs, grid):
+    """Validate launch mappings, static block size, and parameter names."""
     if not isinstance(arguments, Mapping):
         raise TypeError("arguments must be a mapping")
     if not isinstance(constexprs, Mapping):
@@ -127,11 +128,11 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
         or type(grid[0]) is not int
     ):
         raise TypeError("grid must be a one-element tuple of integers")
+
     parameter_names = [argument.arg for argument in kernel.function.args.args]
     if parameter_names != ["x_ptr", "y_ptr", "output_ptr", "n", "BLOCK"]:
         raise ValueError(
-            "launch requires x_ptr, y_ptr, output_ptr, n, and BLOCK "
-            "parameters"
+            "launch requires x_ptr, y_ptr, output_ptr, n, and BLOCK parameters"
         )
     runtime_names = parameter_names[:4]
     if set(arguments) != set(runtime_names):
@@ -140,17 +141,26 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
         )
     if set(constexprs) != {"BLOCK"}:
         raise ValueError("constexprs must contain exactly BLOCK")
+    return runtime_names, block
 
+
+def _validate_launch_tensor(name, tensor, torch):
+    """Validate one tensor before its raw pointer crosses the ABI."""
+    if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
+        raise TypeError(f"argument '{name}' must be a CUDA tensor")
+    if tensor.dtype != torch.float32:
+        raise TypeError(f"argument '{name}' must have dtype torch.float32")
+    if tensor.dim() != 1:
+        raise TypeError(f"argument '{name}' must have rank one")
+    if not tensor.is_contiguous():
+        raise ValueError(f"argument '{name}' must be contiguous")
+
+
+def _validate_runtime_arguments(arguments, runtime_names, torch):
+    """Validate tensor metadata, scalar bounds, and buffer lengths."""
     tensors = tuple(arguments[name] for name in runtime_names[:3])
     for name, tensor in zip(runtime_names, tensors):
-        if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
-            raise TypeError(f"argument '{name}' must be a CUDA tensor")
-        if tensor.dtype != torch.float32:
-            raise TypeError(f"argument '{name}' must have dtype torch.float32")
-        if tensor.dim() != 1:
-            raise TypeError(f"argument '{name}' must have rank one")
-        if not tensor.is_contiguous():
-            raise ValueError(f"argument '{name}' must be contiguous")
+        _validate_launch_tensor(name, tensor, torch)
 
     n = arguments["n"]
     if type(n) is not int or not 0 <= n < (1 << 31):
@@ -158,45 +168,64 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
     for name, tensor in zip(runtime_names, tensors):
         if n > tensor.numel():
             raise ValueError(f"n exceeds tensor length for argument '{name}'")
+    return tensors, n
+
+
+def _validate_cuda_device(tensors, runtime_names, torch):
+    """Require CUDA availability and tensors on the active device."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable in PyTorch")
-
     current_device = torch.cuda.current_device()
     for name, tensor in zip(runtime_names, tensors):
         if tensor.device.index != current_device:
             raise ValueError(
                 f"argument '{name}' must be on the current CUDA device"
             )
+    return current_device
 
-    # The tensor and scalar checks above already pin the exact launch ABI, so
-    # for the canonical annotation shape the descriptors are constants and
-    # re-deriving them through metadata inference would only repeat checks.
-    # Any other annotation shape takes the full path for its diagnostics.
+
+def _launch_descriptors(kernel, arguments, constexprs, runtime_names):
+    """Return and verify the fixed vector-add ABI descriptors."""
+    # Tensor and scalar validation pins the canonical ABI. Re-derive metadata
+    # only when the annotations are not the canonical constexpr shape so its
+    # diagnostics remain authoritative.
     kernel._require_plain_parameters()
     if kernel.constexpr_names == {"BLOCK"}:
-        descriptors = ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
-    else:
-        runtime_types, _ = kernel._validate_inputs(
-            None, arguments, constexprs
-        )
-        descriptors = tuple(
-            "i32" if runtime_types[name] is language.int32 else "ptr<f32>"
-            for name in runtime_names
-        )
-        if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
-            raise TypeError(
-                "launch requires three f32 pointers and one i32"
-            )
+        return ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
 
+    runtime_types, _ = kernel._validate_inputs(None, arguments, constexprs)
+    descriptors = tuple(
+        "i32" if runtime_types[name] is language.int32 else "ptr<f32>"
+        for name in runtime_names
+    )
+    if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
+        raise TypeError("launch requires three f32 pointers and one i32")
+    return descriptors
+
+
+def _validate_launch_geometry(block, n, grid, torch, current_device):
+    """Validate the requested block and grid against the active device."""
     max_threads, target = _device_facts(torch, current_device)
     if block > max_threads:
-        raise ValueError(
-            f"BLOCK {block} exceeds device limit {max_threads}"
-        )
+        raise ValueError(f"BLOCK {block} exceeds device limit {max_threads}")
     expected_grid = ((n + block - 1) // block,)
     if grid != expected_grid:
         raise ValueError(f"grid must equal {expected_grid} for n and BLOCK")
-    stream = _current_stream(torch, current_device)
+    return target, _current_stream(torch, current_device)
+
+
+def _validate_launch(kernel, arguments, constexprs, grid, torch):
+    runtime_names, block = _validate_launch_call(
+        kernel, arguments, constexprs, grid
+    )
+    tensors, n = _validate_runtime_arguments(arguments, runtime_names, torch)
+    current_device = _validate_cuda_device(tensors, runtime_names, torch)
+    descriptors = _launch_descriptors(
+        kernel, arguments, constexprs, runtime_names
+    )
+    target, stream = _validate_launch_geometry(
+        block, n, grid, torch, current_device
+    )
     return _LaunchSpec(
         tensors,
         n,
@@ -602,7 +631,7 @@ class _CudaDriver:
         self._launch(function, grid, block, stream, values)
 
     def launch_segmented(self, function, grid, block, stream, arguments):
-        """Launch the internal three-pointer, two-count M4 ABI."""
+        """Launch the private three-pointer, two-count segmented ABI."""
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,
@@ -616,7 +645,7 @@ class _CudaDriver:
     def launch_segmented_tasks(
         self, function, grid, block, stream, arguments
     ):
-        """Launch the internal four-pointer, two-count M7 task ABI."""
+        """Launch the private four-pointer, two-count task-ID ABI."""
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,
@@ -630,7 +659,7 @@ class _CudaDriver:
     def launch_segmented_mixed(
         self, function, grid, block, stream, arguments
     ):
-        """Launch the internal four-pointer, three-count M7 fused ABI."""
+        """Launch the private four-pointer, three-count fused ABI."""
         self.launch_segmented_tasks(function, grid, block, stream, arguments)
 
     def _launch(self, function, grid, block, stream, values):

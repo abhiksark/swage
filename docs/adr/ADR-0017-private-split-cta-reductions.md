@@ -1,16 +1,17 @@
-<!-- docs/adr/ADR-0017-m8-private-split-cta-reductions.md -->
-# ADR-0017: M8 private split-CTA reductions
+<!-- docs/adr/ADR-0017-private-split-cta-reductions.md -->
+# ADR-0017: Private split-CTA reductions
 
 - Status: accepted
 - Date: 2026-08-24
 
 ## Context
 
-M7 executes one canonical identity segmented sum with private warp, CTA, and
-fused mixed schedules. A segment assigned to CTA still runs in one block, so
-an oversized segment can dominate the launch tail. M8 needs the smallest task
-decomposition that proves complete multi-CTA coverage without adding another
-policy, widening the public API, or changing the frozen M7 benchmark.
+Private execution supports one canonical identity segmented sum with warp,
+CTA, and fused mixed schedules. A segment assigned to CTA still runs in one
+block, so an oversized segment can dominate the launch tail. Split execution
+needs the smallest task decomposition that proves complete multi-CTA coverage
+without adding another policy, widening the public API, or changing the
+frozen mixed-policy benchmark.
 
 ## Decision
 
@@ -59,28 +60,30 @@ stream. Their exact private ABIs live in
 Pure `warp` and `cta` preparation continues to execute every segment as a
 correctness control. Mixed execution submits direct fused work, partial CTAs,
 then merge CTAs in that order on one current stream, skipping empty phases.
-When no segment is split, mixed execution preserves the M7 one-launch path.
-Validation and classification finish before compilation or allocation, and
-failures do not select another policy or backend.
+When no segment is split, mixed execution preserves the direct one-launch
+path. Validation and classification finish before compilation or allocation.
+Failures do not select another policy or backend.
 
 ### Qualification gate
 
-M8 is a correctness gate on NVIDIA RTX A6000 at `sm_86`. Exact all-one sums
-and tolerant nontrivial f32 sums must match the sequential CPU oracle and
-PyTorch. Tests cover boundary lengths, exact chunk multiples, one-element
-remainders, repeated empty segments, split-only, direct-only, mixed and zero
+Split execution is a correctness gate on NVIDIA RTX A6000 at `sm_86`. Exact
+all-one sums and tolerant nontrivial f32 sums must match the sequential CPU
+oracle and PyTorch. Tests cover boundary lengths, exact chunk multiples,
+one-element remainders, repeated empty segments, split-only, direct-only,
+mixed and zero
 work, stream ordering, repeated launches, retention, aliases, device drift,
 and compile, allocation, and launch failures.
 
-The M7 benchmark inputs, recorded result, and `1.05` gate do not change.
+The frozen mixed-policy benchmark inputs, recorded result, and `1.05` gate
+do not change.
 
 ## Consequences
 
-- M8 proves split-CTA identity sums without defining a third scheduling
-  policy or a general task graph.
+- This decision proves split-CTA identity sums without defining a third
+  scheduling policy or a general task graph.
 - Scratch storage is proportional to the number of partial chunks and is
   private to one prepared launch.
 - The ordered stream boundary provides the only dependency mechanism needed
   for this two-stage reduction.
 - Split max, split softmax, packed warps, queues, persistent scheduling, and
-  public segmented execution remain outside M8.
+  public segmented execution remain outside this decision.
