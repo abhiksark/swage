@@ -283,6 +283,35 @@ def test_prepared_sum_uses_current_non_default_stream(policy):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+def test_prepared_sum_supports_cuda_graph_replay(policy):
+    """Capture prepared work after its immutable task IDs are ready."""
+    lengths = [0, 32, 33, 4096]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    prepared = _prepare_planned_sum(values, device_offsets, output)
+    launch = getattr(prepared, policy)
+    launch()
+    torch.cuda.synchronize()
+    launch()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        launch()
+    output.fill_(float("nan"))
+    graph.replay()
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
 def test_prepared_sum_waits_for_task_initialization_across_streams(
     monkeypatch, policy
 ):

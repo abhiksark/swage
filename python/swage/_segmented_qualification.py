@@ -542,11 +542,27 @@ def _prepare_planned_sum(
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream())
 
+    tasks_ready_complete = False
+
+    def wait_for_tasks(stream):
+        nonlocal tasks_ready_complete
+        if tasks_ready_complete:
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "prepared sum must launch once after task initialization "
+                "before CUDA graph capture"
+            )
+        if tasks_ready.query():
+            tasks_ready_complete = True
+        else:
+            stream.wait_event(tasks_ready)
+
     def submit(function, block_size, task_ids, stream):
         task_count = task_ids.numel()
         if task_count == 0:
             return None
-        stream.wait_event(tasks_ready)
+        wait_for_tasks(stream)
         driver.launch_segmented_tasks(
             function,
             (task_count,),
@@ -588,7 +604,7 @@ def _prepare_planned_sum(
 
     def mixed():
         stream = current_stream()
-        stream.wait_event(tasks_ready)
+        wait_for_tasks(stream)
         if direct_count:
             driver.launch_segmented_mixed(
                 mixed_function,

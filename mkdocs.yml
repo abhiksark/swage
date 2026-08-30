@@ -87,6 +87,7 @@ nav:
       - Compiler Tools and Passes: internals/compiler-tools.md
       - Verification: internals/verification.md
       - Benchmarks: internals/benchmarks.md
+      - A6000 Comparison Study: internals/a6000-comparison.md
   - Decisions:
       - ADR Index: decisions/index.md
       - "ADR-0001: Python AST directly to MLIR": adr/ADR-0001-python-ast-directly-to-mlir.md

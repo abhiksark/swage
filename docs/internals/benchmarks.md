@@ -91,6 +91,8 @@ Triton's autotuning stack.
   baseline. The snapshot records the full sweep; Swage claims no
   vector-add win.
 
-Continue with [Verification](verification.md) for the executable
-proof behind each boundary, or [Task Execution](task-execution.md) for
-the execution contracts these measurements exercise.
+Continue with the [A6000 comparison study](a6000-comparison.md) for a
+separate exploratory Swage/Triton campaign across skewed segment
+distributions, [Verification](verification.md) for the executable proof
+behind each boundary, or [Task Execution](task-execution.md) for the
+execution contracts these measurements exercise.
