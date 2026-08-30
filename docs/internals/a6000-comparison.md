@@ -11,35 +11,34 @@ making that scheduling model part of its compiler architecture.
 
 !!! warning "Exploratory evidence, not a release claim"
 
-    This page reports one local campaign from an unclean worktree. It is not
-    a trusted GPU qualification, continuously enforced gate, or public
-    performance contract. Segmented execution is private contributor
-    machinery, not public Swage API. The complete local record is
+    This page reports one local campaign from clean commit `80f222d` on one
+    GPU. It is not a trusted GPU qualification, continuously enforced gate,
+    or public performance contract. Segmented execution is private
+    contributor machinery, not public Swage API. The complete local record is
     [`benchmarks/results/swage-triton-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/swage-triton-a6000-sm86.json).
 
 ## Executive result
 
 Against a swept **fixed-shape** Triton kernel, Swage is faster on six of seven
-segmented distributions. The largest graph-replay differences are 6.46x on
-`one-outlier`, 2.58x on `many-tiny`, and 1.88x on `few-huge`.
+segmented distributions. The largest graph-replay differences are 6.60x on
+`one-outlier`, 2.58x on `many-tiny`, and 1.90x on `few-huge`.
 
 Against a **matched heterogeneous Triton scheduler** with the same 32-element
 cutoff, packed four-warp programs, and separate CTA tasks, the result narrows:
 
-- Swage is 15.8% faster on `log-normal`;
-- Swage and matched Triton are within 1% on `uniform`, `bimodal`,
-  `zipf-like`, and `few-huge`;
-- matched Triton is 7.5% faster on `many-tiny`; and
-- matched Triton is 4.6% faster on `one-outlier` under graph replay.
+- Swage is 16.2% faster on `log-normal`;
+- Swage and matched Triton are within 1.3% on `uniform`, `bimodal`,
+  `zipf-like`, `few-huge`, and `one-outlier`; and
+- matched Triton is 8.3% faster on `many-tiny` under graph replay.
 
 This is the central finding: **heterogeneous task derivation matters, and both
 compiler stacks benefit when given it**. Swage's interesting property is that
 one semantic segment program already lowers through this planning model; the
 result is not evidence that Triton cannot express an equivalent schedule.
 
-The fixed vector-add control is also near parity under graph replay, with
-Swage between parity and 4.8% behind Triton across the sweep. Host-visible
-calls still favor Triton because Swage's Python launch path costs more.
+The fixed vector-add control is also close under graph replay, with Swage
+between parity and 7.0% behind Triton across the sweep. Host-visible calls
+still favor Triton because Swage's Python launch path costs more.
 
 ## What is being compared
 
@@ -128,13 +127,13 @@ better. Each column selects its best measured policy or configuration.
 
 | Distribution | Swage µs | Fixed Triton µs | Planned Triton µs | PyTorch µs | Swage / planned |
 |---|---:|---:|---:|---:|---:|
-| many-tiny | 8.480 | 21.920 | **7.840** | 51.422 | 1.082 |
-| uniform | **382.112** | 379.520 | 382.240 | 381.963 | 1.000 |
-| log-normal | **36.384** | 69.760 | 43.195 | 71.926 | **0.842** |
-| bimodal | **61.104** | 72.928 | 61.152 | 84.192 | 0.999 |
-| zipf-like | **48.768** | 71.916 | 49.056 | 80.253 | 0.994 |
-| few-huge | **37.248** | 69.995 | 37.600 | 69.344 | 0.991 |
-| one-outlier | 10.400 | 67.200 | **9.920** | 55.351 | 1.048 |
+| many-tiny | 8.480 | 21.850 | **7.776** | 51.360 | 1.091 |
+| uniform | 386.336 | **379.520** | 383.136 | 382.013 | 1.008 |
+| log-normal | **36.320** | 68.096 | 43.360 | 71.326 | **0.838** |
+| bimodal | **60.760** | 72.416 | 61.056 | 83.584 | 0.995 |
+| zipf-like | **48.762** | 71.936 | 48.992 | 80.192 | 0.995 |
+| few-huge | **37.175** | 70.556 | 37.627 | 68.160 | 0.988 |
+| one-outlier | 10.072 | 66.519 | **9.949** | 54.944 | 1.012 |
 
 A ratio below 1 favors Swage. Comparing Swage only with fixed Triton makes the
 planning result look like a language result. Planned Triton closes nearly all
@@ -143,9 +142,9 @@ result in this campaign; the other mixed distributions are effectively
 parity under graph replay.
 
 Batched CUDA events retain launcher submission while amortizing it over 32
-calls. They show the same broad picture, with Swage at 0.846x planned Triton
-on `log-normal`, between 0.965x and 0.997x on four other distributions,
-1.066x on `many-tiny`, and 0.917x on `one-outlier`.
+calls. They show the same broad picture, with Swage at 0.840x planned Triton
+on `log-normal`, between 0.967x and 1.004x on four other distributions,
+1.072x on `many-tiny`, and 0.918x on `one-outlier`.
 
 ## Why the mixed policy helps
 
@@ -172,7 +171,7 @@ work.
 The `many-tiny` row is important here. Its maximum is only 32, so fixed
 Triton can already select a small block but still launches one program per
 segment. Packing four tasks per planned Triton program changes graph time from
-21.920 to 7.840 microseconds and slightly beats Swage's 8.480 microseconds.
+21.850 to 7.776 microseconds and slightly beats Swage's 8.480 microseconds.
 This isolates packed task organization as the source of the large gain.
 
 ### It retains a sensible uniform path
@@ -190,13 +189,13 @@ graph-replay medians.
 
 | Elements | Swage µs | Best Triton µs | PyTorch µs | Swage / Triton |
 |---:|---:|---:|---:|---:|
-| 1,024 | 1.079 | **1.056** | 1.208 | 1.022 |
-| 4,096 | 1.081 | **1.056** | 1.215 | 1.024 |
-| 16,384 | **1.088** | **1.088** | 1.184 | 1.000 |
-| 65,536 | 1.280 | **1.273** | 1.373 | 1.005 |
-| 262,144 | 2.045 | **1.952** | 2.112 | 1.048 |
-| 1,048,576 | 18.559 | **17.816** | 17.783 | 1.042 |
-| 4,194,304 | 75.903 | **74.528** | 74.780 | 1.018 |
+| 1,024 | **1.056** | **1.056** | 1.215 | 1.000 |
+| 4,096 | 1.088 | **1.016** | 1.216 | 1.070 |
+| 16,384 | 1.083 | **1.056** | 1.184 | 1.026 |
+| 65,536 | 1.280 | **1.270** | 1.376 | 1.008 |
+| 262,144 | 1.984 | **1.920** | 2.105 | 1.033 |
+| 1,048,576 | 18.496 | **17.696** | 17.664 | 1.045 |
+| 4,194,304 | 76.012 | **74.943** | 75.142 | 1.014 |
 
 Kernel quality is close across this control. The host launch path remains a
 separate Swage loss: batched event timing is roughly 2x slower than Triton for
@@ -206,9 +205,9 @@ not a 2x device-kernel deficit.
 ## Host-visible call latency
 
 Synchronized wall-clock timing includes Python dispatch and synchronization.
-Compared with matched planned Triton, mixed Swage measures 15.579 versus
-16.280 microseconds on `many-tiny`, 43.741 versus 50.413 on `log-normal`, and
-17.352 versus 19.030 on `one-outlier`. Swage's fused direct schedule needs one
+Compared with matched planned Triton, mixed Swage measures 15.529 versus
+16.290 microseconds on `many-tiny`, 43.476 versus 49.763 on `log-normal`, and
+17.372 versus 19.005 on `one-outlier`. Swage's fused direct schedule needs one
 host launch where mixed planned Triton needs two, so host timing generally
 favors Swage more than graph replay does.
 
