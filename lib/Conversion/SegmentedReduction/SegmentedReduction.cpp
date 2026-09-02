@@ -604,6 +604,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   kernel->setAttr(
       NVVM::NVVMDialect::getReqntidAttrName(),
       builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
+  Value claimBroadcast;
+  if (persistent) {
+    auto workgroupSpace = gpu::AddressSpaceAttr::get(
+        module.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+    auto broadcastType = MemRefType::get({1}, i32, AffineMap(), workgroupSpace);
+    claimBroadcast = kernel.addWorkgroupAttribution(broadcastType, loc);
+  }
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -743,10 +750,15 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                    32, gpu::ShuffleMode::IDX);
         return shuffled.getShuffleResult();
       }
-      auto maximum = gpu::AllReduceOperationAttr::get(
-          module.getContext(), gpu::AllReduceOperation::MAXUI);
-      return Value(gpu::AllReduceOp::create(
-          body, claimLoc, leaderClaim.getResult(0), maximum, true));
+      scf::IfOp::create(
+          body, claimLoc, leader, [&](OpBuilder &store, Location storeLoc) {
+            memref::StoreOp::create(store, storeLoc, leaderClaim.getResult(0),
+                                    claimBroadcast, zero);
+            scf::YieldOp::create(store, storeLoc);
+          });
+      gpu::BarrierOp::create(body, claimLoc);
+      return Value(memref::LoadOp::create(body, claimLoc, claimBroadcast,
+                                          ValueRange{zero}));
     };
 
     // CTA tasks are claimed first so a long tail can overlap subsequent
@@ -859,10 +871,15 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     builder.setInsertionPointToStart(&publish.getElseRegion().front());
     scf::YieldOp::create(builder, loc, zeroI32);
     builder.setInsertionPointAfter(publish);
-    auto completionMaximum = gpu::AllReduceOperationAttr::get(
-        module.getContext(), gpu::AllReduceOperation::MAXUI);
-    Value published = gpu::AllReduceOp::create(
-        builder, loc, publish.getResult(0), completionMaximum, true);
+    scf::IfOp::create(
+        builder, loc, firstThread, [&](OpBuilder &store, Location storeLoc) {
+          memref::StoreOp::create(store, storeLoc, publish.getResult(0),
+                                  claimBroadcast, zero);
+          scf::YieldOp::create(store, storeLoc);
+        });
+    gpu::BarrierOp::create(builder, loc);
+    Value published =
+        memref::LoadOp::create(builder, loc, claimBroadcast, ValueRange{zero});
 
     Value three = arith::ConstantIndexOp::create(builder, loc, 3);
     Value mergeBase = arith::MulIOp::create(builder, loc, mergeId, three);
