@@ -65,15 +65,15 @@ def test_recorded_a6000_result_preserves_the_failed_gate():
     )
 
     assert result["source"] == {
-        "revision": "87fb65ec79726e4cb6654c40b58026b47beb2d36",
+        "revision": "f8bb0a9de986ae6a9fa59d8a05666a3c44b159d0",
         "worktree_clean": True,
     }
     assert result["medians_ms"] == {
-        "persistent": 0.1157120019197464,
-        "static_mixed": 0.11872000247240067,
+        "persistent": 0.1167520023882389,
+        "static_mixed": 0.11878400295972824,
     }
     assert result["persistent_to_static_ratio"] == pytest.approx(
-        0.9746630686488273
+        0.9828933145805985
     )
     assert result["gate"] == {"maximum_ratio": 0.95, "passed": False}
     assert all(

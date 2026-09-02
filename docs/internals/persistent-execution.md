@@ -9,8 +9,9 @@ private experiment, not a public API or completed qualification.
 
 !!! warning "Performance gate failed"
 
-    Correctness tests exercise the implementation, but the best clean NVIDIA
-    RTX A6000 run was 2.53% faster than static mixed execution and missed the
+    Correctness tests exercise the implementation, but the semantically
+    qualified NVIDIA RTX A6000 run was 1.71% faster than static mixed
+    execution and missed the
     predeclared 5% requirement. Consequently
     [ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains
     proposed and no current release status depends on this path.
@@ -71,18 +72,27 @@ overlap the tail of split work.
 
 ## Dependency publication
 
-After a partial scratch store, the block converges and thread zero performs an
-acquire-release atomic increment on that merge group's completion counter.
-Only thread zero reads the dependency metadata. It broadcasts a ready merge
-ID only when its increment completes the group; otherwise it broadcasts a
-sentinel. Exactly one CTA therefore reduces the group's compact scratch range
-and writes the segment output.
+After a partial scratch store, the block converges and thread zero executes a
+GPU-scope memory fence before performing an acquire-release atomic increment
+on that merge group's completion counter. Only thread zero reads the
+dependency metadata. It broadcasts a ready merge ID only when its increment
+completes the group; otherwise it broadcasts a sentinel. Before any lane of
+the final CTA reads scratch, it executes a second GPU-scope fence. Exactly one
+CTA therefore reduces the group's compact scratch range and writes the
+segment output.
+
+The explicit fences are intentional. For the pinned LLVM/NVPTX path, the
+lowered LLVM operation retains `acq_rel`, but PTX emission uses the legacy
+unqualified `atom.global.add` spelling. Poisoned-scratch tests with two and
+three resident CTAs exposed stale reads without the explicit `membar.gl`
+pair.
 
 This protocol has no dependency spin loop:
 
 - atomic queue increments give every task index one claimant;
 - every partial has one scratch slot and one merge group;
-- acquire-release publication orders scratch stores before the merge;
+- explicit GPU fences and acquire-release publication order scratch stores
+  before the merge;
 - only the final publisher owns the merge and output store;
 - workers with no remaining queue work terminate.
 

@@ -51,15 +51,20 @@ warp, partial, and merge plan. Timed static execution contains fused direct,
 split partial, and split merge kernels; timed persistent execution contains
 its counter reset and one 168-block resident kernel.
 
-The best clean implementation reduced the persistent median from 140.288 to
-115.712 microseconds. Static mixed measured 118.720 microseconds, so
-persistent was 2.53% faster, but the 0.9747 ratio failed the predeclared
+Adversarial testing later invalidated the original 115.712-microsecond run:
+a final publisher could observe completion before another CTA's scratch store
+was globally visible. That raw record remains in the repository, but is not
+qualification evidence.
+
+With explicit GPU-scope publication fences, the clean persistent median was
+116.752 microseconds and static mixed measured 118.784 microseconds.
+Persistent was 1.71% faster, but the 0.9829 ratio failed the predeclared
 `persistent <= 0.95 * static_mixed` gate. Persistent qualification therefore
 remains incomplete; this is an honest near miss, not a performance success.
 The canonical
 [raw record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json)
-and all three earlier clean failures preserve every sample and source
-revision.
+and all earlier clean runs preserve every sample and source revision. Every
+pre-fence run is explicitly excluded from semantic qualification.
 
 ## Segmented sum under graph timing
 

@@ -45,8 +45,9 @@ Resident CTAs perform these phases without a grid-wide barrier:
 1. thread zero atomically claims direct CTA tasks; the claim is broadcast to
    the block;
 2. thread zero atomically claims split partial tasks;
-3. each partial writes one unique scratch slot, then publishes completion to
-   its merge group with an acquire-release atomic increment;
+3. each partial writes one unique scratch slot, executes an explicit
+   GPU-scope release fence, then publishes completion to its merge group with
+   an acquire-release atomic increment;
 4. the CTA observing the final completion performs the group's only scratch
    merge and output store;
 5. each physical warp independently claims batches of direct warp tasks, with
@@ -59,8 +60,11 @@ has one owner and one output or scratch slot.
 A block that observes an empty phase proceeds while blocks already processing
 that phase may continue. No worker spins on a dependency. Atomic claims give
 exactly-once task ownership; the final completion count gives exactly one
-merge owner. The acquire-release completion chain makes prior scratch stores
-visible to the merge owner.
+merge owner. A GPU-scope acquire fence before the merge scratch loads pairs
+with each publisher's explicit release fence. These fences are required
+because the pinned NVPTX backend emits the completion RMW as a legacy
+unqualified `atom.global.add` instruction even though lowered LLVM IR retains
+`acq_rel`.
 
 The counter reset and resident launch are one ordered stream sequence. Inputs,
 outputs, descriptors, scratch, and counters are retained on that stream.
@@ -101,18 +105,23 @@ failed gate remains recorded and persistent qualification remains incomplete.
 
 ## Recorded outcome
 
-The best clean run, at source revision `87fb65e`, measured a persistent median
-of 115.712 microseconds and a static mixed median of 118.720 microseconds. The
-persistent path was 2.53% faster, but its ratio of 0.9747 did not meet the
-predeclared maximum of 0.95. The gate therefore failed and this ADR remains
-proposed.
+Detailed adversarial testing invalidated the original `87fb65e` measurement:
+with two or three resident CTAs, a final publisher could observe completion
+before another CTA's scratch store became globally visible. The raw run is
+retained as `persistent-sum-a6000-sm86-87fb65e-invalid.json`, but it is not
+qualification evidence.
+
+After adding explicit device fences, the clean `f8bb0a9` run measured a
+persistent median of 116.752 microseconds and a static mixed median of 118.784
+microseconds. The semantically qualified persistent path was 1.71% faster, but
+its ratio of 0.9829 did not meet the predeclared maximum of 0.95. The gate
+therefore failed and this ADR remains proposed.
 
 The canonical raw record is
 [`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json).
-Earlier clean failures at `c34ab5c`, `bb99d25`, and `9625aae` are retained next
-to it rather than discarded. They show the progression from per-claim CTA
-all-reduce broadcasts to shared broadcasts, leader-only dependency metadata,
-and bounded queue batches without changing the frozen workload or threshold.
+Earlier clean runs at `c34ab5c`, `bb99d25`, `9625aae`, and `87fb65e` are
+retained next to it rather than discarded, but all predate the publication
+fence regression and are excluded from semantic qualification.
 
 ## Acceptance boundary
 
@@ -121,7 +130,8 @@ The decision may become accepted only when tests establish:
 - exact direct warp, direct CTA, partial, and merge ownership;
 - empty, boundary, repeated-empty, mixed, split-only, and extreme-skew
   correctness against PyTorch and the sequential CPU oracle;
-- one merge writer after all partial scratch values are published;
+- one merge writer after all partial scratch values are published, including
+  runs that poison every scratch slot before submission;
 - repeated launch, non-default stream, CUDA graph, retention, device drift,
   invalid resident count, allocation failure, compile failure, and launch
   failure behavior;
