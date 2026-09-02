@@ -900,6 +900,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           Value expectedPartialsI32 = arith::IndexCastOp::create(
               publish, publishLoc, publish.getI32Type(), expectedPartials);
 
+          // NVPTX lowers the LLVM atomic to the legacy atom form on sm_86.
+          // Make scratch publication explicit before exposing completion.
+          NVVM::MembarOp::create(publish, publishLoc, NVVM::MemScopeKind::GPU);
           Value previousCompletion = LLVM::AtomicRMWOp::create(
               publish, publishLoc, LLVM::AtomicBinOp::add, completionAddress,
               oneI32, LLVM::AtomicOrdering::acq_rel);
@@ -932,6 +935,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
     scf::IfOp::create(
         builder, loc, hasReadyMerge, [&](OpBuilder &merge, Location mergeLoc) {
+          // Pair with every partial publisher before any lane reads scratch.
+          NVVM::MembarOp::create(merge, mergeLoc, NVVM::MemScopeKind::GPU);
           Value mergeId = arith::IndexCastOp::create(
               merge, mergeLoc, merge.getIndexType(), readyMergeI32);
           Value three = arith::ConstantIndexOp::create(merge, mergeLoc, 3);
