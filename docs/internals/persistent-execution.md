@@ -10,7 +10,7 @@ private experiment, not a public API or completed qualification.
 !!! warning "Performance gate failed"
 
     Correctness tests exercise the implementation, but the semantically
-    qualified NVIDIA RTX A6000 run was 1.71% faster than static mixed
+    qualified NVIDIA RTX A6000 run was 1.06% faster than static mixed
     execution and missed the
     predeclared 5% requirement. Consequently
     [ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains
@@ -68,7 +68,9 @@ Each block proceeds through three queues without a grid-wide barrier:
 
 A worker advances when it observes a queue empty even if other workers are
 still completing already-claimed work. This permits short direct work to
-overlap the tail of split work.
+overlap the tail of split work. A block barrier separates the direct-CTA and
+partial phases because they reuse one shared claim-broadcast slot; it prevents
+the first partial claim from racing the final CTA-claim read.
 
 ## Dependency publication
 

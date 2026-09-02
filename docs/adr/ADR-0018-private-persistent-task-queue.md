@@ -111,17 +111,23 @@ before another CTA's scratch store became globally visible. The raw run is
 retained as `persistent-sum-a6000-sm86-87fb65e-invalid.json`, but it is not
 qualification evidence.
 
-After adding explicit device fences, the clean `f8bb0a9` run measured a
-persistent median of 116.752 microseconds and a static mixed median of 118.784
-microseconds. The semantically qualified persistent path was 1.71% faster, but
-its ratio of 0.9829 did not meet the predeclared maximum of 0.95. The gate
-therefore failed and this ADR remains proposed.
+After adding explicit device fences, Compute Sanitizer exposed a second race:
+the partial phase could overwrite the shared queue-claim slot before every
+thread had read the terminating CTA claim. The clean `f8bb0a9` run is retained
+as `persistent-sum-a6000-sm86-f8bb0a9-invalid.json`, but it also predates the
+correctness fix and is not qualification evidence.
+
+With both publication fences and the CTA-to-partial phase barrier, the clean
+`205f629` run measured a persistent median of 117.520 microseconds and a static
+mixed median of 118.784 microseconds. The corrected persistent path was 1.06%
+faster, but its ratio of 0.9894 did not meet the predeclared maximum of 0.95.
+The gate therefore failed and this ADR remains proposed.
 
 The canonical raw record is
 [`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json).
-Earlier clean runs at `c34ab5c`, `bb99d25`, `9625aae`, and `87fb65e` are
-retained next to it rather than discarded, but all predate the publication
-fence regression and are excluded from semantic qualification.
+Earlier clean runs at `c34ab5c`, `bb99d25`, `9625aae`, `87fb65e`, and
+`f8bb0a9` are retained next to it rather than discarded, but they predate one
+or both synchronization fixes and are excluded from semantic qualification.
 
 ## Acceptance boundary
 
