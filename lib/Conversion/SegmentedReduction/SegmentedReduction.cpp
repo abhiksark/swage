@@ -725,11 +725,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   if (persistent) {
     Value zeroI32 = arith::ConstantIntOp::create(builder, loc, 0, 32);
     Value oneI32 = arith::ConstantIntOp::create(builder, loc, 1, 32);
+    Value fourI32 = arith::ConstantIntOp::create(builder, loc, 4, 32);
+    Value eightI32 = arith::ConstantIntOp::create(builder, loc, 8, 32);
     Value firstThread = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, threadId, zero);
 
     auto claim = [&](OpBuilder &body, Location claimLoc, int64_t counterIndex,
-                     Value leader, bool warpBroadcast) {
+                     Value leader, bool warpBroadcast, Value increment) {
       Value counterOffset =
           arith::ConstantIntOp::create(body, claimLoc, counterIndex, 64);
       Value counterAddress = LLVM::GEPOp::create(
@@ -738,7 +740,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                            leader, /*withElseRegion=*/true);
       body.setInsertionPointToStart(&leaderClaim.getThenRegion().front());
       Value claimed = LLVM::AtomicRMWOp::create(
-          body, claimLoc, LLVM::AtomicBinOp::add, counterAddress, oneI32,
+          body, claimLoc, LLVM::AtomicBinOp::add, counterAddress, increment,
           LLVM::AtomicOrdering::monotonic);
       scf::YieldOp::create(body, claimLoc, claimed);
       body.setInsertionPointToStart(&leaderClaim.getElseRegion().front());
@@ -764,7 +766,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // CTA tasks are claimed first so a long tail can overlap subsequent
     // short-segment work. A CTA that observes the queue empty moves on while
     // another CTA may still be reducing its final long segment.
-    Value firstCTA = claim(builder, loc, 1, firstThread, false);
+    Value firstCTA = claim(builder, loc, 1, firstThread, false, oneI32);
     Value ctaTaskCount = entry->getArgument(12);
     auto ctaLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                         ValueRange{firstCTA});
@@ -785,7 +787,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
         loadSegmentId(builder, loc, entry->getArgument(4), ctaTaskIndex);
     emitSegment(builder, loc, ctaSegment, threadId, block, false);
     gpu::BarrierOp::create(builder, loc);
-    Value nextCTA = claim(builder, loc, 1, firstThread, false);
+    Value nextCTA = claim(builder, loc, 1, firstThread, false, oneI32);
     scf::YieldOp::create(builder, loc, nextCTA);
     builder.setInsertionPointAfter(ctaLoop);
 
@@ -793,7 +795,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // slot, then publishes completion with an acquire-release atomic. The
     // CTA observing the final completion performs the only merge and output
     // store for that dependency group, so workers never spin or deadlock.
-    Value firstPartial = claim(builder, loc, 2, firstThread, false);
+    Value firstPartial = claim(builder, loc, 2, firstThread, false, fourI32);
     Value partialTaskCount = entry->getArgument(13);
     auto partialLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                             ValueRange{firstPartial});
@@ -808,9 +810,19 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Block *partialAfter =
         builder.createBlock(&partialLoop.getAfter(), {}, {i32}, {loc});
     builder.setInsertionPointToEnd(partialAfter);
-    Value partialTask = partialAfter->getArgument(0);
-    Value partialIndex = arith::IndexCastOp::create(
-        builder, loc, builder.getIndexType(), partialTask);
+    Value partialBatch = partialAfter->getArgument(0);
+    Value partialBatchEnd =
+        arith::AddIOp::create(builder, loc, partialBatch, fourI32);
+    Value boundedPartialBatchEnd =
+        arith::MinUIOp::create(builder, loc, partialBatchEnd, partialTaskCount);
+    Value partialBatchIndex = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), partialBatch);
+    Value partialBatchEndIndex = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), boundedPartialBatchEnd);
+    auto partialBatchLoop = scf::ForOp::create(builder, loc, partialBatchIndex,
+                                               partialBatchEndIndex, one);
+    builder.setInsertionPointToStart(partialBatchLoop.getBody());
+    Value partialIndex = partialBatchLoop.getInductionVar();
     Value two = arith::ConstantIndexOp::create(builder, loc, 2);
     Value partialBase = arith::MulIOp::create(builder, loc, partialIndex, two);
     Value partialEndIndex =
@@ -970,7 +982,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               });
           scf::YieldOp::create(merge, mergeLoc);
         });
-    Value nextPartial = claim(builder, loc, 2, firstThread, false);
+    builder.setInsertionPointAfter(partialBatchLoop);
+    Value nextPartial = claim(builder, loc, 2, firstThread, false, fourI32);
     scf::YieldOp::create(builder, loc, nextPartial);
     builder.setInsertionPointAfter(partialLoop);
 
@@ -981,7 +994,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value lane = arith::RemUIOp::create(builder, loc, threadId, warp);
     Value firstLane = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, lane, zero);
-    Value firstWarp = claim(builder, loc, 0, firstLane, true);
+    Value firstWarp = claim(builder, loc, 0, firstLane, true, eightI32);
     Value warpTaskCount = entry->getArgument(11);
     auto warpLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                          ValueRange{firstWarp});
@@ -995,13 +1008,24 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Block *warpAfter =
         builder.createBlock(&warpLoop.getAfter(), {}, {i32}, {loc});
     builder.setInsertionPointToEnd(warpAfter);
-    Value warpTask = warpAfter->getArgument(0);
-    Value warpTaskIndex = arith::IndexCastOp::create(
-        builder, loc, builder.getIndexType(), warpTask);
+    Value warpBatch = warpAfter->getArgument(0);
+    Value warpBatchEnd =
+        arith::AddIOp::create(builder, loc, warpBatch, eightI32);
+    Value boundedWarpBatchEnd =
+        arith::MinUIOp::create(builder, loc, warpBatchEnd, warpTaskCount);
+    Value warpBatchIndex = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), warpBatch);
+    Value warpBatchEndIndex = arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), boundedWarpBatchEnd);
+    auto warpBatchLoop = scf::ForOp::create(builder, loc, warpBatchIndex,
+                                            warpBatchEndIndex, one);
+    builder.setInsertionPointToStart(warpBatchLoop.getBody());
+    Value warpTaskIndex = warpBatchLoop.getInductionVar();
     Value warpSegment =
         loadSegmentId(builder, loc, entry->getArgument(3), warpTaskIndex);
     emitSegment(builder, loc, warpSegment, lane, warp, true);
-    Value nextWarp = claim(builder, loc, 0, firstLane, true);
+    builder.setInsertionPointAfter(warpBatchLoop);
+    Value nextWarp = claim(builder, loc, 0, firstLane, true, eightI32);
     scf::YieldOp::create(builder, loc, nextWarp);
     builder.setInsertionPointAfter(warpLoop);
 
