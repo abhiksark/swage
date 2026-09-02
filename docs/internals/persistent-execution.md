@@ -95,7 +95,9 @@ softmax.
 Queue reset, resident execution, and tensor retention use the current PyTorch
 stream. Launching on another device after preparation is rejected. CUDA graph
 capture is supported after one ordinary initialized launch, matching the
-prepared static path's task-readiness contract.
+prepared static path's task-readiness contract. One prepared object owns one
+counter array and must not have launches in flight concurrently on different
+streams; callers must serialize such reuse.
 
 Failures do not fall back to static mixed execution. Unsupported semantics,
 invalid metadata, invalid residency, compilation errors, allocation errors,

@@ -141,5 +141,7 @@ public segmented launch require separate decisions and tests.
 - A 512-thread shape favors split throughput and supplies sixteen warp
   workers, but may be inferior for direct-only distributions. The frozen
   experiment decides the declared gate rather than post-result tuning.
+- One prepared object has one mutable counter array, so concurrent reuse on
+  different streams is unsupported.
 - Persistent max, persistent softmax, cross-kernel queues, multi-stream
   scheduling, and a public scheduler remain deferred.
