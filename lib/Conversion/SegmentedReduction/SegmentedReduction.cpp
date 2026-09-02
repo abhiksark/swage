@@ -608,7 +608,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   if (persistent) {
     auto workgroupSpace = gpu::AddressSpaceAttr::get(
         module.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
-    auto broadcastType = MemRefType::get({1}, i32, AffineMap(), workgroupSpace);
+    auto broadcastType = MemRefType::get({2}, i32, AffineMap(), workgroupSpace);
     claimBroadcast = kernel.addWorkgroupAttribution(broadcastType, loc);
   }
 
@@ -852,55 +852,89 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
         });
     gpu::BarrierOp::create(builder, loc);
 
-    Value mergeId =
-        loadSegmentId(builder, loc, entry->getArgument(6), partialIndex);
-    Value completionBase = arith::ConstantIndexOp::create(builder, loc, 3);
-    Value completionIndex =
-        arith::AddIOp::create(builder, loc, completionBase, mergeId);
-    Value completionIndex64 = arith::IndexCastOp::create(
-        builder, loc, builder.getI64Type(), completionIndex);
-    Value completionAddress = LLVM::GEPOp::create(
-        builder, loc, pointer, i32, entry->getArgument(9), completionIndex64);
-    auto publish = scf::IfOp::create(builder, loc, TypeRange{i32}, firstThread,
-                                     /*withElseRegion=*/true);
-    builder.setInsertionPointToStart(&publish.getThenRegion().front());
-    Value previousCompletion = LLVM::AtomicRMWOp::create(
-        builder, loc, LLVM::AtomicBinOp::add, completionAddress, oneI32,
-        LLVM::AtomicOrdering::acq_rel);
-    scf::YieldOp::create(builder, loc, previousCompletion);
-    builder.setInsertionPointToStart(&publish.getElseRegion().front());
-    scf::YieldOp::create(builder, loc, zeroI32);
-    builder.setInsertionPointAfter(publish);
+    // Only the leader reads dependency metadata and publishes completion.
+    // It writes either the ready merge ID or -1 into a separate shared slot;
+    // the CTA barrier makes that decision uniform without rereading merge
+    // descriptors in every lane for every non-final partial.
+    Value completionSlot = one;
     scf::IfOp::create(
-        builder, loc, firstThread, [&](OpBuilder &store, Location storeLoc) {
-          memref::StoreOp::create(store, storeLoc, publish.getResult(0),
-                                  claimBroadcast, zero);
-          scf::YieldOp::create(store, storeLoc);
+        builder, loc, firstThread,
+        [&](OpBuilder &publish, Location publishLoc) {
+          Value mergeId = loadSegmentId(publish, publishLoc,
+                                        entry->getArgument(6), partialIndex);
+          Value completionBase =
+              arith::ConstantIndexOp::create(publish, publishLoc, 3);
+          Value completionIndex = arith::AddIOp::create(
+              publish, publishLoc, completionBase, mergeId);
+          Value completionIndex64 = arith::IndexCastOp::create(
+              publish, publishLoc, publish.getI64Type(), completionIndex);
+          Value completionAddress =
+              LLVM::GEPOp::create(publish, publishLoc, pointer, i32,
+                                  entry->getArgument(9), completionIndex64);
+
+          Value three = arith::ConstantIndexOp::create(publish, publishLoc, 3);
+          Value mergeBase =
+              arith::MulIOp::create(publish, publishLoc, mergeId, three);
+          Value mergeBeginIndex =
+              arith::AddIOp::create(publish, publishLoc, mergeBase, one);
+          Value mergeEndIndex =
+              arith::AddIOp::create(publish, publishLoc, mergeBeginIndex, one);
+          Value mergeBegin = loadSegmentId(
+              publish, publishLoc, entry->getArgument(7), mergeBeginIndex);
+          Value mergeEnd = loadSegmentId(publish, publishLoc,
+                                         entry->getArgument(7), mergeEndIndex);
+          Value expectedPartials =
+              arith::SubIOp::create(publish, publishLoc, mergeEnd, mergeBegin);
+          Value expectedPartialsI32 = arith::IndexCastOp::create(
+              publish, publishLoc, publish.getI32Type(), expectedPartials);
+
+          Value previousCompletion = LLVM::AtomicRMWOp::create(
+              publish, publishLoc, LLVM::AtomicBinOp::add, completionAddress,
+              oneI32, LLVM::AtomicOrdering::acq_rel);
+          Value completed = arith::AddIOp::create(publish, publishLoc,
+                                                  previousCompletion, oneI32);
+          Value isLastPartial = arith::CmpIOp::create(
+              publish, publishLoc, arith::CmpIPredicate::eq, completed,
+              expectedPartialsI32);
+          auto readyMerge = scf::IfOp::create(publish, publishLoc,
+                                              TypeRange{i32}, isLastPartial,
+                                              /*withElseRegion=*/true);
+          publish.setInsertionPointToStart(&readyMerge.getThenRegion().front());
+          Value mergeIdI32 = arith::IndexCastOp::create(
+              publish, publishLoc, publish.getI32Type(), mergeId);
+          scf::YieldOp::create(publish, publishLoc, mergeIdI32);
+          publish.setInsertionPointToStart(&readyMerge.getElseRegion().front());
+          Value noMerge =
+              arith::ConstantIntOp::create(publish, publishLoc, -1, 32);
+          scf::YieldOp::create(publish, publishLoc, noMerge);
+          publish.setInsertionPointAfter(readyMerge);
+          memref::StoreOp::create(publish, publishLoc, readyMerge.getResult(0),
+                                  claimBroadcast, completionSlot);
+          scf::YieldOp::create(publish, publishLoc);
         });
     gpu::BarrierOp::create(builder, loc);
-    Value published =
-        memref::LoadOp::create(builder, loc, claimBroadcast, ValueRange{zero});
+    Value readyMergeI32 = memref::LoadOp::create(builder, loc, claimBroadcast,
+                                                 ValueRange{completionSlot});
+    Value hasReadyMerge = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::sge, readyMergeI32, zeroI32);
 
-    Value three = arith::ConstantIndexOp::create(builder, loc, 3);
-    Value mergeBase = arith::MulIOp::create(builder, loc, mergeId, three);
-    Value mergeBeginIndex = arith::AddIOp::create(builder, loc, mergeBase, one);
-    Value mergeEndIndex =
-        arith::AddIOp::create(builder, loc, mergeBeginIndex, one);
-    Value outputSegment =
-        loadSegmentId(builder, loc, entry->getArgument(7), mergeBase);
-    Value mergeBegin =
-        loadSegmentId(builder, loc, entry->getArgument(7), mergeBeginIndex);
-    Value mergeEnd =
-        loadSegmentId(builder, loc, entry->getArgument(7), mergeEndIndex);
-    Value expectedPartials =
-        arith::SubIOp::create(builder, loc, mergeEnd, mergeBegin);
-    Value expectedPartialsI32 = arith::IndexCastOp::create(
-        builder, loc, builder.getI32Type(), expectedPartials);
-    Value completed = arith::AddIOp::create(builder, loc, published, oneI32);
-    Value isLastPartial = arith::CmpIOp::create(
-        builder, loc, arith::CmpIPredicate::eq, completed, expectedPartialsI32);
     scf::IfOp::create(
-        builder, loc, isLastPartial, [&](OpBuilder &merge, Location mergeLoc) {
+        builder, loc, hasReadyMerge, [&](OpBuilder &merge, Location mergeLoc) {
+          Value mergeId = arith::IndexCastOp::create(
+              merge, mergeLoc, merge.getIndexType(), readyMergeI32);
+          Value three = arith::ConstantIndexOp::create(merge, mergeLoc, 3);
+          Value mergeBase =
+              arith::MulIOp::create(merge, mergeLoc, mergeId, three);
+          Value mergeBeginIndex =
+              arith::AddIOp::create(merge, mergeLoc, mergeBase, one);
+          Value mergeEndIndex =
+              arith::AddIOp::create(merge, mergeLoc, mergeBeginIndex, one);
+          Value outputSegment =
+              loadSegmentId(merge, mergeLoc, entry->getArgument(7), mergeBase);
+          Value mergeBegin = loadSegmentId(
+              merge, mergeLoc, entry->getArgument(7), mergeBeginIndex);
+          Value mergeEnd = loadSegmentId(merge, mergeLoc, entry->getArgument(7),
+                                         mergeEndIndex);
           Value mergeFirst =
               arith::AddIOp::create(merge, mergeLoc, mergeBegin, threadId);
           Value mergeIdentity =
@@ -936,7 +970,6 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               });
           scf::YieldOp::create(merge, mergeLoc);
         });
-    gpu::BarrierOp::create(builder, loc);
     Value nextPartial = claim(builder, loc, 2, firstThread, false);
     scf::YieldOp::create(builder, loc, nextPartial);
     builder.setInsertionPointAfter(partialLoop);
