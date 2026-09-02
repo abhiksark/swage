@@ -26,7 +26,7 @@ does not turn private qualification into public API.
 | Pure and fused mixed identity-sum correctness | Private qualification | `python/tests/mlir/test_segmented_runtime.py` | trusted GPU workflow |
 | Frozen mixed-policy performance gate | Private qualification | `benchmarks/results/mixed-sum-a6000-sm86.json`, `tests/python/test_benchmark_mixed_sum.py` | `python -m pytest tests/python/test_benchmark_mixed_sum.py -q` |
 | Split coverage, ordering, failures, and f32 parity | Private qualification | `unittests/TaskClassifierTest.cpp`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage-unit`; trusted GPU workflow |
-| Persistent claims, split completion, graph replay, and failure paths | Experimental; performance gate pending | `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage-python`; trusted GPU workflow after merge |
+| Persistent claims, split completion, graph replay, and failure paths | Experimental; predeclared performance gate failed | `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py`, `benchmarks/results/persistent-sum-a6000-sm86.json` | `ninja -C build check-swage-python`; trusted GPU workflow after merge |
 | Recorded RTX 5090 performance snapshot | Recorded evidence | `benchmarks/results/perf-5090-sm120.json` | Not re-executable in CI |
 | Public segmented syntax and execution | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |

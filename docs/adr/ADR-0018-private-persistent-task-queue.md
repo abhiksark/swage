@@ -1,8 +1,9 @@
 <!-- docs/adr/ADR-0018-private-persistent-task-queue.md -->
 # ADR-0018: Private persistent task queue
 
-- Status: proposed
+- Status: proposed; predeclared performance gate failed
 - Date: 2026-08-30
+- Last evaluated: 2026-09-02
 
 ## Context
 
@@ -48,8 +49,12 @@ Resident CTAs perform these phases without a grid-wide barrier:
    its merge group with an acquire-release atomic increment;
 4. the CTA observing the final completion performs the group's only scratch
    merge and output store;
-5. each physical warp independently claims direct warp tasks, with lane zero
-   broadcasting each claim inside its warp.
+5. each physical warp independently claims batches of direct warp tasks, with
+   lane zero broadcasting each claim inside its warp.
+
+Split claims cover bounded batches of four materialized tasks and direct warp
+claims cover bounded batches of eight. Every task in a claimed batch still
+has one owner and one output or scratch slot.
 
 A block that observes an empty phase proceeds while blocks already processing
 that phase may continue. No worker spins on a dependency. Atomic claims give
@@ -93,6 +98,21 @@ persistent_median <= 0.95 * static_mixed_median
 
 The input, schedule, and ratio must not be changed after seeing a result. A
 failed gate remains recorded and persistent qualification remains incomplete.
+
+## Recorded outcome
+
+The best clean run, at source revision `87fb65e`, measured a persistent median
+of 115.712 microseconds and a static mixed median of 118.720 microseconds. The
+persistent path was 2.53% faster, but its ratio of 0.9747 did not meet the
+predeclared maximum of 0.95. The gate therefore failed and this ADR remains
+proposed.
+
+The canonical raw record is
+[`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json).
+Earlier clean failures at `c34ab5c`, `bb99d25`, and `9625aae` are retained next
+to it rather than discarded. They show the progression from per-claim CTA
+all-reduce broadcasts to shared broadcasts, leader-only dependency metadata,
+and bounded queue batches without changing the frozen workload or threshold.
 
 ## Acceptance boundary
 

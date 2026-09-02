@@ -52,8 +52,9 @@ Current private identity-sum qualification derives:
 
 The thresholds are configurable planning limits. Split work is current only
 for the private canonical identity sum. An experimental private resident
-kernel consumes these descriptors through device counters, but has not passed
-its performance gate. Packing several short segments in the static path,
+kernel consumes these descriptors through device counters, but its clean
+A6000 run failed the predeclared performance gate. Packing several short
+segments in the static path,
 split max, split softmax, and public persistent scheduling remain future
 work.
 

@@ -91,7 +91,8 @@ policy.
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion
-before a unique merge. Its predeclared performance gate has not yet passed.
+before a unique merge. Its clean A6000 run failed the predeclared performance
+gate, so the path remains experimental.
 General cost inference, schedule selection, packed warps, reusable queues, and
 public segmented execution remain planned. They are not current Swage
 ownership claims.

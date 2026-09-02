@@ -2,6 +2,7 @@
 """Tests for the frozen persistent-scheduling benchmark contract."""
 
 import importlib
+import json
 import pathlib
 import subprocess
 
@@ -54,6 +55,31 @@ def test_gate_boundary(persistent_benchmark):
     assert not persistent_benchmark._evaluate_gate(
         {"static_mixed": 2.0, "persistent": 1.9001}
     )[1]
+
+
+def test_recorded_a6000_result_preserves_the_failed_gate():
+    """Keep the committed evidence honest about the predeclared near miss."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    result = json.loads(
+        (root / "benchmarks/results/persistent-sum-a6000-sm86.json").read_text()
+    )
+
+    assert result["source"] == {
+        "revision": "87fb65ec79726e4cb6654c40b58026b47beb2d36",
+        "worktree_clean": True,
+    }
+    assert result["medians_ms"] == {
+        "persistent": 0.1157120019197464,
+        "static_mixed": 0.11872000247240067,
+    }
+    assert result["persistent_to_static_ratio"] == pytest.approx(
+        0.9746630686488273
+    )
+    assert result["gate"] == {"maximum_ratio": 0.95, "passed": False}
+    assert all(
+        len(samples) == 100
+        for samples in result["raw_samples_ms"].values()
+    )
 
 
 def test_git_metadata_requires_clean_worktree(

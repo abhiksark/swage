@@ -7,13 +7,13 @@ device task queues and resolve split dependencies in one kernel. It consumes
 the same host-classified task metadata as static mixed execution. This is a
 private experiment, not a public API or completed qualification.
 
-!!! warning "Performance gate pending"
+!!! warning "Performance gate failed"
 
-    Correctness tests exercise the implementation, but
+    Correctness tests exercise the implementation, but the best clean NVIDIA
+    RTX A6000 run was 2.53% faster than static mixed execution and missed the
+    predeclared 5% requirement. Consequently
     [ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains
-    proposed until a clean NVIDIA RTX A6000 record passes its predeclared
-    static-versus-persistent gate. No current release status depends on this
-    path.
+    proposed and no current release status depends on this path.
 
 ## Private ABI
 
@@ -58,10 +58,12 @@ Each block proceeds through three queues without a grid-wide barrier:
 
 1. **Direct CTA queue.** Thread zero atomically claims one segment ID and
    broadcasts it to the block. All threads perform a block-stride reduction.
-2. **Partial queue.** Thread zero claims one absolute input range. The block
-   reduces it and thread zero writes its unique scratch slot.
+2. **Partial queue.** Thread zero claims up to four consecutive materialized
+   ranges. The block reduces each range and thread zero writes each task's
+   unique scratch slot.
 3. **Warp queue.** Each of the block's sixteen physical warps independently
-   claims segment IDs. Lane zero broadcasts a claim within its warp.
+   claims up to eight consecutive segment IDs. Lane zero broadcasts a claim
+   within its warp.
 
 A worker advances when it observes a queue empty even if other workers are
 still completing already-claimed work. This permits short direct work to
@@ -71,9 +73,10 @@ overlap the tail of split work.
 
 After a partial scratch store, the block converges and thread zero performs an
 acquire-release atomic increment on that merge group's completion counter.
-The previous count is broadcast to the block. Exactly one CTA observes that
-its increment completed the group; that CTA reduces the group's compact
-scratch range and writes the segment output.
+Only thread zero reads the dependency metadata. It broadcasts a ready merge
+ID only when its increment completes the group; otherwise it broadcasts a
+sentinel. Exactly one CTA therefore reduces the group's compact scratch range
+and writes the segment output.
 
 This protocol has no dependency spin loop:
 
