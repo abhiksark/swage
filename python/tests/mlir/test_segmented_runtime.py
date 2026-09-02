@@ -9,6 +9,7 @@ import pytest
 import torch
 from swage._segmented_qualification import (
     _launch_segmented_sum_tasks,
+    _prepare_persistent_sum,
     _prepare_planned_sum,
     _validate_counts,
     _validate_offsets,
@@ -209,6 +210,415 @@ def test_prepared_mixed_sum_matches_exact_segment_lengths(lengths):
     torch.testing.assert_close(
         output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
     )
+
+
+@pytest.mark.parametrize("resident_blocks", [0, -1, 1 << 32, True, "4"])
+def test_persistent_sum_rejects_invalid_residency_before_tensor_work(
+    resident_blocks,
+):
+    """Reject invalid physical grids before validation or native work."""
+    with pytest.raises(ValueError, match="positive u32"):
+        _prepare_persistent_sum(
+            None, None, None, resident_blocks=resident_blocks
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize(
+    "lengths",
+    [
+        pytest.param([0], id="empty"),
+        pytest.param([32, 33], id="policy-boundary"),
+        pytest.param([0, 2, 0, 0, 3], id="repeated-empty"),
+        pytest.param([1, 257, 2, 3837], id="skewed"),
+        pytest.param([4096], id="chunk-boundary"),
+        pytest.param([4097], id="split-boundary"),
+        pytest.param([0, 33, 4097, 1, 8193], id="mixed-split"),
+    ],
+)
+def test_persistent_sum_matches_exact_segment_lengths(lengths):
+    """Drain direct warp and CTA queues without dropped or duplicate work."""
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full(
+        (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
+    )
+
+    prepared = _prepare_persistent_sum(
+        values, device_offsets, output, resident_blocks=4
+    )
+    prepared.launch()
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_sum_resets_queues_for_repeated_and_graph_launches():
+    """Reset claims on every submission and preserve capture replay."""
+    lengths = [1, 32, 33, 4096, 4097, 2, 8193]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    prepared = _prepare_persistent_sum(
+        values, device_offsets, output, resident_blocks=3
+    )
+    expected = torch.tensor(lengths, dtype=torch.float32)
+
+    prepared.launch()
+    torch.cuda.synchronize()
+    output.fill_(float("nan"))
+    prepared.launch()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        prepared.launch()
+    output.fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_sum_uses_current_non_default_stream():
+    """Submit queue reset and resident workers on the current stream."""
+    lengths = [1, 33, 2, 4096]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    prepared = _prepare_persistent_sum(values, device_offsets, output)
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        prepared.launch()
+    stream.synchronize()
+
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_split_sum_matches_nontrivial_oracles():
+    """Publish partial completion before the unique dependent merge."""
+    lengths = [0, 33, 4097, 1, 8193]
+    host_values, host_offsets = _case(lengths)
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+
+    prepared = _prepare_persistent_sum(
+        values, offsets, output, resident_blocks=5
+    )
+    prepared.launch()
+
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
+    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, "sum"),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_extreme_skew_completes_without_starvation():
+    """Drain many claims and dependency groups repeatedly with seven CTAs."""
+    lengths = [1] * 2048 + [65_537] * 8 + [32] * 2048
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    prepared = _prepare_persistent_sum(
+        values, device_offsets, output, resident_blocks=7
+    )
+    expected = torch.tensor(lengths, dtype=torch.float32)
+
+    assert prepared.resident_blocks == 7
+    assert prepared.warp_tasks == 4096
+    assert prepared.cta_tasks == 0
+    assert prepared.partial_tasks == 136
+    assert prepared.merge_tasks == 8
+    for _ in range(10):
+        output.fill_(float("nan"))
+        prepared.launch()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_empty_persistent_sum_does_not_compile_allocate_or_launch(monkeypatch):
+    """Return a no-op after classifying an empty segment set."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    values = torch.empty(0, device="cuda", dtype=torch.float32)
+    offsets = torch.zeros(1, device="cuda", dtype=torch.int32)
+    output = torch.empty(0, device="cuda", dtype=torch.float32)
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("empty persistent work must not continue")
+
+    monkeypatch.setattr(
+        native_swage, "_compile_persistent_segmented_reduction_ptx", fail
+    )
+    monkeypatch.setattr(torch, "tensor", fail)
+    monkeypatch.setattr(torch, "zeros", fail)
+    monkeypatch.setattr(_runtime, "_get_driver", fail)
+
+    prepared = _prepare_persistent_sum(values, offsets, output)
+
+    assert prepared.resident_blocks == 0
+    assert prepared.launch() is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_sum_rejects_mismatched_plan_before_work(monkeypatch):
+    """Reject malformed dependency metadata before compilation or allocation."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    values = torch.ones(4097, device="cuda")
+    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("malformed persistent work must not continue")
+
+    monkeypatch.setattr(
+        native_swage,
+        "_materialize_segmented_plan",
+        lambda *_args, **_kwargs: ([], [], [0, 4096], [0, 0, 1]),
+    )
+    monkeypatch.setattr(
+        native_swage, "_compile_persistent_segmented_reduction_ptx", fail
+    )
+    monkeypatch.setattr(torch, "tensor", fail)
+    monkeypatch.setattr(_runtime, "_get_driver", fail)
+
+    with pytest.raises(RuntimeError, match="materialized plan does not match"):
+        _prepare_persistent_sum(values, offsets, output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
+    """Surface compilation failure before allocating private device state."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    values = torch.ones(33, device="cuda")
+    offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+
+    def compile_fail(*_args, **_kwargs):
+        raise RuntimeError("persistent compile failed")
+
+    def continue_fail(*_args, **_kwargs):
+        pytest.fail("persistent compile failure must stop preparation")
+
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        compile_fail,
+    )
+    monkeypatch.setattr(torch, "tensor", continue_fail)
+    monkeypatch.setattr(_runtime, "_get_driver", continue_fail)
+
+    with pytest.raises(RuntimeError, match="persistent compile failed"):
+        _prepare_persistent_sum(values, offsets, output)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_allocation_failure_precedes_launch(monkeypatch):
+    """Do not submit resident work after private allocation fails."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.launches = []
+
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_persistent(self, *arguments):
+            self.launches.append(arguments)
+
+    values = torch.ones(4097, device="cuda")
+    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        lambda *_args, **_kwargs: ("", "ptx"),
+    )
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(
+        torch,
+        "tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MemoryError("persistent allocation failed")
+        ),
+    )
+
+    with pytest.raises(MemoryError, match="persistent allocation failed"):
+        _prepare_persistent_sum(values, offsets, output)
+    assert not driver.launches
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_launch_failure_has_no_static_fallback(monkeypatch):
+    """Propagate the resident launch error without submitting another policy."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.launches = 0
+
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_persistent(self, *_arguments):
+            self.launches += 1
+            raise RuntimeError("persistent launch failed")
+
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        lambda *_args, **_kwargs: ("", "ptx"),
+    )
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    values = torch.ones(33, device="cuda")
+    offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+    prepared = _prepare_persistent_sum(values, offsets, output)
+
+    with pytest.raises(RuntimeError, match="persistent launch failed"):
+        prepared.launch()
+    assert driver.launches == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
+    """Reject device drift before resetting counters or launching workers."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.launches = []
+
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_persistent(self, *arguments):
+            self.launches.append(arguments)
+
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        lambda *_args, **_kwargs: ("", "ptx"),
+    )
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    values = torch.ones(33, device="cuda")
+    offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+    prepared = _prepare_persistent_sum(values, offsets, output)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 999)
+
+    with pytest.raises(ValueError, match="prepared device"):
+        prepared.launch()
+    assert not driver.launches
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
+    """Keep every private device allocation alive across submissions."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    class _Driver:
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_persistent(self, *_arguments):
+            return None
+
+    values = torch.ones(4098, device="cuda")
+    offsets = torch.tensor([0, 1, 4098], device="cuda", dtype=torch.int32)
+    output = torch.empty(2, device="cuda")
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        lambda *_args, **_kwargs: ("", "ptx"),
+    )
+    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+    original_empty = torch.empty
+    original_tensor = torch.tensor
+    original_zeros = torch.zeros
+    references = []
+
+    def retain(result):
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(
+        torch,
+        "tensor",
+        lambda *args, **kwargs: retain(original_tensor(*args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        torch,
+        "empty",
+        lambda *args, **kwargs: retain(original_empty(*args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        torch,
+        "zeros",
+        lambda *args, **kwargs: retain(original_zeros(*args, **kwargs)),
+    )
+
+    prepared = _prepare_persistent_sum(values, offsets, output)
+    gc.collect()
+    assert references
+    assert all(reference() is not None for reference in references)
+
+    prepared.launch()
+    gc.collect()
+    assert all(reference() is not None for reference in references)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")

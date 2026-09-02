@@ -33,7 +33,14 @@ namespace nb = nanobind;
 
 namespace {
 
-enum class PTXKind { Fixed, Segmented, Fused, SplitPartial, SplitMerge };
+enum class PTXKind {
+  Fixed,
+  Segmented,
+  Fused,
+  Persistent,
+  SplitPartial,
+  SplitMerge
+};
 
 /// CUDA driver entry points resolved at runtime. The extension must not
 /// link against libcuda: CPU-only builds and CI have no driver, and the
@@ -71,8 +78,7 @@ void launchKernel(uint64_t function, int64_t gridX, int64_t blockX,
   constexpr size_t maxArguments = 16;
   const CudaLauncher &launcher = cudaLauncher();
   if (!launcher.launch)
-    throw std::runtime_error(
-        "CUDA Driver library libcuda.so.1 is unavailable");
+    throw std::runtime_error("CUDA Driver library libcuda.so.1 is unavailable");
   if (gridX <= 0 || gridX > int64_t(UINT32_MAX))
     throw nb::value_error("grid_x must be a positive u32");
   if (blockX <= 0 || blockX > 1024)
@@ -87,8 +93,8 @@ void launchKernel(uint64_t function, int64_t gridX, int64_t blockX,
     parameters[index++] = &scalar;
   int result = launcher.launch(
       reinterpret_cast<void *>(function), static_cast<unsigned>(gridX), 1, 1,
-      static_cast<unsigned>(blockX), 1, 1, 0,
-      reinterpret_cast<void *>(stream), parameters.data(), nullptr);
+      static_cast<unsigned>(blockX), 1, 1, 0, reinterpret_cast<void *>(stream),
+      parameters.data(), nullptr);
   if (result == 0)
     return;
   const char *name = nullptr;
@@ -97,10 +103,10 @@ void launchKernel(uint64_t function, int64_t gridX, int64_t blockX,
     launcher.errorName(result, &name);
   if (launcher.errorString)
     launcher.errorString(result, &text);
-  throw std::runtime_error(
-      std::string("CUDA Driver cuLaunchKernel failed: ") +
-      (name ? name : "unknown") + " (" + std::to_string(result) + "): " +
-      (text ? text : "unknown"));
+  throw std::runtime_error(std::string("CUDA Driver cuLaunchKernel failed: ") +
+                           (name ? name : "unknown") + " (" +
+                           std::to_string(result) +
+                           "): " + (text ? text : "unknown"));
 }
 
 MlirModule unwrapModule(nb::object moduleObject) {
@@ -142,6 +148,10 @@ compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
     break;
   case PTXKind::Fused:
     result = swageCompileFusedSegmentedReductionToPTX(
+        module, kernel, chip, store, &lowered, store, &ptx);
+    break;
+  case PTXKind::Persistent:
+    result = swageCompilePersistentSegmentedReductionToPTX(
         module, kernel, chip, store, &lowered, store, &ptx);
     break;
   case PTXKind::SplitPartial:
@@ -242,6 +252,13 @@ NB_MODULE(_swageDialectsNanobind, m) {
       [](nb::object module, std::string kernelName, std::string target) {
         return compilePTX(module, std::move(kernelName), 128, std::move(target),
                           PTXKind::Fused);
+      },
+      nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
+  swageM.def(
+      "_compile_persistent_segmented_reduction_ptx",
+      [](nb::object module, std::string kernelName, std::string target) {
+        return compilePTX(module, std::move(kernelName), 512, std::move(target),
+                          PTXKind::Persistent);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(

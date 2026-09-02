@@ -504,6 +504,66 @@ def test_driver_marshals_four_pointer_fused_segmented_abi():
     assert scalar_values == [4096, 5, 7]
 
 
+def test_driver_marshals_ten_pointer_persistent_abi():
+    """Pass queues, dependencies, scratch, and counts through the ABI."""
+    from swage import _runtime
+
+    driver = object.__new__(_runtime._CudaDriver)
+    calls = []
+    driver._call = lambda name, *args: calls.append((name, args))
+
+    driver.launch_persistent(
+        0xF00D,
+        (168,),
+        128,
+        0xABCD,
+        (
+            0x10,
+            0x20,
+            0x30,
+            0x40,
+            0x50,
+            0x60,
+            0x70,
+            0x80,
+            0x90,
+            0xA0,
+            4096,
+            5,
+            7,
+            11,
+            2,
+        ),
+    )
+
+    name, call = calls[0]
+    parameters = call[-2]
+    pointer_values = [
+        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
+        .contents.value
+        for index in range(10)
+    ]
+    scalar_values = [
+        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_int32))
+        .contents.value
+        for index in range(10, 15)
+    ]
+    assert name == "cuLaunchKernel"
+    assert pointer_values == [
+        0x10,
+        0x20,
+        0x30,
+        0x40,
+        0x50,
+        0x60,
+        0x70,
+        0x80,
+        0x90,
+        0xA0,
+    ]
+    assert scalar_values == [4096, 5, 7, 11, 2]
+
+
 def test_driver_error_contains_stable_name_code_and_text():
     """Preserve actionable CUDA Driver diagnostics."""
     from swage import _runtime
@@ -668,12 +728,20 @@ def test_driver_prefers_the_native_launcher_when_available(monkeypatch):
     driver.launch_segmented(7, (4,), 128, 9, (0x1, 0x2, 0x3, 60, 4))
     driver.launch_segmented_tasks(7, (5,), 32, 9, (1, 2, 3, 4, 60, 5))
     driver.launch_segmented_mixed(7, (6,), 128, 9, (1, 2, 3, 4, 60, 5, 1))
+    driver.launch_persistent(
+        7,
+        (7,),
+        512,
+        9,
+        (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 60, 5, 1, 7, 2),
+    )
 
     assert calls == [
         (7, 3, 128, 9, (0x1, 0x2, 0x3), (129,)),
         (7, 4, 128, 9, (0x1, 0x2, 0x3), (60, 4)),
         (7, 5, 32, 9, (1, 2, 3, 4), (60, 5)),
         (7, 6, 128, 9, (1, 2, 3, 4), (60, 5, 1)),
+        (7, 7, 512, 9, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), (60, 5, 1, 7, 2)),
     ]
 
 

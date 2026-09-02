@@ -1,0 +1,125 @@
+<!-- docs/adr/ADR-0018-private-persistent-task-queue.md -->
+# ADR-0018: Private persistent task queue
+
+- Status: proposed
+- Date: 2026-08-30
+
+## Context
+
+Private identity-sum execution currently submits a fused direct kernel,
+followed by split partial and merge kernels when oversized segments exist.
+CUDA schedules blocks within each launch, but the three launch-wide phases
+cannot overlap. In particular, direct short work completes before split work
+starts, and every split partial must complete before any merge launch starts.
+Extreme skew can therefore leave a launch tail even though independent work
+exists.
+
+A persistent experiment must preserve the semantic segmented program, consume
+the existing host-classified descriptors, publish split dependencies safely,
+and fail directly rather than falling back to the static schedule. It must not
+add a public segmented API or put device coordinates in semantic Swage IR.
+
+## Decision
+
+### Private execution boundary
+
+One private lowering compiles the admitted identity f32 segmented sum into a
+512-thread resident kernel. The host materializes the existing stable direct,
+partial, and merge metadata before compilation or launch. No new semantic or
+planning operation is introduced.
+
+The kernel receives separate device arrays for warp IDs, CTA IDs, partial
+ranges, partial-to-merge IDs, merge records, scratch, and queue/dependency
+counters. Its private ABI is documented in
+[Persistent Execution](../internals/persistent-execution.md).
+
+The host launches at most 168 blocks on the qualification GPU, two per SM.
+Fewer blocks launch when the materialized work contains fewer groups. Each
+launch first resets its private counters on the current PyTorch stream.
+
+### Queue and dependency protocol
+
+Resident CTAs perform these phases without a grid-wide barrier:
+
+1. thread zero atomically claims direct CTA tasks; the claim is broadcast to
+   the block;
+2. thread zero atomically claims split partial tasks;
+3. each partial writes one unique scratch slot, then publishes completion to
+   its merge group with an acquire-release atomic increment;
+4. the CTA observing the final completion performs the group's only scratch
+   merge and output store;
+5. each physical warp independently claims direct warp tasks, with lane zero
+   broadcasting each claim inside its warp.
+
+A block that observes an empty phase proceeds while blocks already processing
+that phase may continue. No worker spins on a dependency. Atomic claims give
+exactly-once task ownership; the final completion count gives exactly one
+merge owner. The acquire-release completion chain makes prior scratch stores
+visible to the merge owner.
+
+The counter reset and resident launch are one ordered stream sequence. Inputs,
+outputs, descriptors, scratch, and counters are retained on that stream.
+Unsupported semantics, malformed descriptors, invalid devices, allocation
+failures, compilation failures, and launches report their errors without a
+policy or backend fallback.
+
+### Predeclared performance experiment
+
+The frozen experiment is named `persistent-tail-skew` and uses exactly:
+
+- NVIDIA RTX A6000 at `sm_86`, with 84 SMs;
+- 32,768 segments;
+- seed 7 in an isolated `random.Random` instance;
+- 32,767 short lengths sampled uniformly and inclusively from 1 through 32;
+- one final oversized length of 16,777,216 elements;
+- no position shuffle, because classification materializes policy queues;
+- warp limit 32 and CTA chunk limit 4096;
+- 512 threads and 168 resident blocks for persistent execution;
+- all-one f32 values, so every expected sum is exact;
+- 25 warmups and 100 interleaved CUDA-event samples per policy.
+
+Compilation, classification, allocation, and module loading occur before
+timing. Timed static execution is the existing prepared `mixed` sequence:
+fused direct work, split partial work, then split merge work. Timed persistent
+execution includes both the device counter reset and resident kernel. The raw
+record must retain every sample, generated statistics, task counts, exact
+source revision, worktree cleanliness, tool versions, driver, and GPU facts.
+
+The performance gate passes only when:
+
+```text
+persistent_median <= 0.95 * static_mixed_median
+```
+
+The input, schedule, and ratio must not be changed after seeing a result. A
+failed gate remains recorded and persistent qualification remains incomplete.
+
+## Acceptance boundary
+
+The decision may become accepted only when tests establish:
+
+- exact direct warp, direct CTA, partial, and merge ownership;
+- empty, boundary, repeated-empty, mixed, split-only, and extreme-skew
+  correctness against PyTorch and the sequential CPU oracle;
+- one merge writer after all partial scratch values are published;
+- repeated launch, non-default stream, CUDA graph, retention, device drift,
+  invalid resident count, allocation failure, compile failure, and launch
+  failure behavior;
+- no deadlock or starvation under repeated extreme-skew execution;
+- the committed clean A6000 record passes the predeclared performance gate;
+- all applicable Python, native, lit, C++, documentation, and GPU tests pass.
+
+This remains private qualification even if accepted. Public segment syntax and
+public segmented launch require separate decisions and tests.
+
+## Consequences
+
+- Direct and dependency-bearing tasks can execute in one resident kernel.
+- Completion state is explicit device data rather than implicit launch order.
+- The protocol specializes to the canonical identity sum; it is not a general
+  task graph or queue API.
+- A 512-thread shape favors split throughput and supplies sixteen warp
+  workers, but may be inferior for direct-only distributions. The frozen
+  experiment decides the declared gate rather than post-result tuning.
+- Persistent max, persistent softmax, cross-kernel queues, multi-stream
+  scheduling, and a public scheduler remain deferred.

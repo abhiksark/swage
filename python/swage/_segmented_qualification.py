@@ -16,6 +16,7 @@ _I32_LIMIT = 1 << 31
 _WARP_BLOCK = 32
 _CTA_BLOCK = 128
 _SPLIT_BLOCK = 512
+_PERSISTENT_BLOCK = 512
 _CTA_CHUNK_ELEMENTS = 4096
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
@@ -248,6 +249,17 @@ class _PreparedSum(NamedTuple):
     warp: Callable[[], None]
     cta: Callable[[], None]
     mixed: Callable[[], None]
+
+
+class _PreparedPersistentSum(NamedTuple):
+    """One prepared persistent launch and its fixed task metadata."""
+
+    launch: Callable[[], None]
+    resident_blocks: int
+    warp_tasks: int
+    cta_tasks: int
+    partial_tasks: int
+    merge_tasks: int
 
 
 def launch_gpu(values, offsets, output, kind, block_size=128):
@@ -657,6 +669,210 @@ def _prepare_planned_sum(
         return None
 
     return _PreparedSum(warp, cta, mixed)
+
+
+def _prepare_persistent_sum(
+    values,
+    offsets,
+    output,
+    *,
+    warp_max_elements=32,
+    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    resident_blocks=None,
+):
+    """Prepare a private resident kernel with split completion handling."""
+    if resident_blocks is not None and (
+        type(resident_blocks) is not int
+        or resident_blocks <= 0
+        or resident_blocks > (1 << 32) - 1
+    ):
+        raise ValueError("resident_blocks must be a positive u32")
+    torch = _runtime._import_torch()
+    value_count, segment_count, host_offsets = _validate_shapes(
+        values, offsets, output, _validate_offsets
+    )
+
+    from mlir_swage import ir
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from mlir_swage.dialects import swage
+
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    target = f"sm_{major}{minor}"
+    kernel_name = "segmented_sum"
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_semantic_module("sum"))
+        warp_ids, cta_ids, partial_records, merge_records = (
+            native_swage._materialize_segmented_plan(
+                module,
+                offsets=host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
+        )
+        expected_warp = []
+        expected_cta = []
+        expected_partial = []
+        expected_merge = []
+        for segment_id, (begin, end) in enumerate(pairwise(host_offsets)):
+            length = end - begin
+            if length <= warp_max_elements:
+                expected_warp.append(segment_id)
+            elif length <= cta_chunk_elements:
+                expected_cta.append(segment_id)
+            else:
+                partial_begin = len(expected_partial) // 2
+                for chunk_begin in range(begin, end, cta_chunk_elements):
+                    chunk_end = min(end, chunk_begin + cta_chunk_elements)
+                    expected_partial.extend([chunk_begin, chunk_end])
+                expected_merge.extend(
+                    [segment_id, partial_begin, len(expected_partial) // 2]
+                )
+        if (
+            warp_ids != expected_warp
+            or cta_ids != expected_cta
+            or partial_records != expected_partial
+            or merge_records != expected_merge
+        ):
+            raise RuntimeError(
+                "materialized plan does not match classified metadata"
+            )
+        if segment_count == 0:
+
+            def no_launch():
+                return None
+
+            return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
+        _, ptx = native_swage._compile_persistent_segmented_reduction_ptx(
+            module,
+            kernel_name=kernel_name,
+            target=target,
+        )
+
+    partial_count = len(partial_records) // 2
+    merge_count = len(merge_records) // 3
+    warp_slots = _PERSISTENT_BLOCK // _WARP_BLOCK
+    work_groups = (
+        len(cta_ids) + partial_count + (len(warp_ids) + warp_slots - 1)
+        // warp_slots
+    )
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if _PERSISTENT_BLOCK > properties.max_threads_per_block:
+        raise ValueError(
+            f"persistent block size {_PERSISTENT_BLOCK} exceeds device limit "
+            f"{properties.max_threads_per_block}"
+        )
+    if resident_blocks is None:
+        resident_blocks = properties.multi_processor_count * 2
+    active_blocks = min(resident_blocks, work_groups)
+
+    partial_merge_ids = [-1] * partial_count
+    for merge_id in range(merge_count):
+        partial_begin = merge_records[merge_id * 3 + 1]
+        partial_end = merge_records[merge_id * 3 + 2]
+        for partial_id in range(partial_begin, partial_end):
+            if partial_merge_ids[partial_id] != -1:
+                raise RuntimeError("partial task belongs to multiple merges")
+            partial_merge_ids[partial_id] = merge_id
+    if any(merge_id < 0 for merge_id in partial_merge_ids):
+        raise RuntimeError("partial task has no merge dependency")
+
+    driver = _runtime._get_driver()
+    _, function = driver.load(ptx, kernel_name)
+    device = offsets.device
+    device_index = device.index
+    warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
+    cta_tasks = torch.tensor(cta_ids, dtype=torch.int32, device=device)
+    partial_ranges = torch.tensor(
+        partial_records, dtype=torch.int32, device=device
+    )
+    partial_merges = torch.tensor(
+        partial_merge_ids, dtype=torch.int32, device=device
+    )
+    merge_ranges = torch.tensor(
+        merge_records, dtype=torch.int32, device=device
+    )
+    scratch = torch.empty(partial_count, dtype=torch.float32, device=device)
+    counters = torch.zeros(3 + merge_count, dtype=torch.int32, device=device)
+    tasks_ready = torch.cuda.Event()
+    tasks_ready.record(torch.cuda.current_stream())
+    tasks_ready_complete = False
+
+    def current_stream():
+        if torch.cuda.current_device() != device_index:
+            raise ValueError(
+                "prepared persistent sum must launch on its prepared device"
+            )
+        return torch.cuda.current_stream()
+
+    def wait_for_tasks(stream):
+        nonlocal tasks_ready_complete
+        if tasks_ready_complete:
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "prepared persistent sum must launch once after task "
+                "initialization before CUDA graph capture"
+            )
+        if tasks_ready.query():
+            tasks_ready_complete = True
+        else:
+            stream.wait_event(tasks_ready)
+
+    def launch():
+        stream = current_stream()
+        wait_for_tasks(stream)
+        counters.zero_()
+        driver.launch_persistent(
+            function,
+            (active_blocks,),
+            _PERSISTENT_BLOCK,
+            stream.cuda_stream,
+            (
+                values.data_ptr(),
+                offsets.data_ptr(),
+                output.data_ptr(),
+                warp_tasks.data_ptr(),
+                cta_tasks.data_ptr(),
+                partial_ranges.data_ptr(),
+                partial_merges.data_ptr(),
+                merge_ranges.data_ptr(),
+                scratch.data_ptr(),
+                counters.data_ptr(),
+                value_count,
+                len(warp_ids),
+                len(cta_ids),
+                partial_count,
+                merge_count,
+            ),
+        )
+        for tensor in (
+            values,
+            offsets,
+            output,
+            warp_tasks,
+            cta_tasks,
+            partial_ranges,
+            partial_merges,
+            merge_ranges,
+            scratch,
+            counters,
+        ):
+            tensor.record_stream(stream)
+        return None
+
+    return _PreparedPersistentSum(
+        launch,
+        active_blocks,
+        len(warp_ids),
+        len(cta_ids),
+        partial_count,
+        merge_count,
+    )
 
 
 def launch_softmax_gpu(values, offsets, output, block_size=128):
