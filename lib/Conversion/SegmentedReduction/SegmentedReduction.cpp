@@ -790,6 +790,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value nextCTA = claim(builder, loc, 1, firstThread, false, oneI32);
     scf::YieldOp::create(builder, loc, nextCTA);
     builder.setInsertionPointAfter(ctaLoop);
+    // The terminating CTA claim is still read from the shared broadcast slot.
+    // Keep the first partial-queue claim from overwriting that slot until every
+    // CTA thread has consumed the terminating value.
+    gpu::BarrierOp::create(builder, loc);
 
     // Split partials share one queue. Each partial writes a unique scratch
     // slot, then publishes completion with an acquire-release atomic. The

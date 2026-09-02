@@ -229,14 +229,16 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         assert lowered.count("nvvm.memory.barrier <gpu>") == 2
         assert "nvvm.shfl.sync  idx" in lowered
         assert "nvvm.shfl.sync  bfly" in lowered
-        assert "nvvm.barrier0" in lowered
+        # Includes the CTA-to-partial phase barrier that protects reuse of
+        # the shared queue-claim broadcast slot.
+        assert lowered.count("nvvm.barrier0") == 12
         assert ptx.count(".param .u64") == 10
         assert ptx.count(".param .u32") == 5
         assert ptx.count("atom") >= 4
         assert ptx.count("membar.gl") == 2
         assert "shfl.sync.idx" in ptx
         assert "shfl.sync.bfly" in ptx
-        assert "bar.sync" in ptx
+        assert ptx.count("bar.sync") == 12
         assert ".entry segmented_sum" in ptx
         assert module.operation.get_asm(enable_debug_info=False) == original
 
