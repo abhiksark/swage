@@ -21,14 +21,12 @@ private experiment, not a public API or completed qualification.
 The 512-thread kernel receives ten pointers followed by five signed-i32
 counts:
 
-```text
-values*, offsets*, output*,
-warp_task_ids*, cta_task_ids*,
-partial_ranges*, partial_merge_ids*, merge_records*,
-scratch*, counters*,
-value_count:i32, warp_count:i32, cta_count:i32,
-partial_count:i32, merge_count:i32
-```
+    values*, offsets*, output*,
+    warp_task_ids*, cta_task_ids*,
+    partial_ranges*, partial_merge_ids*, merge_records*,
+    scratch*, counters*,
+    value_count:i32, warp_count:i32, cta_count:i32,
+    partial_count:i32, merge_count:i32
 
 The flat record layouts remain those of [Split Execution](split-execution.md):
 partial ranges are `[begin, end]` pairs and merge records are
@@ -37,9 +35,7 @@ identifies the merge record that depends on scratch slot `i`.
 
 The counter array has this layout:
 
-```text
-[warp_claim, cta_claim, partial_claim, merge_completion...]
-```
+    [warp_claim, cta_claim, partial_claim, merge_completion...]
 
 Preparation validates and materializes all metadata, allocates scratch and
 counters, compiles and loads the kernel, and records a task-readiness event.
