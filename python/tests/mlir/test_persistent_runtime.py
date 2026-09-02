@@ -198,6 +198,31 @@ def test_persistent_randomized_plans_and_values():
             )
 
 
+def test_persistent_nonfinite_values_cross_every_worker_policy():
+    """Preserve IEEE sum behavior through direct, split, and merge work."""
+    lengths = [0, 32, 33, 4097, 8193]
+    offsets = _offsets(lengths)
+    values = torch.zeros(offsets[-1], device="cuda")
+    values[offsets[1]] = float("nan")
+    values[offsets[2] : offsets[3]] = float("inf")
+    values[offsets[3] : offsets[4]] = float("-inf")
+    values[offsets[4]] = float("inf")
+    values[offsets[4] + 4096] = float("-inf")
+    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    output = torch.empty(len(lengths), device="cuda")
+
+    _prepare_persistent_sum(
+        values, device_offsets, output, resident_blocks=2
+    ).launch()
+
+    expected = torch.tensor(
+        [0.0, float("nan"), float("inf"), float("-inf"), float("nan")]
+    )
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
+
+
 def test_persistent_capture_requires_initialized_task_storage(monkeypatch):
     """Reject capture before the one-time task-readiness handoff."""
     values = torch.ones(33, device="cuda")
