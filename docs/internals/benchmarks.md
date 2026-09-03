@@ -10,9 +10,10 @@
 
 ## Environment and provenance
 
-All numbers were recorded on 2026-08-27 on an NVIDIA GeForce RTX 5090
-(`sm_120`), driver 580.173.02, CUDA 13.0, PyTorch 2.13.0+cu130, and
-Triton 3.7.1, on a co-tenant GPU. The committed snapshot
+Unless a section names another campaign, numbers below were recorded on
+2026-08-27 on an NVIDIA GeForce RTX 5090 (`sm_120`), driver 580.173.02,
+CUDA 13.0, PyTorch 2.13.0+cu130, and Triton 3.7.1, on a co-tenant GPU. The
+committed snapshot
 [`benchmarks/results/perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json)
 records the aggregated medians, quartiles, and per-number provenance.
 Each value is the median of three independent process runs unless its
@@ -38,6 +39,34 @@ Three timing methods separate host dispatch cost from kernel quality:
 </div>
 
 *How each timing method sees dispatch and kernel time. [Open the full-size figure](../assets/figures/timing-methods.svg).*
+
+## Persistent tail-skew gate
+
+A separate 2026-09-02 campaign on the NVIDIA RTX A6000 (`sm_86`) evaluated
+the frozen gate in
+[ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md). Its 32,768
+segments contain 32,767 seeded lengths in `[1, 32]` and one final
+16,777,216-element outlier. Both policies consume the same host-materialized
+warp, partial, and merge plan. Timed static execution contains fused direct,
+split partial, and split merge kernels; timed persistent execution contains
+its counter reset and one 168-block resident kernel.
+
+Adversarial testing invalidated the original 115.712-microsecond run: a final
+publisher could observe completion before another CTA's scratch store was
+globally visible. Compute Sanitizer then invalidated the first fenced run by
+finding a shared queue-claim race at the CTA-to-partial phase handoff. Both raw
+records remain in the repository, but neither is qualification evidence.
+
+With publication fences and the phase barrier, the clean persistent median was
+117.520 microseconds and static mixed measured 118.784 microseconds.
+Persistent was 1.06% faster, but the 0.9894 ratio failed the predeclared
+`persistent <= 0.95 * static_mixed` gate. Persistent qualification therefore
+remains incomplete; this is an honest near miss, not a performance success.
+The canonical
+[raw record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json)
+and all earlier clean runs preserve every sample and source revision. Runs
+that predate either synchronization fix are explicitly excluded from semantic
+qualification.
 
 ## Segmented sum under graph timing
 
@@ -93,6 +122,8 @@ Triton's autotuning stack.
 
 Continue with the [A6000 comparison study](a6000-comparison.md) for a
 separate exploratory Swage/Triton campaign across skewed segment
-distributions, [Verification](verification.md) for the executable proof
-behind each boundary, or [Task Execution](task-execution.md) for the
-execution contracts these measurements exercise.
+distributions, [Persistent Execution](persistent-execution.md) for the failed
+resident-queue qualification, [Verification](verification.md) for the
+executable proof behind each boundary, or
+[Task Execution](task-execution.md) for the execution contracts these
+measurements exercise.

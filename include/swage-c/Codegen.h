@@ -38,6 +38,12 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData);
 
+MLIR_CAPI_EXPORTED MlirLogicalResult
+swageCompilePersistentSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData);
+
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,

@@ -60,6 +60,7 @@ namespace {
 enum class KernelKind {
   FixedBlock,
   SegmentedReduction,
+  PersistentSegmentedReduction,
   SplitPartialReduction,
   SplitMergeReduction,
 };
@@ -210,6 +211,9 @@ void addKernelLoweringPass(PassManager &manager, KernelKind kind,
   case KernelKind::SegmentedReduction:
     manager.addPass(swage::createSegmentedReductionToGPUPass(
         blockSize, useTaskIds, fusedMixed));
+    return;
+  case KernelKind::PersistentSegmentedReduction:
+    manager.addPass(swage::createPersistentSegmentedReductionToGPUPass());
     return;
   case KernelKind::SplitPartialReduction:
     manager.addPass(swage::createSplitPartialReductionToGPUPass());
@@ -392,6 +396,23 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
                         KernelKind::SegmentedReduction, true, true, lowered,
                         ptx)))
+    return mlirLogicalResultFailure();
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  return mlirLogicalResultSuccess();
+}
+
+MlirLogicalResult swageCompilePersistentSegmentedReductionToPTX(
+    MlirModule module, MlirStringRef kernelName, MlirStringRef target,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback ptxCallback, void *ptxUserData) {
+  if (!loweredCallback || !ptxCallback)
+    return mlirLogicalResultFailure();
+  std::string lowered;
+  std::string ptx;
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
+                        KernelKind::PersistentSegmentedReduction, false, false,
+                        lowered, ptx)))
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
   ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);

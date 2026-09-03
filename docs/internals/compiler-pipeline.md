@@ -78,8 +78,11 @@ lowering factories produce the direct, partial, and merge kernels used by the
 qualification runtime.
 
 This branch implements narrow rule-based classification and split task
-decomposition. It does not implement general cost inference, general schedule
-selection, packing, queues, or persistent scheduling.
+decomposition. One private experimental lowering consumes those materialized
+descriptors through persistent device claim counters and split completion
+publication; its predeclared performance gate failed. The branch does not
+implement general cost inference, general schedule selection, packing, or a
+public reusable queue.
 
 ## Ownership boundary
 

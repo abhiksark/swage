@@ -662,6 +662,18 @@ class _CudaDriver:
         """Launch the private four-pointer, three-count fused ABI."""
         self.launch_segmented_tasks(function, grid, block, stream, arguments)
 
+    def launch_persistent(self, function, grid, block, stream, arguments):
+        """Launch the private ten-pointer, five-count persistent ABI."""
+        if self._native_launch is not None:
+            self._native_launch(
+                function, grid[0], block, stream,
+                arguments[:10], arguments[10:],
+            )
+            return
+        values = [ctypes.c_void_p(value) for value in arguments[:10]]
+        values.extend(ctypes.c_int32(value) for value in arguments[10:])
+        self._launch(function, grid, block, stream, values)
+
     def _launch(self, function, grid, block, stream, values):
         parameter_pointers = (ctypes.c_void_p * len(values))(
             *[

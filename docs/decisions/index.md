@@ -31,6 +31,7 @@ gates belong in the roadmap.
 - [ADR-0015: Minimal mixed-policy execution](../adr/ADR-0015-minimal-mixed-policy-execution.md)
 - [ADR-0016: Fused mixed-policy schedule](../adr/ADR-0016-fused-mixed-policy-schedule.md)
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
+- [ADR-0018: Private persistent task queue](../adr/ADR-0018-private-persistent-task-queue.md)
 
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the

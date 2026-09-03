@@ -201,6 +201,65 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         )
 
 
+def test_compiles_persistent_identity_sum_to_deterministic_ptx():
+    """Emit resident workers with direct, partial, and dependency claims."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        first = native_swage._compile_persistent_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+        second = native_swage._compile_persistent_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            target="sm_80",
+        )
+
+        assert first == second
+        lowered, ptx = first
+        signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
+        assert signature is not None
+        assert signature.group(1).count("!llvm.ptr") == 10
+        assert signature.group(1).count("i32") == 5
+        assert lowered.count("llvm.atomicrmw add") == 4
+        assert lowered.count("nvvm.memory.barrier <gpu>") == 2
+        assert "nvvm.shfl.sync  idx" in lowered
+        assert "nvvm.shfl.sync  bfly" in lowered
+        # Includes the CTA-to-partial phase barrier that protects reuse of
+        # the shared queue-claim broadcast slot.
+        assert lowered.count("nvvm.barrier0") == 12
+        assert ptx.count(".param .u64") == 10
+        assert ptx.count(".param .u32") == 5
+        assert ptx.count("atom") >= 4
+        assert ptx.count("membar.gl") == 2
+        assert "shfl.sync.idx" in ptx
+        assert "shfl.sync.bfly" in ptx
+        assert ptx.count("bar.sync") == 12
+        assert ".entry segmented_sum" in ptx
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_persistent_lowering_rejects_non_planning_program():
+    """Fail before mutation when persistent execution cannot preserve it."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        with pytest.raises(ValueError, match="identity reduction region"):
+            native_swage._compile_persistent_segmented_reduction_ptx(
+                module,
+                kernel_name="segmented_sum",
+                target="sm_80",
+            )
+
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
 def test_fused_mixed_lowering_rejects_non_planning_program():
     """Fail before mutation when fused scheduling cannot preserve semantics."""
     with ir.Context() as context:

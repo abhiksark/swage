@@ -89,9 +89,13 @@ validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
 policy.
 
-General cost inference, schedule selection, packed warps, queues, dependency
-execution, persistent scheduling, and public segmented execution remain
-planned. They are not current Swage ownership claims.
+One private experimental identity-sum path now consumes the existing host
+classification through device claim counters and publishes split completion
+before a unique merge. Its clean A6000 run failed the predeclared performance
+gate, so the path remains experimental.
+General cost inference, schedule selection, packed warps, reusable queues, and
+public segmented execution remain planned. They are not current Swage
+ownership claims.
 
 ## Runtime invariants
 

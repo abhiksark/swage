@@ -51,8 +51,11 @@ Current private identity-sum qualification derives:
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
 The thresholds are configurable planning limits. Split work is current only
-for the private canonical identity sum. Packing several short segments,
-split max, split softmax, device queues, and persistent scheduling are future
+for the private canonical identity sum. An experimental private resident
+kernel consumes these descriptors through device counters, but its clean
+A6000 run failed the predeclared performance gate. Packing several short
+segments in the static path,
+split max, split softmax, and public persistent scheduling remain future
 work.
 
 ## Tile: the physical step
