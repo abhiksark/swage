@@ -4,6 +4,7 @@
 import gc
 import inspect
 import weakref
+from unittest import mock
 
 import pytest
 import swage as sw
@@ -85,6 +86,13 @@ SIGNATURE = {
     "n": sl.int32,
 }
 
+DTYPES = [
+    (sl.float32, torch.float32, "f32"),
+    (sl.float16, torch.float16, "f16"),
+    (sl.float8_e4m3fn, torch.float8_e4m3fn, "f8E4M3FN"),
+    (sl.float8_e5m2, torch.float8_e5m2, "f8E5M2"),
+]
+
 
 def _emit(kernel=add_kernel, signature=SIGNATURE, constexprs=None):
     """Emit one native module with the standard test signature."""
@@ -93,20 +101,37 @@ def _emit(kernel=add_kernel, signature=SIGNATURE, constexprs=None):
     return kernel.emit_mlir(signature=signature, constexprs=constexprs)
 
 
-def _arguments(device="cpu"):
+def _arguments(device="cpu", dtype=torch.float32):
     """Create metadata inputs for the standard vector-add kernel."""
     return {
-        "x_ptr": torch.empty(8, device=device),
-        "y_ptr": torch.empty(8, device=device),
-        "output_ptr": torch.empty(8, device=device),
+        "x_ptr": torch.empty(8, device=device, dtype=dtype),
+        "y_ptr": torch.empty(8, device=device, dtype=dtype),
+        "output_ptr": torch.empty(8, device=device, dtype=dtype),
         "n": 8,
     }
 
 
-def test_vector_add_emits_a_deterministic_live_module():
-    """Build the required vector-add structure without textual round trips."""
-    first = _emit()
-    second = _emit()
+@pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
+def test_vector_add_emits_a_deterministic_live_module(
+    dtype, torch_dtype, element_type
+):
+    """Keep same-type gather/add/scatter semantic IR for every storage type."""
+    signature = {
+        "x_ptr": sl.pointer(dtype),
+        "y_ptr": sl.pointer(dtype),
+        "output_ptr": sl.pointer(dtype),
+        "n": sl.int32,
+    }
+    real_import = __import__
+
+    def import_without_torch(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            raise AssertionError("explicit signatures must not import torch")
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=import_without_torch):
+        first = _emit(signature=signature)
+        second = _emit(signature=signature)
 
     assert isinstance(first, ir.Module)
     assert first.operation.verify()
@@ -116,18 +141,32 @@ def test_vector_add_emits_a_deterministic_live_module():
     assert "swage.program_id" in first_asm
     assert "vector.step" in first_asm
     assert first_asm.count("vector.gather") == 2
-    assert "arith.addf" in first_asm
-    assert "vector.scatter" in first_asm
+    assert first_asm.count("arith.addf") == 1
+    assert first_asm.count("vector.scatter") == 1
+    assert f"memref<?x{element_type}>" in first_asm
+    assert f"vector<128x{element_type}>" in first_asm
+    assert "arith.extf" not in first_asm
+    assert "arith.truncf" not in first_asm
 
 
-def test_inferred_and_explicit_signatures_emit_identical_mlir():
-    """Route inferred descriptors through the existing emitter unchanged."""
-    explicit = _emit().operation.get_asm(enable_debug_info=False)
+@pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
+def test_inferred_and_explicit_signatures_emit_identical_mlir(
+    dtype, torch_dtype, element_type
+):
+    """Infer each storage format without host casts or element-type changes."""
+    explicit = _emit(
+        signature={
+            "x_ptr": sl.pointer(dtype),
+            "y_ptr": sl.pointer(dtype),
+            "output_ptr": sl.pointer(dtype),
+            "n": sl.int32,
+        }
+    ).operation.get_asm(enable_debug_info=False)
     first = add_kernel.emit_mlir(
-        arguments=_arguments(), constexprs={"BLOCK": 128}
+        arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
     second = add_kernel.emit_mlir(
-        arguments=_arguments(), constexprs={"BLOCK": 128}
+        arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
 
     assert first.operation.verify()
@@ -137,6 +176,7 @@ def test_inferred_and_explicit_signatures_emit_identical_mlir():
 
 def test_tensor_inference_never_reads_data_pointers(monkeypatch):
     """Infer from metadata without entering the future runtime boundary."""
+
     def fail_data_ptr(self):
         raise AssertionError("data_ptr must not be called")
 
@@ -165,6 +205,8 @@ def test_inferred_i32_boundaries_are_accepted(value):
 @pytest.mark.parametrize(
     ("tensor", "reason"),
     [
+        (torch.empty(8, dtype=torch.int32), "dtype torch.int32"),
+        (torch.empty(8, dtype=torch.bfloat16), "dtype torch.bfloat16"),
         (torch.empty(8, dtype=torch.float64), "dtype torch.float64"),
         (torch.empty(2, 4), "rank 2"),
         (torch.empty(16)[::2], "non-contiguous"),
@@ -199,6 +241,7 @@ def test_cuda_tensor_metadata_is_accepted():
 
 def test_inferred_emission_does_not_retain_arguments():
     """Discard metadata providers before returning the live module."""
+
     def emit_with_local_tensor():
         tensor = torch.empty(8)
         reference = weakref.ref(tensor)
@@ -248,6 +291,7 @@ def test_arbitrary_python_call_is_rejected_without_invoking_it():
 
 def test_control_flow_has_a_stable_source_diagnostic():
     """Reject unsupported control flow at its Python source location."""
+
     @sw.jit
     def bad_kernel():
         if True:
@@ -266,6 +310,7 @@ def test_control_flow_has_a_stable_source_diagnostic():
 
 def test_nested_kernel_mlir_location_uses_real_source_column():
     """Restore indentation removed before parsing to emitted locations."""
+
     @sw.jit
     def nested_kernel():
         pid = sl.program_id(0)  # noqa: F841
@@ -280,6 +325,7 @@ def test_nested_kernel_mlir_location_uses_real_source_column():
 
 def test_rejects_every_unsupported_parameter_kind():
     """Never silently omit Python parameter kinds from the MLIR ABI."""
+
     @sw.jit
     def positional_only(value, /):
         return
@@ -336,6 +382,7 @@ def test_rejects_every_unsupported_parameter_kind():
 
 def test_store_is_rejected_on_an_assignment_rhs():
     """Permit the effectful store only in expression-statement position."""
+
     @sw.jit
     def bad_kernel(output_ptr, n, BLOCK: sl.constexpr):
         pid = sl.program_id(0)
@@ -359,6 +406,7 @@ def test_store_is_rejected_on_an_assignment_rhs():
 
 def test_empty_return_must_be_the_final_statement():
     """Reject statements after return before constructing an invalid block."""
+
     @sw.jit
     def bad_kernel():
         return
@@ -371,8 +419,70 @@ def test_empty_return_must_be_the_final_statement():
         bad_kernel.emit_mlir(signature={}, constexprs={})
 
 
+@pytest.mark.parametrize("inferred", [False, True])
+@pytest.mark.parametrize(
+    ("left", "right", "output", "left_type", "right_type", "operation"),
+    [
+        ("float16", "float32", "float16", "f16", "f32", "addition"),
+        (
+            "float8_e4m3fn",
+            "float8_e5m2",
+            "float8_e4m3fn",
+            "f8E4M3FN",
+            "f8E5M2",
+            "addition",
+        ),
+        ("float16", "float16", "float32", "f16", "f32", "store"),
+        (
+            "float8_e4m3fn",
+            "float8_e4m3fn",
+            "float8_e5m2",
+            "f8E4M3FN",
+            "f8E5M2",
+            "store",
+        ),
+    ],
+)
+def test_mixed_element_types_have_source_located_diagnostics(
+    inferred, left, right, output, left_type, right_type, operation
+):
+    """Reject arithmetic/store mismatches before generic MLIR verification."""
+    dtypes = dict(zip(("x_ptr", "y_ptr", "output_ptr"), (left, right, output)))
+    if inferred:
+        inputs = {
+            "arguments": {
+                name: torch.empty(8, dtype=getattr(torch, dtype))
+                for name, dtype in dtypes.items()
+            }
+        }
+        inputs["arguments"]["n"] = 8
+    else:
+        inputs = {
+            "signature": {
+                name: sl.pointer(getattr(sl, dtype))
+                for name, dtype in dtypes.items()
+            }
+        }
+        inputs["signature"]["n"] = sl.int32
+
+    with pytest.raises(sw.CompilationError) as caught:
+        add_kernel.emit_mlir(**inputs, constexprs={"BLOCK": 128})
+
+    source, source_line = inspect.getsourcelines(add_kernel.python_function)
+    token = "x + y" if operation == "addition" else "sl.store"
+    column = source[7].index(token) + 1
+    message = str(caught.value)
+    assert message.startswith(
+        f"{__file__}:{source_line + 7}:{column}: add_kernel:"
+    )
+    assert operation in message
+    assert "matching" in message
+    assert f"got {left_type} and {right_type}" in message
+
+
 def test_unsupported_types_are_reported_in_source_parameter_order():
     """Choose the first invalid parameter independently of set ordering."""
+
     @sw.jit
     def alpha_first(alpha, beta):
         return
@@ -440,7 +550,7 @@ def test_block_must_be_a_positive_integer(block):
     [sl.float32, sl.pointer(sl.int32), object()],
 )
 def test_unsupported_runtime_types_have_stable_diagnostics(bad_type):
-    """Accept only i32 scalars and dynamic rank-one f32 pointers."""
+    """Accept only i32 scalars and supported floating-point pointers."""
     with pytest.raises(
         sw.CompilationError,
         match="unsupported type for parameter 'n'",
@@ -451,9 +561,7 @@ def test_unsupported_runtime_types_have_stable_diagnostics(bad_type):
 def test_constexpr_parameter_cannot_be_rebound():
     """Keep constexpr arithmetic consistent with the emitted vector width."""
     with pytest.raises(sw.CompilationError) as caught:
-        rebound_block_kernel.emit_mlir(
-            signature={}, constexprs={"BLOCK": 8}
-        )
+        rebound_block_kernel.emit_mlir(signature={}, constexprs={"BLOCK": 8})
 
     assert str(caught.value).endswith(
         "rebound_block_kernel: cannot assign to constexpr parameter 'BLOCK'"
@@ -589,9 +697,9 @@ def test_oversized_integer_literals_have_source_located_diagnostics():
             constexprs={"BLOCK": 8},
         )
 
-    line = inspect.getsourcelines(
-        oversized_literal_kernel.python_function
-    )[1] + 4
+    line = (
+        inspect.getsourcelines(oversized_literal_kernel.python_function)[1] + 4
+    )
     assert f"{__file__}:{line}:" in str(caught.value)
 
 

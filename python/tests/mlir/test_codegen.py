@@ -42,7 +42,7 @@ def test_compiles_fixed_vector_add_to_deterministic_ptx():
     )
 
     assert first == second
-    lowered, ptx = first
+    lowered, ptx, contract = first
     assert "swage." not in lowered
     assert "vector." not in lowered
     assert "llvm.func @add_kernel" in lowered
@@ -51,6 +51,16 @@ def test_compiles_fixed_vector_add_to_deterministic_ptx():
     assert ".entry add_kernel" in ptx
     assert "ld.global.b32" in ptx
     assert "st.global.b32" in ptx
+    assert contract == (
+        '{"version":2,"backend":"cuda","entry":"add_kernel",'
+        '"launch":{"model":"spmd-grid","block":[128,1,1]},'
+        '"arguments":[{"kind":"ptr","origin":"user","source_index":0,'
+        '"access":"read"},{"kind":"ptr","origin":"user","source_index":1,'
+        '"access":"read"},{"kind":"ptr","origin":"user","source_index":2,'
+        '"access":"write"},{"kind":"i32","origin":"user","source_index":3}]}'
+    )
+    assert ptx.count(".param .u64") == 3
+    assert ptx.count(".param .u32") == 1
     assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -85,7 +95,7 @@ def test_rejects_sm_values_the_pinned_llvm_does_not_support(target):
 
 def test_fixed_kernels_pin_their_launch_width_with_reqntid():
     """Make a mismatched blockDim a launch error, not a wrong result."""
-    _, ptx = native_swage._compile_ptx(
+    _, ptx, _ = native_swage._compile_ptx(
         _emit(), kernel_name="add_kernel", block_size=128, target="sm_80"
     )
     assert ".reqntid 128, 1, 1" in ptx
@@ -104,7 +114,7 @@ def test_rejects_a_block_size_above_the_hardware_limit():
 
 def test_compiles_for_the_newest_supported_sm():
     """Keep the admission edge chips compiling, not just sm_80."""
-    _, ptx = native_swage._compile_ptx(
+    _, ptx, _ = native_swage._compile_ptx(
         _emit(), kernel_name="add_kernel", block_size=128, target="sm_121"
     )
     assert ".target sm_121" in ptx
@@ -131,9 +141,7 @@ def test_rejects_function_symbols_ptx_cannot_represent():
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
         module = ir.Module.parse(renamed)
-        with pytest.raises(
-            ValueError, match="not a valid PTX identifier"
-        ):
+        with pytest.raises(ValueError, match="not a valid PTX identifier"):
             native_swage._compile_ptx(
                 module,
                 kernel_name="añadir",

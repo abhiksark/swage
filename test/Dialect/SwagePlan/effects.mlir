@@ -2,7 +2,7 @@
 // RUN: swage-opt --cse %s | FileCheck %s
 
 module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
+  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
 
   func.func @classify_around_offsets_write(
       %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)

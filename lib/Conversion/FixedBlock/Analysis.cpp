@@ -1,36 +1,31 @@
-//===- FixedBlockToGPU.cpp - Fixed-block GPU lowering --------------------===//
+//===- Analysis.cpp - Fixed-block admission -----------------------------===//
 //
 // Part of the Swage project, under the MIT License.
 // See LICENSE for license information.
 //
 //===----------------------------------------------------------------------===//
 
-#include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
+#include "Analysis.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
-#include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 
-namespace mlir::swage {
+namespace mlir::swage::detail {
 namespace {
 
 LogicalResult verifyPointerType(Type type) {
   auto memref = dyn_cast<MemRefType>(type);
-  return success(memref && memref.getRank() == 1 &&
-                 memref.getElementType().isF32() &&
-                 memref.getLayout().isIdentity());
+  return success(
+      memref && memref.getRank() == 1 &&
+      (memref.getElementType().isF32() || memref.getElementType().isF16() ||
+       isa<Float8E4M3FNType, Float8E5M2Type>(memref.getElementType())) &&
+      memref.getLayout().isIdentity());
 }
 
 LogicalResult verifyVectorWidth(Operation *op, int64_t blockSize) {
@@ -92,8 +87,14 @@ LogicalResult verifyFixedVectorAddSignature(func::FuncOp function) {
       failed(verifyPointerType(type.getInput(2))) ||
       !type.getInput(3).isInteger(32))
     return function.emitError(
-        "fixed vector add requires three rank-one identity-layout f32 memrefs "
-        "and one i32");
+        "fixed vector add requires three rank-one identity-layout memrefs "
+        "of f32, f16, f8E4M3FN, or f8E5M2 and one i32");
+  Type elementType = cast<MemRefType>(type.getInput(0)).getElementType();
+  if (!llvm::all_of(type.getInputs().take_front(3), [&](Type input) {
+        return cast<MemRefType>(input).getElementType() == elementType;
+      }))
+    return function.emitError(
+        "fixed vector add requires identical pointer element types");
   if (!llvm::all_of(type.getInputs().take_front(3), [](Type input) {
         return cast<MemRefType>(input).getMemorySpaceAsInt() == 0;
       }))
@@ -157,7 +158,8 @@ LogicalResult verifyFixedVectorAddCounts(func::FuncOp function,
   if (counts.programIds != 1 || counts.gathers != 2 || counts.scatters != 1 ||
       counts.floatAdds != 1)
     return function.emitError(
-        "expected one program_id, two gathers, one f32 add, and one scatter");
+        "expected one program_id, two gathers, one floating-point add, and one "
+        "scatter");
   return success();
 }
 
@@ -204,13 +206,16 @@ LogicalResult verifyFixedVectorAddDataflow(func::FuncOp function,
   auto scatter = *function.getOps<vector::ScatterOp>().begin();
   auto add = scatter.getValueToStore().getDefiningOp<arith::AddFOp>();
   if (!add)
-    return scatter.emitError("scatter value must be the vector f32 add");
+    return scatter.emitError(
+        "scatter value must be the vector floating-point add");
   if (failed(verifyFixedVectorAddConnections(function, gathers[0], gathers[1],
                                              scatter, add)))
     return failure();
   return verifyCanonicalVectorAddAccesses(function, gathers[0], gathers[1],
                                           scatter, blockSize);
 }
+
+} // namespace
 
 LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
   if (failed(verifyFixedVectorAddSignature(function)))
@@ -222,114 +227,4 @@ LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize) {
   return verifyFixedVectorAddDataflow(function, blockSize);
 }
 
-void buildKernel(ModuleOp module, func::FuncOp source, int64_t blockSize) {
-  OpBuilder builder(module.getContext());
-  Location loc = source.getLoc();
-  builder.setInsertionPoint(source);
-  auto gpuModule = gpu::GPUModuleOp::create(builder, loc,
-                                            source.getName().str() + "_module");
-
-  builder.setInsertionPointToStart(gpuModule.getBody());
-  Type pointer = LLVM::LLVMPointerType::get(module.getContext());
-  Type i32 = builder.getI32Type();
-  Type f32 = builder.getF32Type();
-  auto kernelType = FunctionType::get(module.getContext(),
-                                      {pointer, pointer, pointer, i32}, {});
-  auto kernel =
-      gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
-  kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
-                  builder.getUnitAttr());
-  kernel->setAttr(
-      NVVM::NVVMDialect::getReqntidAttrName(),
-      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
-
-  Block *entry = &kernel.getBody().front();
-  builder.setInsertionPointToStart(entry);
-
-  Value blockId = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
-  Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
-  Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
-  Value base = arith::MulIOp::create(builder, loc, blockId, block);
-  Value offset = arith::AddIOp::create(builder, loc, base, threadId);
-  Value n = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                       entry->getArgument(3));
-  Value inBounds =
-      arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt, offset, n);
-  Value byteOffset =
-      arith::IndexCastOp::create(builder, loc, builder.getI64Type(), offset);
-
-  scf::IfOp::create(
-      builder, loc, inBounds, [&](OpBuilder &body, Location bodyLoc) {
-        Value xAddress = LLVM::GEPOp::create(body, bodyLoc, pointer, f32,
-                                             entry->getArgument(0), byteOffset);
-        Value yAddress = LLVM::GEPOp::create(body, bodyLoc, pointer, f32,
-                                             entry->getArgument(1), byteOffset);
-        Value outputAddress = LLVM::GEPOp::create(
-            body, bodyLoc, pointer, f32, entry->getArgument(2), byteOffset);
-        Value x = LLVM::LoadOp::create(body, bodyLoc, f32, xAddress);
-        Value y = LLVM::LoadOp::create(body, bodyLoc, f32, yAddress);
-        Value sum = arith::AddFOp::create(body, bodyLoc, x, y);
-        LLVM::StoreOp::create(body, bodyLoc, sum, outputAddress);
-        scf::YieldOp::create(body, bodyLoc);
-      });
-  gpu::ReturnOp::create(builder, loc);
-  source.erase();
-}
-
-class FixedBlockToGPUPass
-    : public PassWrapper<FixedBlockToGPUPass, OperationPass<ModuleOp>> {
-public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FixedBlockToGPUPass)
-
-  FixedBlockToGPUPass() = default;
-  FixedBlockToGPUPass(const FixedBlockToGPUPass &other) : PassWrapper(other) {
-    blockSize = other.blockSize.getValue();
-  }
-  explicit FixedBlockToGPUPass(int64_t requestedBlockSize) {
-    blockSize = requestedBlockSize;
-  }
-
-  StringRef getArgument() const final { return "swage-fixed-block-to-gpu"; }
-  StringRef getDescription() const final {
-    return "Lower the fixed vector-add subset to one GPU x-thread per lane";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const final {
-    registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
-                    NVVM::NVVMDialect, scf::SCFDialect>();
-  }
-
-  void runOnOperation() final {
-    if (blockSize <= 0) {
-      getOperation().emitError("block-size must be a positive integer");
-      return signalPassFailure();
-    }
-    if (blockSize > 1024) {
-      getOperation().emitError("block-size must be at most 1024");
-      return signalPassFailure();
-    }
-    auto functions = llvm::to_vector(getOperation().getOps<func::FuncOp>());
-    if (functions.size() != 1) {
-      getOperation().emitError("expected exactly one kernel function");
-      return signalPassFailure();
-    }
-    if (failed(verifyFixedVectorAdd(functions.front(), blockSize)))
-      return signalPassFailure();
-    buildKernel(getOperation(), functions.front(), blockSize);
-  }
-
-private:
-  Option<int64_t> blockSize{*this, "block-size",
-                            llvm::cl::desc("fixed x block size"),
-                            llvm::cl::init(0)};
-};
-
-} // namespace
-
-std::unique_ptr<Pass> createFixedBlockToGPUPass(int64_t blockSize) {
-  return std::make_unique<FixedBlockToGPUPass>(blockSize);
-}
-
-void registerFixedBlockToGPUPass() { PassRegistration<FixedBlockToGPUPass>(); }
-
-} // namespace mlir::swage
+} // namespace mlir::swage::detail

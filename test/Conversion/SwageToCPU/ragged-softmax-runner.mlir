@@ -15,7 +15,7 @@
 module {
   func.func @ragged_softmax(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -70,7 +70,6 @@ module {
     %o3 = arith.constant 3 : i32
     %o4 = arith.constant 4 : i32
     %o7 = arith.constant 7 : i32
-    %o8 = arith.constant 8 : i32
     %sentinel = arith.constant -1.0 : f32
     %five = arith.constant 5.0 : f32
     %zero = arith.constant 0.0 : f32
@@ -100,8 +99,8 @@ module {
     memref.store %o3, %offsets[%c3] : memref<?xi32>
     memref.store %o7, %offsets[%c4] : memref<?xi32>
 
-    call @ragged_softmax(%values, %offsets, %output, %o8, %o4)
-        : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
+    call @ragged_softmax(%values, %offsets, %output)
+        : (memref<?xf32>, memref<?xi32>, memref<?xf32>) -> ()
     %unranked = memref.cast %output : memref<?xf32> to memref<*xf32>
     call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()
     memref.dealloc %values_storage : memref<8xf32>

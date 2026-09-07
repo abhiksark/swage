@@ -29,14 +29,21 @@ bool isRankOneMemRef(Type type, Type elementType) {
 
 bool hasCanonicalSemanticABI(func::FuncOp function) {
   FunctionType type = function.getFunctionType();
-  if (type.getNumInputs() != 5 || type.getNumResults() != 0)
+  if (type.getNumInputs() != 3 || type.getNumResults() != 0)
     return false;
+
   MLIRContext *context = function.getContext();
-  return isRankOneMemRef(type.getInput(0), Float32Type::get(context)) &&
-         isRankOneMemRef(type.getInput(1), IntegerType::get(context, 32)) &&
-         isRankOneMemRef(type.getInput(2), Float32Type::get(context)) &&
-         type.getInput(3).isSignlessInteger(32) &&
-         type.getInput(4).isSignlessInteger(32);
+  unsigned f32Buffers = 0;
+  unsigned i32Buffers = 0;
+  for (Type input : type.getInputs()) {
+    if (isRankOneMemRef(input, Float32Type::get(context)))
+      ++f32Buffers;
+    else if (isRankOneMemRef(input, IntegerType::get(context, 32)))
+      ++i32Buffers;
+    else
+      return false;
+  }
+  return f32Buffers == 2 && i32Buffers == 1;
 }
 
 } // namespace
@@ -90,6 +97,6 @@ LogicalResult ClassifyOp::verify() {
     return emitOpError("kernel must not reference its containing function");
   if (!hasCanonicalSemanticABI(kernel))
     return emitOpError(
-        "kernel must use the canonical five-argument semantic ABI");
+        "kernel must use the canonical three-buffer semantic ABI");
   return success();
 }

@@ -9,7 +9,7 @@
 module {
   func.func @segmented_sum(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -50,8 +50,8 @@ module {
     memref.store %o1, %offsets[%c2] : memref<?xi32>
     memref.store %o4, %offsets[%c3] : memref<?xi32>
     memref.store %o4, %offsets[%c4] : memref<?xi32>
-    call @segmented_sum(%values, %offsets, %output, %o4, %o4)
-        : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
+    call @segmented_sum(%values, %offsets, %output)
+        : (memref<?xf32>, memref<?xi32>, memref<?xf32>) -> ()
     %unranked = memref.cast %output : memref<?xf32> to memref<*xf32>
     call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()
     memref.dealloc %values_storage : memref<4xf32>

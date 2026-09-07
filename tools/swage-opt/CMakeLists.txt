@@ -2,7 +2,7 @@
 set(LIBS
   MLIRSwage
   MLIRSwagePlan
-  MLIRSwageFixedBlockToGPU
+  MLIRSwageFixedBlock
   MLIRSwageSegmentedReduction
   MLIROptLib
   MLIRRegisterAllPasses
@@ -14,6 +14,15 @@ set(LIBS
   MLIRVectorDialect
   MLIRGPUDialect
   MLIRLLVMDialect
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRIndexToLLVM
+  MLIRMathToLLVM
+  MLIRMemRefToLLVM
+  MLIRNVVMToLLVM
+  MLIRUBToLLVM
+  MLIRVectorToLLVM
 )
 add_llvm_executable(swage-opt swage-opt.cpp)
 

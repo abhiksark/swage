@@ -1,5 +1,35 @@
 include(AddMLIRPython)
 
+# Build-tree packages retain checkout identity too. Wheel builds must supply
+# this information explicitly, including when building from an sdist.
+if(NOT SWAGE_WHEEL_BUILD)
+  find_package(Git REQUIRED)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    OUTPUT_VARIABLE SWAGE_SOURCE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    OUTPUT_VARIABLE SWAGE_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  if(SWAGE_GIT_STATUS STREQUAL "")
+    set(SWAGE_SOURCE_CLEAN true)
+  else()
+    set(SWAGE_SOURCE_CLEAN false)
+  endif()
+endif()
+file(STRINGS "${PROJECT_SOURCE_DIR}/python/swage/__init__.py"
+     SWAGE_VERSION_LINE REGEX "^__version__ = ")
+string(REGEX REPLACE "^__version__ = \"([^\"]+)\"$" "\\1"
+       SWAGE_PACKAGE_VERSION "${SWAGE_VERSION_LINE}")
+set(SWAGE_PYTHON_ROOT
+    "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
+configure_file(mlir_swage/_build_info.json.in
+               "${SWAGE_PYTHON_ROOT}/_build_info.json" @ONLY)
+install(FILES "${SWAGE_PYTHON_ROOT}/_build_info.json"
+        DESTINATION "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}"
+        COMPONENT SwagePythonModules)
+
 # All MLIR packages are co-located under the mlir_swage top-level package
 # (the API is embedded in a relocatable way).
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=${MLIR_PYTHON_PACKAGE_PREFIX}.")
@@ -63,9 +93,15 @@ add_mlir_python_modules(SwagePythonModules
     SwagePythonCAPI
 )
 
+if(SWAGE_WHEEL_BUILD)
+  set(SWAGE_PYTHON_TEST_ROOT "${MLIR_BINARY_DIR}")
+else()
+  set(SWAGE_PYTHON_TEST_ROOT "${MLIR_BINARY_DIR}/python_packages")
+endif()
+
 add_custom_target(check-swage-python
   COMMAND ${CMAKE_COMMAND} -E env
-    "PYTHONPATH=${MLIR_BINARY_DIR}/python_packages"
+    "PYTHONPATH=${SWAGE_PYTHON_TEST_ROOT}"
     "${Python3_EXECUTABLE}" -m pytest -q
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   DEPENDS SwagePythonModules

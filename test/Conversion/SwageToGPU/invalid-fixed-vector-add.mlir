@@ -1,6 +1,19 @@
 // test/Conversion/SwageToGPU/invalid-fixed-vector-add.mlir
 // RUN: swage-opt --swage-fixed-block-to-gpu='block-size=128' \
 // RUN:   --verify-diagnostics --split-input-file %s
+// RUN: swage-opt --swage-fixed-block-to-host='block-size=128' \
+// RUN:   --verify-diagnostics --split-input-file %s
+// RUN: swage-opt --swage-fixed-block-to-gpu='block-size=128' --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=UNCHANGED --implicit-check-not=gpu.module
+// RUN: swage-opt --swage-fixed-block-to-host='block-size=128' --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=UNCHANGED --implicit-check-not=llvm.getelementptr
+
+// UNCHANGED-LABEL: func.func @unsupported_element(
+// UNCHANGED-SAME: memref<?xbf16>
+// UNCHANGED-LABEL: func.func @mixed_inputs(
+// UNCHANGED-SAME: memref<?xf16>
+// UNCHANGED-SAME: memref<?xf32>
+// UNCHANGED-LABEL: func.func @mixed_output(
+// UNCHANGED-SAME: memref<?xf8E4M3FN>
+// UNCHANGED-SAME: memref<?xf8E5M2>
 
 module {
   func.func @bad_axis(
@@ -38,7 +51,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{fixed vector add requires three rank-one identity-layout f32 memrefs and one i32}}
+  // expected-error@+1 {{requires three rank-one identity-layout memrefs}}
   func.func @bad_layout(
       %x: memref<?xf32, strided<[2]>>, %y: memref<?xf32>,
       %output: memref<?xf32>, %n: i32) {
@@ -63,6 +76,39 @@ module {
     %sum = arith.addf %lhs, %rhs : vector<128xf32>
     vector.scatter %output[%c0] [%offsets], %mask, %sum
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{requires three rank-one identity-layout memrefs}}
+  func.func @unsupported_element(
+      %x: memref<?xbf16>, %y: memref<?xbf16>,
+      %output: memref<?xbf16>, %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{requires identical pointer element types}}
+  func.func @mixed_inputs(
+      %x: memref<?xf16>, %y: memref<?xf32>,
+      %output: memref<?xf16>, %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{requires identical pointer element types}}
+  func.func @mixed_output(
+      %x: memref<?xf8E4M3FN>, %y: memref<?xf8E4M3FN>,
+      %output: memref<?xf8E5M2>, %n: i32) {
     return
   }
 }

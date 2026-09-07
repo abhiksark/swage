@@ -7,7 +7,7 @@
 module {
   func.func @bad_axis(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     // expected-error@+1 {{only swage.segment_id axis 0 is supported}}
     %sid = swage.segment_id 1
     %segment = swage.make_segment %values, %offsets, %sid
@@ -27,7 +27,7 @@ module {
 module {
   func.func @unsupported_min(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -45,10 +45,10 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets}}
+  // expected-error@+1 {{segmented reduction arguments must be dynamic rank-one identity memrefs}}
   func.func @bad_offsets(
       %values: memref<?xf32>, %offsets: memref<?xi64>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi64>, index -> !swage.segment<f32>
@@ -64,32 +64,12 @@ module {
 
 // -----
 
-module {
-  func.func @captured_transform(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    // expected-error@+1 {{segment captures must be f32 results of a swage.reduce in the same function}}
-    %sum = swage.reduce %segment captures(%value_count : i32) kind<sum>
-        : !swage.segment<f32> -> f32 {
-    ^bb0(%value: f32, %capture: i32):
-      swage.yield %value : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
 // math.exp becomes a libdevice call the PTX path cannot resolve, so it is
 // rejected on both backends; exponentials must be written as math.exp2.
 module {
   func.func @unsupported_region_operation(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -110,7 +90,7 @@ module {
 module {
   func.func @extra_operation(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -132,7 +112,7 @@ module {
 module {
   func.func @multi_use_map(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -162,7 +142,7 @@ module {
 module {
   func.func @integer_region_constant(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -185,7 +165,7 @@ module {
 module {
   func.func @wide_capture(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -212,7 +192,7 @@ module {
 module {
   func.func @bad_axis_and_terminals(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     // expected-error@+1 {{only swage.segment_id axis 0 is supported}}
     %sid = swage.segment_id 1
     %segment = swage.make_segment %values, %offsets, %sid
@@ -235,7 +215,7 @@ module {
   // expected-error@+1 {{segmented reduction requires exactly one output terminal}}
   func.func @two_terminals(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -254,20 +234,22 @@ module {
 
 // -----
 
-// A map_store may only write the function's output buffer.
+// The make_segment read role and terminal write role must resolve to distinct
+// entry buffers; admission rejects the ambiguity before either backend
+// mutates the function.
 module {
-  func.func @map_store_wrong_buffer(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+  func.func @ambiguous_values_and_output(
+      %shared: memref<?xf32>, %bounds: memref<?xi32>,
+      %unused: memref<?xf32>) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
+    %segment = swage.make_segment %shared, %bounds, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    // expected-error@+1 {{swage.map_store must write the function output buffer}}
-    swage.map_store %segment, %values : !swage.segment<f32>, memref<?xf32> {
+    // expected-error@+1 {{values, offsets, and output roles must resolve to three distinct function arguments}}
+    swage.map_store %segment, %shared : !swage.segment<f32>, memref<?xf32> {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }

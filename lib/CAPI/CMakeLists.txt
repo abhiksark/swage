@@ -13,6 +13,7 @@ add_mlir_public_c_api_library(SwageCAPI
   MLIRBuiltinToLLVMIRTranslation
   MLIRControlFlowToLLVM
   MLIRFuncToLLVM
+  MLIRExecutionEngine
   MLIRGPUToLLVMIRTranslation
   MLIRGPUToNVVMTransforms
   MLIRIndexToLLVM
@@ -22,9 +23,11 @@ add_mlir_public_c_api_library(SwageCAPI
   MLIRNVVMToLLVM
   MLIRNVVMToLLVMIRTranslation
   MLIRSCFToControlFlow
+  MLIRReconcileUnrealizedCasts
   MLIRSwage
-  MLIRSwageFixedBlockToGPU
+  MLIRSwageFixedBlock
   MLIRSwageSegmentedReduction
+  MLIRSwageSupport
   MLIRTargetLLVM
   MLIRUBToLLVM
   MLIRVectorToLLVM

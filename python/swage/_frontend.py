@@ -9,11 +9,15 @@ import textwrap
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from . import language
+from . import _native, language
+from ._errors import CompilationError
 
-
-class CompilationError(Exception):
-    """A source-located error in a Swage kernel definition."""
+_FLOAT_MLIR_TYPES = {
+    language.float32: "F32Type",
+    language.float16: "F16Type",
+    language.float8_e4m3fn: "Float8E4M3FNType",
+    language.float8_e5m2: "Float8E5M2Type",
+}
 
 
 class _Value(NamedTuple):
@@ -74,6 +78,7 @@ class _Kernel:
             if _is_constexpr_annotation(argument.annotation)
         }
         functools.update_wrapper(self, function)
+        self._cuda_fast_launch = None
         if not (self.__name__.isascii() and self.__name__.isidentifier()):
             self._raise(
                 self.function,
@@ -83,8 +88,7 @@ class _Kernel:
             is_jit = (
                 isinstance(decorator, ast.Name) and decorator.id == "jit"
             ) or (
-                isinstance(decorator, ast.Attribute)
-                and decorator.attr == "jit"
+                isinstance(decorator, ast.Attribute) and decorator.attr == "jit"
             )
             if not is_jit:
                 self._raise(
@@ -98,8 +102,25 @@ class _Kernel:
             "use kernel.launch()"
         )
 
-    def launch(self, *, arguments, constexprs, grid):
-        """Asynchronously launch the canonical fixed vector-add subset."""
+    def launch(
+        self,
+        *,
+        arguments,
+        constexprs,
+        grid,
+        backend="cuda",
+    ):
+        """Launch the canonical fixed vector-add subset on one backend."""
+        if type(backend) is str and backend == "cuda":
+            reference = self._cuda_fast_launch
+            if reference is not None:
+                fast_launch = reference()
+                # Direct method dispatch avoids the callable-instance wrapper.
+                if fast_launch is not None and fast_launch.__call__(
+                    arguments, constexprs, grid
+                ):
+                    return None
+
         from ._runtime import launch
 
         return launch(
@@ -107,6 +128,7 @@ class _Kernel:
             arguments=arguments,
             constexprs=constexprs,
             grid=grid,
+            backend=backend,
         )
 
     def emit_mlir(self, *, signature=None, arguments=None, constexprs):
@@ -114,14 +136,7 @@ class _Kernel:
         runtime_types, static_values = self._validate_inputs(
             signature, arguments, constexprs
         )
-        try:
-            from mlir_swage import ir
-            from mlir_swage.dialects import arith, func, swage, vector
-        except ImportError as error:
-            raise RuntimeError(
-                "Swage emit_mlir() requires the build-tree "
-                "mlir_swage bindings"
-            ) from error
+        ir, arith, func, swage, vector = _native.load_ir()
 
         emitter = _Emitter(
             self,
@@ -139,9 +154,7 @@ class _Kernel:
         runtime_values, runtime_label = self._select_runtime_inputs(
             signature, arguments
         )
-        self._validate_input_mappings(
-            runtime_values, runtime_label, constexprs
-        )
+        self._validate_input_mappings(runtime_values, runtime_label, constexprs)
         parameters, constexpr_names, runtime_parameters = (
             self._partition_parameters(
                 runtime_values, runtime_label, constexprs
@@ -152,9 +165,7 @@ class _Kernel:
                 signature, runtime_parameters
             )
         else:
-            runtime_types = self._infer_signature(
-                arguments, runtime_parameters
-            )
+            runtime_types = self._infer_signature(arguments, runtime_parameters)
         self._validate_constexprs(parameters, constexpr_names, constexprs)
         return runtime_types, dict(constexprs)
 
@@ -174,21 +185,15 @@ class _Kernel:
     ):
         """Validate mapping containers and key types in diagnostic order."""
         if not isinstance(runtime_values, Mapping):
-            self._raise(
-                self.function, f"{runtime_label} must be a mapping"
-            )
+            self._raise(self.function, f"{runtime_label} must be a mapping")
         if not isinstance(constexprs, Mapping):
             self._raise(self.function, "constexprs must be a mapping")
         if any(not isinstance(key, str) for key in runtime_values):
-            self._raise(
-                self.function, f"{runtime_label} keys must be strings"
-            )
+            self._raise(self.function, f"{runtime_label} keys must be strings")
         if any(not isinstance(key, str) for key in constexprs):
             self._raise(self.function, "constexprs keys must be strings")
 
-    def _partition_parameters(
-        self, runtime_values, runtime_label, constexprs
-    ):
+    def _partition_parameters(self, runtime_values, runtime_label, constexprs):
         """Validate and return the declared runtime/constexpr partition."""
         self._require_plain_parameters()
         parameters = self.parameter_names
@@ -212,15 +217,10 @@ class _Kernel:
             name = sorted(misplaced)[0]
             self._raise(
                 self.function,
-                f"runtime parameter '{name}' must be passed in "
-                f"{runtime_label}",
+                f"runtime parameter '{name}' must be passed in {runtime_label}",
             )
-        self._require_keys(
-            runtime_label, runtime_value_names, runtime_names
-        )
-        self._require_keys(
-            "constexprs", supplied_constexprs, constexpr_names
-        )
+        self._require_keys(runtime_label, runtime_value_names, runtime_names)
+        self._require_keys("constexprs", supplied_constexprs, constexpr_names)
         return parameters, constexpr_names, runtime_parameters
 
     def _validate_constexprs(self, parameters, constexpr_names, constexprs):
@@ -259,7 +259,8 @@ class _Kernel:
                 continue
             if (
                 isinstance(value, language._PointerType)
-                and value.element_type is language.float32
+                and isinstance(value.element_type, language._ScalarType)
+                and value.element_type in language._FLOAT_TYPES
             ):
                 continue
             self._raise(
@@ -271,14 +272,13 @@ class _Kernel:
     def _infer_signature(self, arguments, runtime_parameters):
         try:
             import torch
-            float32 = torch.float32
+
             strided = torch.strided
             tensor_type = torch.Tensor
         except Exception:
             self._raise(
                 self.function,
-                "PyTorch metadata inference requires "
-                "'swage-compiler[pytorch]'",
+                "PyTorch metadata inference requires 'swage-compiler[pytorch]'",
             )
 
         signature = {}
@@ -298,6 +298,7 @@ class _Kernel:
                 rank = value.dim()
                 device_type = value.device.type
                 contiguous = value.is_contiguous()
+                element_type = language._torch_float_type(dtype, torch)
             except Exception:
                 self._raise(
                     self.function,
@@ -306,7 +307,7 @@ class _Kernel:
                 )
             if layout != strided:
                 reason = f"layout {layout}"
-            elif dtype != float32:
+            elif element_type is None:
                 reason = f"dtype {dtype}"
             elif rank != 1:
                 reason = f"rank {rank}"
@@ -315,7 +316,7 @@ class _Kernel:
             elif not contiguous:
                 reason = "non-contiguous"
             else:
-                signature[name] = language.pointer(language.float32)
+                signature[name] = language.pointer(element_type)
                 continue
             self._raise(
                 self.function,
@@ -357,8 +358,9 @@ class _Kernel:
         if extra:
             details.append(f"extra: {', '.join(extra)}")
         parameter_kind = (
-            "runtime parameters" if label in {"signature", "arguments"} else
-            "constexpr parameters"
+            "runtime parameters"
+            if label in {"signature", "arguments"}
+            else "constexpr parameters"
         )
         self._raise(
             self.function,
@@ -415,7 +417,6 @@ class _Emitter:
         context = self.ir.Context()
         with context:
             self.swage.register_dialects(context)
-            self.f32 = self.ir.F32Type.get()
             self.i32 = self.ir.IntegerType.get_signless(32)
             self.index = self.ir.IndexType.get()
             self.block = self.constexprs.get("BLOCK")
@@ -459,7 +460,10 @@ class _Emitter:
             if declared is language.int32:
                 types.append(self.i32)
             else:
-                types.append(self.ir.MemRefType.get([dynamic], self.f32))
+                element_type = getattr(
+                    self.ir, _FLOAT_MLIR_TYPES[declared.element_type]
+                ).get()
+                types.append(self.ir.MemRefType.get([dynamic], element_type))
         return types
 
     def _bind_arguments(self, arguments):
@@ -537,11 +541,21 @@ class _Emitter:
             self._error(node, "unsupported binary operands")
         location = self._location(node)
         if isinstance(node.op, ast.Add):
-            if left.kind == right.kind == "f32_vector":
+            if left.kind == right.kind == "float_vector":
+                if left.value.type != right.value.type:
+                    left_type = self.ir.VectorType(left.value.type).element_type
+                    right_type = self.ir.VectorType(
+                        right.value.type
+                    ).element_type
+                    self._error(
+                        node,
+                        "floating-point addition requires matching element "
+                        f"types; got {left_type} and {right_type}",
+                    )
                 result = self.arith.AddFOp(
                     left.value, right.value, loc=location
                 ).result
-                return _Value(result, "f32_vector")
+                return _Value(result, "float_vector")
             left, right = self._broadcast_index_pair(left, right, node)
             result = self.arith.AddIOp(
                 left.value, right.value, loc=location
@@ -692,21 +706,22 @@ class _Emitter:
             self._error(node.args[0], "sl.load requires pointer + offsets")
         if mask.kind != "bool_vector":
             self._error(keywords["mask"], "sl.load mask must be a vector")
-        if (
-            not isinstance(other_node, ast.Constant)
-            or type(other_node.value) not in {int, float}
-        ):
+        if not isinstance(other_node, ast.Constant) or type(
+            other_node.value
+        ) not in {int, float}:
             self._error(other_node, "sl.load other must be a numeric literal")
         location = self._location(node)
+        element_type = self.ir.MemRefType(address.base.type).element_type
+        vector_type = self._float_vector_type(node, element_type)
         other = self.arith.ConstantOp(
-            self.f32, float(other_node.value), loc=location
+            element_type, float(other_node.value), loc=location
         ).result
         pass_through = self.vector.BroadcastOp(
-            self._float_vector_type(node), other, loc=location
+            vector_type, other, loc=location
         ).result
         zero = self.arith.ConstantOp(self.index, 0, loc=location).result
         result = self.vector.GatherOp(
-            self._float_vector_type(node),
+            vector_type,
             address.base,
             [zero],
             address.offsets,
@@ -714,7 +729,7 @@ class _Emitter:
             pass_through,
             loc=location,
         ).result
-        return _Value(result, "f32_vector")
+        return _Value(result, "float_vector")
 
     def _store(self, node):
         keywords = self._keywords(node)
@@ -730,8 +745,16 @@ class _Emitter:
         )
         if not isinstance(address, _Address):
             self._error(node.args[0], "sl.store requires pointer + offsets")
-        if value.kind != "f32_vector" or mask.kind != "bool_vector":
+        if value.kind != "float_vector" or mask.kind != "bool_vector":
             self._error(node, "sl.store requires float values and a mask")
+        element_type = self.ir.MemRefType(address.base.type).element_type
+        value_type = self.ir.VectorType(value.value.type).element_type
+        if value_type != element_type:
+            self._error(
+                node,
+                "sl.store requires matching value and pointer element "
+                f"types; got {value_type} and {element_type}",
+            )
         location = self._location(node)
         zero = self.arith.ConstantOp(self.index, 0, loc=location).result
         self.vector.ScatterOp(
@@ -771,10 +794,10 @@ class _Emitter:
             self._error(node, "BLOCK is required for vector operations")
         return self.ir.VectorType.get([self.block], self.index)
 
-    def _float_vector_type(self, node):
+    def _float_vector_type(self, node, element_type):
         if self.block is None:
             self._error(node, "BLOCK is required for vector operations")
-        return self.ir.VectorType.get([self.block], self.f32)
+        return self.ir.VectorType.get([self.block], element_type)
 
     def _location(self, node):
         line = self.kernel.source_line + node.lineno - 1
