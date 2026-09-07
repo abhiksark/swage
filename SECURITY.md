@@ -60,12 +60,16 @@ protection, signing policy, and publisher/reviewer configuration require
 separately authorized operator setup; the workflow's existence does not
 establish that administration or release gates are complete.
 
-For a published release, verify the downloaded distribution against the
-retained `SHA256SUMS` and GitHub attestations:
+For a published release, set `RELEASE_RUN_ID` to the successful signed-tag
+run and verify the downloaded distribution against the retained `SHA256SUMS`
+and its detached build-provenance bundle:
 
 ```bash
+gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
+  --name release-attestations --dir attestations
+PROVENANCE_BUNDLE=<build-provenance-bundle-in-attestations>
 sha256sum --check SHA256SUMS
-gh attestation verify <downloaded-wheel-or-sdist> --repo abhiksark/swage
+gh attestation verify <downloaded-wheel-or-sdist> --bundle "$PROVENANCE_BUNDLE"
 python -m swage.env --json --check native
 ```
 

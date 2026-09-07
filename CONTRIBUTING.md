@@ -283,13 +283,23 @@ been published or production-qualified. Complete these steps in order:
    SPDX SBOM, retain `release-attestations`, and reach the protected `pypi`
    environment for reviewer approval and OIDC publication. All external
    workflow actions are pinned to immutable commits.
-6. **Verify the published artifact:** check `SHA256SUMS` and GitHub
-   attestations (`gh attestation verify <downloaded-wheel-or-sdist> --repo abhiksark/swage`),
-   install from PyPI into a clean environment, and check build revision and
-   selected backend health. Record filenames, sizes, hashes, reproducibility
-   hash, SBOM/attestation identifiers, Python/PyTorch/glibc matrix, hardware,
-   raw SLO results, and any skipped checks. No production-ready claim is
-   valid before both installed-wheel CPU and trusted A6000 gates pass.
+6. **Verify the published artifact:** use the successful signed-tag run's
+   detached build-provenance bundle, rather than a stored attestation record:
+
+   ```bash
+   gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
+     --name release-attestations --dir attestations
+   PROVENANCE_BUNDLE=<build-provenance-bundle-in-attestations>
+   gh attestation verify <downloaded-wheel-or-sdist> \
+     --bundle "$PROVENANCE_BUNDLE"
+   ```
+
+   Check `SHA256SUMS`, install from PyPI into a clean environment, and check
+   build revision and selected backend health. Record filenames, sizes, hashes,
+   reproducibility hash, SBOM/attestation identifiers, Python/PyTorch/glibc
+   matrix, hardware, raw SLO results, and any skipped checks. No
+   production-ready claim is valid before both installed-wheel CPU and trusted
+   A6000 gates pass.
 
 Rollback is immutable: with explicit publication authority, **yank a defective
 v0.5.2 and ship v0.5.3 through the same gates** (updating the version-specific
