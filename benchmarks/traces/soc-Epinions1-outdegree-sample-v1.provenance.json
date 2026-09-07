@@ -1,0 +1,92 @@
+{
+  "citations": [
+    {
+      "authors": "Matthew Richardson; Rakesh Agrawal; Pedro Domingos",
+      "doi": "10.1007/978-3-540-39718-2_23",
+      "title": "Trust Management for the Semantic Web",
+      "url": "https://doi.org/10.1007/978-3-540-39718-2_23"
+    },
+    {
+      "authors": "Timothy A. Davis; Yifan Hu",
+      "doi": "10.1145/2049662.2049663",
+      "title": "The University of Florida Sparse Matrix Collection",
+      "url": "https://doi.org/10.1145/2049662.2049663"
+    }
+  ],
+  "derived_trace": {
+    "count": 32768,
+    "encoding": "one unsigned decimal integer plus LF per row",
+    "filename": "soc-Epinions1-outdegree-sample-v1.txt",
+    "generator_revision": "benchmarks/prepare_soc_epinions1_trace.py:v1",
+    "max": 1669,
+    "median": 1.0,
+    "min": 0,
+    "p95": 30,
+    "redistributed_fields": "outgoing row lengths only",
+    "sha256": "97138fdc92d297aa026480edda222827f9c1e84cc2d001d66a52d18e3201ee48",
+    "sum": 222306
+  },
+  "extraction": {
+    "digest": "SHA-256",
+    "domain_separator_display": "swage/soc-Epinions1/row-sample/v1\\0",
+    "domain_separator_hex": "73776167652f736f632d4570696e696f6e73312f726f772d73616d706c652f763100",
+    "output_order": "hash-ranking order",
+    "ranking": "ascending lexicographic (full 32-byte digest, row_id)",
+    "replacement": false,
+    "row_id_encoding": "uint64_be",
+    "sample_count": 32768,
+    "version": "soc-epinions1-outdegree-v1"
+  },
+  "graph": {
+    "actual_vertex_count": 75879,
+    "advertised_edge_count": 508837,
+    "advertised_vertex_count": 75879,
+    "duplicate_policy": "reject duplicate stored coordinates",
+    "orientation": "matrix row = source; row nnz = outgoing degree",
+    "self_loop_policy": "retain stored self-loops",
+    "symmetry_expansion_policy": "none; general matrices are not symmetrized",
+    "vertex_universe_rule": "sorted union of one-based row and column IDs occurring in the coordinate records",
+    "zero_row_policy": "retain sink-only vertices with length zero"
+  },
+  "license": {
+    "attribution": "SuiteSparse Matrix Collection, SNAP/soc-Epinions1; original graph by Matthew Richardson, Rakesh Agrawal, and Pedro Domingos.",
+    "collection_policy_url": "https://sparse.tamu.edu/about",
+    "identifier": "CC-BY-4.0",
+    "modification_notice": "Modified by the Swage project: counted outgoing stored coordinates over the actual endpoint-ID union, retained sink-only zero rows, and selected 32,768 rows with the documented hash ranking. No vertex IDs or edges are redistributed.",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "matrix_market": {
+    "banner": "%%MatrixMarket matrix coordinate pattern general",
+    "columns": 75888,
+    "field": "pattern",
+    "format": "coordinate",
+    "index_base": 1,
+    "object": "matrix",
+    "rows": 75888,
+    "stored_entries": 508837,
+    "symmetry": "general"
+  },
+  "schema_version": 1,
+  "source": {
+    "archive": {
+      "etag": "aeea34c0fe3b48be8ae96de54867f418",
+      "filename": "soc-Epinions1.tar.gz",
+      "last_modified": "2020-05-01 19:19:17 GMT",
+      "md5": "aeea34c0fe3b48be8ae96de54867f418",
+      "sha256": "ed75c7f919799a8571aab592e2b89d8e54bc734530b4b8c5ab2071386ecd698e",
+      "size_bytes": 1552639
+    },
+    "collection": "SuiteSparse Matrix Collection",
+    "dataset_name": "soc-Epinions1",
+    "download_url": "https://sparse.tamu.edu/MM/SNAP/soc-Epinions1.tar.gz",
+    "group": "SNAP",
+    "landing_url": "https://sparse.tamu.edu/SNAP/soc-Epinions1",
+    "matrix_id": 2284,
+    "member": {
+      "path": "soc-Epinions1/soc-Epinions1.mtx",
+      "sha256": "f24ae6890fc53c9e9b153812c4d22cd2e87a3642a1af12eeefd06dae0888f627",
+      "size_bytes": 5158059
+    },
+    "retrieved_at": "2026-09-04"
+  }
+}
