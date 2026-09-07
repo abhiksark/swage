@@ -135,6 +135,17 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
 
 
 @sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Canonical vector multiply used to exercise launch admission."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
+@sw.jit
 def renamed_kernel(left, right, destination, length, TILE: sl.constexpr):
     """Canonical vector add with arbitrary diagnostic parameter labels."""
     pid = sl.program_id(0)
@@ -566,6 +577,183 @@ def test_empty_launch_is_a_validated_noop(monkeypatch):
             is None
         )
     emit.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("arguments-type", "mapping"),
+        ("argument-count", "arguments must contain exactly"),
+        ("constexpr-count", "constexprs must contain exactly"),
+        ("zero-block", "positive integer"),
+        ("negative-block", "positive integer"),
+        ("boolean-block", "positive integer"),
+        ("oversized-block", "1024|device limit"),
+        ("grid-type", "one-element tuple"),
+        ("boolean-grid", "one-element tuple"),
+        ("negative-grid", "grid must equal"),
+        ("multidimensional-grid", "one-element tuple"),
+        ("grid-count", "grid must equal"),
+        ("boolean-count", "nonnegative i32"),
+        ("floating-count", "nonnegative i32"),
+        ("negative-count", "nonnegative i32"),
+        ("oversized-count", "nonnegative i32"),
+        ("length", "exceeds tensor length"),
+        ("rank", "rank one"),
+        ("stride", "contiguous"),
+        ("dtype", "must have dtype"),
+        ("mixed-dtype", "same dtype"),
+        ("device", "tensor"),
+        ("zero-rank", "rank one"),
+        ("zero-stride", "contiguous"),
+        ("zero-dtype", "must have dtype"),
+        ("zero-device", "tensor"),
+    ],
+)
+def test_multiply_rejects_invalid_launches_before_backend_work(
+    monkeypatch, backend, warm, case, reason
+):
+    """Apply multiplication admission before cold or cached backend work."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    adapter = _RecordingBackend(backend)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(_runtime, "get_backend", lambda _name: adapter)
+    monkeypatch.setattr(
+        _runtime,
+        "_compiler_identity",
+        lambda: {"revision": None, "clean": False, "llvm": None},
+    )
+    monkeypatch.setattr(
+        multiply_kernel, "emit_mlir", lambda **_kwargs: object()
+    )
+    _runtime._identity_cache = None
+    _runtime._artifact_cache.clear()
+    multiply_kernel.__dict__.pop("_specialization_memo", None)
+    if warm:
+        multiply_kernel.launch(
+            arguments=_arguments(torch, n=1, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(1,),
+            backend=backend,
+        )
+    calls_before = list(adapter.calls)
+    arguments = _arguments(torch, n=1, device_type=backend)
+    constexprs = {"BLOCK": 128}
+    grid = (1,)
+    if case == "arguments-type":
+        arguments = []
+    elif case == "argument-count":
+        arguments.pop("y_ptr")
+    elif case == "constexpr-count":
+        constexprs["EXTRA"] = 1
+    elif case == "zero-block":
+        constexprs["BLOCK"] = 0
+    elif case == "negative-block":
+        constexprs["BLOCK"] = -1
+    elif case == "boolean-block":
+        constexprs["BLOCK"] = True
+    elif case == "oversized-block":
+        constexprs["BLOCK"] = 2048
+        grid = (1,)
+    elif case == "grid-type":
+        grid = [1]
+    elif case == "boolean-grid":
+        grid = (True,)
+    elif case == "negative-grid":
+        grid = (-1,)
+    elif case == "multidimensional-grid":
+        grid = (1, 1)
+    elif case == "grid-count":
+        grid = (2,)
+    elif case == "boolean-count":
+        arguments["n"] = True
+    elif case == "floating-count":
+        arguments["n"] = 1.0
+    elif case == "negative-count":
+        arguments["n"] = -1
+    elif case == "oversized-count":
+        arguments["n"] = 1 << 31
+    elif case == "length":
+        arguments["x_ptr"] = _Tensor(torch, size=0, device_type=backend)
+    elif case == "rank":
+        arguments["y_ptr"] = _Tensor(torch, rank=2, device_type=backend)
+    elif case == "stride":
+        arguments["output_ptr"] = _Tensor(
+            torch, contiguous=False, device_type=backend
+        )
+    elif case == "dtype":
+        arguments["x_ptr"] = _Tensor(
+            torch, dtype=object(), device_type=backend
+        )
+    elif case == "mixed-dtype":
+        torch.float16 = object()
+        arguments["y_ptr"] = _Tensor(
+            torch, dtype=torch.float16, device_type=backend
+        )
+    elif case == "device":
+        wrong_device = "cpu" if backend == "cuda" else "cuda"
+        arguments["x_ptr"] = _Tensor(torch, device_type=wrong_device)
+    elif case.startswith("zero-"):
+        arguments = _arguments(torch, n=0, size=0, device_type=backend)
+        grid = (0,)
+        parameter = {
+            "zero-rank": "x_ptr",
+            "zero-stride": "y_ptr",
+            "zero-dtype": "output_ptr",
+            "zero-device": "x_ptr",
+        }[case]
+        overrides = {"size": 0, "device_type": backend}
+        if case == "zero-rank":
+            overrides["rank"] = 2
+        elif case == "zero-stride":
+            overrides["contiguous"] = False
+        elif case == "zero-dtype":
+            overrides["dtype"] = object()
+        else:
+            overrides["device_type"] = "cpu" if backend == "cuda" else "cuda"
+        arguments[parameter] = _Tensor(torch, **overrides)
+
+    with pytest.raises((TypeError, ValueError), match=reason):
+        multiply_kernel.launch(
+            arguments=arguments,
+            constexprs=constexprs,
+            grid=grid,
+            backend=backend,
+        )
+
+    assert adapter.calls == calls_before
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_empty_multiply_is_a_validated_noop_for_every_backend(
+    monkeypatch, backend
+):
+    """Validate zero work without compilation, pointer access, or writes."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    adapter = _RecordingBackend(backend)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(_runtime, "get_backend", lambda _name: adapter)
+    monkeypatch.setattr(
+        _Tensor,
+        "data_ptr",
+        lambda _self: pytest.fail("zero work acquired a raw pointer"),
+    )
+    with mock.patch.object(multiply_kernel, "emit_mlir") as emit:
+        multiply_kernel.launch(
+            arguments=_arguments(torch, n=0, size=0, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(0,),
+            backend=backend,
+        )
+
+    emit.assert_not_called()
+    assert adapter.calls == []
 
 
 @pytest.mark.parametrize(

@@ -41,7 +41,7 @@ evidence.
 | Actual repaired cp313 wheel CUDA correctness, cache reuse, and fixed-runtime SLOs | Required trusted release gate; qualification pending | `publish-pypi.yml`, `scripts/smoke_installed_wheel.py`, `benchmarks/benchmark_fixed_runtime.py` | Installed fixed runtime pytest, CUDA health/smoke, second process `--require-persistent-hit`, and `--enforce --output fixed-runtime-slo.json` on NVIDIA RTX A6000 / `sm_86` |
 | Restricted AST to verified native module | Public today, compile-only | `tests/python/test_frontend.py`, `python/tests/mlir/test_frontend.py` | `python -m pytest tests/python -q`; `ninja -C build check-swage-python` |
 | Fixed vector add/multiply CPU/CUDA lowering and launch | Public today | fixed-block lit tests, `python/tests/mlir/test_cpu_runtime.py`, `python/tests/mlir/test_runtime.py` | `ninja -C build check-swage`; `ninja -C build check-swage-python`; trusted GPU workflow |
-| FP16 and FP8 elementwise numerics and dtype isolation | Public source implementation; multiplication GPU qualification pending | `python/tests/mlir/test_low_precision_runtime.py`, fixed-block low-precision lit tests, `scripts/smoke_installed_wheel.py` | `ninja -C build check-swage-python`; installed CPU/CUDA smoke for both operations and all four dtypes; exhaustive FP8 checks remain operation-specific evidence |
+| FP32, FP16, and FP8 elementwise numerics, storage, and dispatch isolation | Public source implementation; trusted multiplication qualification remains a release gate | `python/tests/mlir/test_low_precision_runtime.py`, `python/tests/mlir/test_operation_dispatch.py`, fixed-block low-precision lit tests | `ninja -C build check-swage-python`; installed CPU/CUDA runtime tests and smoke for both operations and all four dtypes |
 | Compiler-generated physical launch contracts | Internal boundary | `unittests/KernelContractTest.cpp`, `python/tests/mlir/test_codegen.py`, `tests/python/test_abi.py` | `ninja -C build check-swage-unit`; `ninja -C build check-swage-python`; `python -m pytest tests/python/test_abi.py -q` |
 | Segmented sum and max CPU/GPU parity | Private qualification | `test/Conversion/SwageToCPU`, `test/Conversion/SwageToGPU`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Stable ragged-softmax parity and edge cases | Private qualification | ragged-softmax lit files and `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
@@ -107,6 +107,51 @@ snapshots upgrade nothing, and their numbers are presented on
 [Benchmarks](benchmarks.md). The private persistent performance gate remains
 failed; fixed-vector release hardening neither completes it nor changes
 the v0.6.0 mapping.
+
+## Multiplication regression coverage
+
+The fixed runtime suites compare CPU and CUDA multiplication against the
+CPU oracle `(x.float() * y.float()).to(x.dtype)`. Every non-NaN output must
+match its storage encoding exactly, including signed zeros and subnormals;
+NaN payloads are not part of the numerical contract.
+
+`test_low_precision_runtime.py` separates numerical datasets from launch
+layouts so that large datasets do not multiply the geometry test matrix:
+
+- FP8 covers all 65,536 encoding pairs for each format and backend.
+- FP16 covers all 65,536 encodings against 19 factors, including signed
+  zeros, rounding boundaries, range limits, infinities, and NaN.
+- FP32 covers 65,536 seeded raw-encoding pairs and both signs of every
+  exponent with mantissas around rounding boundaries.
+- Launch coverage spans blocks `1, 31, 32, 33, 128, 256, 512, 1024`, empty
+  inputs, adjacent boundary sizes, multiple blocks, and 1,000,003 elements
+  at block 256.
+- Storage coverage checks contiguous offset views, guard bytes, shorter
+  counts, and output aliasing with either input or both, using snapshots
+  taken before an in-place launch.
+
+Validation tests reject malformed metadata and geometry before compilation
+or execution, on cold and warm calls including zero work. Compiler tests
+independently corrupt gather/scatter masks and offsets and reject arithmetic
+chains while checking source diagnostics, unchanged input modules,
+deterministic output, and physical launch contracts.
+
+`test_operation_dispatch.py` exercises all four dtypes through prepared
+CUDA and forced ctypes launches, changed streams and storage, and graph
+replay after input changes and cache eviction. Its two-process cache test
+requires real clean build provenance: identically named add and multiply
+kernels produce eight distinct artifacts, then reuse them with compilation
+disabled in the second process. Dirty build-tree runs cannot establish this
+persistent-cache result; run the suite against the installed clean wheel
+outside the checkout with `PYTHONPATH` unset and
+`SWAGE_REQUIRE_PERSISTENT_CACHE_TEST=1` to reject a dirty build instead of
+skipping that case. CPU compilation coalescing is covered in
+`test_cpu_runtime.py`; the installed CPU workflow also runs the numerical
+and dispatch suites with CUDA cases skipped.
+
+These correctness checks do not change the performance gates below. Local
+A6000 results establish local evidence; sanitizer, hosted ABI/PyTorch,
+manylinux, and additional-device qualification require their own runs.
 
 ## Frozen fixed-runtime SLO gates
 

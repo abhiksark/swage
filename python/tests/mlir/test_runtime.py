@@ -26,6 +26,17 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+@sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Canonical vector multiply for real CUDA admission checks."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
 def _run_cuda_probe(ptx, entry, kinds, values, grid, block, *, native):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
@@ -66,8 +77,8 @@ def _run_cuda_probe(ptx, entry, kinds, values, grid, block, *, native):
         driver.module_unload(module)
 
 
-def _launch(x, y, output, n, block=128):
-    add_kernel.launch(
+def _launch(x, y, output, n, block=128, kernel=add_kernel):
+    kernel.launch(
         arguments={
             "x_ptr": x,
             "y_ptr": y,
@@ -148,13 +159,16 @@ def test_repeated_launches_and_argument_release():
         ("dtype", TypeError),
     ],
 )
-def test_warm_launch_revalidates_same_tensor_metadata(mutation, error_type):
+@pytest.mark.parametrize("kernel", [add_kernel, multiply_kernel])
+def test_warm_launch_revalidates_same_tensor_metadata(
+    mutation, error_type, kernel
+):
     """Never trust shape, strides, or dtype cached by tensor identity."""
     x = torch.arange(258, device="cuda", dtype=torch.float32)
     y = torch.ones_like(x)
     output = torch.empty_like(x)
-    _launch(x, y, output, 129)
-    _launch(x, y, output, 129)
+    _launch(x, y, output, 129, kernel=kernel)
+    _launch(x, y, output, 129, kernel=kernel)
     torch.cuda.synchronize()
 
     if mutation == "length":
@@ -168,7 +182,7 @@ def test_warm_launch_revalidates_same_tensor_metadata(mutation, error_type):
     output.fill_(-1)
     try:
         with pytest.raises(error_type):
-            _launch(x, y, output, 129)
+            _launch(x, y, output, 129, kernel=kernel)
         torch.testing.assert_close(output, torch.full_like(output, -1))
     finally:
         torch.cuda.synchronize()

@@ -204,7 +204,33 @@ def _multiply_source():
         ("%lhs, %rhs : vector", "%lhs, %lhs : vector", "do not form"),
         ("%mask, %product\n", "%mask, %lhs\n", "scatter value must"),
         ("%y[%c0]", "%x[%c0]", "do not form"),
+        (
+            "    %lhs = vector.gather %x[%c0] [%offsets], %mask, %passthrough",
+            "    %other_mask = arith.cmpi ult, %offsets, %offsets "
+            ": vector<128xindex>\n"
+            "    %lhs = vector.gather %x[%c0] [%offsets], %other_mask, "
+            "%passthrough",
+            "do not form",
+        ),
+        (
+            "    %rhs = vector.gather %y[%c0] [%offsets], %mask, %passthrough",
+            "    %other_mask = arith.cmpi ult, %offsets, %offsets "
+            ": vector<128xindex>\n"
+            "    %rhs = vector.gather %y[%c0] [%offsets], %other_mask, "
+            "%passthrough",
+            "do not form",
+        ),
+        (
+            "    vector.scatter %output[%c0] [%offsets], %mask, %product",
+            "    %other_mask = arith.cmpi ult, %offsets, %offsets "
+            ": vector<128xindex>\n"
+            "    vector.scatter %output[%c0] [%offsets], %other_mask, "
+            "%product",
+            "do not form",
+        ),
+        ("%x[%c0] [%offsets]", "%x[%c0] [%lane]", "do not form"),
         ("%y[%c0] [%offsets]", "%y[%c0] [%lane]", "do not form"),
+        ("%output[%c0] [%offsets]", "%output[%c0] [%lane]", "do not form"),
         ("arith.cmpi slt", "arith.cmpi sge", "canonical program offsets"),
         (
             "constant 0 : index",
@@ -226,6 +252,12 @@ def _multiply_source():
         (
             "    vector.scatter",
             "    %chained = arith.addf %product, %rhs : vector<128xf32>\n"
+            "    vector.scatter",
+            "one floating-point add or multiply",
+        ),
+        (
+            "    vector.scatter",
+            "    %chained = arith.mulf %product, %rhs : vector<128xf32>\n"
             "    vector.scatter",
             "one floating-point add or multiply",
         ),

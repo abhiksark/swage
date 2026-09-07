@@ -140,6 +140,11 @@ jobs:
         run: |
           unset PYTHONPATH
           "$RUNNER_TEMP/wheel-venv/bin/python" -m swage.env --json --check cpu
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pytest --import-mode=importlib \
+            --rootdir "$RUNNER_TEMP" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_cpu_runtime.py" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_low_precision_runtime.py" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_operation_dispatch.py" -q
           "$RUNNER_TEMP/wheel-venv/bin/python" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
             --backend cpu --expected-revision "$GITHUB_SHA"
 

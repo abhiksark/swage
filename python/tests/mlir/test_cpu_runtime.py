@@ -88,15 +88,17 @@ def test_native_cpu_boundaries_and_process_artifact_reuse(
         assert len(compiles) == (0 if n == 0 else 1)
 
 
+@pytest.mark.parametrize("operation", OPERATIONS)
 def test_native_cpu_first_compile_is_coalesced_before_concurrent_invoke(
-    monkeypatch,
+    monkeypatch, operation
 ):
     """Publish one eagerly initialized engine to two concurrent callers."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
-    _reset_runtime()
+    kernel, torch_operation = OPERATIONS[operation]
+    _reset_runtime(kernel)
     original = native_swage._compile_fixed_host
     compile_lock = threading.Lock()
     compile_count = 0
@@ -116,8 +118,8 @@ def test_native_cpu_first_compile_is_coalesced_before_concurrent_invoke(
         y = torch.randn(4097, generator=generator)
         output = torch.empty_like(x)
         callers.wait()
-        _launch(x, y, output, x.numel())
-        torch.testing.assert_close(output, x + y)
+        _launch(x, y, output, x.numel(), operation=operation)
+        torch.testing.assert_close(output, torch_operation(x, y))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(run, seed) for seed in (11, 29)]

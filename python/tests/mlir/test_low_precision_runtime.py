@@ -45,14 +45,14 @@ def backend(request):
     return request.param
 
 
-def _launch(x, y, output, backend, n=None, operation="add"):
+def _launch(x, y, output, backend, n=None, operation="add", block=128):
     if n is None:
         n = x.numel()
     kernel, _ = OPERATIONS[operation]
     kernel.launch(
         arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": n},
-        constexprs={"BLOCK": 128},
-        grid=((n + 127) // 128,),
+        constexprs={"BLOCK": block},
+        grid=((n + block - 1) // block,),
         backend=backend,
     )
 
@@ -69,6 +69,11 @@ def _assert_encoding(actual, expected):
     actual_bits = actual.view(torch.uint8).reshape(-1, width)
     expected_bits = expected.view(torch.uint8).reshape(-1, width)
     assert torch.equal(actual_bits[non_nan], expected_bits[non_nan])
+
+
+def _multiply_oracle(x, y):
+    """Multiply through f32 and round once to the input storage dtype."""
+    return (x.float() * y.float()).to(x.dtype)
 
 
 @pytest.mark.parametrize("operation", OPERATIONS)
@@ -144,6 +149,191 @@ def test_fp16_encodings_and_rounding_boundaries(backend, operation):
     _launch(x, y, output, backend, operation=operation)
 
     _assert_encoding(output, expected)
+
+
+def test_multiply_fp16_every_encoding_and_factor(backend):
+    """Multiply every binary16 encoding by 19 boundary factors."""
+    finfo = torch.finfo(torch.float16)
+    factors = torch.tensor(
+        [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            2.0,
+            -2.0,
+            1.0 - 2**-11,
+            1.0 + 2**-10,
+            2**-24,
+            finfo.smallest_normal,
+            finfo.max,
+            -finfo.max,
+            float("inf"),
+            -float("inf"),
+            float("nan"),
+        ],
+        dtype=torch.float16,
+    )
+    encodings = torch.arange(65536, dtype=torch.int32).to(torch.int16)
+    values = encodings.view(torch.float16)
+    x_cpu = values.repeat_interleave(factors.numel())
+    y_cpu = factors.repeat(values.numel())
+    expected = _multiply_oracle(x_cpu, y_cpu)
+    x = x_cpu.to(backend)
+    y = y_cpu.to(backend)
+    output = torch.empty_like(x)
+
+    _launch(x, y, output, backend, operation="multiply")
+
+    _assert_encoding(output, expected)
+
+
+def test_multiply_fp32_seeded_pairs_and_rounding_boundaries(backend):
+    """Cover seeded raw pairs and mantissa rounding across every exponent."""
+    generator = torch.Generator().manual_seed(0x5A6E)
+    random_bits = torch.randint(
+        0, 2**32, (2, 65536), dtype=torch.int64, generator=generator
+    ).to(torch.int32)
+    x_random, y_random = random_bits.view(torch.float32)
+    exponents = torch.arange(256, dtype=torch.int64)
+    signs = torch.tensor([0, 1], dtype=torch.int64)
+    mantissas = torch.tensor(
+        [0x000000, 0x3FFFFF, 0x400000, 0x400001, 0x7FFFFF],
+        dtype=torch.int64,
+    )
+    boundary_bits = (
+        (signs[:, None, None] << 31)
+        | (exponents[None, :, None] << 23)
+        | mantissas[None, None, :]
+    ).reshape(-1)
+    x_boundary = boundary_bits.to(torch.int32).view(torch.float32)
+    y_boundary = torch.full_like(x_boundary, 1.5)
+    x_cpu = torch.cat((x_random, x_boundary))
+    y_cpu = torch.cat((y_random, y_boundary))
+    expected = _multiply_oracle(x_cpu, y_cpu)
+    x = x_cpu.to(backend)
+    y = y_cpu.to(backend)
+    output = torch.empty_like(x)
+
+    _launch(x, y, output, backend, operation="multiply")
+
+    _assert_encoding(output, expected)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        torch.float32,
+        torch.float16,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    ),
+)
+@pytest.mark.parametrize("block", (1, 31, 32, 33, 128, 256, 512, 1024))
+def test_multiply_launch_boundaries(backend, dtype, block):
+    """Cover empty, immediate, tail, and multi-block launch boundaries."""
+    for n in (0, 1, block - 1, block, block + 1, 2 * block + 1):
+        x_cpu = (torch.arange(n).float() % 11 - 5).to(dtype)
+        y_cpu = (torch.arange(n).float() % 7 - 3).to(dtype)
+        x = x_cpu.to(backend)
+        y = y_cpu.to(backend)
+        output = torch.empty_like(x)
+
+        _launch(
+            x,
+            y,
+            output,
+            backend,
+            operation="multiply",
+            block=block,
+        )
+
+        _assert_encoding(output, _multiply_oracle(x_cpu, y_cpu))
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        torch.float32,
+        torch.float16,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    ),
+)
+def test_multiply_million_element_tail(backend, dtype):
+    """Cover a large multi-block launch with a partial final block."""
+    n = 1_000_003
+    x_cpu = (torch.arange(n).float() % 17 - 8).to(dtype)
+    y_cpu = (torch.arange(n).float() % 13 - 6).to(dtype)
+    x = x_cpu.to(backend)
+    y = y_cpu.to(backend)
+    output = torch.empty_like(x)
+
+    _launch(x, y, output, backend, operation="multiply", block=256)
+
+    _assert_encoding(output, _multiply_oracle(x_cpu, y_cpu))
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        torch.float32,
+        torch.float16,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    ),
+)
+@pytest.mark.parametrize("n", (1, 31, 33))
+@pytest.mark.parametrize("alias", ("none", "x", "y", "both"))
+def test_multiply_offset_views_guards_and_aliases(backend, dtype, n, alias):
+    """Preserve guard storage and snapshot aliased inputs before writes."""
+    capacity = n + 3
+    x_storage = torch.full((capacity + 4,), -7.0, dtype=dtype, device=backend)
+    x = x_storage[1 : capacity + 1]
+    x.copy_(
+        (torch.arange(capacity, device=backend).float() % 9 - 4).to(dtype)
+    )
+    storages = [x_storage]
+    if alias == "both":
+        y = x
+    else:
+        y_storage = torch.full(
+            (capacity + 6,), -9.0, dtype=dtype, device=backend
+        )
+        y = y_storage[2 : capacity + 2]
+        y.copy_(
+            (torch.arange(capacity, device=backend).float() % 5 - 2).to(dtype)
+        )
+        storages.append(y_storage)
+    if alias == "none":
+        output_storage = torch.full(
+            (capacity + 8,), -11.0, dtype=dtype, device=backend
+        )
+        output = output_storage[3 : capacity + 3]
+        storages.append(output_storage)
+    elif alias == "x" or alias == "both":
+        output = x
+    else:
+        output = y
+    expected_values = _multiply_oracle(
+        x[:n].cpu().clone(), y[:n].cpu().clone()
+    )
+    guarded = output._base
+    expected_storages = [storage.cpu().clone() for storage in storages]
+    start = output.storage_offset()
+    output_index = next(
+        index for index, storage in enumerate(storages) if storage is guarded
+    )
+    expected_storages[output_index][start : start + n] = expected_values
+
+    _launch(x, y, output, backend, n=n, operation="multiply", block=32)
+
+    for storage, expected_storage in zip(storages, expected_storages):
+        _assert_encoding(storage, expected_storage)
 
 
 @pytest.mark.parametrize("operation", OPERATIONS)

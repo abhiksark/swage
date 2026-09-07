@@ -163,12 +163,18 @@ jobs:
             --forbid-prefix {project} --forbid-prefix /tmp/swage-release-build
             $SWAGE_REBUILD_SDIST > "$SWAGE_EVIDENCE_DIR/repair-$SWAGE_PYTHON_TAG.json"
           CIBW_BEFORE_TEST_LINUX: >-
+            python -m pip install pytest &&
             python -m pip install torch==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu/ &&
             mkdir -p /tmp/swage-installed-cpu
           CIBW_TEST_COMMAND: >-
             cd /tmp/swage-installed-cpu &&
             env -u PYTHONPATH python -m swage.env --json --check cpu
             > "$SWAGE_EVIDENCE_DIR/cpu-health-$SWAGE_PYTHON_TAG.json" &&
+            env -u PYTHONPATH python -m pytest --import-mode=importlib
+            --rootdir /tmp/swage-installed-cpu
+            {project}/python/tests/mlir/test_cpu_runtime.py
+            {project}/python/tests/mlir/test_low_precision_runtime.py
+            {project}/python/tests/mlir/test_operation_dispatch.py -q &&
             env -u PYTHONPATH python {project}/scripts/smoke_installed_wheel.py
             --backend cpu --expected-revision "$SWAGE_SOURCE_REVISION"
             > "$SWAGE_EVIDENCE_DIR/cpu-smoke-$SWAGE_PYTHON_TAG.json"
@@ -334,13 +340,16 @@ jobs:
           echo "RELEASE_WORK=$work" >> "$GITHUB_ENV"
       - name: Check installed CUDA health and fixed native runtime suite
         working-directory: ${{ runner.temp }}
+        env:
+          SWAGE_REQUIRE_PERSISTENT_CACHE_TEST: "1"
         run: |
           unset PYTHONPATH
           py="$RELEASE_WORK/venv/bin/python"
           "$py" -m swage.env --json --check cuda > "$RELEASE_WORK/evidence/cuda-health.json"
           "$py" -m pytest --import-mode=importlib --rootdir "$RUNNER_TEMP" \
             "$GITHUB_WORKSPACE/python/tests/mlir/test_runtime.py" \
-            "$GITHUB_WORKSPACE/python/tests/mlir/test_low_precision_runtime.py" -q \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_low_precision_runtime.py" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_operation_dispatch.py" -q \
             --junitxml="$RELEASE_WORK/evidence/fixed-runtime.xml"
       - name: Check CUDA correctness and second-process persistent cache
         working-directory: ${{ runner.temp }}

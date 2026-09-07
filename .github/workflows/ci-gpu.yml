@@ -57,6 +57,7 @@ jobs:
           python -m pytest -q \
             python/tests/mlir/test_runtime.py \
             python/tests/mlir/test_low_precision_runtime.py \
+            python/tests/mlir/test_operation_dispatch.py \
             python/tests/mlir/test_segmented_runtime.py \
             python/tests/mlir/test_persistent_runtime.py
 
