@@ -297,3 +297,85 @@ def test_combined_expression_is_rejected_without_writes(backend):
             backend=backend,
         )
     assert torch.equal(output, torch.full_like(output, -7.0))
+
+
+def _boundary_launch(backend, operation, warm, dtype=torch.float32):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    _runtime._artifact_cache.clear()
+    kernel = _kernels()[operation]
+
+    def launch(tensors, n=129):
+        kernel.launch(
+            arguments=dict(
+                zip(("x_ptr", "y_ptr", "output_ptr", "n"), (*tensors, n))
+            ),
+            constexprs={"BLOCK": 128},
+            grid=((n + 127) // 128,),
+            backend=backend,
+        )
+
+    if warm:
+        tensors = [
+            torch.full((129,), value, device=backend, dtype=dtype)
+            for value in (2.0, 3.0, -7.0)
+        ]
+        for _ in range(2):
+            launch(tensors)
+    return launch
+
+
+@pytest.mark.parametrize(
+    ("backend", "operation", "dtype", "warm"),
+    [
+        ("cpu", 0, torch.float32, False),
+        ("cpu", 1, torch.float32, False),
+        ("cuda", 0, torch.float32, False),
+        ("cuda", 1, torch.float32, False),
+        ("cuda", 0, torch.float32, True),
+        ("cuda", 1, torch.float8_e4m3fn, True),
+    ],
+)
+def test_partial_active_overlap_is_rejected(backend, operation, dtype, warm):
+    """Reject shifted active overlap before compilation or writes."""
+    launch = _boundary_launch(backend, operation, warm, dtype)
+    for position, name in enumerate(("x_ptr", "y_ptr")):
+        for input_start, output_start in ((1, 129), (129, 1)):
+            storage = torch.full((260,), -7.0, device=backend, dtype=dtype)
+            tensors = [
+                torch.full_like(storage[:129], value) for value in (2, 3)
+            ]
+            tensors[position] = storage[input_start : input_start + 129]
+            tensors.append(storage[output_start : output_start + 129])
+            before = storage.clone()
+            artifacts = tuple(_runtime._artifact_cache)
+            with pytest.raises(ValueError, match=f"overlap.*{name}"):
+                launch(tensors)
+            assert tuple(_runtime._artifact_cache) == artifacts
+            assert torch.equal(
+                storage.view(torch.uint8), before.view(torch.uint8)
+            )
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("operation", [0, 1], ids=["add", "multiply"])
+def test_negative_metadata_is_rejected_without_writes(backend, operation):
+    """Reject every unresolved argument, including on a prepared CUDA call."""
+    launch = _boundary_launch(backend, operation, warm=backend == "cuda")
+    for position, name in enumerate(("x_ptr", "y_ptr", "output_ptr")):
+        storage = [
+            torch.full((129,), value, device=backend)
+            for value in (2.0, 3.0, -7.0)
+        ]
+        tensors = list(storage)
+        tensors[position] = storage[position]._neg_view()
+        assert tensors[position].is_contiguous()
+        assert tensors[position].is_neg()
+        before = [tensor.clone() for tensor in storage]
+        artifacts = tuple(_runtime._artifact_cache)
+        for n in (129, 0):
+            with pytest.raises(ValueError, match=f"{name}.*negative"):
+                launch(tensors, n)
+            assert tuple(_runtime._artifact_cache) == artifacts
+            for tensor, expected in zip(storage, before):
+                assert torch.equal(tensor, expected)

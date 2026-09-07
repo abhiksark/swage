@@ -1,3 +1,4 @@
+# python/swage/_runtime.py
 """Backend-neutral specialization, artifact, and launch orchestration."""
 
 import ast
@@ -289,6 +290,11 @@ def _validate_launch_tensor(name, tensor, torch, backend):
         raise TypeError(f"argument '{name}' must be a {backend.upper()} tensor")
     if tensor.device.type != backend:
         raise TypeError(f"argument '{name}' must be a {backend.upper()} tensor")
+    if tensor.is_neg() or tensor.is_conj():
+        raise ValueError(
+            f"argument '{name}' must not have unresolved negative or "
+            "conjugate metadata"
+        )
     element_type = language._torch_float_type(tensor.dtype, torch)
     if element_type is None:
         raise TypeError(
@@ -373,6 +379,15 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch, adapter):
             raise ValueError("BLOCK must be at most 1024 for the CPU backend")
         target = "native"
         stream = None
+    if n:
+        active_bytes = n * tensors[2].element_size()
+        output_start = tensors[2].data_ptr()
+        for name, tensor in zip(runtime_names[:2], tensors[:2]):
+            if 0 < abs(tensor.data_ptr() - output_start) < active_bytes:
+                raise ValueError(
+                    f"argument '{runtime_names[2]}' must not partially "
+                    f"overlap argument '{name}' in their active ranges"
+                )
     return _LaunchSpec(
         adapter,
         tensors,

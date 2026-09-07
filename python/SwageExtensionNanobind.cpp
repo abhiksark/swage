@@ -395,8 +395,11 @@ public:
     if (!PyType_Check(tensorType.ptr()))
       throw nb::type_error("torch.Tensor must be a type");
     elementDtype = std::move(dtype);
+    elementBytes = nb::cast<uint64_t>(elementDtype.attr("itemsize"));
     numel = tensorType.attr("numel");
     isContiguous = tensorType.attr("is_contiguous");
+    isNeg = tensorType.attr("is_neg");
+    isConj = tensorType.attr("is_conj");
     getDevice = tensorType.attr("get_device");
     dataPtr = tensorType.attr("data_ptr");
     recordStream = tensorType.attr("record_stream");
@@ -405,9 +408,12 @@ public:
     bool ordinaryMethods = Py_TYPE(isContiguous.ptr()) == &PyMethodDescr_Type;
     auto *tensorClass = reinterpret_cast<PyTypeObject *>(tensorType.ptr());
     numelMethod = noArgsTensorMethod(numel, tensorClass);
+    negativeMethod = noArgsTensorMethod(isNeg, tensorClass);
+    conjugateMethod = noArgsTensorMethod(isConj, tensorClass);
     deviceMethod = noArgsTensorMethod(getDevice, tensorClass);
     pointerMethod = noArgsTensorMethod(dataPtr, tensorClass);
-    ordinaryMethods &= numelMethod && deviceMethod && pointerMethod;
+    ordinaryMethods &= numelMethod && negativeMethod && conjugateMethod &&
+                       deviceMethod && pointerMethod;
     for (Attribute name : {IsCUDA, Dtype, NDim}) {
       size_t index = name - IsCUDA;
       nb::object &descriptor = tensorDescriptors[index];
@@ -493,6 +499,10 @@ public:
           !tensorProperty(tensor, Dtype).is(elementDtype) ||
           nb::cast<int32_t>(tensorProperty(tensor, NDim)) != 1 ||
           !callOne(isContiguous, tensor).is(nb::handle(Py_True)) ||
+          !checkedObject(negativeMethod(tensor.ptr(), nullptr))
+               .is(nb::handle(Py_False)) ||
+          !checkedObject(conjugateMethod(tensor.ptr(), nullptr))
+               .is(nb::handle(Py_False)) ||
           nb::cast<int64_t>(checkedObject(numelMethod(tensor.ptr(), nullptr))) <
               int64_t(count) ||
           nb::cast<int32_t>(
@@ -516,8 +526,7 @@ public:
     for (size_t i = 0; i < tensors.size(); ++i) {
       if (hasTensorInstanceState(tensors[i].ptr()))
         return false;
-      // data_ptr includes storage offsets and preserves the Python binding's
-      // physical-pointer semantics for aliases, overlaps and negative views.
+      // data_ptr includes storage offsets; logical metadata was checked above.
       nb::object pointer =
           checkedObject(pointerMethod(tensors[i].ptr(), nullptr));
       if (!PyLong_CheckExact(pointer.ptr()))
@@ -530,6 +539,13 @@ public:
         return false;
       }
       if (!pointers[i])
+        return false;
+    }
+    uint64_t activeBytes = uint64_t(count) * elementBytes;
+    for (uint64_t input : {pointers[0], pointers[1]}) {
+      uint64_t distance =
+          input < pointers[2] ? pointers[2] - input : input - pointers[2];
+      if (distance && distance < activeBytes)
         return false;
     }
 
@@ -642,6 +658,7 @@ public:
           value.identity.ptr(),       value.stream.ptr(),
           value.tensorType.ptr(),     value.elementDtype.ptr(),
           value.numel.ptr(),          value.isContiguous.ptr(),
+          value.isNeg.ptr(),          value.isConj.ptr(),
           value.getDevice.ptr(),      value.dataPtr.ptr(),
           value.recordStream.ptr(),   value.isInBadFork.ptr(),
           value.currentDevice.ptr(),  value.currentRawStream.ptr(),
@@ -776,11 +793,12 @@ private:
   uint32_t entryTypeVersion = 0, tensorTypeVersion = 0;
   nb::object entryRef, artifact, runtimeRef, cudaBackendRef;
   nb::object artifactCacheRef, loadedCacheRef, driverRef, identity, stream;
-  nb::object tensorType, elementDtype, numel, isContiguous;
+  nb::object tensorType, elementDtype, numel, isContiguous, isNeg, isConj;
   nb::object getDevice, dataPtr, recordStream;
   std::array<nb::object, 3> tensorDescriptors;
   std::array<PyGetSetDef *, 3> tensorGetters{};
   PyCFunction numelMethod = nullptr, deviceMethod = nullptr;
+  PyCFunction negativeMethod = nullptr, conjugateMethod = nullptr;
   PyCFunction pointerMethod = nullptr;
   nb::object isInBadFork, currentDevice, currentRawStream, isCapturing;
   nb::object torchFunctionMode;
@@ -789,6 +807,7 @@ private:
   nb::object rawStreamValue, deviceValue;
   CachedPythonLock artifactLock, cudaLock;
   uint64_t context = 0, function = 0, rawStream = 0, event = 0;
+  uint64_t elementBytes = 0;
   int32_t device = 0;
   uint32_t block = 0;
 };

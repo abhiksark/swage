@@ -22,5 +22,5 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
 - `mlir_swage` is a private implementation package bundled in native
   `swage-compiler` wheels, not a public `swage.ir` API. PyTorch remains
   optional for explicit compile-only emission. Execution is available only
-  through the explicit fixed vector-add `launch()` boundary; direct kernel
-  calls remain unavailable.
+  through the explicit canonical fixed-vector add or multiply `launch()`
+  boundary; direct kernel calls remain unavailable.

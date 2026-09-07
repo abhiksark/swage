@@ -42,7 +42,7 @@ Python source or native test IR
         v
 verified Swage semantic MLIR
         |
-        +-- public canonical fixed vector add
+        +-- public canonical fixed vector add or multiply
         |      +-- Native host lowering -> LLVM ExecutionEngine
         |      `-- GPU lowering -> LLVM NVPTX -> PTX -> CUDA Driver API
         +-- private direct segmented CPU/GPU qualification
@@ -161,8 +161,8 @@ error. Native packaging does not expand the admitted public kernel subset.
   physical launch contracts.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add plus private
-  segmented runtime qualification on a real NVIDIA device.
+- The trusted GPU workflow covers public fixed vector add or multiply plus
+  private segmented runtime qualification on a real NVIDIA device.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 - Release checks inspect native wheel tags, ELF dependencies and relocatability,

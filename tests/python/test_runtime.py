@@ -182,6 +182,13 @@ class _Tensor:
         self._rank = rank
         self._contiguous = contiguous
         self._pointer = pointer
+        self._negative = False
+        self._conjugate = False
+        self._element_size = 1
+        if self.dtype is torch.float32:
+            self._element_size = 4
+        elif self.dtype is getattr(torch, "float16", None):
+            self._element_size = 2
         self.recorded_streams = []
 
     def dim(self):
@@ -192,6 +199,15 @@ class _Tensor:
 
     def numel(self):
         return self._size
+
+    def element_size(self):
+        return self._element_size
+
+    def is_neg(self):
+        return self._negative
+
+    def is_conj(self):
+        return self._conjugate
 
     def data_ptr(self):
         return self._pointer
@@ -869,6 +885,27 @@ def test_mixed_dtypes_fail_before_pointer_acquisition(
             grid=(n,),
             backend=backend,
         )
+
+
+@pytest.mark.parametrize("flag", ["_negative", "_conjugate"])
+def test_lazy_metadata_fails_before_any_pointer_access(monkeypatch, flag):
+    """Reject unresolved metadata in every position before pointer access."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    monkeypatch.setattr(
+        _Tensor, "data_ptr", lambda _self: pytest.fail("pointer read")
+    )
+    for name in ("x_ptr", "y_ptr", "output_ptr"):
+        for n in (0, 1):
+            arguments = _arguments(torch, n=n)
+            setattr(arguments[name], flag, True)
+            with pytest.raises(
+                ValueError, match=f"{name}.*(negative|conjugate)"
+            ):
+                _runtime._validate_runtime_arguments(
+                    arguments, tuple(arguments), torch, "cuda"
+                )
 
 
 def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
