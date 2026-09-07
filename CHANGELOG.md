@@ -8,10 +8,10 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
-- Public canonical vector addition now supports matching `float16`,
-  `float8_e4m3fn`, and `float8_e5m2` tensors on CPU and CUDA, alongside
-  `float32`. Low-precision arithmetic rounds an FP32 sum to the storage
-  format; software FP8 conversion works on RTX A6000 `sm_86`.
+- Public canonical vector addition and multiplication now support matching
+  `float16`, `float8_e4m3fn`, and `float8_e5m2` tensors on CPU and CUDA,
+  alongside `float32`. Low-precision arithmetic rounds an FP32 sum or product
+  to the storage format; software FP8 conversion works on RTX A6000 `sm_86`.
 - Dtype-aware specialization and native warm-launch validation, public
   low-precision signature markers/stubs, and `--dtype` in the vector-add
   example. Numerical coverage exhausts both FP8 formats' encoding pairs
