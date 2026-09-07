@@ -37,5 +37,6 @@ or execute a kernel.
   direct MLIR emitter, so they produce the same module.
 - Import and metadata access failures remain inside the frontend diagnostic
   boundary and identify the optional installation extra.
-- Data pointers, launch validation, specialization, PTX lowering, and CUDA
-  execution remain runtime work.
+- Data pointers, launch validation, specialization, backend lowering, and
+  execution remain runtime work. CUDA emits PTX; Native CPU uses a
+  process-local LLVM JIT executable.

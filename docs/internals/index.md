@@ -19,6 +19,7 @@ find its content in the topic pages below.
 | [Task Planning](planning.md) | Classification of segments into tasks |
 | [Task Execution](task-execution.md) | Warp, CTA, and fused mixed launches |
 | [Split Execution](split-execution.md) | Oversized segments, partials, and merges |
+| [Persistent Execution](persistent-execution.md) | The private resident-queue experiment and its failed performance gate |
 | [SwagePlan Dialect](swage-plan-dialect.md) | The private planning IR surface |
 | [Compiler Tools and Passes](compiler-tools.md) | `swage-opt` and the registered passes |
 | [Verification](verification.md) | The claim-to-test evidence matrix |

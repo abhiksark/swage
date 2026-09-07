@@ -1,16 +1,16 @@
 <!-- docs/assets/diagrams/frontend-boundary.svg -->
 <svg xmlns="http://www.w3.org/2000/svg"
-  viewBox="0 0 1200 680" role="img"
+  viewBox="0 0 1200 700" role="img"
   aria-labelledby="frontend-boundary-title frontend-boundary-description"
   font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="frontend-boundary-title">Frontend verification and execution boundary</title>
-  <desc id="frontend-boundary-description">Python source passes restricted AST validation and verified semantic MLIR before emit_mlir stops or canonical launch continues to CUDA.</desc>
+  <desc id="frontend-boundary-description">Python source passes restricted AST validation and verified semantic MLIR before emit_mlir stops or canonical launch continues to the explicitly selected Native CPU or CUDA backend.</desc>
   <defs>
     <marker id="frontend-boundary-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#59636E"/>
     </marker>
   </defs>
-  <rect data-role="canvas" x="0" y="0" width="1200" height="680" fill="#FFFDF8"/>
+  <rect data-role="canvas" x="0" y="0" width="1200" height="700" fill="#FFFDF8"/>
   <text x="48" y="54" font-size="32" font-weight="750" fill="#17212B" text-anchor="start">Frontend boundary</text>
   <rect x="60" y="130" width="230" height="126" rx="14" fill="#F5F3ED" stroke="#59636E" stroke-width="2"/>
   <text x="175" y="170" font-size="17" font-weight="700" fill="#17212B" text-anchor="middle">Python source</text>
@@ -42,7 +42,7 @@
   <text x="1085" y="438" font-size="22" font-weight="750" fill="#17212B" text-anchor="middle">launch()</text>
   <text x="1085" y="470" font-size="16" font-weight="500" fill="#8E4775" text-anchor="middle">canonical only</text>
   <line x1="1045" y1="504" x2="1045" y2="558" stroke="#59636E" stroke-width="3" marker-end="url(#frontend-boundary-arrow)"/>
-  <rect x="865" y="570" width="295" height="72" rx="14" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
-  <text x="1012" y="600" font-size="18" font-weight="700" fill="#17212B" text-anchor="middle">native compile -> CUDA</text>
-  <text x="1012" y="626" font-size="16" font-weight="500" fill="#A94500" text-anchor="middle">nonzero target gate: sm_80+</text>
+  <rect x="825" y="570" width="335" height="72" rx="14" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
+  <text x="992" y="600" font-size="18" font-weight="700" fill="#17212B" text-anchor="middle">native compile -> CPU or CUDA</text>
+  <text x="992" y="626" font-size="16" font-weight="500" fill="#A94500" text-anchor="middle">CPU: host-call | CUDA: sm_80+</text>
 </svg>

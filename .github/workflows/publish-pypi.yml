@@ -1,72 +1,427 @@
 # .github/workflows/publish-pypi.yml
-
 name: publish-pypi
 
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
+
+permissions:
+  contents: read
 
 concurrency:
   group: publish-pypi-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
+  source:
+    name: Validate release source and reproducible sdist
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 20
+    outputs:
+      revision: ${{ steps.source.outputs.revision }}
+      epoch: ${{ steps.source.outputs.epoch }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
-      - name: Install build tools
-        run: python -m pip install build twine
-      - name: Verify source and package version
+      - name: Validate source and signed protected tag
+        id: source
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          checked_out="$(git rev-parse HEAD)"
-          package_version="$(
-            PYTHONPATH=python python -c \
-              'import swage; print(swage.__version__)'
-          )"
-          test "$checked_out" = "$GITHUB_SHA"
-          if test "$EVENT_NAME" = "push"; then
-            test "$REF_TYPE" = "tag"
-            test "$REF_NAME" = "v$package_version"
-            test "$(git cat-file -t "$REF_NAME")" = "tag"
-            test "$(git rev-parse "$REF_NAME^{commit}")" = "$checked_out"
-          fi
-      - name: Build distributions
-        run: python -m build
-      - name: Check distributions
-        run: python -m twine check --strict dist/*
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+          revision = git("rev-parse", "HEAD")
+          assert revision == os.environ["GITHUB_SHA"]
+          assert not git("status", "--porcelain"), "release tree must be clean"
+          source = pathlib.Path("python/swage/__init__.py").read_text()
+          version = re.search(r'^__version__ = "([^"]+)"$', source, re.M).group(1)
+          assert version == "0.5.2", "this release policy is for v0.5.2"
+          git("fetch", "--no-tags", "origin", "main:refs/remotes/origin/main")
+          git("merge-base", "--is-ancestor", revision, "refs/remotes/origin/main")
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              tag = os.environ["GITHUB_REF_NAME"]
+              assert os.environ["GITHUB_REF_TYPE"] == "tag" and tag == f"v{version}"
+              assert os.environ["GITHUB_REF_PROTECTED"] == "true", "protect v* tags first"
+              assert git("cat-file", "-t", tag) == "tag", "annotated tag required"
+              assert git("rev-parse", f"{tag}^{{commit}}") == revision
+              tag_object = git("rev-parse", tag)
+              repository = os.environ["GITHUB_REPOSITORY"]
+              # GitHub's verifier validates GPG/SSH signatures; missing or
+              # indeterminate verification fails closed, never trusts tag text.
+              record = json.loads(subprocess.check_output([
+                  "gh", "api", f"repos/{repository}/git/tags/{tag_object}"
+              ], text=True))
+              verification = record["verification"]
+              assert record["sha"] == tag_object and record["object"]["sha"] == revision
+              assert verification["verified"] and verification["reason"] == "valid"
+              assert verification["signature"] and verification["payload"]
+              branch = json.loads(subprocess.check_output([
+                  "gh", "api", f"repos/{repository}/branches/main"
+              ], text=True))
+              assert branch["protected"], "protect main before release"
+          else:
+              assert os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+          epoch = git("show", "-s", "--format=%ct", revision)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"revision={revision}\nepoch={epoch}\n")
+          PY
+      - name: Build and compare CMake-free source distributions
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source.outputs.epoch }}
+        run: |
+          python -m pip install build twine
+          python -m build --sdist --outdir dist
+          python -m build --sdist --outdir "$RUNNER_TEMP/second-sdist"
+          cmp dist/swage_compiler-0.5.2.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.2.tar.gz"
+          python -m twine check --strict dist/*.tar.gz
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
-          name: python-package-distributions
-          path: dist/
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  python-security:
+    needs: source
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/ci-python.yml
+
+  native-security:
+    needs: source
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/ci-cpp.yml
+
+  wheels:
+    name: Native manylinux wheel (${{ matrix.python }})
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp310, cp311, cp312, cp313]
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.source.outputs.epoch }}
+      SWAGE_SOURCE_REVISION: ${{ needs.source.outputs.revision }}
+      SWAGE_PYTHON_TAG: ${{ matrix.python }}
+      SWAGE_EVIDENCE_DIR: /host${{ github.workspace }}/release-evidence
+      SWAGE_REBUILD_SDIST: ${{ matrix.python == 'cp313' && '--rebuild-sdist /project/release-source/swage_compiler-0.5.2.tar.gz' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: release-sdist
+          path: release-source
+      - name: Prepare evidence destination and LLVM build space
+        run: |
+          mkdir release-evidence
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+      - uses: pypa/cibuildwheel@ee02a1537ce3071a004a6b08c41e72f0fdc42d9a
+        with:
+          only: ${{ matrix.python }}-manylinux_x86_64
+        env:
+          CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ENVIRONMENT_PASS_LINUX: SOURCE_DATE_EPOCH SWAGE_SOURCE_REVISION SWAGE_PYTHON_TAG SWAGE_EVIDENCE_DIR SWAGE_REBUILD_SDIST
+          CIBW_ENVIRONMENT_LINUX: >-
+            SWAGE_LLVM_HOME=/opt/swage/llvm
+            SWAGE_LLVM_BUILD_TYPE=Release SWAGE_LLVM_PYTHON_BINDINGS=ON
+            SWAGE_LLVM_TARGETS="X86;NVPTX" CC=gcc CXX=g++
+            MLIR_DIR=/opt/swage/llvm/install-llvmorg-22.1.8/lib/cmake/mlir
+            LLVM_DIR=/opt/swage/llvm/install-llvmorg-22.1.8/lib/cmake/llvm
+            SKBUILD_BUILD_DIR=/tmp/swage-release-build
+            CMAKE_ARGS="-DMLIR_DIR=$MLIR_DIR -DLLVM_DIR=$LLVM_DIR -DSWAGE_SOURCE_REVISION=$SWAGE_SOURCE_REVISION -DSWAGE_SOURCE_CLEAN=true"
+          CIBW_BEFORE_BUILD_LINUX: >-
+            bash {project}/scripts/fetch_llvm.sh &&
+            python -m pip install
+            -r /opt/swage/llvm/src-llvmorg-22.1.8/mlir/python/requirements.txt
+            nanobind==2.15.0 ninja build scikit-build-core==1.0.3 auditwheel pyelftools &&
+            SWAGE_PYTHON_EXECUTABLE="$(command -v python)" bash {project}/scripts/build_llvm.sh
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            python {project}/scripts/repair_native_wheel.py {wheel}
+            --wheel-dir {dest_dir} --expected-revision "$SWAGE_SOURCE_REVISION"
+            --forbid-prefix {project} --forbid-prefix /tmp/swage-release-build
+            $SWAGE_REBUILD_SDIST > "$SWAGE_EVIDENCE_DIR/repair-$SWAGE_PYTHON_TAG.json"
+          CIBW_BEFORE_TEST_LINUX: >-
+            python -m pip install torch==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu/ &&
+            mkdir -p /tmp/swage-installed-cpu
+          CIBW_TEST_COMMAND: >-
+            cd /tmp/swage-installed-cpu &&
+            env -u PYTHONPATH python -m swage.env --json --check cpu
+            > "$SWAGE_EVIDENCE_DIR/cpu-health-$SWAGE_PYTHON_TAG.json" &&
+            env -u PYTHONPATH python {project}/scripts/smoke_installed_wheel.py
+            --backend cpu --expected-revision "$SWAGE_SOURCE_REVISION"
+            > "$SWAGE_EVIDENCE_DIR/cpu-smoke-$SWAGE_PYTHON_TAG.json"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: release-wheel-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        if: always()
+        with:
+          name: release-wheel-evidence-${{ matrix.python }}
+          path: release-evidence/*.json
+
+  aggregate:
+    name: Gate exact artifact set and generate SBOM
+    needs: [source, wheels, python-security, native-security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          pattern: release-wheel-cp*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: release-sdist
+          path: dist
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          pattern: release-wheel-evidence-*
+          merge-multiple: true
+          path: release-evidence
+      - name: Check exact ABI set, provenance, reproducibility and hashes
+        env:
+          EXPECTED_REVISION: ${{ needs.source.outputs.revision }}
+        run: |
+          python -m pip install twine auditwheel pyelftools packaging
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+
+          dist = pathlib.Path("dist")
+          evidence = pathlib.Path("release-evidence")
+          abis = ("cp310", "cp311", "cp312", "cp313")
+          wheels = {abi: f"swage_compiler-0.5.2-{abi}-{abi}-manylinux_2_28_x86_64.whl" for abi in abis}
+          expected = {*wheels.values(), "swage_compiler-0.5.2.tar.gz"}
+          assert {path.name for path in dist.iterdir()} == expected, "unexpected release artifact set"
+          for abi, filename in wheels.items():
+              first = json.loads((evidence / f"repair-{abi}.json").read_text())
+              command = [sys.executable, "scripts/check_native_wheel.py", str(dist / filename),
+                         "--expected-revision", os.environ["EXPECTED_REVISION"], "--expected-python", abi]
+              roots = first["forbidden_prefixes"]
+              if abi == "cp313":
+                  repeated = first["reproducibility"]
+                  assert repeated["sha256"] == first["sha256"], "cp313 reproducibility mismatch"
+                  roots += [repeated["source_root"], repeated["build_root"]]
+              for root in roots:
+                  command += ["--forbid-prefix", root]
+              checked = json.loads(subprocess.check_output(command, text=True))
+              assert checked["sha256"] == first["sha256"]
+          sums = "".join(f"{hashlib.sha256((dist / name).read_bytes()).hexdigest()}  {name}\n" for name in sorted(expected))
+          (evidence / "SHA256SUMS").write_text(sums)
+          print(sums, end="")
+          PY
+          python -m twine check --strict dist/*
+      - name: Unpack checked distributions for package and file inventory
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          for artifact in sorted(pathlib.Path("dist").iterdir()):
+              destination = pathlib.Path("sbom-input") / artifact.name
+              destination.mkdir(parents=True)
+              if artifact.suffix == ".whl":
+                  with zipfile.ZipFile(artifact) as archive:
+                      archive.extractall(destination)
+              else:
+                  with tarfile.open(artifact) as archive:
+                      archive.extractall(destination, filter="data")
+          PY
+      - name: Generate one SPDX JSON SBOM for the aggregate
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+          SYFT_SOURCE_NAME: swage-compiler-release
+          SYFT_SOURCE_VERSION: "0.5.2"
+          SYFT_SELECT_CATALOGERS: +file-metadata-cataloger,+file-digest-cataloger
+          SYFT_FILE_METADATA_SELECTION: all
+        with:
+          path: sbom-input
+          syft-version: v1.51.0
+          format: spdx-json
+          output-file: release-evidence/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - name: Reject missing package or distribution inventory
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+
+          sbom = json.loads(pathlib.Path("release-evidence/sbom.spdx.json").read_text())
+          assert sbom["spdxVersion"] == "SPDX-2.3"
+          assert any(package["name"] == "swage-compiler" and
+                     package.get("versionInfo") == "0.5.2"
+                     for package in sbom["packages"]), "SBOM omits Swage"
+          inventoried = set()
+          for item in sbom.get("files", []):
+              parts = pathlib.PurePosixPath(item["fileName"]).parts
+              if parts and any(check["algorithm"] == "SHA256"
+                               for check in item.get("checksums", [])):
+                  inventoried.add(parts[0])
+          expected = {path.name for path in pathlib.Path("dist").iterdir()}
+          assert expected <= inventoried, f"SBOM omits distributions: {expected - inventoried}"
+          PY
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: release-artifact-evidence
+          path: release-evidence/*
+          if-no-files-found: error
+
+  gpu:
+    name: Qualify installed release wheel on A6000
+    needs: [source, aggregate]
+    runs-on: [self-hosted, linux, x64, swage-gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: release-distributions
+          path: release-dist
+      - name: Install aggregated cp313 wheel and retain runner CUDA Torch
+        run: |
+          work="$RUNNER_TEMP/swage-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3.13 -m venv --system-site-packages "$work/venv"
+          "$work/venv/bin/python" -m pip install pytest
+          "$work/venv/bin/python" -m pip install --no-deps --ignore-installed \
+            release-dist/swage_compiler-0.5.2-cp313-cp313-manylinux_2_28_x86_64.whl
+          mkdir "$work/evidence"
+          echo "RELEASE_WORK=$work" >> "$GITHUB_ENV"
+      - name: Check installed CUDA health and fixed native runtime suite
+        working-directory: ${{ runner.temp }}
+        run: |
+          unset PYTHONPATH
+          py="$RELEASE_WORK/venv/bin/python"
+          "$py" -m swage.env --json --check cuda > "$RELEASE_WORK/evidence/cuda-health.json"
+          "$py" -m pytest --import-mode=importlib --rootdir "$RUNNER_TEMP" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_runtime.py" \
+            "$GITHUB_WORKSPACE/python/tests/mlir/test_low_precision_runtime.py" -q \
+            --junitxml="$RELEASE_WORK/evidence/fixed-runtime.xml"
+      - name: Check CUDA correctness and second-process persistent cache
+        working-directory: ${{ runner.temp }}
+        env:
+          EXPECTED_REVISION: ${{ needs.source.outputs.revision }}
+        run: |
+          unset PYTHONPATH
+          export SWAGE_CACHE_DIR="$RELEASE_WORK/persistent-cache"
+          py="$RELEASE_WORK/venv/bin/python"
+          "$py" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
+            --backend cuda --expected-revision "$EXPECTED_REVISION" \
+            > "$RELEASE_WORK/evidence/cuda-smoke.json"
+          "$py" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
+            --backend cuda --expected-revision "$EXPECTED_REVISION" --require-persistent-hit \
+            > "$RELEASE_WORK/evidence/cuda-cache-reuse.json"
+      - name: Enforce qualified A6000 runtime SLOs
+        working-directory: ${{ runner.temp }}
+        run: |
+          unset PYTHONPATH
+          "$RELEASE_WORK/venv/bin/python" "$GITHUB_WORKSPACE/benchmarks/benchmark_fixed_runtime.py" \
+            --enforce --output "$RELEASE_WORK/evidence/fixed-runtime-slo.json"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        if: always()
+        with:
+          name: release-gpu-evidence
+          path: ${{ env.RELEASE_WORK }}/evidence/*
+
+  attest:
+    name: Attest qualified signed-tag artifacts
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.2'
+    needs: [aggregate, gpu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: release-distributions
+          path: dist
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: release-artifact-evidence
+          path: evidence
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/*
+          create-storage-record: false
+      - name: Attest aggregate SPDX SBOM
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/*
+          sbom-path: evidence/sbom.spdx.json
+          create-storage-record: false
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: release-attestations
+          path: |
+            ${{ steps.provenance.outputs.bundle-path }}
+            ${{ steps.sbom.outputs.bundle-path }}
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: build
+    name: Publish qualified immutable native release
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.2'
+    needs: attest
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/swage-compiler
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
         with:
-          name: python-package-distributions
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+          name: release-distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33

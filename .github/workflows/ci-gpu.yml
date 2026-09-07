@@ -56,7 +56,9 @@ jobs:
         run: |
           python -m pytest -q \
             python/tests/mlir/test_runtime.py \
-            python/tests/mlir/test_segmented_runtime.py
+            python/tests/mlir/test_low_precision_runtime.py \
+            python/tests/mlir/test_segmented_runtime.py \
+            python/tests/mlir/test_persistent_runtime.py
 
       - name: Run the documented fixed vector-add walkthrough
         run: |
@@ -71,3 +73,55 @@ jobs:
           test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"
           python -m pytest -q \
             'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'
+
+  fixed-runtime-slo:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, swage-gpu]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build isolated fixed-runtime wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/swage-fixed-runtime-$GITHUB_RUN_ID"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python -m venv --system-site-packages "$work/venv"
+          py="$work/venv/bin/python"
+          "$py" -m pip install build scikit-build-core==1.0.3 nanobind==2.15.0
+          pin="$(cat cmake/llvm-version.txt)"
+          llvm="$HOME/.swage/llvm/install-$pin"
+          "$py" -m build --wheel --outdir "$work/dist" \
+            -Cbuild-dir="$work/build" \
+            -Ccmake.define.MLIR_DIR="$llvm/lib/cmake/mlir" \
+            -Ccmake.define.LLVM_DIR="$llvm/lib/cmake/llvm" \
+            -Ccmake.define.SWAGE_SOURCE_REVISION="$GITHUB_SHA" \
+            -Ccmake.define.SWAGE_SOURCE_CLEAN=true
+          "$py" -m pip install --no-deps --ignore-installed "$work"/dist/*.whl
+          echo "FIXED_WORK=$work" >> "$GITHUB_ENV"
+      - name: Check installed CUDA boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" -m swage.env --json --check cuda
+          env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" \
+            "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
+            --backend cuda --expected-revision "$GITHUB_SHA"
+      - name: Enforce fixed-runtime A6000 SLOs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" \
+            "$GITHUB_WORKSPACE/benchmarks/benchmark_fixed_runtime.py" \
+            --enforce --output "$RUNNER_TEMP/fixed-runtime-slo.json"
+      - name: Retain raw SLO evidence on failure
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: fixed-runtime-slo
+          path: ${{ runner.temp }}/fixed-runtime-slo.json

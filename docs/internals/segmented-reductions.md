@@ -9,16 +9,23 @@ contracts; none of them is a public API.
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
 
-The admitted semantic module has one axis-zero segment ID, one segment over
-rank-one f32 values and rank-one i32 offsets, one capture-free identity
-reduction of kind `sum` or `max`, one rank-one f32 output, and explicit i32
-value and segment counts.
+The admitted semantic module has exactly three user buffers: rank-one f32
+values, rank-one i32 offsets, and rank-one f32 output. It has one axis-zero
+segment ID, one segment, and one capture-free identity reduction of kind
+`sum` or `max`. Buffer roles come from types, effects, and operation dataflow,
+not parameter names or positions; ambiguous programs fail during read-only
+admission.
 
-The internal ABI is:
+The semantic ABI is:
 
 ```text
-values*, offsets*, output*, value_count:i32, segment_count:i32
+values*, offsets*, output*
 ```
+
+CPU and planning lowerings derive value and segment counts from memref
+dimensions. GPU lowerings retain concrete i32 count parameters in their
+physical PTX signatures, where compiler-generated launch contracts mark them
+as derived runtime bindings.
 
 The CPU path lowers to sequential SCF and memref operations and executes with
 upstream `mlir-runner`. The GPU path uses one CTA per segment and block-stride

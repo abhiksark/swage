@@ -19,7 +19,7 @@ REQUIRED_LABELS = {
         "gid = program_id(0) * BLOCK + arange(0, BLOCK)",
         "mask = gid < n",
         "masked",
-        "public launch contract",
+        "public CUDA launch contract",
     ),
     "warp-vs-cta-tiles": (
         "32-thread warp tile",
@@ -71,7 +71,7 @@ REQUIRED_LABELS = {
         "GPU lowering infrastructure",
         "NVPTX emission",
         "current stream",
-        "one launch crosses the domains",
+        "one CUDA launch crosses the domains",
     ),
     "ragged-softmax-phases": (
         "one CTA per segment",
@@ -98,7 +98,7 @@ REQUIRED_LABELS = {
         "miss",
     ),
     "dispatch-path": (
-        "_launch_kernel",
+        "_launch_cuda_kernel",
         "nanobind",
         "dlopen libcuda.so.1",
         "GIL held across the enqueue",
@@ -140,9 +140,7 @@ REQUIRED_LABELS = {
 
 def _load_renderer():
     """Load the figure renderer module from its script path."""
-    spec = importlib.util.spec_from_file_location(
-        "render_docs_figures", SCRIPT
-    )
+    spec = importlib.util.spec_from_file_location("render_docs_figures", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -176,9 +174,7 @@ def test_tex_sources_open_with_their_repo_path_comment():
     """Sources and the preamble name their repo-relative location."""
     module = _load_renderer()
     paths = [module.SOURCE_DIR / module.PREAMBLE_NAME]
-    paths += [
-        module.SOURCE_DIR / f"{spec.name}.tex" for spec in module.FIGURES
-    ]
+    paths += [module.SOURCE_DIR / f"{spec.name}.tex" for spec in module.FIGURES]
     for path in paths:
         first_line = path.read_text().splitlines()[0]
         assert first_line == f"% figures/{path.name}", path
@@ -321,8 +317,7 @@ def test_perf_snapshot_is_wellformed_and_sourced():
             assert cell["median"] > 0, (row["distribution"], impl)
             sourced = "provenance" in cell
             spread = (
-                "q1" in cell
-                and 0 < cell["q1"] <= cell["median"] <= cell["q3"]
+                "q1" in cell and 0 < cell["q1"] <= cell["median"] <= cell["q3"]
             )
             assert sourced or spread, (row["distribution"], impl)
     for stage in snapshot["dispatch_call_us"]:

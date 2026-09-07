@@ -8,19 +8,96 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- Public canonical vector addition now supports matching `float16`,
+  `float8_e4m3fn`, and `float8_e5m2` tensors on CPU and CUDA, alongside
+  `float32`. Low-precision arithmetic rounds an FP32 sum to the storage
+  format; software FP8 conversion works on RTX A6000 `sm_86`.
+- Dtype-aware specialization and native warm-launch validation, public
+  low-precision signature markers/stubs, and `--dtype` in the vector-add
+  example. Numerical coverage exhausts both FP8 formats' encoding pairs
+  on CPU/CUDA and checks FP16 encodings, rounding, tails, and dtype switches.
+- v0.5.2 fixed-vector release hardening: self-contained Linux x86-64 native
+  wheels for regular CPython 3.10–3.13, fixed-contract type stubs, bundled LLVM
+  licensing and validated build provenance.
+- Public `SwageError`, `CompilationError`, and `BackendUnavailableError`
+  hierarchy, structured `swage.env --json --check native|cpu|cuda` diagnostics,
+  and opt-in sanitized `swage.runtime` DEBUG events.
+- Native artifact, minimum-PyTorch CPU, source/sdist reproducibility, sanitizer,
+  CodeQL, dependency-review, and installed A6000 runtime SLO release gates.
+  Manual release dispatch produces evidence without attestation or publication.
+
 - Generated TikZ figure atlas covering the GPU execution approaches, and a
   benchmarks page backed by a committed RTX 5090 snapshot.
+- Version-2 backend-neutral compiler launch contracts with strict canonical
+  JSON validation, CUDA and Native CPU launch models, complete physical scalar
+  kinds, typed runtime binding, and retained RTX A6000 host-marshalling gate
+  evidence.
+- An independent-process Swage/Triton campaign runner with interleaved
+  candidate timing, preparation-only and end-to-end measurements, a fused
+  one-launch Triton comparator, fail-closed NVIDIA compute-context telemetry,
+  explicit archival-eligibility assertions, and a pinned,
+  provenance-checked `soc-Epinions1` outgoing-degree trace.
+- Explicit `backend="cuda"` or `backend="cpu"` public launch selection for the
+  canonical fixed vector add. The Native CPU path uses a synchronous,
+  process-local LLVM JIT executable and never falls back to CUDA.
 
 ### Changed
+
+- Native wheel builds use pinned scikit-build-core and exact LLVM 22.1.8;
+  source distributions and frontend-only editable installs remain CMake-free.
+  Private segmented Python modules are excluded from wheels, not source trees.
+- Validated packaged build identity now takes precedence over checkout identity
+  for persistent CUDA caching. Malformed identity disables persistence without
+  preventing process-local compilation.
+- The optimizer driver registers the same upstream LLVM conversion
+  interfaces as runtime codegen, so complete fixed GPU-to-NVVM pipelines
+  do not abort on an unimplemented promised dialect interface.
 
 - The documentation site is restructured into getting started, user guide,
   API reference, internals, and decisions sections; milestone codenames
   moved out of user-facing prose, and every previously published URL
   redirects to its new location.
+- The research paper now treats the fixed mixed policy separately from its
+  offline oracle, narrows public/private claims, expands related-work
+  positioning, records byte-exact frozen artifact pins, distinguishes
+  archival headline evidence from current-tree engineering campaigns, and
+  replaces the redundant admission figure with a capability table.
 - Split partial and merge kernels use 512 threads, sized so one
   4096-element chunk fully occupies a CTA at eight elements per thread.
-- Warm launches dispatch through a compiled nanobind entry point that
+- Warm CUDA launches dispatch through a compiled nanobind entry point that
   resolves `libcuda.so.1` with `dlopen`; ctypes remains the fallback.
+  Canonical fixed warm dispatch now checks live tensor, device, stream, context,
+  and cache state natively while retaining full validation on shortcut misses
+  and PyTorch allocator stream recording.
+- Legacy-default-stream module completion fences are deferred until retirement;
+  caller-owned streams retain per-submission fences. Capture launches skip
+  retirement polling so cache eviction cannot inject completion events into
+  a captured graph.
+- Fixed and segmented CUDA kernels share one ordered typed launcher,
+  backend-aware artifact cache, and context-keyed module lifecycle; compiler
+  contracts replace parameter names and positional pointer/scalar groups as
+  physical ABI authority.
+- Runtime orchestration is backend-neutral. CPU artifacts remain process-local;
+  only verified CUDA PTX with validated clean compiler identity is persisted.
+- Segmented semantic functions now contain only values, offsets, and output
+  buffers. CPU and planning lowerings derive counts from memref dimensions;
+  physical GPU contracts retain required runtime counts as derived bindings.
+- Segmented compiler and Python internals are decomposed by admission,
+  emission, validation, planning, execution, and oracle responsibilities.
+  Process caches are bounded, compilation coalesces per specialization, and
+  completed evicted modules unload through nonblocking same-context event
+  polling while graph-captured modules remain context-owned.
+
+### Release qualification
+
+The v0.5.2 changes above are unreleased. Publication requires the repaired
+four-ABI artifact set, byte-identical cp313 source/sdist wheels, security gates,
+and trusted installed-wheel A6000 correctness and performance evidence.
+FP32 behavior and the canonical kernel shape are unchanged; the newly
+supported storage formats expand the public dtype contract. Existing frozen
+FP32 performance evidence does not qualify low-precision performance.
+No public segmented execution or persistent segmented performance gate
+was changed.
 
 ## [0.5.1] - 2026-08-24
 

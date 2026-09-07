@@ -1,0 +1,47 @@
+name: dependency-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Review dependency vulnerabilities and licenses
+        id: review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown
+          license-check: true
+          comment-summary-in-pr: never
+      - name: Report dependency license changes
+        if: ${{ always() && steps.review.outputs.dependency-changes != '' }}
+        env:
+          DEPENDENCY_CHANGES: ${{ steps.review.outputs.dependency-changes }}
+        run: |
+          python3 - <<'PY'
+          import html
+          import json
+          import os
+
+          changes = json.loads(os.environ["DEPENDENCY_CHANGES"])
+          fields = ("change_type", "manifest", "name", "version", "license")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("<h2>Dependency license changes</h2>\n")
+              summary.write("<p>Informational only; no license allowlist or denylist is imposed.</p>\n")
+              summary.write("<table><tr><th>Change</th><th>Manifest</th><th>Package</th><th>Version</th><th>License</th></tr>\n")
+              for change in changes:
+                  cells = (html.escape(str(change[field] or "Unknown")) for field in fields)
+                  summary.write("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>\n")
+              summary.write("</table>\n")
+          PY

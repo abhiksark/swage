@@ -33,6 +33,10 @@ gates belong in the roadmap.
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
 - [ADR-0018: Private persistent task queue](../adr/ADR-0018-private-persistent-task-queue.md)
 
+## Runtime and lowered ABI
+
+- [ADR-0019: Compiler-generated kernel launch contracts](../adr/ADR-0019-compiler-generated-kernel-contracts.md)
+
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the
 rationale.

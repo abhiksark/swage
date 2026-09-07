@@ -27,5 +27,25 @@ M7 was the `v0.5.0` feature gate, and `v0.5.0` was published on 2026-08-24.
 M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 `v0.3.0`, and `v0.4.0` versions remain outside this roadmap gate.
 
+### Fixed-vector release hardening: v0.5.2
+
+The source tree implements self-contained native wheels, fixed-contract typing,
+stable backend errors, structured health checks, build provenance, and gated
+artifact/security/SLO workflows. v0.5.2 remains unreleased until the four-ABI
+CPU artifact checks, cp313 reproducibility check, and trusted installed-wheel
+A6000 performance gates pass, followed by the protected signed-tag process.
+No production-ready claim follows from implementation alone.
+
+The source tree also extends canonical vector addition to matching
+`float16`, `float8_e4m3fn`, and `float8_e5m2` tensors, alongside `float32`.
+CPU and RTX A6000 `sm_86` execution pass exhaustive FP8 input-pair checks
+and FP16 rounding/encoding coverage. These are correctness results, not
+low-precision performance qualification; release artifacts must be rebuilt
+and pass the expanded installed-wheel checks.
+
+The canonical fixed vector-add kernel shape is unchanged; these additions
+do not complete M9 or add a public segmented API. The v0.6.0 mapping remains
+unchanged, and the failed persistent scheduling performance gate is not waived.
+
 Tracked as GitHub milestones; per-phase issues carry the detailed
 acceptance criteria.

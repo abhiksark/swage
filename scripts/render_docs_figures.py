@@ -45,10 +45,10 @@ class FigureSpec(NamedTuple):
 FIGURES = (
     FigureSpec(
         name="fixed-block-thread-map",
-        title="Fixed-block launch geometry",
+        title="CUDA fixed-block launch geometry",
         description=(
-            "A 22-element input covered by three 8-thread blocks, with "
-            "the third block expanded to show global indices and the "
+            "A 22-element input covered by three CUDA blocks of 8 threads, "
+            "with the third block expanded to show global indices and the "
             "two masked tail lanes."
         ),
     ),
@@ -78,7 +78,7 @@ FIGURES = (
         title="Ownership map",
         description=(
             "Three lanes separate what Swage owns from what upstream "
-            "MLIR and LLVM own and what PyTorch owns, with one launch "
+            "MLIR and LLVM own and what PyTorch owns, with one CUDA launch "
             "traced across the domains."
         ),
     ),
