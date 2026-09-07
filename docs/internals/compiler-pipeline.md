@@ -8,8 +8,8 @@ MLIR and LLVM infrastructure. There is no second production IR between Python
 and MLIR.
 
 Verified semantic MLIR enters one of three admitted branches. The public
-fixed-block branch uses one shared canonical vector-add admission, then emits
-either a CUDA GPU function or a sequential Native host function. Private
+fixed-block branch uses one shared canonical vector elementwise admission,
+then emits either a CUDA GPU function or a sequential Native host function. Private
 direct segmented branches lower to the sequential CPU oracle or the one-CTA
 GPU path. The private SwagePlan branch adds the narrow classification
 companion for direct or split identity-sum lowering. GPU branches rejoin
@@ -52,7 +52,7 @@ small private planning surface.
 
 ## Public fixed-block branch
 
-The fixed-block conversion admits only the canonical vector-add form. The
+The fixed-block conversion admits only canonical vector add or multiply. The
 CUDA pass maps each vector lane to one GPU x-thread, lowers through upstream
 GPU, SCF, NVVM, and LLVM infrastructure, and emits PTX in process. The Native
 host pass uses the same admission and emits a sequential pointer loop that is
@@ -62,11 +62,11 @@ public runtime selects exactly one branch from `backend="cuda"` or
 
 The three pointer elements must all be `f32`, `f16`, `f8E4M3FN`, or `f8E5M2`.
 Shared scalar emission keeps native FP32 operations, widens FP16 loads for
-FP32 addition before rounding the store, and implements FP8 conversion using
+FP32 arithmetic before rounding the store, and implements FP8 conversion using
 byte loads/stores and scalar arithmetic. FP8 never reaches LLVM as an
 unsupported floating type and does not require newer FP8 hardware.
-The semantic module still contains a same-element-type vector add; these
-are physical realizations of its rounding contract.
+The semantic module still contains a same-element-type vector add or multiply;
+these are physical realizations of its rounding contract.
 
 No `nvgpu` conversion is part of the CUDA branch. Runtime specialization,
 cache, executable ownership, module loading, stream, and retention behavior

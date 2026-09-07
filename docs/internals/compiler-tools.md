@@ -30,8 +30,8 @@ passes.
 
 | Pass argument | Options | Current admitted purpose |
 |---|---|---|
-| `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
-| `--swage-fixed-block-to-host` | required positive `block-size` | Lower the canonical fixed vector-add shape to one sequential host call |
+| `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower canonical fixed vector add or multiply to one GPU x-thread per lane |
+| `--swage-fixed-block-to-host` | required positive `block-size` | Lower canonical fixed vector add or multiply to one sequential host call |
 | `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required positive `block-size`; optional `use-task-ids`; optional `fused-mixed` | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for the canonical identity segmented sum |

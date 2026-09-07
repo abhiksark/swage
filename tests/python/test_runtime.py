@@ -2247,3 +2247,70 @@ def test_debug_events_report_cache_and_launch_without_payload(
         str(tmp_path),
     ):
         assert secret not in "\n".join(messages)
+
+
+def test_same_name_arithmetic_uses_distinct_disk_cache_entries(
+    tmp_path, monkeypatch
+):
+    """The AST digest separates add/multiply with every other field equal."""
+    from swage import _runtime
+
+    @sw.jit
+    def elementwise(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    addition = elementwise
+
+    @sw.jit
+    def elementwise(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x * y, mask=mask)
+
+    adapter = _RecordingBackend("cuda")
+    adapter.persistent_cache = True
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_runtime, "_artifact_cache", _runtime.OrderedDict())
+    monkeypatch.setattr(
+        _runtime,
+        "_compiler_identity",
+        lambda: {"revision": "a" * 40, "clean": True, "llvm": "llvmorg-test"},
+    )
+    specializations = [
+        _runtime._specialization_data(
+            kernel,
+            descriptors=("ptr<f32>",) * 3 + ("i32",),
+            constexprs={"BLOCK": 128},
+            target="sm_86",
+            adapter=adapter,
+        )
+        for kernel in (addition, elementwise)
+    ]
+    assert specializations[0]["source"] != specializations[1]["source"]
+    assert {k: v for k, v in specializations[0].items() if k != "source"} == {
+        k: v for k, v in specializations[1].items() if k != "source"
+    }
+    first = [
+        _runtime._compile_cached(adapter, spec, "elementwise", 128, object)
+        for spec in specializations
+    ]
+    assert len(adapter.calls) == 2
+    assert first[0].key != first[1].key
+    assert len(list(tmp_path.glob("*/metadata.json"))) == 2
+    _runtime._artifact_cache.clear()
+    monkeypatch.setattr(
+        adapter,
+        "compile",
+        mock.Mock(side_effect=AssertionError("disk hit recompiled")),
+    )
+    for spec, expected in zip(reversed(specializations), reversed(first)):
+        actual = _runtime._compile_cached(
+            adapter, spec, "elementwise", 128, object
+        )
+        assert actual == expected

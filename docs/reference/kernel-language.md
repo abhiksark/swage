@@ -2,9 +2,10 @@
 
 # Kernel Language
 
-The current Python frontend accepts one restricted AST shape for fixed-block
-vector add. This page lists that syntax. Anything not listed fails closed with
-a source-located `CompilationError`.
+The current Python frontend accepts a restricted AST for fixed-block kernels.
+This page lists that syntax. Anything not listed fails closed with a
+source-located `CompilationError`. The narrower public execution shape has
+exactly one floating vector addition or multiplication.
 
 ## Function shape
 
@@ -39,7 +40,8 @@ The accepted expression forms are:
 - an integer literal that fits signed 64-bit;
 - `+` for index arithmetic, pointer plus offset vector, or two floating
   vectors with matching element types;
-- `*` for index arithmetic;
+- `*` for index arithmetic or two floating vectors with matching element
+  types;
 - one signed less-than comparison between an index-offset vector and an i32
   or index value;
 - one of the symbolic calls below.
@@ -87,7 +89,10 @@ admitted element range sequentially.
 The emitter tracks only i32 scalar parameters, index scalars, index vectors,
 boolean vectors, floating vectors and pointer descriptors with element type
 `f32`, `f16`, `f8E4M3FN`, or `f8E5M2`, and transient pointer-plus-offset
-addresses. Floating addition and stores require matching element types.
+addresses. Floating addition, multiplication, and stores require matching
+element types. A public launch kernel has exactly one floating `x + y` or
+`x * y`; operation chains, floating vector/scalar arithmetic, broadcasting,
+and matrix multiplication are outside the admitted execution shape.
 It emits standard `arith`, `func`, `memref`, and `vector` operations around
 the logical `swage.program_id` operation. See
 [Dtypes and rounding](runtime-environment.md#dtypes-and-rounding) for the

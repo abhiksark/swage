@@ -147,7 +147,7 @@ def _validate_contract_specialization(
 
 
 def launch(kernel, *, arguments, constexprs, grid, backend="cuda"):
-    """Compile and launch one canonical fixed vector-add kernel."""
+    """Compile and launch one canonical fixed vector elementwise kernel."""
     adapter = get_backend(backend)
     torch = _import_torch(adapter.name)
     spec = _validate_launch(

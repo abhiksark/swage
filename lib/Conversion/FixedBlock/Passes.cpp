@@ -1,3 +1,4 @@
+// lib/Conversion/FixedBlock/Passes.cpp
 //===- Passes.cpp - Fixed-block lowering passes -------------------------===//
 //
 // Part of the Swage project, under the MIT License.
@@ -18,13 +19,15 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <utility>
+
 using namespace mlir;
 
 namespace mlir::swage {
 namespace {
 
-FailureOr<func::FuncOp> admitFixedVectorAdd(ModuleOp module,
-                                            int64_t blockSize) {
+FailureOr<std::pair<func::FuncOp, detail::FixedElementwiseKind>>
+admitFixedElementwise(ModuleOp module, int64_t blockSize) {
   if (blockSize <= 0) {
     module.emitError("block-size must be a positive integer");
     return failure();
@@ -38,9 +41,10 @@ FailureOr<func::FuncOp> admitFixedVectorAdd(ModuleOp module,
     module.emitError("expected exactly one kernel function");
     return failure();
   }
-  if (failed(detail::verifyFixedVectorAdd(functions.front(), blockSize)))
+  auto kind = detail::verifyFixedElementwise(functions.front(), blockSize);
+  if (failed(kind))
     return failure();
-  return functions.front();
+  return std::make_pair(functions.front(), *kind);
 }
 
 class FixedBlockToGPUPass
@@ -58,7 +62,7 @@ public:
 
   StringRef getArgument() const final { return "swage-fixed-block-to-gpu"; }
   StringRef getDescription() const final {
-    return "Lower the fixed vector-add subset to one GPU x-thread per lane";
+    return "Lower the fixed elementwise subset to one GPU x-thread per lane";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -67,11 +71,11 @@ public:
   }
 
   void runOnOperation() final {
-    FailureOr<func::FuncOp> function =
-        admitFixedVectorAdd(getOperation(), blockSize);
+    auto function = admitFixedElementwise(getOperation(), blockSize);
     if (failed(function))
       return signalPassFailure();
-    detail::buildFixedGPUProgram(getOperation(), *function, blockSize);
+    detail::buildFixedGPUProgram(getOperation(), function->first, blockSize,
+                                 function->second);
   }
 
 private:
@@ -95,7 +99,7 @@ public:
 
   StringRef getArgument() const final { return "swage-fixed-block-to-host"; }
   StringRef getDescription() const final {
-    return "Lower the fixed vector-add subset to one sequential host call";
+    return "Lower the fixed elementwise subset to one sequential host call";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -104,11 +108,11 @@ public:
   }
 
   void runOnOperation() final {
-    FailureOr<func::FuncOp> function =
-        admitFixedVectorAdd(getOperation(), blockSize);
+    auto function = admitFixedElementwise(getOperation(), blockSize);
     if (failed(function))
       return signalPassFailure();
-    detail::buildFixedHostProgram(getOperation(), *function, blockSize);
+    detail::buildFixedHostProgram(getOperation(), function->first, blockSize,
+                                  function->second);
   }
 
 private:

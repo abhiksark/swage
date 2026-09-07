@@ -218,7 +218,8 @@ def capability_boundary() -> bytes:
     svg = Svg(
         "capability-boundary.svg",
         "Swage capability boundary",
-        "Four status lanes distinguish the public fixed vector-add surface, "
+        "Four status lanes distinguish the public fixed vector elementwise "
+        "surface, "
         "private segmented qualification, the resident-queue experiment, "
         "and planned segmented APIs.",
         height=830,
@@ -237,7 +238,7 @@ def capability_boundary() -> bytes:
             "blue",
             "blue_fill",
             ("Python capture", "emit_mlir()", "launch(cpu / cuda)"),
-            "canonical fixed vector add only",
+            "canonical vector add or multiply only",
             False,
         ),
         (
@@ -561,7 +562,8 @@ def compiler_pipeline() -> bytes:
         "Swage compiler pipeline",
         "Verified semantic MLIR enters the public fixed-block branch, the "
         "private direct segmented branch, or private SwagePlan work. Public "
-        "fixed vector add lowers explicitly to a Native LLVM JIT or CUDA; "
+        "fixed vector add or multiply lowers explicitly to Native LLVM or "
+        "CUDA; "
         "private segmented CPU oracle work stops separately.",
         height=850,
     )
@@ -582,7 +584,7 @@ def compiler_pipeline() -> bytes:
         (
             55,
             "PUBLIC TODAY",
-            "fixed-block vector add",
+            "fixed-block add / multiply",
             ("same fixed admission", "CUDA or Native host"),
             "blue",
             "blue_fill",

@@ -1,3 +1,4 @@
+// lib/Conversion/FixedBlock/Analysis.h
 //===- Analysis.h - Fixed-block admission ---------------------*- C++ -*-===//
 //
 // Part of the Swage project, under the MIT License.
@@ -24,14 +25,18 @@ class FuncOp;
 
 namespace mlir::swage::detail {
 
-LogicalResult verifyFixedVectorAdd(func::FuncOp function, int64_t blockSize);
+enum class FixedElementwiseKind { Add, Multiply };
+
+FailureOr<FixedElementwiseKind> verifyFixedElementwise(func::FuncOp function,
+                                                       int64_t blockSize);
 void buildFixedGPUProgram(ModuleOp module, func::FuncOp source,
-                          int64_t blockSize);
+                          int64_t blockSize, FixedElementwiseKind kind);
 void buildFixedHostProgram(ModuleOp module, func::FuncOp source,
-                           int64_t blockSize);
-void buildFixedScalarAdd(OpBuilder &builder, Location loc, Type elementType,
-                         Value xBase, Value yBase, Value outputBase,
-                         Value offset);
+                           int64_t blockSize, FixedElementwiseKind kind);
+void buildFixedScalarElementwise(OpBuilder &builder, Location loc,
+                                 Type elementType, Value xBase, Value yBase,
+                                 Value outputBase, Value offset,
+                                 FixedElementwiseKind kind);
 
 } // namespace mlir::swage::detail
 

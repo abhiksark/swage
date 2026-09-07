@@ -11,8 +11,8 @@
 Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
 how one segment-local program can keep its meaning while task derivation
 changes with runtime segment lengths. Its public execution boundary is one
-canonical fixed vector-add kernel; the wider segment compiler exists as
-private qualification machinery or planned work.
+canonical fixed vector add or multiply kernel; the wider segment compiler
+exists as private qualification machinery or planned work.
 
 !!! warning "Fixed-vector release boundary"
 
@@ -28,9 +28,9 @@ private qualification machinery or planned work.
 - Public `swage` and self-contained private `mlir_swage` in the v0.5.2
   native-wheel implementation, distributed as `swage-compiler`.
 - `@swage.jit` capture and compile-only `emit_mlir()` for the restricted
-  fixed-block vector-add subset, without a source tree or local LLVM install.
-- Keyword-only launch of the canonical fixed vector add on explicitly selected
-  CUDA or Native CPU backends.
+  fixed-block elementwise subset, without a source tree or local LLVM install.
+- Keyword-only launch of canonical fixed vector add or multiply on explicitly
+  selected CUDA or Native CPU backends.
 - `python -m swage.env --json` diagnostics and explicit native/CPU/CUDA health checks.
 - Native `swage` MLIR parsing and verification; compiler tools through source builds.
 

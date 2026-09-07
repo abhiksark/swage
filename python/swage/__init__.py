@@ -1,5 +1,5 @@
 # python/swage/__init__.py
-"""Swage: compile fixed vector add for explicit CPU and CUDA execution."""
+"""Swage: compile fixed vector add or multiply for CPU and CUDA execution."""
 
 from ._errors import BackendUnavailableError, CompilationError, SwageError
 from ._frontend import jit

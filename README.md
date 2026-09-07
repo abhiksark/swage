@@ -11,7 +11,8 @@
 **Turn variable-sized dense segments into efficient GPU tile tasks.**
 
 Swage is a Python-embedded MLIR/LLVM compiler with a deliberately narrow public
-execution contract: canonical fixed vector addition on explicitly selected
+execution contract: canonical fixed vector addition or multiplication on
+explicitly selected
 CPU and CUDA backends. Variable-sized segment execution remains private
 research.
 
@@ -24,11 +25,14 @@ alone are not release qualification.
 
 ### Public today
 
-- The canonical fixed vector-add kernel is the only public execution subset.
+- Canonical fixed vector add and multiply are the only public execution subset.
   Contiguous rank-one tensors may use `float32`, `float16`,
   `float8_e4m3fn`, or `float8_e5m2`; both inputs and the output must match.
-  Low-precision addition uses FP32 arithmetic rounded back to the storage
+  Low-precision arithmetic widens to FP32 and rounds back to the storage
   dtype. FP8 conversion runs in the compiled kernel, including on `sm_86`.
+  Kernels contain exactly one `x + y` or `x * y` value operation; chains,
+  floating vector/scalar arithmetic, broadcasting, and matrix multiplication remain
+  unsupported.
 - The restricted Python frontend emits verified MLIR through self-contained
   native bindings, bundled in the v0.5.2 wheel contract.
 - `kernel.launch(..., backend="cuda")` lowers through LLVM NVPTX and enqueues
@@ -92,8 +96,9 @@ python -m swage.env --json --check cuda
 
 Choose the backend explicitly; an unavailable backend raises
 `swage.BackendUnavailableError`, never probes an alternative for execution.
-See [Quickstart](docs/getting-started/quickstart.md) for the canonical kernel
-and `examples/fixed_vector_add.py --backend cpu|cuda`. The
+See [Quickstart](docs/getting-started/quickstart.md) for the canonical kernels
+and the runnable `examples/fixed_vector_add.py` and
+`examples/fixed_vector_multiply.py` scripts. The
 [runtime environment reference](docs/reference/runtime-environment.md)
 defines error codes, build identity, opt-in `swage.runtime` DEBUG logging, and
 wheel checksum/attestation verification.

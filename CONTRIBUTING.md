@@ -69,7 +69,7 @@ glibc 2.28 or newer; no PyPy, free-threaded, musllinux, macOS, Windows, or
 aarch64 wheel is in the release contract. PyTorch is optional
 (`torch>=2.6,<3`, the `pytorch` extra), is never bundled, and is required
 to launch either explicitly selected backend. Only canonical contiguous
-rank-1 vector add is public, with matching `float32`, `float16`,
+rank-1 vector add or multiply is public, with matching `float32`, `float16`,
 `float8_e4m3fn`, or `float8_e5m2` tensors. CUDA is the default and never
 falls back to CPU. The installed smoke exercises every supported dtype.
 
@@ -200,13 +200,13 @@ neither private segmented qualification nor historical GPU snapshots replace it.
 - Documentation: fix incorrect boundaries before improving presentation. Run
   `mkdocs build --strict` and `ruff check .`.
 - Public Python frontend: work under `python/swage/`. The accepted AST and API
-  are narrow fixed-vector-add contracts. Run the Python tier and native
+  are narrow fixed-vector elementwise contracts. Run the Python tier and native
   binding integration when emission changes.
 - Native dialects and lowering: work under `include/swage/`, `lib/`, and
   `test/`. Run `ninja -C build check-swage`; run C++ or binding targets when
   their code changes.
-- Runtime: public execution remains canonical fixed vector add on explicitly
-  selected CUDA or Native CPU backends. Segmented helpers are private
+- Runtime: public execution remains canonical fixed vector add or multiply on
+  explicitly selected CUDA or Native CPU backends. Segmented helpers are private
   qualification. Runtime changes require the hosted tests and, where CUDA
   behavior changes, trusted GPU evidence.
 - Benchmarks: preserve frozen inputs and gates. Prepare outside timing and

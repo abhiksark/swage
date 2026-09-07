@@ -20,6 +20,23 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+@sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Multiply equal-dtype vectors without promoting their storage."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
+OPERATIONS = {
+    "add": (add_kernel, torch.add),
+    "multiply": (multiply_kernel, torch.mul),
+}
+
+
 @pytest.fixture(params=("cpu", "cuda"))
 def backend(request):
     """Exercise CPU independently of CUDA availability."""
@@ -28,10 +45,11 @@ def backend(request):
     return request.param
 
 
-def _launch(x, y, output, backend, n=None):
+def _launch(x, y, output, backend, n=None, operation="add"):
     if n is None:
         n = x.numel()
-    add_kernel.launch(
+    kernel, _ = OPERATIONS[operation]
+    kernel.launch(
         arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": n},
         constexprs={"BLOCK": 128},
         grid=((n + 127) // 128,),
@@ -53,24 +71,27 @@ def _assert_encoding(actual, expected):
     assert torch.equal(actual_bits[non_nan], expected_bits[non_nan])
 
 
+@pytest.mark.parametrize("operation", OPERATIONS)
 @pytest.mark.parametrize("dtype_name", ("float8_e4m3fn", "float8_e5m2"))
-def test_fp8_add_every_encoding_pair(backend, dtype_name):
+def test_fp8_every_encoding_pair(backend, dtype_name, operation):
     """Cover all 65,536 FP8 pairs, including rounding and special values."""
     dtype = getattr(torch, dtype_name)
     encodings = torch.arange(256, dtype=torch.int16).to(torch.uint8)
     x_cpu = encodings.repeat_interleave(256).view(dtype)
     y_cpu = encodings.repeat(256).view(dtype)
-    expected = (x_cpu.float() + y_cpu.float()).to(dtype)
+    _, torch_operation = OPERATIONS[operation]
+    expected = torch_operation(x_cpu.float(), y_cpu.float()).to(dtype)
     x = x_cpu.to(backend)
     y = y_cpu.to(backend)
     output = torch.empty_like(x)
 
-    _launch(x, y, output, backend)
+    _launch(x, y, output, backend, operation=operation)
 
     _assert_encoding(output, expected)
 
 
-def test_fp16_add_encodings_and_rounding_boundaries(backend):
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_fp16_encodings_and_rounding_boundaries(backend, operation):
     """Preserve half encodings and round normal/subnormal/overflow ties."""
     encodings = torch.arange(65536, dtype=torch.int32).to(torch.int16)
     values = encodings.view(torch.float16)
@@ -88,6 +109,8 @@ def test_fp16_add_encodings_and_rounding_boundaries(backend):
             -0.0,
             float("inf"),
             float("nan"),
+            1.0 + 2**-10,
+            -(1.0 + 2**-10),
         ],
         dtype=torch.float16,
     )
@@ -105,22 +128,26 @@ def test_fp16_add_encodings_and_rounding_boundaries(backend):
             -0.0,
             -float("inf"),
             1.0,
+            1.5,
+            1.5,
         ],
         dtype=torch.float16,
     )
     x_cpu = torch.cat((values, left))
     y_cpu = torch.cat((torch.zeros_like(values), right))
-    expected = (x_cpu.float() + y_cpu.float()).to(torch.float16)
+    _, torch_operation = OPERATIONS[operation]
+    expected = torch_operation(x_cpu.float(), y_cpu.float()).to(torch.float16)
     x = x_cpu.to(backend)
     y = y_cpu.to(backend)
     output = torch.empty_like(x)
 
-    _launch(x, y, output, backend)
+    _launch(x, y, output, backend, operation=operation)
 
     _assert_encoding(output, expected)
 
 
-def test_dtype_switches_preserve_strides_tail_and_in_place_add(backend):
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_dtype_switches_preserve_strides_tail_and_in_place(backend, operation):
     """One kernel must never reuse another dtype's artifact or byte stride."""
     dtypes = (
         torch.float32,
@@ -135,33 +162,115 @@ def test_dtype_switches_preserve_strides_tail_and_in_place_add(backend):
         x = (torch.arange(n + 2).float() % 17 / 8).to(dtype).to(backend)[1:-1]
         y = (torch.arange(n).float() % 13 / 4).to(dtype).to(backend)
         expected = storage.cpu().clone()
-        expected[3 : 3 + n] = (x.cpu().float() + y.cpu().float()).to(dtype)
-        _launch(x, y, output, backend)
+        _, torch_operation = OPERATIONS[operation]
+        expected[3 : 3 + n] = torch_operation(
+            x.cpu().float(), y.cpu().float()
+        ).to(dtype)
+        _launch(x, y, output, backend, operation=operation)
         _assert_encoding(storage, expected)
 
         # A repeated same-dtype call uses current storage and permits aliasing.
         expected[3 : 3 + n] = (
-            expected[3 : 3 + n].float() + y.cpu().float()
+            torch_operation(expected[3 : 3 + n].float(), y.cpu().float())
         ).to(dtype)
-        _launch(output, y, output, backend)
+        _launch(output, y, output, backend, operation=operation)
         _assert_encoding(storage, expected)
 
         # Empty work still validates, but must not touch any byte.
-        _launch(x, y, output, backend, n=0)
+        _launch(x, y, output, backend, n=0, operation=operation)
         _assert_encoding(storage, expected)
 
 
+@pytest.mark.parametrize("operation", OPERATIONS)
 @pytest.mark.parametrize("n", (0, 3))
-def test_warm_launch_rejects_mixed_dtypes_without_writes(backend, n):
+def test_warm_launch_rejects_mixed_dtypes_without_writes(backend, n, operation):
     """A supported dtype is still invalid when it differs from its peers."""
     x = torch.ones(3, dtype=torch.float16, device=backend)
     output = torch.empty_like(x)
-    _launch(x, x, output, backend)
-    _launch(x, x, output, backend)
+    _launch(x, x, output, backend, operation=operation)
+    _launch(x, x, output, backend, operation=operation)
     output.fill_(-7)
     other = x.to(torch.float8_e4m3fn)
 
     with pytest.raises(TypeError):
-        _launch(x, other, output, backend, n=n)
+        _launch(x, other, output, backend, n=n, operation=operation)
 
     _assert_encoding(output, torch.full((3,), -7, dtype=torch.float16))
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize("dtype", (torch.float16, torch.float32))
+def test_float_edge_matrix_matches_storage_oracle(backend, dtype, operation):
+    """Cover signs, zeros, subnormals, RNE, overflow, infinities, and NaNs."""
+    finfo = torch.finfo(dtype)
+    smallest_subnormal = 2**-24 if dtype == torch.float16 else 2**-149
+    values = torch.tensor(
+        [
+            0.0,
+            -0.0,
+            finfo.smallest_normal,
+            -finfo.smallest_normal,
+            smallest_subnormal,
+            -smallest_subnormal,
+            1.0,
+            -1.0,
+            1.5,
+            -1.5,
+            1.0 + finfo.eps,
+            1.0 + 2 * finfo.eps,
+            finfo.max,
+            -finfo.max,
+            float("inf"),
+            -float("inf"),
+            float("nan"),
+        ],
+        dtype=dtype,
+    )
+    x_cpu = values.repeat_interleave(values.numel())
+    y_cpu = values.repeat(values.numel())
+    _, torch_operation = OPERATIONS[operation]
+    expected = torch_operation(x_cpu.float(), y_cpu.float()).to(dtype)
+    x = x_cpu.to(backend)
+    y = y_cpu.to(backend)
+    output = torch.empty_like(x)
+
+    _launch(x, y, output, backend, operation=operation)
+
+    _assert_encoding(output, expected)
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_invalid_geometry_does_not_write(backend, operation):
+    """Reject a grid inconsistent with n before touching output storage."""
+    kernel, _ = OPERATIONS[operation]
+    x = torch.ones(129, device=backend)
+    output = torch.full_like(x, -7)
+
+    with pytest.raises(ValueError, match="grid must equal"):
+        kernel.launch(
+            arguments={
+                "x_ptr": x,
+                "y_ptr": x,
+                "output_ptr": output,
+                "n": 129,
+            },
+            constexprs={"BLOCK": 128},
+            grid=(1,),
+            backend=backend,
+        )
+
+    _assert_encoding(output, torch.full((129,), -7.0))
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_invalid_device_does_not_write(backend, operation):
+    """Reject a tensor on the wrong device before touching output storage."""
+    output = torch.full((3,), -7.0, device=backend)
+    wrong_device = "meta" if backend == "cpu" else "cpu"
+    x = torch.ones(3, device=wrong_device)
+    y = torch.ones_like(output)
+
+    with pytest.raises(TypeError):
+        _launch(x, y, output, backend, operation=operation)
+
+    _assert_encoding(output, torch.full((3,), -7.0))

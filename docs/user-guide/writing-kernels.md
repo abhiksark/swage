@@ -78,6 +78,11 @@ module = add_kernel.emit_mlir(
 )
 ```
 
+Replacing the final `x + y` with `x * y` selects the other public operation.
+The shape and ABI stay identical. Exactly one floating operation is admitted;
+chains, floating vector/scalar arithmetic, broadcasting, and matrix
+multiplication are not.
+
 Passing `arguments=` instead infers the same signature from PyTorch
 tensor metadata without reading values. Exactly one of the two modes is
 required; the full contract lives in [swage](../reference/swage.md).

@@ -1,3 +1,4 @@
+// lib/Conversion/FixedBlock/Host.cpp
 //===- Host.cpp - Fixed-block host emission -----------------------------===//
 //
 // Part of the Swage project, under the MIT License.
@@ -22,7 +23,7 @@ using namespace mlir;
 namespace mlir::swage::detail {
 
 void buildFixedHostProgram(ModuleOp module, func::FuncOp source,
-                           int64_t blockSize) {
+                           int64_t blockSize, FixedElementwiseKind kind) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -58,9 +59,9 @@ void buildFixedHostProgram(ModuleOp module, func::FuncOp source,
       [&](OpBuilder &body, Location bodyLoc, Value offset, ValueRange) {
         Value byteOffset = arith::IndexCastOp::create(
             body, bodyLoc, body.getI64Type(), offset);
-        buildFixedScalarAdd(body, bodyLoc, elementType, entry->getArgument(0),
-                            entry->getArgument(1), entry->getArgument(2),
-                            byteOffset);
+        buildFixedScalarElementwise(
+            body, bodyLoc, elementType, entry->getArgument(0),
+            entry->getArgument(1), entry->getArgument(2), byteOffset, kind);
         scf::YieldOp::create(body, bodyLoc);
       });
   func::ReturnOp::create(builder, loc);

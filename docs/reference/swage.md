@@ -121,11 +121,11 @@ Related: [Writing Kernels](../user-guide/writing-kernels.md).
 kernel.launch(*, arguments, constexprs, grid, backend="cuda")
 ```
 
-Compile as needed and launch the canonical fixed vector-add kernel on exactly
-one selected backend. CUDA remains the default and enqueues asynchronously;
+Compile as needed and launch a canonical fixed vector add or multiply kernel
+on exactly one selected backend. CUDA remains the default and enqueues asynchronously;
 `backend="cpu"` invokes a synchronous Native LLVM JIT entry. The call is
 keyword-only and returns `None`. Its only public execution contract is the
-canonical one-dimensional fixed vector add with five parameters in this
+canonical one-dimensional fixed vector operation with five parameters in this
 semantic order:
 
 ```text
@@ -153,8 +153,11 @@ Returns
 :   `None`. CUDA enqueues on the current PyTorch stream and retains submitted
     tensors through `record_stream()`. CPU execution is complete on return.
 
-Low-precision addition computes an FP32 sum and rounds it back to the tensor
-dtype. It does not promote or cast tensor storage. See
+Low-precision arithmetic widens both inputs to FP32, performs the selected
+addition or multiplication, and rounds once to the tensor dtype. It does not
+promote or cast tensor storage. The kernel body contains exactly one `x + y`
+or `x * y`; chains, floating vector/scalar arithmetic, broadcasting, and
+matrix multiplication are unsupported. See
 [Dtypes and rounding](runtime-environment.md#dtypes-and-rounding) for
 subnormal, overflow, and NaN behavior.
 

@@ -52,7 +52,8 @@ kernel's meaning.
 
 Swage instead preserves the segment-local meaning and allows task derivation
 to be qualified separately. Today, that separation is public for canonical
-fixed vector add and privately qualified for selected segmented modules.
+fixed vector add or multiply and privately qualified for selected segmented
+modules.
 General public segmented execution remains planned.
 
 Continue with [Writing Kernels](writing-kernels.md) to put the model on

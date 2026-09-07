@@ -148,6 +148,7 @@ source-build route needs a build-tree `PYTHONPATH`:
 ninja -C build check-swage-python
 PYTHONPATH=build/python_packages python -m swage.env --json --check native
 PYTHONPATH=build/python_packages python examples/fixed_vector_add.py --backend cpu
+PYTHONPATH=build/python_packages python examples/fixed_vector_multiply.py --backend cpu
 ```
 
 `check-swage-python` supplies its own build-tree path. Explicit

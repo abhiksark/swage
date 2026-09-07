@@ -48,7 +48,7 @@ REQUIRED_LABELS = {
     ),
     "compiler-pipeline.svg": (
         "verified semantic MLIR",
-        "fixed-block vector add",
+        "fixed-block add / multiply",
         "CUDA or Native host",
         "segmented direct",
         "SwagePlan direct + split",

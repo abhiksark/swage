@@ -24,6 +24,17 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+@sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Multiply equal-dtype vectors without accessing masked-off elements."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
 class _CacheEvents(logging.Handler):
     def __init__(self):
         super().__init__(logging.DEBUG)
@@ -90,58 +101,73 @@ def main(argv=None):
     logger.setLevel(logging.DEBUG)
     sizes = (0, 1, 127, 128, 129, 4097)
     dtype_names = ("float32", "float16", "float8_e4m3fn", "float8_e5m2")
+    operations = (
+        ("add", add_kernel, lambda x, y: x.float() + y.float()),
+        ("multiply", multiply_kernel, lambda x, y: x.float() * y.float()),
+    )
+    cache_coverage = {}
     try:
-        for dtype_name in dtype_names:
-            dtype = getattr(torch, dtype_name)
-            for n in sizes:
-                values = (
-                    torch.arange(n, device=args.backend, dtype=torch.float32)
-                    % 127
-                )
-                x = values.to(dtype)
-                y = (values * 0.5).to(dtype)
-                output = torch.empty_like(x)
-                expected = (x.float() + y.float()).to(dtype)
-                arguments = {
-                    "x_ptr": x,
-                    "y_ptr": y,
-                    "output_ptr": output,
-                    "n": n,
-                }
-                module = add_kernel.emit_mlir(
-                    arguments=arguments,
-                    constexprs={"BLOCK": 128},
-                )
-                if not module.operation.verify():
-                    raise RuntimeError("wheel emitted invalid semantic MLIR")
-                for _ in range(2):
-                    # All-one bits encode a NaN in every supported dtype.
-                    output.view(torch.uint8).fill_(0xFF)
-                    add_kernel.launch(
+        for operation_name, kernel, reference in operations:
+            for dtype_name in dtype_names:
+                before = observer.counts.copy()
+                dtype = getattr(torch, dtype_name)
+                for n in sizes:
+                    values = torch.arange(
+                        n, device=args.backend, dtype=torch.float32
+                    ) % 13
+                    x = values.to(dtype)
+                    y = (values * 0.5).to(dtype)
+                    output = torch.empty_like(x)
+                    expected = reference(x, y).to(dtype)
+                    arguments = {
+                        "x_ptr": x,
+                        "y_ptr": y,
+                        "output_ptr": output,
+                        "n": n,
+                    }
+                    module = kernel.emit_mlir(
                         arguments=arguments,
                         constexprs={"BLOCK": 128},
-                        grid=((n + 127) // 128,),
-                        backend=args.backend,
                     )
-                    if args.backend == "cuda":
-                        torch.cuda.synchronize()
-                    torch.testing.assert_close(
-                        output.float(),
-                        expected.float(),
-                        rtol=0,
-                        atol=0,
-                        equal_nan=True,
+                    if not module.operation.verify():
+                        raise RuntimeError(
+                            "wheel emitted invalid semantic MLIR"
+                        )
+                    for _ in range(2):
+                        # All-one bits encode a NaN in every supported dtype.
+                        output.view(torch.uint8).fill_(0xFF)
+                        kernel.launch(
+                            arguments=arguments,
+                            constexprs={"BLOCK": 128},
+                            grid=((n + 127) // 128,),
+                            backend=args.backend,
+                        )
+                        if args.backend == "cuda":
+                            torch.cuda.synchronize()
+                        torch.testing.assert_close(
+                            output.float(),
+                            expected.float(),
+                            rtol=0,
+                            atol=0,
+                            equal_nan=True,
+                        )
+                events = {
+                    name: observer.counts[name] - before[name]
+                    for name in observer.counts
+                }
+                cache_coverage[f"{operation_name}:{dtype_name}"] = events
+                if events["memory-hit"] == 0:
+                    raise RuntimeError(
+                        f"{operation_name} {dtype_name} did not reuse the "
+                        "process artifact"
                     )
-        if observer.counts["memory-hit"] == 0:
-            raise RuntimeError(
-                "second launch did not reuse the process artifact"
-            )
-        if args.require_persistent_hit and (
-            observer.counts["persistent-hit"] == 0 or observer.counts["compile"]
-        ):
-            raise RuntimeError(
-                "second process did not reuse the persistent artifact"
-            )
+                if args.require_persistent_hit and (
+                    events["persistent-hit"] == 0 or events["compile"]
+                ):
+                    raise RuntimeError(
+                        f"{operation_name} {dtype_name} did not reuse the "
+                        "persistent artifact"
+                    )
     finally:
         logger.removeHandler(observer)
         logger.setLevel(old_level)
@@ -153,7 +179,9 @@ def main(argv=None):
                 "native": native,
                 "sizes": sizes,
                 "dtypes": dtype_names,
+                "operations": tuple(name for name, _, _ in operations),
                 "cache_events": observer.counts,
+                "cache_coverage": cache_coverage,
                 "passed": True,
                 "imports": paths,
             },

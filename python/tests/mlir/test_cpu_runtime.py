@@ -1,3 +1,4 @@
+# python/tests/mlir/test_cpu_runtime.py
 """Real Native CPU tests for the canonical fixed-vector launch boundary."""
 
 import threading
@@ -20,14 +21,33 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
-def _reset_runtime():
+@sw.jit
+def multiply_kernel(  # noqa: D103
+    x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr
+):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
+OPERATIONS = {
+    "add": (add_kernel, torch.add),
+    "multiply": (multiply_kernel, torch.mul),
+}
+
+
+def _reset_runtime(kernel=add_kernel):
     _runtime._artifact_cache.clear()
     _runtime._compilations.clear()
-    add_kernel.__dict__.pop("_specialization_memo", None)
+    kernel.__dict__.pop("_specialization_memo", None)
 
 
-def _launch(x, y, output, n, block=128):
-    add_kernel.launch(
+def _launch(x, y, output, n, block=128, operation="add"):
+    kernel, _ = OPERATIONS[operation]
+    kernel.launch(
         arguments={
             "x_ptr": x,
             "y_ptr": y,
@@ -40,13 +60,17 @@ def _launch(x, y, output, n, block=128):
     )
 
 
-def test_native_cpu_boundaries_and_process_artifact_reuse(monkeypatch):
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_native_cpu_boundaries_and_process_artifact_reuse(
+    monkeypatch, operation
+):
     """Run every fixed boundary and compile one shared nonzero artifact."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
-    _reset_runtime()
+    kernel, torch_operation = OPERATIONS[operation]
+    _reset_runtime(kernel)
     original = native_swage._compile_fixed_host
     compiles = []
 
@@ -59,8 +83,8 @@ def test_native_cpu_boundaries_and_process_artifact_reuse(monkeypatch):
         x = torch.randn(n)
         y = torch.randn(n)
         output = torch.empty_like(x)
-        _launch(x, y, output, n)
-        torch.testing.assert_close(output, torch.add(x, y))
+        _launch(x, y, output, n, operation=operation)
+        torch.testing.assert_close(output, torch_operation(x, y))
         assert len(compiles) == (0 if n == 0 else 1)
 
 

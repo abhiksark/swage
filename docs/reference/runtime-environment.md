@@ -2,8 +2,8 @@
 
 # Runtime and Environment
 
-The public runtime executes canonical fixed vector add on an explicitly
-selected CUDA or Native CPU backend. The private segmented runtime remains a
+The public runtime executes canonical fixed vector add or multiply on an
+explicitly selected CUDA or Native CPU backend. The private segmented runtime remains a
 CUDA qualification surface; its sequential CPU lowering is a correctness
 oracle, not the public Native CPU backend. Every path validates its complete
 host-visible boundary before reading pointers, allocating private storage,
@@ -49,8 +49,8 @@ attacker-controlled compilation safe. See the
 
 ## Dtypes and rounding
 
-Canonical vector addition accepts contiguous rank-one tensors with matching
-input and output dtypes:
+Canonical vector addition and multiplication accept contiguous rank-one
+tensors with matching input and output dtypes:
 
 | PyTorch dtype | Storage | Format |
 |---|---|---|
@@ -59,7 +59,7 @@ input and output dtypes:
 | `torch.float8_e4m3fn` | 8 bits | E4M3FN, finite values and NaNs, no infinities |
 | `torch.float8_e5m2` | 8 bits | E5M2, including infinities and NaNs |
 
-FP16 and FP8 values are widened inside the compiled kernel, added in FP32,
+FP16 and FP8 values are widened inside the compiled kernel, combined in FP32,
 then rounded to the output format using round-to-nearest, ties-to-even.
 FP8 loads and stores use bytes with scalar software conversion on both
 backends; native FP8 arithmetic or a newer GPU than `sm_86` is not required.
@@ -68,12 +68,15 @@ No temporary promoted tensors or host-side tensor casts are introduced.
 Conversion is not saturating: FP16 and E5M2 overflow produce signed infinity;
 E4M3FN overflow produces NaN. Subnormal values and signed zeros follow
 the format's arithmetic. NaN payload and sign are not guaranteed.
-An explicit PyTorch reference, including where direct FP8 addition is
-unavailable, is `(x.float() + y.float()).to(x.dtype)`.
+Explicit PyTorch references, including where direct FP8 arithmetic is
+unavailable, are `(x.float() + y.float()).to(x.dtype)` and
+`(x.float() * y.float()).to(x.dtype)`.
 
 Mixed dtypes, `bfloat16`, `float64`, and the FP8 FNUZ formats are rejected,
 including for zero-length work. This does not expand the admitted operation
-beyond canonical vector addition or add low-precision segmented kernels.
+beyond one canonical vector addition or multiplication and does not add
+low-precision segmented kernels. Operation chains, floating vector/scalar
+arithmetic, broadcasting, and matrix multiplication remain unsupported.
 
 ## Launch lifecycle
 
@@ -315,7 +318,7 @@ independently so a failure does not hide other facts.
 configuration, not whether this particular artifact passed release gates.
 It is independent of backend availability. An admitted non-qualified GPU
 may report `available: true, qualified: false`. Neither this field nor a
-successful check runs vector add, measures SLOs, or establishes production
+successful check runs vector arithmetic, measures SLOs, or establishes production
 qualification.
 
 Without `--check` the CLI exits zero. A selected check exits zero only if

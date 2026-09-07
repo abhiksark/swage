@@ -1,5 +1,5 @@
 # python/swage/__init__.pyi
-"""Types for the public fixed vector-add contract."""
+"""Types for the public fixed vector elementwise contract."""
 
 from collections.abc import Callable, Mapping
 from typing import Any, Literal

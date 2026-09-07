@@ -1,3 +1,4 @@
+// lib/Conversion/FixedBlock/GPU.cpp
 //===- GPU.cpp - Fixed-block GPU emission -------------------------------===//
 //
 // Part of the Swage project, under the MIT License.
@@ -25,7 +26,7 @@ using namespace mlir;
 namespace mlir::swage::detail {
 
 void buildFixedGPUProgram(ModuleOp module, func::FuncOp source,
-                          int64_t blockSize) {
+                          int64_t blockSize, FixedElementwiseKind kind) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -76,9 +77,9 @@ void buildFixedGPUProgram(ModuleOp module, func::FuncOp source,
 
   scf::IfOp::create(
       builder, loc, inBounds, [&](OpBuilder &body, Location bodyLoc) {
-        buildFixedScalarAdd(body, bodyLoc, elementType, entry->getArgument(0),
-                            entry->getArgument(1), entry->getArgument(2),
-                            byteOffset);
+        buildFixedScalarElementwise(
+            body, bodyLoc, elementType, entry->getArgument(0),
+            entry->getArgument(1), entry->getArgument(2), byteOffset, kind);
         scf::YieldOp::create(body, bodyLoc);
       });
   gpu::ReturnOp::create(builder, loc);

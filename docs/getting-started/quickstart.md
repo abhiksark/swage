@@ -2,14 +2,16 @@
 
 # Quickstart
 
-This tutorial takes the canonical fixed vector-add kernel from source capture
+This tutorial takes a canonical fixed vector-add kernel from source capture
 to a verified result on an explicitly selected CPU or CUDA backend. It uses
 the v0.5.2 native-wheel contract, whose publication and release qualification
 are still pending; see [Installation](installation.md) for release-candidate
 and source-build options. The committed
 [`examples/fixed_vector_add.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_add.py)
 contains this walkthrough as one runnable script, using metadata inference
-in place of the explicit signature.
+in place of the explicit signature. The parallel
+[`examples/fixed_vector_multiply.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_multiply.py)
+uses the same ABI with `x * y`.
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
@@ -74,6 +76,11 @@ retires lanes at or beyond `n`. The kernel is not directly callable;
 calling it raises. The accepted source forms are listed in
 [Kernel Language](../reference/kernel-language.md).
 
+Changing only the stored value to `x * y` selects multiplication. The public
+subset accepts exactly one `x + y` or `x * y`; it does not accept operation
+chains, floating vector/scalar arithmetic, broadcasting, or matrix
+multiplication.
+
 ## Emit and read the MLIR
 
 `emit_mlir()` uses the native bindings included in the wheel. It needs no GPU
@@ -137,13 +144,15 @@ python examples/fixed_vector_add.py --backend cuda
 python examples/fixed_vector_add.py --backend cpu --dtype float16
 python examples/fixed_vector_add.py --backend cuda --dtype float8_e4m3fn
 python examples/fixed_vector_add.py --backend cuda --dtype float8_e5m2
+python examples/fixed_vector_multiply.py --backend cpu
+python examples/fixed_vector_multiply.py --backend cuda --dtype float8_e4m3fn
 ```
 
 Choose the backend and dtype to exercise. `--dtype` defaults to `float32`;
 all four dtypes work on either backend. The example explicitly creates
 low-precision inputs by casting generated FP32 data and checks the result
-against FP32 addition rounded back to that dtype. Swage itself never casts
-or moves tensor storage. The example source is not needed by the installed
+against the selected FP32 operation rounded back to that dtype. Swage itself
+never casts or moves tensor storage. The example source is not needed by the installed
 runtime; outside a checkout, download the linked script and run it with
 the same options.
 

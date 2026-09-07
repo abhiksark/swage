@@ -110,7 +110,7 @@ class _Kernel:
         grid,
         backend="cuda",
     ):
-        """Launch the canonical fixed vector-add subset on one backend."""
+        """Launch canonical fixed vector addition or multiplication."""
         if type(backend) is str and backend == "cuda":
             reference = self._cuda_fast_launch
             if reference is not None:
@@ -540,32 +540,26 @@ class _Emitter:
         if not isinstance(left, _Value) or not isinstance(right, _Value):
             self._error(node, "unsupported binary operands")
         location = self._location(node)
-        if isinstance(node.op, ast.Add):
+        if isinstance(node.op, (ast.Add, ast.Mult)):
+            is_add = isinstance(node.op, ast.Add)
             if left.kind == right.kind == "float_vector":
                 if left.value.type != right.value.type:
                     left_type = self.ir.VectorType(left.value.type).element_type
                     right_type = self.ir.VectorType(
                         right.value.type
                     ).element_type
+                    operation = "addition" if is_add else "multiplication"
                     self._error(
                         node,
-                        "floating-point addition requires matching element "
+                        f"floating-point {operation} requires matching element "
                         f"types; got {left_type} and {right_type}",
                     )
-                result = self.arith.AddFOp(
-                    left.value, right.value, loc=location
-                ).result
+                operation = self.arith.AddFOp if is_add else self.arith.MulFOp
+                result = operation(left.value, right.value, loc=location).result
                 return _Value(result, "float_vector")
             left, right = self._broadcast_index_pair(left, right, node)
-            result = self.arith.AddIOp(
-                left.value, right.value, loc=location
-            ).result
-            return _Value(result, left.kind)
-        if isinstance(node.op, ast.Mult):
-            left, right = self._broadcast_index_pair(left, right, node)
-            result = self.arith.MulIOp(
-                left.value, right.value, loc=location
-            ).result
+            operation = self.arith.AddIOp if is_add else self.arith.MulIOp
+            result = operation(left.value, right.value, loc=location).result
             return _Value(result, left.kind)
         operator = type(node.op).__name__
         self._error(node, f"unsupported binary operator '{operator}'")

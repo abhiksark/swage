@@ -4,7 +4,7 @@
   aria-labelledby="compiler-pipeline-title compiler-pipeline-description"
   font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <title id="compiler-pipeline-title">Swage compiler pipeline</title>
-  <desc id="compiler-pipeline-description">Verified semantic MLIR enters the public fixed-block branch, the private direct segmented branch, or private SwagePlan work. Public fixed vector add lowers explicitly to a Native LLVM JIT or CUDA; private segmented CPU oracle work stops separately.</desc>
+  <desc id="compiler-pipeline-description">Verified semantic MLIR enters the public fixed-block branch, the private direct segmented branch, or private SwagePlan work. Public fixed vector add or multiply lowers explicitly to Native LLVM or CUDA; private segmented CPU oracle work stops separately.</desc>
   <defs>
     <marker id="compiler-pipeline-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#59636E"/>
@@ -18,7 +18,7 @@
   <rect x="55" y="245" width="330" height="180" rx="14" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
   <rect x="77" y="265" width="250" height="38" rx="19" fill="#DCEFFD" stroke="#00689D" stroke-width="2"/>
   <text x="202" y="291" font-size="16" font-weight="750" fill="#00689D" text-anchor="middle">PUBLIC TODAY</text>
-  <text x="220" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">fixed-block vector add</text>
+  <text x="220" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">fixed-block add / multiply</text>
   <text x="220" y="384" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">same fixed admission</text>
   <text x="220" y="414" font-size="16" font-weight="500" fill="#00689D" text-anchor="middle">CUDA or Native host</text>
   <rect x="420" y="245" width="330" height="180" rx="14" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>

@@ -1,4 +1,5 @@
-//===- Scalar.cpp - Fixed vector-add scalar arithmetic -----------------===//
+// lib/Conversion/FixedBlock/Scalar.cpp
+//===- Scalar.cpp - Fixed elementwise scalar arithmetic -----------------===//
 //
 // Part of the Swage project, under the MIT License.
 // See LICENSE for license information.
@@ -136,12 +137,13 @@ Value encodeFP8(OpBuilder &builder, Location loc, Value value,
 
 } // namespace
 
-void buildFixedScalarAdd(OpBuilder &builder, Location loc, Type elementType,
-                         Value xBase, Value yBase, Value outputBase,
-                         Value offset) {
+void buildFixedScalarElementwise(OpBuilder &builder, Location loc,
+                                 Type elementType, Value xBase, Value yBase,
+                                 Value outputBase, Value offset,
+                                 FixedElementwiseKind kind) {
   bool isFP8 = isa<Float8E4M3FNType, Float8E5M2Type>(elementType);
   assert((isFP8 || elementType.isF16() || elementType.isF32()) &&
-         "fixed vector-add element type was not admitted");
+         "fixed elementwise element type was not admitted");
   Type storageType = isFP8 ? builder.getI8Type() : elementType;
   Type pointer = xBase.getType();
   Value xAddress =
@@ -161,12 +163,20 @@ void buildFixedScalarAdd(OpBuilder &builder, Location loc, Type elementType,
     x = arith::ExtFOp::create(builder, loc, builder.getF32Type(), x);
     y = arith::ExtFOp::create(builder, loc, builder.getF32Type(), y);
   }
-  Value sum = arith::AddFOp::create(builder, loc, x, y);
+  Value result;
+  switch (kind) {
+  case FixedElementwiseKind::Add:
+    result = arith::AddFOp::create(builder, loc, x, y);
+    break;
+  case FixedElementwiseKind::Multiply:
+    result = arith::MulFOp::create(builder, loc, x, y);
+    break;
+  }
   if (isFP8)
-    sum = encodeFP8(builder, loc, sum, mantissaBits, bias);
+    result = encodeFP8(builder, loc, result, mantissaBits, bias);
   else if (elementType.isF16())
-    sum = arith::TruncFOp::create(builder, loc, elementType, sum);
-  LLVM::StoreOp::create(builder, loc, sum, outputAddress);
+    result = arith::TruncFOp::create(builder, loc, elementType, result);
+  LLVM::StoreOp::create(builder, loc, result, outputAddress);
 }
 
 } // namespace mlir::swage::detail

@@ -36,14 +36,19 @@ CPU artifact checks, cp313 reproducibility check, and trusted installed-wheel
 A6000 performance gates pass, followed by the protected signed-tag process.
 No production-ready claim follows from implementation alone.
 
-The source tree also extends canonical vector addition to matching
+The source tree extends canonical vector addition and multiplication to matching
 `float16`, `float8_e4m3fn`, and `float8_e5m2` tensors, alongside `float32`.
-CPU and RTX A6000 `sm_86` execution pass exhaustive FP8 input-pair checks
-and FP16 rounding/encoding coverage. These are correctness results, not
-low-precision performance qualification; release artifacts must be rebuilt
-and pass the expanded installed-wheel checks.
+The existing CPU and RTX A6000 `sm_86` exhaustive FP8 input-pair checks and
+FP16 rounding/encoding evidence cover addition. Multiplication follows the
+same FP32 arithmetic and rounding contract, but new release artifacts must be
+built and pass the expanded installed-wheel CPU and trusted CUDA checks. The
+historical addition results are not multiplication evidence or low-precision
+performance qualification.
 
-The canonical fixed vector-add kernel shape is unchanged; these additions
+The canonical fixed-vector ABI is unchanged; multiplication adds one alternate
+`x * y` body with the same four runtime parameters and block constexpr. It
+does not admit operation chains, floating vector/scalar arithmetic,
+broadcasting, or matrix multiplication. These additions
 do not complete M9 or add a public segmented API. The v0.6.0 mapping remains
 unchanged, and the failed persistent scheduling performance gate is not waived.
 

@@ -24,6 +24,16 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
 
 
 @sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
+@sw.jit
 def rebound_block_kernel(BLOCK: sl.constexpr):  # noqa: D103
     BLOCK = 4
     pid = sl.program_id(0)
@@ -111,9 +121,13 @@ def _arguments(device="cpu", dtype=torch.float32):
     }
 
 
+@pytest.mark.parametrize(
+    "kernel, arithmetic",
+    [(add_kernel, "arith.addf"), (multiply_kernel, "arith.mulf")],
+)
 @pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
 def test_vector_add_emits_a_deterministic_live_module(
-    dtype, torch_dtype, element_type
+    dtype, torch_dtype, element_type, kernel, arithmetic
 ):
     """Keep same-type gather/add/scatter semantic IR for every storage type."""
     signature = {
@@ -130,8 +144,8 @@ def test_vector_add_emits_a_deterministic_live_module(
         return real_import(name, *args, **kwargs)
 
     with mock.patch("builtins.__import__", side_effect=import_without_torch):
-        first = _emit(signature=signature)
-        second = _emit(signature=signature)
+        first = _emit(kernel=kernel, signature=signature)
+        second = _emit(kernel=kernel, signature=signature)
 
     assert isinstance(first, ir.Module)
     assert first.operation.verify()
@@ -141,7 +155,7 @@ def test_vector_add_emits_a_deterministic_live_module(
     assert "swage.program_id" in first_asm
     assert "vector.step" in first_asm
     assert first_asm.count("vector.gather") == 2
-    assert first_asm.count("arith.addf") == 1
+    assert first_asm.count(arithmetic) == 1
     assert first_asm.count("vector.scatter") == 1
     assert f"memref<?x{element_type}>" in first_asm
     assert f"vector<128x{element_type}>" in first_asm
@@ -149,23 +163,28 @@ def test_vector_add_emits_a_deterministic_live_module(
     assert "arith.truncf" not in first_asm
 
 
+@pytest.mark.parametrize(
+    "kernel, arithmetic",
+    [(add_kernel, "arith.addf"), (multiply_kernel, "arith.mulf")],
+)
 @pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
 def test_inferred_and_explicit_signatures_emit_identical_mlir(
-    dtype, torch_dtype, element_type
+    dtype, torch_dtype, element_type, kernel, arithmetic
 ):
     """Infer each storage format without host casts or element-type changes."""
     explicit = _emit(
+        kernel=kernel,
         signature={
             "x_ptr": sl.pointer(dtype),
             "y_ptr": sl.pointer(dtype),
             "output_ptr": sl.pointer(dtype),
             "n": sl.int32,
-        }
+        },
     ).operation.get_asm(enable_debug_info=False)
-    first = add_kernel.emit_mlir(
+    first = kernel.emit_mlir(
         arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
-    second = add_kernel.emit_mlir(
+    second = kernel.emit_mlir(
         arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
 
@@ -263,12 +282,13 @@ def test_inferred_emission_does_not_retain_arguments():
     assert reference() is None
 
 
-def test_vector_add_preserves_kernel_and_python_source_locations():
+@pytest.mark.parametrize("kernel", [add_kernel, multiply_kernel])
+def test_vector_add_preserves_kernel_and_python_source_locations(kernel):
     """Expose kernel-name and file-line locations in debug assembly."""
-    debug_asm = _emit().operation.get_asm(enable_debug_info=True)
-    source_line = inspect.getsourcelines(add_kernel.python_function)[1]
+    debug_asm = _emit(kernel=kernel).operation.get_asm(enable_debug_info=True)
+    source_line = inspect.getsourcelines(kernel.python_function)[1]
 
-    assert 'loc("add_kernel"' in debug_asm
+    assert f'loc("{kernel.__name__}"' in debug_asm
     assert __file__ in debug_asm
     assert f":{source_line + 1}:" in debug_asm
 
@@ -419,6 +439,7 @@ def test_empty_return_must_be_the_final_statement():
         bad_kernel.emit_mlir(signature={}, constexprs={})
 
 
+@pytest.mark.parametrize("kernel", [add_kernel, multiply_kernel])
 @pytest.mark.parametrize("inferred", [False, True])
 @pytest.mark.parametrize(
     ("left", "right", "output", "left_type", "right_type", "operation"),
@@ -444,7 +465,7 @@ def test_empty_return_must_be_the_final_statement():
     ],
 )
 def test_mixed_element_types_have_source_located_diagnostics(
-    inferred, left, right, output, left_type, right_type, operation
+    inferred, left, right, output, left_type, right_type, operation, kernel
 ):
     """Reject arithmetic/store mismatches before generic MLIR verification."""
     dtypes = dict(zip(("x_ptr", "y_ptr", "output_ptr"), (left, right, output)))
@@ -466,14 +487,17 @@ def test_mixed_element_types_have_source_located_diagnostics(
         inputs["signature"]["n"] = sl.int32
 
     with pytest.raises(sw.CompilationError) as caught:
-        add_kernel.emit_mlir(**inputs, constexprs={"BLOCK": 128})
+        kernel.emit_mlir(**inputs, constexprs={"BLOCK": 128})
 
-    source, source_line = inspect.getsourcelines(add_kernel.python_function)
+    source, source_line = inspect.getsourcelines(kernel.python_function)
     token = "x + y" if operation == "addition" else "sl.store"
+    if kernel is multiply_kernel and operation == "addition":
+        token = "x * y"
+        operation = "multiplication"
     column = source[7].index(token) + 1
     message = str(caught.value)
     assert message.startswith(
-        f"{__file__}:{source_line + 7}:{column}: add_kernel:"
+        f"{__file__}:{source_line + 7}:{column}: {kernel.__name__}:"
     )
     assert operation in message
     assert "matching" in message
@@ -734,3 +758,27 @@ def test_a_docstring_only_kernel_emits_an_empty_function():
     )
     assert "func.func @docstring_only_kernel" in str(module)
     assert "return" in str(module)
+
+
+@pytest.mark.parametrize("scalar_on_left", [False, True])
+def test_vector_scalar_multiplication_is_rejected(scalar_on_left):
+    """Do not add scalar broadcasting to floating-point multiplication."""
+
+    @sw.jit
+    def right_scalar(x_ptr, BLOCK: sl.constexpr):
+        offsets = sl.arange(0, BLOCK)
+        x = sl.load(x_ptr + offsets, mask=offsets < BLOCK, other=0.0)
+        _ = x * 2
+
+    @sw.jit
+    def left_scalar(x_ptr, BLOCK: sl.constexpr):
+        offsets = sl.arange(0, BLOCK)
+        x = sl.load(x_ptr + offsets, mask=offsets < BLOCK, other=0.0)
+        _ = 2 * x
+
+    kernel = left_scalar if scalar_on_left else right_scalar
+    with pytest.raises(sw.CompilationError, match="requires index operands"):
+        kernel.emit_mlir(
+            signature={"x_ptr": sl.pointer(sl.float32)},
+            constexprs={"BLOCK": 128},
+        )

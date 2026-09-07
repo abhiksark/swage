@@ -41,7 +41,7 @@ module {
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
           into vector<128xf32>
     %sum = arith.addf %lhs, %rhs : vector<128xf32>
-    // expected-error@+1 {{fixed vector add must use canonical program offsets and bounds mask}}
+    // expected-error@+1 {{fixed elementwise operation must use canonical program offsets and bounds mask}}
     vector.scatter %output[%c0] [%offsets], %mask, %sum
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
     return
