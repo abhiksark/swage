@@ -409,12 +409,18 @@ jobs:
           subject-path: dist/*
           sbom-path: evidence/sbom.spdx.json
           create-storage-record: false
+      - name: Name detached attestation bundles
+        run: |
+          mkdir -p attestations
+          cp "${{ steps.provenance.outputs.bundle-path }}" \
+            attestations/build-provenance.json
+          cp "${{ steps.sbom.outputs.bundle-path }}" attestations/sbom.json
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: release-attestations
           path: |
-            ${{ steps.provenance.outputs.bundle-path }}
-            ${{ steps.sbom.outputs.bundle-path }}
+            attestations/build-provenance.json
+            attestations/sbom.json
           if-no-files-found: error
 
   publish:

@@ -289,7 +289,7 @@ been published or production-qualified. Complete these steps in order:
    ```bash
    gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
      --name release-attestations --dir attestations
-   PROVENANCE_BUNDLE=attestations/attestation.json
+   PROVENANCE_BUNDLE=attestations/build-provenance.json
    gh attestation verify <downloaded-wheel-or-sdist> \
      --bundle "$PROVENANCE_BUNDLE" --repo abhiksark/swage
    ```
