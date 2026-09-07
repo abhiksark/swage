@@ -76,6 +76,15 @@ def _multiply_oracle(x, y):
     return (x.float() * y.float()).to(x.dtype)
 
 
+def _fp8_oracle(x, y, operation, dtype):
+    """Preserve non-saturating E4M3FN overflow across PyTorch versions."""
+    wide = operation(x.float(), y.float())
+    expected = wide.to(dtype)
+    if dtype is torch.float8_e4m3fn:
+        expected.view(torch.uint8)[wide.abs() > 464.0] = 0x7F
+    return expected
+
+
 @pytest.mark.parametrize("operation", OPERATIONS)
 @pytest.mark.parametrize("dtype_name", ("float8_e4m3fn", "float8_e5m2"))
 def test_fp8_every_encoding_pair(backend, dtype_name, operation):
@@ -85,7 +94,7 @@ def test_fp8_every_encoding_pair(backend, dtype_name, operation):
     x_cpu = encodings.repeat_interleave(256).view(dtype)
     y_cpu = encodings.repeat(256).view(dtype)
     _, torch_operation = OPERATIONS[operation]
-    expected = torch_operation(x_cpu.float(), y_cpu.float()).to(dtype)
+    expected = _fp8_oracle(x_cpu, y_cpu, torch_operation, dtype)
     x = x_cpu.to(backend)
     y = y_cpu.to(backend)
     output = torch.empty_like(x)

@@ -1,6 +1,7 @@
 # python/swage/_segmented_oracle.py
 """Subprocess-backed CPU oracles for segmented qualification."""
 
+import os
 import pathlib
 import re
 import shutil
@@ -115,12 +116,12 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
     return "\n".join(lines)
 
 
-def _llvm_root(root):
+def _llvm_root(build):
     """Find the pinned install used to configure the current build."""
-    cache = root / "build" / "CMakeCache.txt"
+    cache = build / "CMakeCache.txt"
     match = re.search(r"^MLIR_DIR:[^=]*=(.+)$", cache.read_text(), re.MULTILINE)
     if not match:
-        raise RuntimeError("build/CMakeCache.txt does not identify MLIR_DIR")
+        raise RuntimeError(f"{cache} does not identify MLIR_DIR")
     return pathlib.Path(match.group(1)).parents[2]
 
 
@@ -143,8 +144,9 @@ def _run(command, source):
 def _execute(module_text):
     """Lower and run one executable module, returning its printed values."""
     root = pathlib.Path(__file__).resolve().parents[2]
-    llvm_root = _llvm_root(root)
-    swage_opt = root / "build" / "bin" / "swage-opt"
+    build = pathlib.Path(os.environ.get("SWAGE_BUILD_DIR", root / "build"))
+    llvm_root = _llvm_root(build)
+    swage_opt = build / "bin" / "swage-opt"
     mlir_opt = shutil.which("mlir-opt") or llvm_root / "bin" / "mlir-opt"
     mlir_runner = (
         shutil.which("mlir-runner") or llvm_root / "bin" / "mlir-runner"

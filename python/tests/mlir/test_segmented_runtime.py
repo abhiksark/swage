@@ -8,7 +8,7 @@ import weakref
 
 import pytest
 import torch
-from swage import _cuda_backend, _runtime
+from swage import _cuda_backend, _runtime, _segmented_oracle
 from swage import _segmented_runtime as segmented_runtime
 from swage._segmented_oracle import cpu_oracle, cpu_softmax_oracle
 from swage._segmented_qualification import (
@@ -288,6 +288,26 @@ def test_cpu_oracle_rejects_empty_offsets_with_the_validator_message():
 
     with pytest.raises(ValueError, match="at least the initial zero"):
         cpu_oracle(values, offsets, "sum")
+
+
+def test_cpu_oracle_uses_configured_build_directory(monkeypatch, tmp_path):
+    """Resolve compiler tools from the build selected by the workflow."""
+    configured = tmp_path / "native-build"
+    monkeypatch.setenv("SWAGE_BUILD_DIR", str(configured))
+
+    def llvm_root(build):
+        assert build == configured
+        return tmp_path / "llvm"
+
+    def run(command, _source):
+        assert command[0] == configured / "bin" / "swage-opt"
+        raise RuntimeError("selected configured build")
+
+    monkeypatch.setattr(_segmented_oracle, "_llvm_root", llvm_root)
+    monkeypatch.setattr(_segmented_oracle, "_run", run)
+
+    with pytest.raises(RuntimeError, match="selected configured build"):
+        _segmented_oracle._execute("module {}")
 
 
 @pytest.mark.parametrize("count", [-1, 1 << 31])

@@ -110,10 +110,12 @@ the v0.6.0 mapping.
 
 ## Multiplication regression coverage
 
-The fixed runtime suites compare CPU and CUDA multiplication against the
-CPU oracle `(x.float() * y.float()).to(x.dtype)`. Every non-NaN output must
-match its storage encoding exactly, including signed zeros and subnormals;
-NaN payloads are not part of the numerical contract.
+The fixed runtime suites compare CPU and CUDA multiplication against widened
+FP32 arithmetic rounded once to the storage dtype. FP16 uses PyTorch's cast;
+FP8 uses a version-independent format oracle so PyTorch 2.13's saturating
+E4M3FN overflow does not redefine Swage's non-saturating contract. Every
+non-NaN output must match its storage encoding exactly, including signed zeros
+and subnormals; NaN payloads are not part of the numerical contract.
 
 `test_low_precision_runtime.py` separates numerical datasets from launch
 layouts so that large datasets do not multiply the geometry test matrix:

@@ -68,9 +68,11 @@ No temporary promoted tensors or host-side tensor casts are introduced.
 Conversion is not saturating: FP16 and E5M2 overflow produce signed infinity;
 E4M3FN overflow produces NaN. Subnormal values and signed zeros follow
 the format's arithmetic. NaN payload and sign are not guaranteed.
-Explicit PyTorch references, including where direct FP8 arithmetic is
-unavailable, are `(x.float() + y.float()).to(x.dtype)` and
-`(x.float() * y.float()).to(x.dtype)`.
+The FP16 reference is `(x.float() op y.float()).to(x.dtype)`. FP8
+qualification uses the same widened operation with a version-independent
+format oracle. This matters for E4M3FN because PyTorch 2.13 saturates results
+above the 464 overflow midpoint while Swage's documented non-saturating
+conversion produces NaN.
 
 Mixed dtypes, `bfloat16`, `float64`, and the FP8 FNUZ formats are rejected,
 including for zero-length work. This does not expand the admitted operation
