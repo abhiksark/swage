@@ -289,9 +289,9 @@ been published or production-qualified. Complete these steps in order:
    ```bash
    gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
      --name release-attestations --dir attestations
-   PROVENANCE_BUNDLE=<build-provenance-bundle-in-attestations>
+   PROVENANCE_BUNDLE=attestations/attestation.json
    gh attestation verify <downloaded-wheel-or-sdist> \
-     --bundle "$PROVENANCE_BUNDLE"
+     --bundle "$PROVENANCE_BUNDLE" --repo abhiksark/swage
    ```
 
    Check `SHA256SUMS`, install from PyPI into a clean environment, and check

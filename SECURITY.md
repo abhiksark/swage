@@ -67,9 +67,10 @@ and its detached build-provenance bundle:
 ```bash
 gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
   --name release-attestations --dir attestations
-PROVENANCE_BUNDLE=<build-provenance-bundle-in-attestations>
+PROVENANCE_BUNDLE=attestations/attestation.json
 sha256sum --check SHA256SUMS
-gh attestation verify <downloaded-wheel-or-sdist> --bundle "$PROVENANCE_BUNDLE"
+gh attestation verify <downloaded-wheel-or-sdist> \
+  --bundle "$PROVENANCE_BUNDLE" --repo abhiksark/swage
 python -m swage.env --json --check native
 ```
 
