@@ -16,10 +16,12 @@ a TeX toolchain.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 from pathlib import Path
@@ -232,6 +234,87 @@ def _dispatch_include() -> str:
     return "".join(lines)
 
 
+def _load_campaign_chart(manifest_path: Path):
+    """Load five archival processes without trusting stored timing summaries."""
+    source = REPO_ROOT / "benchmarks/benchmark_campaign.py"
+    spec = importlib.util.spec_from_file_location("benchmark_campaign", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    campaign = module.load_campaign(manifest_path)
+    processes = campaign["child_process_medians"]
+    if len(processes) != 5:
+        raise ValueError("campaign charts require five independent processes")
+    distributions = [
+        row["distribution"]
+        for row in campaign["children"][0]["results"]
+        if row["case"] == "segmented-sum"
+    ]
+    if not distributions:
+        raise ValueError("campaign charts require segmented-sum results")
+    return distributions, processes
+
+
+def _campaign_plot(processes, metrics, style):
+    """Emit coordinates from medians of raw-child process medians."""
+    values = (
+        statistics.median(process[metric] for process in processes)
+        for metric in metrics
+    )
+    coordinates = " ".join(
+        f"({index},{value!r})" for index, value in enumerate(values)
+    )
+    return f"\\addplot[{style}] coordinates {{{coordinates}}};\n"
+
+
+def _segmented_baselines_include(manifest_path: Path) -> str:
+    """Generate the five declared baselines from validated raw child samples."""
+    distributions, processes = _load_campaign_chart(manifest_path)
+    candidates = (
+        ("torch_padded", "fill=swpurplefill, draw=swpurple"),
+        ("swage_warp", "fill=swbluefill, draw=swblue"),
+        ("swage_cta", "fill=swgreenfill, draw=swgreen"),
+        ("triton_matched_task_partition", "fill=sworangefill, draw=sworange"),
+        ("swage_mixed", "fill=swmuted, draw=swink"),
+    )
+    lines = []
+    for candidate, style in candidates:
+        metrics = [
+            f"segmented-sum/distribution={name}/{candidate}/batched_event_us"
+            for name in distributions
+        ]
+        lines.append(_campaign_plot(processes, metrics, f"ybar, {style}"))
+    lines.append(
+        "\\legend{PyTorch padded, Swage warp, Swage CTA, "
+        "Triton manual buckets, Swage mixed}\n"
+    )
+    return "".join(lines)
+
+
+def _phase_breakdown_include(manifest_path: Path) -> str:
+    """Keep suite compilation separate from per-input planning and dispatch."""
+    distributions, processes = _load_campaign_chart(manifest_path)
+    compilation = _campaign_plot(
+        processes,
+        ["segmented-sum/swage_total/compilation_us"],
+        "ybar, fill=swbluefill, draw=swblue",
+    )
+    lines = ["\\newcommand{\\compilationplot}{%\n", compilation, "}\n"]
+    lines.append("\\newcommand{\\planningplots}{%\n")
+    for metric, style in (
+        ("planning_us", "fill=sworangefill, draw=sworange"),
+        ("batched_event_us", "fill=swbluefill, draw=swblue"),
+    ):
+        metrics = [
+            f"segmented-sum/distribution={name}/swage_mixed/{metric}"
+            for name in distributions
+        ]
+        lines.append(_campaign_plot(processes, metrics, f"ybar, {style}"))
+    lines.append(
+        "\\legend{Per-input planning, Steady-state kernel/dispatch}\n}\n"
+    )
+    return "".join(lines)
+
+
 def chart_include(spec: FigureSpec) -> str | None:
     """Return the generated data include for one chart figure."""
     if spec.name == "segsum-graph-comparison":
@@ -286,8 +369,7 @@ def _finalize_svg(spec: FigureSpec, markup: str, digest: str) -> bytes:
         raise RuntimeError("converted output has no svg opening tag")
     prefix = spec.name
     injected = (
-        f' role="img" aria-labelledby="{prefix}-title '
-        f'{prefix}-description"'
+        f' role="img" aria-labelledby="{prefix}-title {prefix}-description"'
     )
     metadata = (
         f'\n<title id="{prefix}-title">{_escape(spec.title)}</title>'
@@ -299,7 +381,7 @@ def _finalize_svg(spec: FigureSpec, markup: str, digest: str) -> bytes:
         + injected
         + ">"
         + metadata
-        + markup[opening_end + 1:]
+        + markup[opening_end + 1 :]
     )
     header = (
         f"<!-- docs/assets/figures/{spec.name}.svg -->\n"
@@ -383,9 +465,7 @@ def render_figures(output_dir: Path, *, check: bool = False) -> list[str]:
             )
             continue
         try:
-            path.write_bytes(
-                _render_figure(spec, tectonic, include, digest)
-            )
+            path.write_bytes(_render_figure(spec, tectonic, include, digest))
         except (OSError, RuntimeError, ValueError) as error:
             errors.append(f"cannot render {spec.name}: {error}")
     return sorted(errors)

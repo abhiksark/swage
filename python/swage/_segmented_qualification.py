@@ -155,6 +155,101 @@ def _materialize_host_plan(
     )
 
 
+def _materialize_planned_sum_host(
+    torch,
+    host_offsets,
+    value_count,
+    segment_count,
+    *,
+    warp_max_elements,
+    cta_chunk_elements,
+):
+    """Materialize the host plan without compiling or device allocation."""
+    native_swage = _native.load_extension(backend="cuda")
+
+    semantic = _programs._semantic_module("sum")
+    module = _execution._emit_semantic_module(semantic)
+    host_plan = _materialize_host_plan(
+        native_swage,
+        module,
+        host_offsets,
+        value_count,
+        segment_count,
+        warp_max_elements,
+        cta_chunk_elements,
+    )
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    target = f"sm_{major}{minor}"
+    schedule = {
+        "warp_max_elements": warp_max_elements,
+        "cta_chunk_elements": cta_chunk_elements,
+    }
+    return semantic, host_plan, target, schedule
+
+
+def _planned_sum_artifact_specs(host_plan, schedule):
+    """Describe the required artifacts in their compilation order."""
+    kernel_name = "segmented_sum"
+    specs = [
+        (
+            "warp",
+            {
+                "kernel_name": kernel_name,
+                "block_size": _WARP_BLOCK,
+                "lowering_kind": "segmented",
+                "lowering_options": {"use_task_ids": True},
+                "schedule": schedule,
+            },
+        ),
+        (
+            "cta",
+            {
+                "kernel_name": kernel_name,
+                "block_size": _CTA_BLOCK,
+                "lowering_kind": "segmented",
+                "lowering_options": {"use_task_ids": True},
+                "schedule": schedule,
+            },
+        ),
+    ]
+    if host_plan.warp_count + host_plan.cta_count:
+        specs.append(
+            (
+                "mixed",
+                {
+                    "kernel_name": kernel_name,
+                    "block_size": _CTA_BLOCK,
+                    "lowering_kind": "segmented_fused",
+                    "schedule": schedule,
+                },
+            )
+        )
+    if host_plan.partial_count:
+        specs.extend(
+            (
+                (
+                    "partial",
+                    {
+                        "kernel_name": f"{kernel_name}__partial",
+                        "block_size": _SPLIT_BLOCK,
+                        "lowering_kind": "segmented_split_partial",
+                        "schedule": schedule,
+                    },
+                ),
+                (
+                    "merge",
+                    {
+                        "kernel_name": f"{kernel_name}__merge",
+                        "block_size": _SPLIT_BLOCK,
+                        "lowering_kind": "segmented_split_merge",
+                        "schedule": schedule,
+                    },
+                ),
+            )
+        )
+    return tuple(specs)
+
+
 def _prepare_planned_sum(
     values,
     offsets,
@@ -172,73 +267,18 @@ def _prepare_planned_sum(
     if segment_count == 0:
         return _execution._PreparedSegmentedExecution(torch=torch)
 
-    native_swage = _native.load_extension(backend="cuda")
-
-    semantic = _programs._semantic_module("sum")
-    module = _execution._emit_semantic_module(semantic)
-    host_plan = _materialize_host_plan(
-        native_swage,
-        module,
+    semantic, host_plan, target, schedule = _materialize_planned_sum_host(
+        torch,
         host_offsets,
         value_count,
         segment_count,
-        warp_max_elements,
-        cta_chunk_elements,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
     )
-    direct_count = host_plan.warp_count + host_plan.cta_count
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
-    kernel_name = "segmented_sum"
-    schedule = {
-        "warp_max_elements": warp_max_elements,
-        "cta_chunk_elements": cta_chunk_elements,
-    }
     artifacts = {
-        "warp": _execution._compile_artifact(
-            semantic,
-            kernel_name=kernel_name,
-            target=target,
-            block_size=_WARP_BLOCK,
-            lowering_kind="segmented",
-            lowering_options={"use_task_ids": True},
-            schedule=schedule,
-        ),
-        "cta": _execution._compile_artifact(
-            semantic,
-            kernel_name=kernel_name,
-            target=target,
-            block_size=_CTA_BLOCK,
-            lowering_kind="segmented",
-            lowering_options={"use_task_ids": True},
-            schedule=schedule,
-        ),
+        name: _execution._compile_artifact(semantic, target=target, **kwargs)
+        for name, kwargs in _planned_sum_artifact_specs(host_plan, schedule)
     }
-    if direct_count:
-        artifacts["mixed"] = _execution._compile_artifact(
-            semantic,
-            kernel_name=kernel_name,
-            target=target,
-            block_size=_CTA_BLOCK,
-            lowering_kind="segmented_fused",
-            schedule=schedule,
-        )
-    if host_plan.partial_count:
-        artifacts["partial"] = _execution._compile_artifact(
-            semantic,
-            kernel_name=f"{kernel_name}__partial",
-            target=target,
-            block_size=_SPLIT_BLOCK,
-            lowering_kind="segmented_split_partial",
-            schedule=schedule,
-        )
-        artifacts["merge"] = _execution._compile_artifact(
-            semantic,
-            kernel_name=f"{kernel_name}__merge",
-            target=target,
-            block_size=_SPLIT_BLOCK,
-            lowering_kind="segmented_split_merge",
-            schedule=schedule,
-        )
 
     counts = {
         "value_count": value_count,

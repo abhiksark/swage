@@ -7,14 +7,17 @@ when the benchmark is executed; the project does not depend on Triton.
 
 import argparse
 import json
+import os
 import pathlib
 import platform
-import statistics
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+
+from benchmark_campaign import summarize_us, validate_child
+from swage._benchmark import _fixed_vector_add_kernel
 
 _WARMUPS = 25
 _SAMPLES = 100
@@ -72,23 +75,6 @@ def _git_metadata(root: pathlib.Path) -> dict[str, object]:
     return {"revision": revision, "worktree_clean": not dirty, "dirty": dirty}
 
 
-def _median_iqr(values: Iterable[float]) -> dict[str, float]:
-    """Return median and quartiles for one nonempty sample list."""
-    ordered = sorted(values)
-    if not ordered:
-        raise ValueError("at least one timing sample is required")
-    if len(ordered) == 1:
-        quartiles = (ordered[0], ordered[0])
-    else:
-        inclusive = statistics.quantiles(ordered, n=4, method="inclusive")
-        quartiles = (inclusive[0], inclusive[2])
-    return {
-        "median": statistics.median(ordered),
-        "q1": quartiles[0],
-        "q3": quartiles[1],
-    }
-
-
 def _rotating_orders(
     candidates: Iterable[str], rounds: int
 ) -> list[tuple[str, ...]]:
@@ -100,14 +86,12 @@ def _rotating_orders(
         raise ValueError("timing candidate names must be unique")
     if rounds < 0:
         raise ValueError("timing rounds must be nonnegative")
-    offsets = (
-        round_index % len(names) for round_index in range(rounds)
-    )
+    offsets = (round_index % len(names) for round_index in range(rounds))
     return [names[offset:] + names[:offset] for offset in offsets]
 
 
 def _order_position_counts(
-    orders: Iterable[tuple[str, ...]]
+    orders: Iterable[tuple[str, ...]],
 ) -> dict[str, list[int]]:
     """Count how often each candidate occupies each order position."""
     materialized = list(orders)
@@ -153,7 +137,7 @@ def _interleaved_call_us(
             end = time.perf_counter_ns()
             timings[name].append((end - start) / 1_000.0)
     return {
-        name: {"samples_us": values, "summary_us": _median_iqr(values)}
+        name: {"samples_us": values, "summary_us": summarize_us(values)}
         for name, values in timings.items()
     }
 
@@ -176,12 +160,10 @@ def _interleaved_batched_event_us(
                 launches[name]()
             end.record()
             end.synchronize()
-            elapsed_us = (
-                start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES
-            )
+            elapsed_us = start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES
             timings[name].append(elapsed_us)
     return {
-        name: {"samples_us": values, "summary_us": _median_iqr(values)}
+        name: {"samples_us": values, "summary_us": summarize_us(values)}
         for name, values in timings.items()
     }
 
@@ -233,15 +215,13 @@ def _interleaved_graph_us(
             graphs[name].replay()
             end.record()
             end.synchronize()
-            elapsed_us = (
-                start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES
-            )
+            elapsed_us = start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES
             timings[name].append(elapsed_us)
     results = {
         name: {
             "available": True,
             "samples_us": values,
-            "summary_us": _median_iqr(values),
+            "summary_us": summarize_us(values),
         }
         for name, values in timings.items()
     }
@@ -262,9 +242,7 @@ def _timings(
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Collect interleaved call, event, and graph measurements."""
     call = _interleaved_call_us(torch, launches, warmups, samples)
-    batched = _interleaved_batched_event_us(
-        torch, launches, warmups, samples
-    )
+    batched = _interleaved_batched_event_us(torch, launches, warmups, samples)
     graph = _interleaved_graph_us(torch, launches, warmups, samples)
     results = {
         name: {
@@ -297,23 +275,6 @@ def _timings(
     return results, method
 
 
-def _make_swage_vadd():
-    """Define the canonical Swage vector-add kernel lazily."""
-    import swage as sw
-    import swage.language as sl
-
-    @sw.jit
-    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
-        pid = sl.program_id(0)
-        offsets = pid * BLOCK + sl.arange(0, BLOCK)
-        mask = offsets < n
-        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
-        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
-        sl.store(output_ptr + offsets, x + y, mask=mask)
-
-    return add_kernel
-
-
 def _make_triton_vadd():
     """Define a direct Triton vector-add baseline lazily."""
     import triton
@@ -333,7 +294,7 @@ def _make_triton_vadd():
 
 def _run_vadd(torch, warmups: int, samples: int) -> list[dict[str, object]]:
     """Benchmark fixed vector add across problem sizes."""
-    swage_kernel = _make_swage_vadd()
+    swage_kernel = _fixed_vector_add_kernel()
     triton_kernel = _make_triton_vadd()
     results = []
     for exponent in (10, 12, 14, 16, 18, 20, 22):
@@ -421,6 +382,32 @@ def _offsets_from_lengths(torch, lengths: list[int]):
         offsets.append(offsets[-1] + length)
     device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     return offsets, device_offsets
+
+
+def _padded_identity_input(torch, lengths):
+    """Materialize the all-one workload as contiguous padded CUDA rows."""
+    rows = len(lengths)
+    columns = max(lengths, default=0)
+    row_lengths = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    column_ids = torch.arange(columns, device="cuda", dtype=torch.int32)
+    padded = (column_ids[None, :] < row_lengths[:, None]).to(torch.float32)
+    packed_elements = sum(lengths)
+    padded_elements = rows * columns
+    padding_elements = padded_elements - packed_elements
+    return padded, {
+        "rows": rows,
+        "columns": columns,
+        "packed_elements": packed_elements,
+        "padded_elements": padded_elements,
+        "padding_elements": padding_elements,
+        "padding_fraction": (
+            padding_elements / padded_elements if padded_elements else 0.0
+        ),
+        "storage_bytes": padded_elements * 4,
+        "dtype": "float32",
+        "input_materialization_timed": False,
+        "output_preallocated": True,
+    }
 
 
 def _make_triton_segmented_sum():
@@ -539,33 +526,21 @@ def _make_triton_fused_sum():
             mask=short_active & (short_index < short_end),
             other=0.0,
         )
-        short_matrix = tl.reshape(
-            short_values, (SHORT_TASK_SLOTS, WARP_LANES)
-        )
+        short_matrix = tl.reshape(short_values, (SHORT_TASK_SLOTS, WARP_LANES))
         short_totals = tl.sum(short_matrix, axis=1)
         output_slots = tl.arange(0, SHORT_TASK_SLOTS)
         output_tasks = program_id * SHORT_TASK_SLOTS + output_slots
-        output_active = (
-            is_warp_program & (output_tasks < warp_task_count)
-        )
+        output_active = is_warp_program & (output_tasks < warp_task_count)
         output_segments = tl.load(
             warp_task_ids + output_tasks, mask=output_active, other=0
         )
-        tl.store(
-            output + output_segments, short_totals, mask=output_active
-        )
+        tl.store(output + output_segments, short_totals, mask=output_active)
 
         cta_task = program_id - WARP_PROGRAMS
         cta_active = (~is_warp_program) & (cta_task < cta_task_count)
-        cta_segment = tl.load(
-            cta_task_ids + cta_task, mask=cta_active, other=0
-        )
-        cta_begin = tl.load(
-            offsets + cta_segment, mask=cta_active, other=0
-        )
-        cta_end = tl.load(
-            offsets + cta_segment + 1, mask=cta_active, other=0
-        )
+        cta_segment = tl.load(cta_task_ids + cta_task, mask=cta_active, other=0)
+        cta_begin = tl.load(offsets + cta_segment, mask=cta_active, other=0)
+        cta_end = tl.load(offsets + cta_segment + 1, mask=cta_active, other=0)
         cta_total = tl.zeros((LOGICAL_LANES,), dtype=tl.float32)
         for base in range(0, MAX_CTA_ELEMENTS, LOGICAL_LANES):
             cta_index = cta_begin + base + lanes
@@ -621,6 +596,310 @@ def _host_offsets(lengths: Iterable[int]) -> list[int]:
     return offsets
 
 
+def _require_empty_compilation_caches() -> dict[str, bool]:
+    """Require fresh, separate compiler-cache directories."""
+    directories = []
+    for variable in ("SWAGE_CACHE_DIR", "TRITON_CACHE_DIR"):
+        value = os.environ.get(variable)
+        if not value:
+            raise RuntimeError(
+                f"{variable} must name an existing empty directory"
+            )
+        directory = pathlib.Path(value).resolve()
+        if (
+            not directory.is_dir()
+            or next(directory.iterdir(), None) is not None
+        ):
+            raise RuntimeError(
+                f"{variable} must name an existing empty directory"
+            )
+        directories.append(directory)
+    if directories[0].samefile(directories[1]):
+        raise RuntimeError(
+            "SWAGE_CACHE_DIR and TRITON_CACHE_DIR must be distinct"
+        )
+    return {
+        "fresh_process": True,
+        "unique_directories": True,
+        "swage_initially_empty": True,
+        "triton_initially_empty": True,
+    }
+
+
+def _measure_segmented_compilation(torch, cases, kernels) -> dict[str, object]:
+    """Compile all specializations before correctness or warmup launches."""
+    from swage._segmented_qualification import (
+        _materialize_planned_sum_host,
+        _planned_sum_artifact_specs,
+    )
+    from swage._segmented_runtime import _compile_artifact
+
+    cache_policy = _require_empty_compilation_caches()
+    fixed_kernel, packed_kernel, cta_kernel, fused_kernel = kernels
+    signatures = []
+    case_configs = []
+    artifact_inputs = {}
+    for case in cases:
+        lengths = case["lengths"]
+        host_offsets = _host_offsets(lengths)
+        semantic, host_plan, target, schedule = _materialize_planned_sum_host(
+            torch,
+            host_offsets,
+            host_offsets[-1],
+            len(lengths),
+            warp_max_elements=_WARP_MAX_ELEMENTS,
+            cta_chunk_elements=4096,
+        )
+        specs = _planned_sum_artifact_specs(host_plan, schedule)
+        if tuple(name for name, _ in specs) != ("warp", "cta", "mixed"):
+            raise ValueError(
+                "bounded segmented compilation requires exactly warp, cta, "
+                "and mixed artifacts; split artifacts are unsupported"
+            )
+        for name, kwargs in specs:
+            inputs = (semantic, target, kwargs)
+            if name in artifact_inputs and artifact_inputs[name] != inputs:
+                raise ValueError(
+                    f"segmented cases disagree on {name} specialization"
+                )
+            artifact_inputs[name] = inputs
+        warp_ids, cta_ids = _partition_lengths(lengths)
+        signatures.append(
+            {
+                "distribution": case["distribution"],
+                "value_count": host_offsets[-1],
+                "segment_count": len(lengths),
+                "warp_task_count": len(warp_ids),
+                "cta_task_count": len(cta_ids),
+                "warp_programs": (len(warp_ids) + 3) // 4,
+            }
+        )
+        case_configs.append(_triton_sum_configs(max(lengths, default=0)))
+    if not signatures:
+        raise ValueError("segmented compilation requires at least one case")
+
+    timings = {}
+    component_order = []
+
+    def measure(name, operation, *args, **kwargs):
+        begin = time.perf_counter_ns()
+        operation(*args, **kwargs)
+        sample = (time.perf_counter_ns() - begin) / 1_000
+        if sample <= 0:
+            raise RuntimeError(f"{name} compilation timer did not advance")
+        component_order.append(name)
+        timings[name] = {
+            "samples_us": [sample],
+            "summary_us": summarize_us([sample]),
+        }
+
+    swage_components = []
+    for name, (semantic, target, kwargs) in artifact_inputs.items():
+        component = f"swage_{name}"
+        measure(component, _compile_artifact, semantic, target=target, **kwargs)
+        swage_components.append(component)
+
+    # Dtypes become Triton MockTensor pointers in JITFunction.warmup. Actual
+    # scalar arguments still participate in Triton's runtime specialization.
+    fixed_configs = sorted(
+        {config for configs in case_configs for config in configs}
+    )
+    triton_components = []
+
+    def compile_fixed(block, warps):
+        for signature, configs in zip(signatures, case_configs):
+            if (block, warps) not in configs:
+                continue
+            fixed_kernel.warmup(
+                torch.float32,
+                torch.int32,
+                torch.float32,
+                signature["segment_count"],
+                BLOCK=block,
+                num_warps=warps,
+                grid=(signature["segment_count"],),
+            )
+
+    for block, warps in fixed_configs:
+        component = f"triton_b{block}_w{warps}"
+        measure(component, compile_fixed, block, warps)
+        triton_components.append(component)
+
+    if any(signature["warp_task_count"] for signature in signatures):
+
+        def compile_packed():
+            for signature in signatures:
+                count = signature["warp_task_count"]
+                if count:
+                    packed_kernel.warmup(
+                        torch.float32,
+                        torch.int32,
+                        torch.float32,
+                        torch.int32,
+                        count,
+                        TASKS=4,
+                        WARP=32,
+                        num_warps=4,
+                        grid=(signature["warp_programs"],),
+                    )
+
+        measure("triton_matched_packed", compile_packed)
+        triton_components.append("triton_matched_packed")
+
+    if any(signature["cta_task_count"] for signature in signatures):
+
+        def compile_cta(warps):
+            for signature in signatures:
+                count = signature["cta_task_count"]
+                if count:
+                    cta_kernel.warmup(
+                        torch.float32,
+                        torch.int32,
+                        torch.float32,
+                        torch.int32,
+                        count,
+                        BLOCK=4096,
+                        num_warps=warps,
+                        grid=(count,),
+                    )
+
+        for warps in (1, 2, 4, 8):
+            component = f"triton_matched_cta_w{warps}"
+            measure(component, compile_cta, warps)
+            triton_components.append(component)
+
+    def compile_fused():
+        for signature in signatures:
+            fused_kernel.warmup(
+                torch.float32,
+                torch.int32,
+                torch.float32,
+                torch.int32,
+                signature["warp_task_count"],
+                torch.int32,
+                signature["cta_task_count"],
+                WARP_PROGRAMS=signature["warp_programs"],
+                LOGICAL_LANES=128,
+                SHORT_TASK_SLOTS=4,
+                WARP_LANES=32,
+                MAX_CTA_ELEMENTS=4096,
+                num_warps=4,
+                grid=(
+                    signature["warp_programs"] + signature["cta_task_count"],
+                ),
+            )
+
+    measure("triton_fused", compile_fused)
+    triton_components.append("triton_fused")
+    derived_totals = {
+        "swage_total": swage_components,
+        "triton_total": triton_components,
+    }
+    for name, components in derived_totals.items():
+        sample = sum(
+            timings[component]["samples_us"][0] for component in components
+        )
+        timings[name] = {
+            "samples_us": [sample],
+            "summary_us": summarize_us([sample]),
+        }
+    return {
+        "status": "measured",
+        "case": "segmented-sum",
+        "timing_method": (
+            "one time.perf_counter_ns wall-clock sample per ordered "
+            "compile-only component; totals are exact component sums, "
+            "not isolated cold starts"
+        ),
+        "compiler_order": ["swage", "triton"],
+        "component_order": component_order,
+        "configurations": {
+            "swage_artifacts": list(artifact_inputs),
+            "triton_fixed": [
+                {"block": block, "num_warps": warps}
+                for block, warps in fixed_configs
+            ],
+            "triton_matched_cta_num_warps": [1, 2, 4, 8],
+            "triton_fused_warp_programs": sorted(
+                {signature["warp_programs"] for signature in signatures}
+            ),
+            "triton_case_signatures": signatures,
+        },
+        "derived_totals": derived_totals,
+        "cache_policy": cache_policy,
+        "scope": {
+            "swage": {
+                "included": [
+                    "specialization",
+                    "semantic-module parse inside the compile miss",
+                    "MLIR/LLVM/NVPTX lowering and verification",
+                    "PTX production",
+                    "persistent-cache write",
+                ],
+                "excluded": [
+                    "imports",
+                    "host plan materialization",
+                    "contract binding",
+                    "CUDA module lease/load",
+                    "first launch",
+                    "device synchronization",
+                ],
+            },
+            "triton": {
+                "included": [
+                    "JITFunction.warmup compilation for actual "
+                    "per-case scalars",
+                    "runtime-scalar and constexpr specialization",
+                    "persistent-cache write",
+                    "duplicate-signature in-process cache hits "
+                    "within each group",
+                ],
+                "excluded": [
+                    "imports",
+                    "JIT-function construction",
+                    "kernel launch",
+                    "device synchronization",
+                ],
+            },
+        },
+        "not_applicable": {
+            "torch_segment_reduce": (
+                "eager PyTorch operator; no measured JIT phase"
+            ),
+            "torch_padded": "eager PyTorch operator; no measured JIT phase",
+        },
+        "timings": timings,
+    }
+
+
+def _plan_swage_sum(torch, values, offsets, output):
+    """Synchronize plan state without compilation, binding, or module load."""
+    from swage._segmented_plan import _prepare_planned_device_state
+    from swage._segmented_qualification import _materialize_planned_sum_host
+    from swage._segmented_validation import _validate_offsets, _validate_shapes
+
+    value_count, segment_count, host_offsets = _validate_shapes(
+        values, offsets, output, _validate_offsets
+    )
+    _, host_plan, _, _ = _materialize_planned_sum_host(
+        torch,
+        host_offsets,
+        value_count,
+        segment_count,
+        warp_max_elements=_WARP_MAX_ELEMENTS,
+        cta_chunk_elements=4096,
+    )
+    prepared = _prepare_planned_device_state(
+        torch,
+        offsets.device,
+        host_plan,
+        value_count=value_count,
+        segment_count=segment_count,
+    )
+    torch.cuda.synchronize()
+    return prepared
+
+
 def _launch_matched_task_partition(
     packed_kernel,
     cta_kernel,
@@ -664,9 +943,7 @@ def _wall_clock_interleaved_us(
     unit: str = "microseconds per synchronized end-to-end operation",
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Measure complete synchronized operations in rotating order."""
-    for round_index, order in enumerate(
-        _rotating_orders(operations, warmups)
-    ):
+    for round_index, order in enumerate(_rotating_orders(operations, warmups)):
         for name in order:
             operations[name](round_index)
     timings = {name: [] for name in operations}
@@ -678,7 +955,7 @@ def _wall_clock_interleaved_us(
             end = time.perf_counter_ns()
             timings[name].append((end - start) / 1_000.0)
     results = {
-        name: {"samples_us": values, "summary_us": _median_iqr(values)}
+        name: {"samples_us": values, "summary_us": summarize_us(values)}
         for name, values in timings.items()
     }
     method = {
@@ -703,7 +980,7 @@ def _orchestration_measurements(
     warmups: int,
     samples: int,
 ) -> dict[str, object]:
-    """Measure preparation and complete orchestration without compilation."""
+    """Measure compilation-free planning and warm complete orchestration."""
     from swage._segmented_validation import (
         _validate_offsets,
         _validate_shapes,
@@ -723,17 +1000,13 @@ def _orchestration_measurements(
         )
         validated_lengths = [
             end - begin
-            for begin, end in zip(
-                validated_offsets, validated_offsets[1:]
-            )
+            for begin, end in zip(validated_offsets, validated_offsets[1:])
         ]
         warp_ids, cta_ids = _partition_lengths(validated_lengths)
         device_warp_ids = torch.tensor(
             warp_ids, device="cuda", dtype=torch.int32
         )
-        device_cta_ids = torch.tensor(
-            cta_ids, device="cuda", dtype=torch.int32
-        )
+        device_cta_ids = torch.tensor(cta_ids, device="cuda", dtype=torch.int32)
         return device_warp_ids, device_cta_ids
 
     def run_swage(device_offsets):
@@ -762,30 +1035,26 @@ def _orchestration_measurements(
     run_swage(offsets)
     run_triton(offsets)
 
-    swage_preparation_output = torch.empty(len(lengths), device="cuda")
-    triton_preparation_output = torch.empty(len(lengths), device="cuda")
+    swage_planning_output = torch.empty(len(lengths), device="cuda")
+    triton_planning_output = torch.empty(len(lengths), device="cuda")
 
-    def prepare_swage_sample(_):
-        prepared = prepare_swage_only(offsets, swage_preparation_output)
-        torch.cuda.synchronize()
-        return prepared
+    def plan_swage_sample(_):
+        return _plan_swage_sum(torch, values, offsets, swage_planning_output)
 
-    def prepare_triton_sample(_):
-        descriptors = prepare_triton_only(
-            offsets, triton_preparation_output
-        )
+    def plan_triton_sample(_):
+        descriptors = prepare_triton_only(offsets, triton_planning_output)
         torch.cuda.synchronize()
         return descriptors
 
-    preparation_operations = {
-        "swage_mixed": prepare_swage_sample,
-        "triton_matched_task_partition": prepare_triton_sample,
+    planning_operations = {
+        "swage_mixed": plan_swage_sample,
+        "triton_matched_task_partition": plan_triton_sample,
     }
-    preparation_timings, preparation_method = _wall_clock_interleaved_us(
-        preparation_operations,
+    planning_timings, planning_method = _wall_clock_interleaved_us(
+        planning_operations,
         warmups,
         samples,
-        unit="microseconds per synchronized preparation",
+        unit="microseconds per synchronized planning operation",
     )
 
     fixed_operations = {
@@ -825,34 +1094,35 @@ def _orchestration_measurements(
         "device synchronization",
     ]
     return {
-        "preparation_only": {
+        "planning": {
             "geometry": "fixed offsets reused; output preallocated",
             "included": [
-                "tensor validation",
+                "tensor/offset validation",
+                "Swage semantic-module parsing and "
+                "native host-plan materialization",
                 "host task classification",
-                "descriptor tensor materialization",
+                "device descriptor/scratch materialization",
                 "device synchronization",
             ],
             "excluded": [
                 "output allocation",
                 "kernel launch",
-                "artifact/JIT compilation",
+                "artifact compilation/cache lookup",
+                "contract binding",
+                "CUDA module lease/load",
             ],
-            "compilation_excluded_after_explicit_warmup": True,
-            "timing_method": preparation_method,
-            "timings": preparation_timings,
+            "timing_method": planning_method,
+            "timings": planning_timings,
         },
         "end_to_end": {
             "artifact_jit_warmup": (
                 "one untimed complete operation per candidate before all "
-                "preparation and end-to-end samples"
+                "planning and end-to-end samples"
             ),
             "compilation_excluded": True,
             "graph_samples_combined": False,
             "warm_preparation": {
-                "geometry": (
-                    "fixed offsets reused; plan preparation repeated"
-                ),
+                "geometry": ("fixed offsets reused; plan preparation repeated"),
                 "included": complete_included,
                 "timing_method": fixed_method,
                 "timings": fixed_timings,
@@ -871,23 +1141,23 @@ def _orchestration_measurements(
 
 
 def _run_segmented_sum(
-    torch, warmups: int, samples: int
+    torch, warmups: int, samples: int, *, cases, kernels
 ) -> list[dict[str, object]]:
     """Benchmark private segmented sum against Triton and torch baselines."""
-    from distributions import generate_lengths, summarize_lengths
-    from real_traces import load_real_trace
+    from distributions import summarize_lengths
     from swage._segmented_qualification import _prepare_planned_sum
 
-    triton_kernel = _make_triton_segmented_sum()
-    triton_packed_kernel, triton_cta_kernel = (
-        _make_triton_matched_task_partition()
-    )
-    triton_fused_kernel = _make_triton_fused_sum()
-    cases = _segmented_case_inputs(generate_lengths, load_real_trace)
+    (
+        triton_kernel,
+        triton_packed_kernel,
+        triton_cta_kernel,
+        triton_fused_kernel,
+    ) = kernels
     results = []
     for case in cases:
         name = case["distribution"]
         lengths = case["lengths"]
+        segment_count = len(lengths)
         statistics_summary = summarize_lengths(lengths)
         triton_configs = _triton_sum_configs(statistics_summary["max"])
         warp_ids, cta_ids = _partition_lengths(lengths)
@@ -895,18 +1165,18 @@ def _run_segmented_sum(
         device_warp_ids = torch.tensor(
             warp_ids, device="cuda", dtype=torch.int32
         )
-        device_cta_ids = torch.tensor(
-            cta_ids, device="cuda", dtype=torch.int32
-        )
+        device_cta_ids = torch.tensor(cta_ids, device="cuda", dtype=torch.int32)
         values = torch.ones(
             host_offsets[-1], device="cuda", dtype=torch.float32
         )
         expected = torch.tensor(lengths, device="cuda", dtype=torch.float32)
+        padded, padded_layout = _padded_identity_input(torch, lengths)
         outputs = {
-            "swage_warp": torch.empty(_SEGMENT_COUNT, device="cuda"),
-            "swage_cta": torch.empty(_SEGMENT_COUNT, device="cuda"),
-            "swage_mixed": torch.empty(_SEGMENT_COUNT, device="cuda"),
-            "triton_fused": torch.empty(_SEGMENT_COUNT, device="cuda"),
+            "swage_warp": torch.empty(segment_count, device="cuda"),
+            "swage_cta": torch.empty(segment_count, device="cuda"),
+            "swage_mixed": torch.empty(segment_count, device="cuda"),
+            "triton_fused": torch.empty(segment_count, device="cuda"),
+            "torch_padded": torch.empty(segment_count, device="cuda"),
         }
         torch_output = {"value": None}
         prepared = _prepare_planned_sum(
@@ -958,27 +1228,30 @@ def _run_segmented_sum(
             "swage_warp": swage_warp,
             "swage_cta": swage_cta,
             "swage_mixed": prepared.launch_mixed,
-            "torch": launch_torch,
+            "torch_segment_reduce": launch_torch,
+            "torch_padded": lambda: torch.sum(
+                padded, dim=1, out=outputs["torch_padded"]
+            ),
             "triton_fused": launch_fused,
         }
         for block, warps in triton_configs:
-            output = torch.empty(_SEGMENT_COUNT, device="cuda")
+            output = torch.empty(segment_count, device="cuda")
             launch_name = f"triton_b{block}_w{warps}"
             outputs[launch_name] = output
             launches[launch_name] = (
                 lambda out=output, block=block, warps=warps: triton_kernel[
-                    (_SEGMENT_COUNT,)
+                    (segment_count,)
                 ](
                     values,
                     offsets,
                     out,
-                    _SEGMENT_COUNT,
+                    segment_count,
                     BLOCK=block,
                     num_warps=warps,
                 )
             )
         for warps in (1, 2, 4, 8):
-            output = torch.empty(_SEGMENT_COUNT, device="cuda")
+            output = torch.empty(segment_count, device="cuda")
             launch_name = "triton_matched_task_partition"
             if warps != 1:
                 launch_name = f"{launch_name}_w{warps}"
@@ -1000,7 +1273,10 @@ def _run_segmented_sum(
         for launch in launches.values():
             launch()
         torch.cuda.synchronize()
-        checked_outputs = {**outputs, "torch": torch_output["value"]}
+        checked_outputs = {
+            **outputs,
+            "torch_segment_reduce": torch_output["value"],
+        }
         for output_name, output in checked_outputs.items():
             torch.testing.assert_close(
                 output,
@@ -1026,7 +1302,7 @@ def _run_segmented_sum(
         row = {
             "case": "segmented-sum",
             "distribution": name,
-            "segment_count": _SEGMENT_COUNT,
+            "segment_count": segment_count,
             "statistics": statistics_summary,
             "triton_sweep_configs": [
                 {"block": block, "num_warps": warps}
@@ -1069,8 +1345,9 @@ def _run_segmented_sum(
             },
             "timing_method": timing_method,
             "timings": timing_results,
-            "preparation_only": orchestration["preparation_only"],
+            "planning": orchestration["planning"],
             "end_to_end": orchestration["end_to_end"],
+            "padded_layout": padded_layout,
         }
         if "trace_provenance" in case:
             row["trace_provenance"] = case["trace_provenance"]
@@ -1086,22 +1363,39 @@ def main():
 
     import torch
     import triton
-    from swage import _cuda_backend
+    from swage import _cuda_backend, env
 
     if not torch.cuda.is_available():
         raise RuntimeError("benchmark requires CUDA-enabled PyTorch")
     root = pathlib.Path(__file__).resolve().parents[1]
+    native = env.report()["native"]
+    if native["available"] is not True:
+        raise RuntimeError("comparison requires available native metadata")
+    compiler = {
+        key: native[key]
+        for key in (
+            "package_version",
+            "source_revision",
+            "source_clean",
+            "llvm_version",
+            "build_type",
+        )
+    }
+    compiler["llvm_pin"] = (
+        (root / "cmake" / "llvm-version.txt").read_text().strip()
+    )
     device = torch.cuda.current_device()
     properties = torch.cuda.get_device_properties(device)
     capability = torch.cuda.get_device_capability(device)
     result = {
+        "schema_version": 1,
         "benchmark": "swage-triton-comparison",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "source": _git_metadata(root),
         "environment": {
             "platform": platform.platform(),
             "python": sys.version,
-            "pytorch": torch.__version__,
+            "pytorch": str(torch.__version__),
             "pytorch_cuda": torch.version.cuda,
             "triton": triton.__version__,
             "cuda_driver": _cuda_backend.driver_version(),
@@ -1109,36 +1403,60 @@ def main():
             "compute_capability": f"sm_{capability[0]}{capability[1]}",
             "multiprocessors": properties.multi_processor_count,
             "total_memory_bytes": properties.total_memory,
+            "compiler": compiler,
         },
         "methodology": {
             "warmups_per_candidate_per_measurement": arguments.warmups,
             "samples_per_candidate_per_measurement": arguments.samples,
-            "candidate_sampling": (
-                "deterministic rotating/interleaved order"
-            ),
+            "candidate_sampling": ("deterministic rotating/interleaved order"),
             "batched_launches": _BATCHED_LAUNCHES,
             "graph_replay_launches": _BATCHED_LAUNCHES,
             "graph_capture_before_interleaved_replay": True,
             "kernel_timing_compilation_excluded": True,
             "end_to_end_compilation_excluded_after_explicit_warmup": True,
-            "preparation_only_output_preallocated": True,
-            "preparation_only_kernel_launch_excluded": True,
+            "planning_output_preallocated": True,
+            "planning_kernel_launch_excluded": True,
+            "planning_compilation_excluded": True,
             "end_to_end_not_combined_with_graph_samples": True,
             "correctness_checked_before_timing": True,
             "triton_dependency": "optional runtime import; not a project dep",
         },
+        "compilation": {
+            "status": "not-run",
+            "reason": "segmented-sum suite not selected",
+        },
         "results": [],
     }
+    if arguments.suite in {"all", "segmented-sum"}:
+        from distributions import generate_lengths
+        from real_traces import load_real_trace
+
+        cases = list(_segmented_case_inputs(generate_lengths, load_real_trace))
+        kernels = (
+            _make_triton_segmented_sum(),
+            *_make_triton_matched_task_partition(),
+            _make_triton_fused_sum(),
+        )
+        result["compilation"] = _measure_segmented_compilation(
+            torch, cases, kernels
+        )
     if arguments.suite in {"all", "vadd"}:
         result["results"].extend(
             _run_vadd(torch, arguments.warmups, arguments.samples)
         )
     if arguments.suite in {"all", "segmented-sum"}:
         result["results"].extend(
-            _run_segmented_sum(torch, arguments.warmups, arguments.samples)
+            _run_segmented_sum(
+                torch,
+                arguments.warmups,
+                arguments.samples,
+                cases=cases,
+                kernels=kernels,
+            )
         )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(json.dumps(result, indent=2) + "\n")
+    validate_child(result)
     print(json.dumps({"output": str(arguments.output)}, sort_keys=True))
 
 

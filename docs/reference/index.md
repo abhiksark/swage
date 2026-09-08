@@ -12,6 +12,7 @@ disagree, the reference is normative.
 | [swage.language](swage-language.md) | The symbolic kernel-language exports |
 | [Kernel Language](kernel-language.md) | The accepted Python source grammar |
 | [Runtime and Environment](runtime-environment.md) | Launch validation, targets, cache, streams, and diagnostics |
+| [Benchmarking](benchmarking.md) | Installed-wheel vector-add CLI, frozen raw evidence, and enforcement |
 
 Compiler-facing references, including the MLIR dialects and registered
 passes, live under [Internals](../internals/index.md); they are not public

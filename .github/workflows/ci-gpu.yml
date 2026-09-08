@@ -118,7 +118,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP"
           env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" \
-            "$GITHUB_WORKSPACE/benchmarks/benchmark_fixed_runtime.py" \
+            -m swage.bench vector-add \
             --enforce --output "$RUNNER_TEMP/fixed-runtime-slo.json"
       - name: Retain raw SLO evidence on failure
         if: always()

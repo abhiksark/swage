@@ -278,9 +278,13 @@ Good discussion questions include:
 
 ## Reproduce the campaign
 
-Triton is an optional benchmark-time import and is not a Swage dependency.
-The campaign runner launches fresh processes, preserves their JSON records,
-and aggregates process medians:
+Triton 3.7 is an optional benchmark-time import, not a Swage dependency.
+Build from a clean committed source revision with the pinned LLVM/MLIR
+`llvmorg-22.1.8` and `Release` configuration. The native build metadata must
+name that exact revision and an independently read matching source pin.
+The campaign runner launches fresh processes with distinct empty Swage and
+Triton caches outside the source and output directories, removes those caches
+afterward, preserves raw JSON records, and aggregates process medians:
 
 ```bash
 PYTHONPATH="$PWD/python:$PWD/build/python_packages" \
@@ -302,16 +306,52 @@ nonempty process observations. Shared mode preserves those observations but is
 not eligible for archival use and cannot use `--archival-source`; empty
 snapshots alone do not prove exclusive allocation.
 
-The current child harness rotates and interleaves candidate order.
-Preparation-only and fixed- and changing-geometry end-to-end timings compare
-only `swage_mixed` with matched task-partition Triton at one CTA warp; fused
-Triton has prepared steady-state timings only, and compilation is excluded. It
-also includes `soc-epinions1-outdegree-v1`, a deterministic,
+The schema-v1 child harness rotates and interleaves candidate order. It
+separates fresh-cache suite compilation, per-input planning, and steady-state
+kernel/dispatch timing:
+
+- Compilation records the ordered Swage warp/CTA/mixed artifact misses, then
+  Triton compile-only `warmup` groups covering every selected distribution's
+  scalar and constexpr signatures. It excludes kernel launches and
+  synchronization. This is an ordered phase account, not an isolated
+  cold-start comparison between compilers.
+- Planning compares `swage_mixed` with matched task-partition Triton at one
+  CTA warp. It includes validation, host classification, device descriptor
+  materialization, and synchronization. Swage also includes semantic-module
+  parsing and scratch materialization; compilation/cache lookup, contract
+  binding, module loading, output allocation, and launches are excluded.
+- Synchronized calls, 32-launch batched CUDA events, and 32-launch graph
+  replays remain separate steady-state measurements. Fixed- and
+  changing-geometry end-to-end operations repeat full preparation and launch
+  after explicit compilation warmup; they are not added to graph samples.
+
+The harness also includes `soc-epinions1-outdegree-v1`, a deterministic,
 without-replacement, hash-ranked 32,768-row sample of the 75,879-vertex
 endpoint universe with sink-only vertices retained as zero rows. The frozen
 `80f222d` central record predates these controls: it is fixed-order,
 one-process legacy evidence over seven synthetic distributions and gains no
 new result from the current harness.
+
+The five declared segmented baselines are `torch_padded`, `swage_warp`,
+`swage_cta`, `triton_matched_task_partition` (the manual-buckets baseline),
+and `swage_mixed`. `torch_segment_reduce`, the fixed Triton sweep, alternate
+CTA-warp task partitions, and fused Triton remain additional comparators.
+The padded baseline materializes a contiguous float32
+`[segment_count, max_length]` all-one/zero matrix before timing, then measures
+`torch.sum(..., dim=1, out=...)` with a preallocated output. Its JSON records
+packed and padded elements, padding fraction, and storage bytes. All-empty
+segments use zero columns and storage and produce one zero per segment.
+This is a **padded-storage lower bound for this fixed all-one workload**:
+input construction is excluded from every steady-state sample, not charged
+selectively to other kernels. It does not erase the storage expansion or
+claim general packed-to-padded conversion is free.
+
+`benchmarks/benchmark_campaign.py` validates exact versioned schemas, unique
+JSON keys, raw inclusive-IQR summaries, compiler/source agreement, child
+hashes, complete candidate sets, and recomputed telemetry eligibility.
+Stored summaries and aggregate medians are integrity checks, not substitutes
+for raw samples. An invalid run retains failed observations externally and
+does not leave a success manifest.
 
 Exact reproduction requires the full recorded revision and environment; a
 current-tree campaign is a new run. An archival campaign additionally requires

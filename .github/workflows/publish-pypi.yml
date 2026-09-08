@@ -369,7 +369,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           unset PYTHONPATH
-          "$RELEASE_WORK/venv/bin/python" "$GITHUB_WORKSPACE/benchmarks/benchmark_fixed_runtime.py" \
+          "$RELEASE_WORK/venv/bin/python" -m swage.bench vector-add \
             --enforce --output "$RELEASE_WORK/evidence/fixed-runtime-slo.json"
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         if: always()

@@ -103,6 +103,11 @@ and the runnable `examples/fixed_vector_add.py` and
 defines error codes, build identity, opt-in `swage.runtime` DEBUG logging, and
 wheel checksum/attestation verification.
 
+Native wheels also ship `python -m swage.bench vector-add --output result.json`
+for the frozen CUDA vector-add benchmark. See the
+[benchmark CLI contract](docs/reference/benchmarking.md) for prerequisites,
+raw evidence, and `--enforce`; this command alone does not qualify a release.
+
 Compiler contributors can instead build exactly `llvmorg-22.1.8`:
 
 ```bash

@@ -276,6 +276,8 @@ def _check_archive(
         )
     required = {
         "swage/__init__.py",
+        "swage/bench.py",
+        "swage/_benchmark.py",
         "swage/language.py",
         "swage/py.typed",
         "swage/__init__.pyi",

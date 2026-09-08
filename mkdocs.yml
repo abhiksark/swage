@@ -74,6 +74,7 @@ nav:
       - swage.language: reference/swage-language.md
       - Kernel Language: reference/kernel-language.md
       - Runtime and Environment: reference/runtime-environment.md
+      - Benchmarking: reference/benchmarking.md
   - Internals:
       - internals/index.md
       - Compiler Pipeline: internals/compiler-pipeline.md

@@ -38,7 +38,7 @@ evidence.
 | Self-contained repaired manylinux wheel, ABI, size, licenses, and provenance | Implemented v0.5.2 release gate; hosted artifact checks | `scripts/check_native_wheel.py`, `scripts/repair_native_wheel.py`, `publish-pypi.yml` | Shared repair/check scripts with `--expected-revision` and all source/build roots as `--forbid-prefix`; each wheel strictly below 95,000,000 bytes |
 | Exact distribution set and source-tree/sdist wheel reproducibility | Implemented v0.5.2 release gate; hosted aggregation | `publish-pypi.yml`, repair JSON | Exactly four cp310–cp313 wheels plus one sdist; cp313 `--rebuild-sdist` SHA-256 equality; `SHA256SUMS` |
 | SPDX SBOM, build provenance, and publication authorization | Implemented release gates; not yet a published attestation | `publish-pypi.yml` | One aggregate SPDX JSON SBOM; signed protected tag only for build/SBOM attestation and reviewed `pypi` OIDC publication; manual runs never attest or publish |
-| Actual repaired cp313 wheel CUDA correctness, cache reuse, and fixed-runtime SLOs | Required trusted release gate; qualification pending | `publish-pypi.yml`, `scripts/smoke_installed_wheel.py`, `benchmarks/benchmark_fixed_runtime.py` | Installed fixed runtime pytest, CUDA health/smoke, second process `--require-persistent-hit`, and `--enforce --output fixed-runtime-slo.json` on NVIDIA RTX A6000 / `sm_86` |
+| Actual repaired cp313 wheel CUDA correctness, cache reuse, and fixed-runtime SLOs | Required trusted release gate; qualification pending | `publish-pypi.yml`, `scripts/smoke_installed_wheel.py`, `python/swage/_benchmark.py` | Installed fixed runtime pytest, CUDA health/smoke, second process `--require-persistent-hit`, and `python -m swage.bench vector-add --enforce --output fixed-runtime-slo.json` on NVIDIA RTX A6000 / `sm_86` |
 | Restricted AST to verified native module | Public today, compile-only | `tests/python/test_frontend.py`, `python/tests/mlir/test_frontend.py` | `python -m pytest tests/python -q`; `ninja -C build check-swage-python` |
 | Fixed vector add/multiply CPU/CUDA lowering and launch | Public today | fixed-block lit tests, `python/tests/mlir/test_cpu_runtime.py`, `python/tests/mlir/test_runtime.py` | `ninja -C build check-swage`; `ninja -C build check-swage-python`; trusted GPU workflow |
 | FP32, FP16, and FP8 elementwise numerics, storage, and dispatch isolation | Public source implementation; trusted multiplication qualification remains a release gate | `python/tests/mlir/test_low_precision_runtime.py`, `python/tests/mlir/test_operation_dispatch.py`, fixed-block low-precision lit tests | `ninja -C build check-swage-python`; installed CPU/CUDA runtime tests and smoke for both operations and all four dtypes |
@@ -157,10 +157,14 @@ manylinux, and additional-device qualification require their own runs.
 
 ## Frozen fixed-runtime SLO gates
 
-`benchmarks/benchmark_fixed_runtime.py` writes raw JSON before returning,
-including failed gates. `--enforce` refuses hardware other than exactly
-NVIDIA RTX A6000 / `sm_86`. Correctness runs before every timing section;
-any mismatch invalidates the record regardless of timing.
+`python -m swage.bench vector-add --output fixed-runtime-slo.json` writes raw
+JSON before returning, including failed gates and partial measurement errors.
+The installed-wheel [benchmark CLI contract](../reference/benchmarking.md)
+preserves the frozen vector-add-only scope; public multiplication is not a
+benchmark selector. `--enforce` refuses hardware other than exactly NVIDIA RTX
+A6000 / `sm_86`. Correctness runs before every timing section; any mismatch
+invalidates the record regardless of timing. Passing this CLI alone does not
+qualify a release.
 
 | Gate | Frozen method | Passing threshold |
 |---|---|---|
@@ -180,8 +184,8 @@ Signed-tag runs may attest and publish only after all gates pass.
 
 The 2026-09-05 repaired cp313 run on NVIDIA RTX A6000 / `sm_86`, CPython
 3.13.13, and PyTorch `2.12.0+cu130` passes every frozen SLO and all 32 installed
-fixed-runtime tests. The benchmark script is byte-identical to the
-pre-remediation source distribution; neither timings nor thresholds were
+fixed-runtime tests. The benchmark script used for that run was byte-identical
+to the pre-remediation source distribution; neither timings nor thresholds were
 redefined. [Raw samples and build identity](https://github.com/abhiksark/swage/blob/main/benchmarks/results/fixed-runtime-a6000-sm86.json)
 record the following results:
 

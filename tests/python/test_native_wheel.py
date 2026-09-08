@@ -159,6 +159,8 @@ def _wheel(
     )
     members = {
         "swage/__init__.py": b'__version__ = "0.5.2"\n',
+        "swage/bench.py": b"",
+        "swage/_benchmark.py": b"",
         "swage/language.py": b"",
         "swage/py.typed": b"",
         "swage/__init__.pyi": b"def jit(f): ...\n",
@@ -351,6 +353,8 @@ def test_dirty_artifacts_require_explicit_local_opt_in(checker, tmp_path):
     "member",
     [
         "swage/__init__.py",
+        "swage/bench.py",
+        "swage/_benchmark.py",
         "mlir_swage/ir.py",
         _EXTENSION,
         _SWAGE_EXTENSION,
@@ -364,7 +368,7 @@ def test_dirty_artifacts_require_explicit_local_opt_in(checker, tmp_path):
     ],
 )
 def test_missing_release_capability_fails(checker, tmp_path, member):
-    """Removing a binding, runtime, public typing or license fails the gate."""
+    """Removing a binding, runtime, CLI, typing or license fails the gate."""
     wheel = _wheel(tmp_path, remove=[member])
     with pytest.raises(ValueError, match="missing"):
         checker.check_wheel(wheel, expected_revision=_REVISION)

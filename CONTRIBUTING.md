@@ -185,12 +185,15 @@ Run tiers in order; a later passing result never waives an earlier failure:
    `python "$repo/scripts/smoke_installed_wheel.py" --backend cuda`,
    then the same smoke in a second process with `--require-persistent-hit`
    and the same private `SWAGE_CACHE_DIR`. Run
-   `python "$repo/benchmarks/benchmark_fixed_runtime.py" --enforce --output fixed-runtime-slo.json`.
+   `python -m swage.bench vector-add --enforce --output fixed-runtime-slo.json`.
    The release workflow also runs `python/tests/mlir/test_runtime.py` against
    that installed wheel. Enforcement requires exactly NVIDIA RTX A6000 /
    `sm_86`; retain raw JSON even on failure.
 
 See [Verification](docs/internals/verification.md) for the frozen SLO thresholds.
+The installed-wheel [benchmark CLI](docs/reference/benchmarking.md) preserves
+the frozen vector-add-only workload; multiplication remains public execution,
+not an additional benchmark selector.
 Local measurements that miss the warm-dispatch or throughput gates under
 load do not qualify a release. The trusted installed-wheel run must pass;
 neither private segmented qualification nor historical GPU snapshots replace it.

@@ -8,6 +8,9 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- Installed-wheel `python -m swage.bench vector-add --output PATH [--enforce]`
+  entry point, with dependency-free help and the unchanged frozen float32
+  vector-add schema, correctness checks, and inclusive A6000 gates.
 - Public canonical vector addition and multiplication now support matching
   `float16`, `float8_e4m3fn`, and `float8_e5m2` tensors on CPU and CUDA,
   alongside `float32`. Low-precision arithmetic rounds an FP32 sum or product
@@ -32,17 +35,24 @@ semantic versioning (`0.x`; anything may change).
   JSON validation, CUDA and Native CPU launch models, complete physical scalar
   kinds, typed runtime binding, and retained RTX A6000 host-marshalling gate
   evidence.
-- An independent-process Swage/Triton campaign runner with interleaved
-  candidate timing, preparation-only and end-to-end measurements, a fused
-  one-launch Triton comparator, fail-closed NVIDIA compute-context telemetry,
-  explicit archival-eligibility assertions, and a pinned,
-  provenance-checked `soc-Epinions1` outgoing-degree trace.
+- A source-only independent-process Swage/Triton campaign runner with
+  interleaved candidate timing, fresh-cache compile-only phase accounting,
+  separate per-input planning and warm end-to-end measurements, and a padded
+  PyTorch storage baseline. Strict schema-v1 evidence validates native/source
+  identity, raw samples, child hashes, aggregates, and NVIDIA telemetry.
+  Parameterized chart calculations use only raw child samples; archival
+  figures require a successful exclusive campaign. The pinned,
+  provenance-checked `soc-Epinions1` outgoing-degree trace is retained.
 - Explicit `backend="cuda"` or `backend="cpu"` public launch selection for the
   canonical fixed vector add. The Native CPU path uses a synchronous,
   process-local LLVM JIT executable and never falls back to CUDA.
 
 ### Changed
 
+- Replaced the standalone fixed-runtime benchmark script with the installed
+  module command. CI and release callers require the wheel-shipped parser and
+  benchmark implementation; no compatibility wrapper or segmented selector
+  is provided.
 - Native wheel builds use pinned scikit-build-core and exact LLVM 22.1.8;
   source distributions and frontend-only editable installs remain CMake-free.
   Private segmented Python modules are excluded from wheels, not source trees.

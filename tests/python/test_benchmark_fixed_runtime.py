@@ -1,23 +1,16 @@
 # tests/python/test_benchmark_fixed_runtime.py
 """Frozen SLO thresholds, evidence completeness, and enforcement eligibility."""
 
-import importlib.util
 import json
-from pathlib import Path
 
 import pytest
+from swage import _benchmark
 
 
 @pytest.fixture
 def slo_harness():
     """Load the measurement harness without importing PyTorch or native code."""
-    path = Path(__file__).resolve().parents[2] / "benchmarks"
-    spec = importlib.util.spec_from_file_location(
-        "benchmark_fixed_runtime", path / "benchmark_fixed_runtime.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _benchmark
 
 
 def _evidence():
@@ -104,20 +97,24 @@ def test_failure_writes_partial_raw_json_before_exit(
 
     monkeypatch.setattr(slo_harness, "_measure", fail)
     output = tmp_path / "evidence.json"
-    assert slo_harness.main(["--output", str(output), "--enforce"]) == 1
+    assert slo_harness.run_fixed_vector_add(output=output, enforce=True) == 1
     record = json.loads(output.read_text())
+    assert record["benchmark"] == "fixed-runtime"
+    assert record["schema_version"] == 1
     assert record["measurements"]["warm_host_us"] == [12.5]
     assert record["configuration"]["cold"]["processes"] == 5
     assert record["error"]["type"] == "ValueError"
     assert not record["valid"] and not record["passed"]
 
 
-def test_enforced_threshold_failure_keeps_complete_evidence(
+@pytest.mark.parametrize("enforce", (False, True))
+def test_threshold_failure_keeps_complete_evidence(
     slo_harness,
     monkeypatch,
     tmp_path,
+    enforce,
 ):
-    """Complete measurements survive an enforced SLO failure."""
+    """Complete evidence survives failure; only enforcement fails the exit."""
 
     def slow(record, enforce):
         record.update(_evidence())
@@ -125,7 +122,9 @@ def test_enforced_threshold_failure_keeps_complete_evidence(
 
     monkeypatch.setattr(slo_harness, "_measure", slow)
     output = tmp_path / "slow.json"
-    assert slo_harness.main(["--output", str(output), "--enforce"]) == 1
+    assert slo_harness.run_fixed_vector_add(
+        output=output, enforce=enforce
+    ) == int(enforce)
     record = json.loads(output.read_text())
     assert record["gates"]["cold_ms"]["passed"]
     assert not record["gates"]["warm_host_us"]["passed"]

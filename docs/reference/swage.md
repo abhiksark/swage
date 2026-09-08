@@ -19,6 +19,11 @@ The package ships `py.typed` and stubs for this fixed public contract,
 including `Literal["cpu", "cuda"]` backend selection. Symbolic DSL values do
 not imply a broader public language or segmented execution surface.
 
+The installed-wheel operational command
+`python -m swage.bench vector-add --output result.json` is documented in
+[Benchmarking](benchmarking.md). It does not add package exports or kernel
+APIs, expose segmented execution, or independently qualify a release.
+
 ## swage.jit
 
 ```python

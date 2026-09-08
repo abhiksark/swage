@@ -1,7 +1,6 @@
-# benchmarks/benchmark_fixed_runtime.py
+# python/swage/_benchmark.py
 """Measure the frozen installed-wheel CUDA release gates; always retain JSON."""
 
-import argparse
 import json
 import math
 import os
@@ -36,7 +35,7 @@ _CONFIG = {
 }
 
 
-def _kernel():
+def _fixed_vector_add_kernel():
     import swage as sw
     import swage.language as sl
 
@@ -109,7 +108,7 @@ def _cold_child():
     _installed()
     import torch
 
-    kernel = _kernel()
+    kernel = _fixed_vector_add_kernel()
     launch, output, expected, _, _ = _inputs(torch, kernel, 129, 128)
     torch.cuda.synchronize()
     before = _rss()
@@ -213,6 +212,7 @@ def require_qualified_hardware(name, target):
 def _measure(record, enforce):
     swage = _installed()
     import torch
+
     from swage import env
 
     record["package"] = swage.__version__
@@ -247,7 +247,7 @@ def _measure(record, enforce):
     native = record["environment"]["native"]
     if native["error"] or native["package_version"] != swage.__version__:
         raise ValueError("installed native package identity failed")
-    kernel = _kernel()
+    kernel = _fixed_vector_add_kernel()
     launch, output, expected, _, _ = _inputs(torch, kernel, 129, 128)
     # Preflight is separate so measured child processes still start cold.
     _correct(torch, launch, output, expected)
@@ -259,7 +259,9 @@ def _measure(record, enforce):
             child = subprocess.run(
                 [
                     sys.executable,
-                    str(pathlib.Path(__file__).resolve()),
+                    "-m",
+                    "swage.bench",
+                    "vector-add",
                     "--cold-child",
                 ],
                 env={**os.environ, "SWAGE_CACHE_DIR": str(cache)},
@@ -324,26 +326,18 @@ def _measure(record, enforce):
                 )
 
 
-def main(argv=None):
+def run_fixed_vector_add(*, output, enforce, cold_child=False) -> int:
     """Write raw evidence on invalid runs; never waive correctness failures."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=pathlib.Path)
-    parser.add_argument("--enforce", action="store_true")
-    parser.add_argument(
-        "--cold-child", action="store_true", help=argparse.SUPPRESS
-    )
-    args = parser.parse_args(argv)
-    if args.cold_child:
+    if cold_child:
         print(json.dumps(_cold_child(), sort_keys=True))
         return 0
-    if args.output is None:
-        parser.error("--output is required")
+    output = pathlib.Path(output)
     record = {
         "schema_version": 1,
         "benchmark": "fixed-runtime",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "configuration": _CONFIG,
-        "enforced": args.enforce,
+        "enforced": enforce,
         "qualified": False,
         "valid": False,
         "passed": False,
@@ -352,7 +346,7 @@ def main(argv=None):
         "measurements": {"cold": [], "warm_host_us": [], "throughput": {}},
     }
     try:
-        _measure(record, args.enforce)
+        _measure(record, enforce)
         evaluate(record)
     except Exception as error:
         record["error"] = {
@@ -361,20 +355,16 @@ def main(argv=None):
             if isinstance(error, ValueError)
             else "measurement failed; record is invalid",
         }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     print(
         json.dumps(
             {
-                "output": str(args.output),
+                "output": str(output),
                 "valid": record["valid"],
                 "passed": record["passed"],
             },
             sort_keys=True,
         )
     )
-    return int(not record["valid"] or (args.enforce and not record["passed"]))
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return int(not record["valid"] or (enforce and not record["passed"]))

@@ -32,6 +32,9 @@ exists as private qualification machinery or planned work.
 - Keyword-only launch of canonical fixed vector add or multiply on explicitly
   selected CUDA or Native CPU backends.
 - `python -m swage.env --json` diagnostics and explicit native/CPU/CUDA health checks.
+- Installed-wheel `python -m swage.bench vector-add --output result.json` for
+  the [frozen CUDA vector-add benchmark](reference/benchmarking.md), not
+  independent release qualification.
 - Native `swage` MLIR parsing and verification; compiler tools through source builds.
 
 The fixed kernel's semantics are unchanged. CPU and CUDA selection never falls
