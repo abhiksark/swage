@@ -9,8 +9,11 @@ Rules for the Python package (`swage`, distributed as `swage-compiler`).
 - Preserve Python source locations into MLIR; diagnostics name the kernel
   function and line.
 - Symbolic `swage.language` functions must fail clearly outside `@sw.jit`.
-- Public API compatibility: anything importable from `swage` is public;
-  removals or renames need a deprecation note in `CHANGELOG.md`.
+- Public API compatibility applies to documented public `swage` interfaces and
+  explicit public exports, not every importable module. Underscore-prefixed
+  implementation modules, including `swage._segmented*`, and `mlir_swage` are
+  private. Removals or renames of public interfaces need a deprecation note in
+  `CHANGELOG.md`.
 - Style: Google Python style, 80 columns, Google-style docstrings; `ruff
   check .` must pass. Every file starts with its repo-relative path
   comment (see existing files).
