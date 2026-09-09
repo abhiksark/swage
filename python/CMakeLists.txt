@@ -101,7 +101,7 @@ endif()
 
 add_custom_target(check-swage-python
   COMMAND ${CMAKE_COMMAND} -E env
-    "PYTHONPATH=${SWAGE_PYTHON_TEST_ROOT}"
+    "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}:${SWAGE_PYTHON_TEST_ROOT}"
     "${Python3_EXECUTABLE}" -m pytest -q
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   DEPENDS SwagePythonModules

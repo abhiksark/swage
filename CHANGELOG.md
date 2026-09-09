@@ -49,6 +49,10 @@ semantic versioning (`0.x`; anything may change).
 
 ### Changed
 
+- Native Python test subprocesses retain the active checkout's source package
+  path, preventing an unrelated editable install from contaminating
+  second-process persistent-cache verification in linked worktrees.
+
 - Replaced the standalone fixed-runtime benchmark script with the installed
   module command. CI and release callers require the wheel-shipped parser and
   benchmark implementation; no compatibility wrapper or segmented selector
