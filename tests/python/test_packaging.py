@@ -2,6 +2,7 @@
 """Tests for the published Python distributions."""
 
 import email
+import re
 import subprocess
 import sys
 import tarfile
@@ -13,7 +14,19 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_VERSION = "0.5.1"
+
+
+def _source_version():
+    """Read the version from the file the build backend reads it from."""
+    source = (_REPO_ROOT / "python" / "swage" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
+    assert match is not None, "python/swage/__init__.py sets no __version__"
+    return match.group(1)
+
+
+_VERSION = _source_version()
 _PACKAGE_FILES = {
     "swage/__init__.py",
     "swage/_frontend.py",
@@ -103,8 +116,8 @@ def test_sdist_contains_only_distribution_sources(distributions):
     assert _PACKAGE_FILES == package_members
 
 
-def test_distribution_metadata_identifies_v051(distributions):
-    """Publish matching wheel and sdist metadata for version 0.5.1."""
+def test_distribution_metadata_matches_the_package_source(distributions):
+    """Publish wheel and sdist metadata that carry the source version."""
     wheel, sdist = distributions
     with zipfile.ZipFile(wheel) as archive:
         metadata_name = next(
@@ -126,9 +139,25 @@ def test_distribution_metadata_identifies_v051(distributions):
         assert metadata["Version"] == _VERSION
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["Summary"] == (
-            "Python-embedded MLIR/LLVM GPU compiler for variable-sized "
-            "dense segments"
+            "Pure Python package of Swage, an experimental MLIR/LLVM GPU "
+            "compiler; emitting MLIR and launching kernels require a native "
+            "build from source"
         )
+
+
+def test_build_backend_has_one_pinned_version():
+    """Pin the same hatchling in the build system, dev extra, and CI lock."""
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (_REPO_ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+
+    build_system = re.search(r"^requires = (\[.*\])$", pyproject, re.MULTILINE)
+    assert build_system is not None
+    pyproject_pins = re.findall(r'"hatchling==([^"]+)"', pyproject)
+    lock_pins = re.findall(r"^hatchling==(\S+)", lock, re.MULTILINE)
+
+    assert len(lock_pins) == 1
+    assert build_system.group(1) == f'["hatchling=={lock_pins[0]}"]'
+    assert pyproject_pins == [lock_pins[0], lock_pins[0]]
 
 
 def test_wheel_clean_install_has_the_expected_native_boundary(
@@ -163,7 +192,7 @@ def test_wheel_clean_install_has_the_expected_native_boundary(
 
             import swage
 
-            assert swage.__version__ == "0.5.1"
+            assert swage.__version__ == sys.argv[1]
             assert "torch" not in sys.modules
             assert "mlir_swage" not in sys.modules
 
@@ -185,7 +214,7 @@ def test_wheel_clean_install_has_the_expected_native_boundary(
         encoding="utf-8",
     )
     result = subprocess.run(
-        [str(python), str(smoke)],
+        [str(python), str(smoke), _VERSION],
         capture_output=True,
         text=True,
         check=False,

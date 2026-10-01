@@ -1,3 +1,4 @@
+# .github/workflows/ci-python.yml
 name: ci-python
 
 on:
@@ -25,14 +26,19 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install package with dev extras
-        run: pip install -e ".[dev]" build
+      # requirements-ci.txt pins every tool and its dependencies by hash. The
+      # package is then installed with the locked build backend and without
+      # a download.
+      - name: Install hash-locked tools and the package
+        run: |
+          python -m pip install --require-hashes -r requirements-ci.txt
+          python -m pip install --no-deps --no-build-isolation -e .
       - name: Lint
         run: ruff check .
       - name: Tests
         run: python -m pytest tests/python -q
       - name: Package build
-        run: python -m build
+        run: python -m build --no-isolation
 
   docs:
     runs-on: ubuntu-latest
@@ -42,7 +48,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+      # The file Read the Docs installs, so both builds use one toolchain.
       - name: Install docs toolchain
-        run: pip install ".[docs]"
+        run: python -m pip install --require-hashes -r docs/requirements.txt
       - name: Build docs strictly
         run: make docs

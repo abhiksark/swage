@@ -9,6 +9,10 @@
 #                     pinned release; configure rejects any other version
 #   SWAGE_BUILD_DIR   build tree (default ./build)
 #   SWAGE_BUILD_TYPE  CMake build type (default RelWithDebInfo)
+#
+# The mlir_swage bindings are built for the `python` found on PATH, the
+# interpreter the documented commands run, or for `python3` where `python`
+# is absent or older than Python 3.10.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,10 +29,27 @@ if [ ! -d "$MLIR_DIR" ]; then
     exit 1
 fi
 
+PYTHON=""
+for candidate in python python3; do
+    if command -v "$candidate" >/dev/null &&
+        "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
+            >/dev/null 2>&1; then
+        PYTHON="$(command -v "$candidate")"
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "error: found no Python 3.10 or newer on PATH as python or python3;" \
+        "the mlir_swage bindings and their tests need one" >&2
+    exit 1
+fi
+echo "Python interpreter: $PYTHON"
+
 cmake -G Ninja -S "$REPO_ROOT" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="${SWAGE_BUILD_TYPE:-RelWithDebInfo}" \
     -DMLIR_DIR="$MLIR_DIR" \
     -DLLVM_DIR="$LLVM_DIR" \
+    -DPython3_EXECUTABLE="$PYTHON" \
     -DLLVM_EXTERNAL_LIT="$(command -v lit || true)"
 
 ninja -C "$BUILD_DIR"
