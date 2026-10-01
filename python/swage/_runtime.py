@@ -128,7 +128,12 @@ def launch(kernel, *, arguments, constexprs, grid):
         )
         _write_dumps(artifact)
         driver = _get_driver()
-        context = driver.current_context()
+        try:
+            context = driver.current_context()
+        except RuntimeError:
+            context = _make_context_current(
+                torch, driver.current_context, spec.tensors[0].device.index
+            )
         loaded_key = (artifact.key, context)
         loaded = _loaded_functions.get(loaded_key)
         if loaded is None:
@@ -379,6 +384,33 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
         stream,
         descriptors,
     )
+
+
+def _make_context_current(torch, current_context, device_index):
+    """Give a thread that has no CUDA context the context of its device.
+
+    A thread that has not used CUDA has no current context, and PyTorch
+    makes the device's context current with its first CUDA call there. A
+    launch may make no such call before it reaches the driver, so the
+    context is made current here. No context is created: the device holds
+    validated tensors, so its context exists. This is the path of a
+    thread's first launch only; a context that is already current is never
+    replaced.
+
+    Args:
+        torch: The PyTorch module.
+        current_context: The driver's bound `current_context` method.
+        device_index: Index of the device of the validated tensors, which
+            the caller has checked to be the current device.
+
+    Returns:
+        The context that is current now.
+
+    Raises:
+        RuntimeError: The thread still has no current context.
+    """
+    torch.cuda.set_device(device_index)
+    return current_context()
 
 
 def _device_facts(torch, index):

@@ -3291,3 +3291,63 @@ def test_atomic_write_closes_a_descriptor_it_could_not_wrap(
     with pytest.raises(OSError, match="Bad file descriptor"):
         os.fstat(opened[0])
     assert list(tmp_path.iterdir()) == []
+
+
+def test_launch_gives_a_thread_without_a_context_its_device_context(
+    monkeypatch,
+):
+    """Make the validated device's context current and launch in it."""
+    torch, _ = _fake_torch(current_device=0)
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    def current_context():
+        if not made_current:
+            raise RuntimeError("PyTorch has no current CUDA context")
+        return 0xCAFE
+
+    driver.current_context = current_context
+    arguments = _arguments(torch)
+
+    add_kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
+
+    assert made_current == [0]
+    assert driver.loads == [("ptx", "add_kernel")]
+    assert len(driver.launches) == 1
+
+
+def test_launch_reports_a_context_it_could_not_make_current(monkeypatch):
+    """Keep the driver's error when the device has no context to give."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    def no_context():
+        raise RuntimeError("PyTorch has no current CUDA context")
+
+    driver.current_context = no_context
+
+    with pytest.raises(RuntimeError, match="no current CUDA context"):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert made_current == [0]
+    assert driver.loads == driver.launches == []
+
+
+def test_launch_does_not_touch_a_context_that_is_current(monkeypatch):
+    """Never set the device on a thread that already has a context."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    add_kernel.launch(
+        arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+    )
+
+    assert made_current == []
+    assert len(driver.launches) == 1

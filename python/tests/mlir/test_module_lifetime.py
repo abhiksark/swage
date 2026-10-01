@@ -968,8 +968,7 @@ def test_cold_compile_does_not_block_a_warm_public_launch(monkeypatch):
     errors = []
 
     def launch_on_this_thread(target, block):
-        # The public launch needs a CUDA context that is already current,
-        # and a new thread has none until PyTorch makes one current.
+        # A new thread has no CUDA context until PyTorch gives it one.
         torch.cuda.set_device(x.device)
         _add(x, y, target, block)
 

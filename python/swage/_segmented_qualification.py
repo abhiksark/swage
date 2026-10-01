@@ -412,28 +412,6 @@ def _load_once(driver, ptx, kernel_name):
     return handles
 
 
-def _make_context_current(torch, current_context, device_index):
-    """Give a thread that has no CUDA context the context of its device.
-
-    A thread that has not used CUDA has no current context, and PyTorch
-    makes the device's context current with its first CUDA call there. A
-    prepared launch may make no such call before it reaches the driver, so
-    the context is made current here. This is the path of a thread's first
-    launch only; a context that is already current is never replaced.
-
-    Args:
-        torch: The PyTorch module.
-        current_context: The driver's bound `current_context` method.
-        device_index: Index of the prepared device, which the caller has
-            checked to be the current device.
-
-    Returns:
-        The context that is current now.
-    """
-    torch.cuda.set_device(device_index)
-    return current_context()
-
-
 def _semantic_module(kind):
     """Return the canonical private qualification module."""
     if kind not in {"sum", "max"}:
@@ -998,7 +976,7 @@ def _prepare_planned_reduction(
             try:
                 context = current_context()
             except RuntimeError:
-                context = _make_context_current(
+                context = _runtime._make_context_current(
                     torch, current_context, device_index
                 )
             if context != prepared_context:
@@ -1220,7 +1198,7 @@ def _prepare_persistent_sum(
             try:
                 context = current_context()
             except RuntimeError:
-                context = _make_context_current(
+                context = _runtime._make_context_current(
                     torch, current_context, device_index
                 )
             if context != prepared_context:

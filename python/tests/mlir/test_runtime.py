@@ -2,6 +2,7 @@
 """Real CUDA tests for the fixed vector-add launch boundary."""
 
 import gc
+import threading
 import weakref
 
 import pytest
@@ -301,6 +302,50 @@ def test_environment_report_describes_this_device(tmp_path, monkeypatch):
     )
     assert report["compile_on_miss"] == "allowed"
     assert not cache.exists()
+
+
+@pytest.mark.parametrize("block", [128, 48])
+def test_launch_works_on_a_thread_that_has_not_used_cuda(block):
+    """Make PyTorch's context current on the thread and create no other.
+
+    A new thread has no current CUDA context. The launch gives it the
+    context of the validated device, for a kernel the process has loaded
+    (block 128) and for one it compiles and loads on that thread (block 48).
+    """
+    from swage import _runtime
+
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.full_like(x, -777.0)
+    _launch(x, y, torch.empty_like(x), 129)
+    torch.cuda.synchronize()
+    driver = _runtime._get_driver()
+    main_context = driver.current_context()
+    seen = {}
+
+    def launch_first_thing():
+        try:
+            try:
+                seen["before"] = driver.current_context()
+            except RuntimeError as error:
+                seen["before"] = str(error)
+            _launch(x, y, output, 129, block=block)
+            seen["after"] = driver.current_context()
+        except Exception as error:  # Reported by the assertion below.
+            seen["error"] = error
+
+    worker = threading.Thread(target=launch_first_thing)
+    worker.start()
+    worker.join()
+    torch.cuda.synchronize()
+
+    assert "error" not in seen, seen
+    assert seen["before"] == "PyTorch has no current CUDA context"
+    # Context ids are unique for the life of the process, so an equal id is
+    # the context PyTorch already had, not a new one.
+    assert seen["after"] == main_context
+    assert driver.current_context() == main_context
+    torch.testing.assert_close(output, x + y)
 
 
 def test_native_launcher_runs_the_fixed_kernel():
