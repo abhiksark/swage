@@ -1406,6 +1406,16 @@ public:
       getOperation().emitError("persistent lowering requires block-size 512");
       return signalPassFailure();
     }
+    // The persistent kernel has its own ten-pointer ABI and always loads
+    // segment IDs from its task queues, so the task-ID ABI cannot be honored.
+    // Fused mixed lowering is not checked the same way: the C API compiles it
+    // with both flags set.
+    if (persistent && useTaskIds) {
+      getOperation().emitError(
+          "persistent lowering does not accept use-task-ids; the persistent "
+          "kernel always loads segment IDs from its own task queues");
+      return signalPassFailure();
+    }
     if (!hasPowerOfTwoWarpCount(blockSize)) {
       // Read the option first: streaming the option object itself prints its
       // value as a character.
