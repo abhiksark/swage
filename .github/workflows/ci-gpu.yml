@@ -72,10 +72,11 @@ jobs:
       # reuse, so a skip fails the step.
       - name: Test persistent cache reuse in a new process
         run: |
+          set -o pipefail
           python -m pytest -q -rs \
             python/tests/mlir/test_cache_process_reuse.py \
             | tee "$RUNNER_TEMP/cache-process-reuse.txt"
-          if grep -q SKIPPED "$RUNNER_TEMP/cache-process-reuse.txt"; then
+          if grep -qi skipped "$RUNNER_TEMP/cache-process-reuse.txt"; then
             echo "a cache reuse case was skipped" >&2
             exit 1
           fi
