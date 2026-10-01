@@ -25,9 +25,11 @@ devices, creates a CUDA context, or falls back. PyTorch, `mlir_swage`, and
 direct kernel calls remain unavailable.
 
 Cache identity covers every compiler input and the exact target architecture.
-Persistent reuse is limited to identified clean builds, cached artifacts are
-verified before loading, and loaded modules remain scoped to their CUDA
-context.
+Persistent reuse is limited to processes that can identify the compiler they
+load, by a digest of the frontend sources and the identity of the native
+libraries; it does not depend on a git checkout or a clean working tree.
+Cached artifacts are verified before loading, and loaded modules remain
+scoped to their CUDA context.
 
 The private segmented kernels reload each segment range from device memory
 at every launch, while host validation sees only the snapshot taken when the

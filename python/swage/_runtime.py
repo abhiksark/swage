@@ -721,7 +721,9 @@ class _CudaDriver:
         self.library.cuGetErrorString.restype = ctypes.c_int
         # The compiled launcher skips per-launch ctypes marshalling; the
         # ctypes path stays as the fallback when the build-tree bindings
-        # are absent (for example a wheel install reading a warm cache).
+        # cannot be imported. A wheel-only install cannot launch from a
+        # warm cache: with no native libraries to identify, it never reads
+        # the persistent cache.
         try:
             from mlir_swage._mlir_libs._swageDialectsNanobind import (
                 swage as native_swage,

@@ -90,7 +90,7 @@ REQUIRED_LABELS = {
         "normalized source",
         "ordered ABI descriptors",
         "exact compute capability",
-        "Swage revision",
+        "frontend and native compiler identity",
         "LLVM version",
         "verified before module load",
         "rejected",

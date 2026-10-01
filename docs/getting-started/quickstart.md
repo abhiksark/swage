@@ -142,9 +142,10 @@ find "$SWAGE_DUMP_DIR" -maxdepth 1 -type f -print
 ```
 
 The dump directory receives the lowered MLIR and the emitted PTX, named
-by specialization digest. On an identified clean checkout with its LLVM
-pin, a second run exercises persistent-cache verification and reuse; a
-dirty or unidentified build reuses compiled work only within the process.
+by specialization digest. A second run exercises persistent-cache
+verification and reuse, whether or not the checkout is clean; a process that
+cannot identify its frontend sources or native libraries reuses compiled
+work only within the process.
 
 ## Where next
 

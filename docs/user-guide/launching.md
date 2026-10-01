@@ -29,11 +29,12 @@ A launch is compiled per specialization: the normalized source, the
 kernel name, the ABI, the compile-time values, the exact compute
 capability, and the toolchain identity all participate in one key. The
 first launch of a specialization compiles in process through LLVM
-NVPTX; later launches reuse the loaded function. On an identified clean
-checkout the compiled artifact also lands in a verified persistent
-cache, so a fresh process skips compilation entirely. The key
-composition and the verify-or-reject cache path are drawn on the
-runtime page.
+NVPTX; later launches reuse the loaded function. When the process can
+identify its frontend sources and native compiler libraries, which does
+not require a clean git checkout, the compiled artifact also lands in a
+verified persistent cache, so a fresh process skips compilation
+entirely. The key composition and the verify-or-reject cache path are
+drawn on the runtime page.
 
 ## Asynchronous by design
 
