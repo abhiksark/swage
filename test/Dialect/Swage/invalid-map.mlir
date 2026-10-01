@@ -1,3 +1,4 @@
+// test/Dialect/Swage/invalid-map.mlir
 // RUN: swage-opt %s --split-input-file --verify-diagnostics
 
 func.func @yield_type_mismatch(%s: !swage.segment<f32>) -> !swage.segment<f32> {

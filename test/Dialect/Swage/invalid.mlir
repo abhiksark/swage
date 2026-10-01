@@ -1,3 +1,4 @@
+// test/Dialect/Swage/invalid.mlir
 // RUN: swage-opt %s --split-input-file --verify-diagnostics
 
 func.func @element_type_mismatch(%values: memref<?xf32>, %offsets: memref<?xi32>, %sid: index) {
