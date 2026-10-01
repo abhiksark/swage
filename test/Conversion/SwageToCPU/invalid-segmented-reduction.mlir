@@ -274,3 +274,171 @@ module {
     return
   }
 }
+
+// -----
+
+// The lowering compiles the one function that holds Swage operations. A
+// module with none has nothing to lower.
+// expected-error@+1 {{expected exactly one function containing Swage segment operations, found 0}}
+module {
+  func.func @bystander() {
+    return
+  }
+}
+
+// -----
+
+// Two segment functions leave the choice of kernel open, so both are refused.
+// expected-error@+1 {{expected exactly one function containing Swage segment operations, found 2}}
+module {
+  func.func @first(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+  func.func @second(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+// An unreachable second block is still a second block.
+module {
+  // expected-error@+1 {{segmented reduction requires one block}}
+  func.func @two_blocks(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  ^unreachable:
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{segmented reduction requires one segment_id, one make_segment, at least one reduce, and one return}}
+  func.func @two_segment_ids(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %unused = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{segmented reduction requires one segment_id, one make_segment, at least one reduce, and one return}}
+  func.func @two_segments(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %unused = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+// A program that only maps and stores has no reduction to lower.
+module {
+  // expected-error@+1 {{segmented reduction requires one segment_id, one make_segment, at least one reduce, and one return}}
+  func.func @map_store_without_reduce(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    swage.map_store %segment, %output : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%value: f32):
+      %doubled = arith.addf %value, %value : f32
+      swage.yield %doubled : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// The segment must view the values argument. The output buffer has the same
+// type, so only this rule keeps a kernel from reducing what it writes.
+module {
+  func.func @segment_of_the_output(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    // expected-error@+1 {{make_segment must bind the function values and offsets at segment_id}}
+    %segment = swage.make_segment %output, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+// The result goes to the output argument and nowhere else.
+module {
+  func.func @store_into_the_values(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    // expected-error@+1 {{segmented reduction result must be stored at output[segment_id]}}
+    memref.store %sum, %values[%sid] : memref<?xf32>
+    return
+  }
+}
