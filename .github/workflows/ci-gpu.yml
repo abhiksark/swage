@@ -66,8 +66,16 @@ jobs:
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.mlir' -print -quit)"
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.ptx' -print -quit)"
 
+      # Fresh processes share a cache directory of their own: the first must
+      # compile once and publish one entry, the second must compile nothing
+      # and read that entry under the same key. A skipped case observes no
+      # reuse, so a skip fails the step.
       - name: Test persistent cache reuse in a new process
         run: |
-          test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"
-          python -m pytest -q \
-            'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'
+          python -m pytest -q -rs \
+            python/tests/mlir/test_cache_process_reuse.py \
+            | tee "$RUNNER_TEMP/cache-process-reuse.txt"
+          if grep -q SKIPPED "$RUNNER_TEMP/cache-process-reuse.txt"; then
+            echo "a cache reuse case was skipped" >&2
+            exit 1
+          fi
