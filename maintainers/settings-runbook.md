@@ -9,6 +9,14 @@ command yourself with a GitHub CLI session that has admin rights on
 
 The commands use `gh api` only, so they work with an old GitHub CLI.
 
+## Status
+
+Steps 1, 3, 4, and 5 were applied and checked on 2026-10-02. Step 2, runner
+isolation, is not done; the `SECURITY.md` sentence at the end of this page
+waits for it. The four required checks in step 3 are job names in
+`ci-python.yml` and `ci-cpp.yml`; renaming one of those jobs blocks every
+pull request until the protection is updated.
+
 ## 1. Require approval for every outside pull request
 
 The self-hosted GPU runner is registered at repository level on a public

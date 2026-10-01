@@ -30,6 +30,35 @@ semantic versioning (`0.x`; anything may change).
   `benchmarks/benchmark_fresh_offsets.py`, which times segmented sum on a new
   offsets layout every iteration with preparation inside the timed region.
 
+- A support matrix page, an emit-only example that runs with the native
+  build and no GPU or PyTorch, and user-guide sections for the offsets
+  contract, layout conversions, and the empty and NaN results of the private
+  segmented path.
+- `swage-c/Dialects.h` adds a `!swage.segment<T>` constructor and predicate
+  and a `swage_plan` registration handle. CMake installs the headers and a
+  `find_package(Swage CONFIG)` package.
+- `python -m swage.env` reports `swage_file`, `mlir_swage_file`, `target`
+  (qualified, admitted, or not admitted), `cache_dir`, `cache`, and
+  `compile_on_miss`.
+- `SWAGE_CACHE_MAX_ENTRIES` (default 1024) bounds the disk cache;
+  `SWAGE_CACHE_READ_ONLY=1` reads entries without changing the cache root;
+  `SWAGE_NO_COMPILE=1` raises on a kernel that is not cached. These govern
+  the public `launch()` only.
+- Benchmarks: a driver repeats a harness in independent processes and
+  reports the median and range of per-process medians; records carry native
+  library and PTX hashes, CPU, driver, and GPU state; rows report effective
+  GB/s and timer resolution; a pad-to-max PyTorch baseline and options for
+  10^6 segments, seeds, values, and distributions; the gate scripts can
+  rerun on another GPU without producing gate evidence.
+- Tests and documentation for the numerics of the private segmented paths:
+  bit reproducibility of each sum schedule, the dependence of sum bits on
+  the schedule and how to pin it, a sum error bound checked at up to
+  1,048,577 elements, sum special values, and the ragged-softmax error as a
+  function of logit spread.
+- A compile-only test covers every admitted processor, including `sm_87`.
+  `ci-cpp` gains a clang-format check and an ASan and UBSan job.
+- `THIRD_PARTY_NOTICES.md` lists what a native build contains.
+
 ### Changed
 
 - The documentation site is restructured into getting started, user guide,
@@ -44,11 +73,15 @@ semantic versioning (`0.x`; anything may change).
   to the value count before indexing the values buffer, and each merge
   range to the partial count before indexing scratch. The softmax launch
   bounds its store by the shorter of the values and output buffers.
-  Segment IDs read from a task buffer are not bounded on the device
-  (ADR-0012).
+- Segmented GPU kernels also bound every index they load: a segment ID from
+  a task buffer and the output segment of a merge record against the segment
+  count, and a persistent merge ID against the merge count. An index outside
+  its bound is skipped. The private task-ID, fused, persistent, and split
+  merge kernels take a trailing segment count; valid-input results are
+  unchanged (ADR-0012).
 - The segmented GPU lowering and the private launch helpers reject block
   sizes whose warp count is not a power of two, and the lowering rejects
-  `persistent` combined with `use-task-ids`.
+  `persistent` or `fused-mixed` combined with `use-task-ids`.
 - `swage.extent`, `swage.map`, `swage.reduce`, and `swage.map_store` declare
   a memory read on their segment operand. `swage.extent` is no longer `Pure`,
   so upstream CSE and LICM no longer merge or hoist segment readers across
@@ -93,11 +126,62 @@ semantic versioning (`0.x`; anything may change).
   linked LLVM version. A full run refuses a package from another checkout,
   and candidate order is a recorded seeded permutation per iteration.
 - The codename test scans tracked files instead of walking the filesystem.
+- `launch()` rejects lazy negation and conjugate views and an output that
+  overlaps an input, including in-place use, and requires PyTorch 2.6 with
+  `Tensor.record_stream`, all before any kernel is compiled or enqueued.
+- Frontend: `emit_mlir()` checks the kernel before importing the native
+  package, so a wheel-only install reports a kernel outside the language
+  with a source-located `CompilationError`. The language module is matched
+  by object under any import name, and `load other=` accepts a leading minus
+  sign. Rejected now: parameter defaults, parameter annotations other than
+  `constexpr`, return annotations other than `None`, assignment to a name
+  bound to the language module, `other=` literals float32 cannot represent,
+  and compile-time index arithmetic that leaves signed 64-bit. `sl.load` and
+  `sl.store` declare their keywords as required. Several diagnostics name
+  the operator, call, literal, or annotation the kernel wrote.
+- Loaded CUDA modules are unloaded once no cache entry, prepared launch, or
+  captured public launch holds them, and the in-process kernel caches keep
+  128 entries. Warm launches no longer take the compile lock, and
+  compilation releases the GIL. Prepared launches reject a different CUDA
+  context, and a prepared persistent launch rejects an overlapping launch.
+- Private segmented preparation validates and classifies offsets from one
+  host int32 buffer with no per-element Python work and parses each program
+  once per process; the Python plan derivation is now a property test
+  against the native classifier. The private path now needs numpy.
+- The code generation C API states its contract in `swage-c/Codegen.h` and
+  reports every failure with a diagnostic. The fixed-block lowering rejects
+  scalable vectors and named memory spaces with a diagnostic, and several
+  fixed-block and C API diagnostics say what was found.
+- CMake refuses in-source builds and declares the NVVM dialect dependency of
+  both conversions. The CPU runner lit tests require the `mlir-runner`
+  feature.
+- The `swage.reduce` description, ADR-0008, and the design invariants state
+  that the combining order is unspecified and that an f32 sum depends on the
+  schedule within rounding. No op syntax, trait, or verifier changed.
+- The README states before the install instructions that segments are not
+  usable from Python.
+- Hosted CI, the release workflow, and the docs build install one
+  hash-locked tool set (`requirements-ci.txt`); the build backend is pinned;
+  the release workflow runs the pure-Python tier before it builds; the
+  `ci-cpp` LLVM cache key covers the build script, tarball digest, and
+  runner image.
+- `build_llvm.sh` and `build_swage.sh` build the bindings for the `python`
+  on `PATH` and fall back to `python3`. The package description states that
+  the wheel is pure Python.
+- Kernel-body integer literals are bounded to signed 64-bit with a
+  source-located error, and kernel names that PTX cannot represent are
+  rejected at capture and in PTX compilation. Both changes postdate
+  `v0.5.1` and were missing from this list.
 
 ### Fixed
 
 - The private CPU oracle returned one unwritten value for a batch with zero
   segments. It now returns an empty result.
+- A contiguous negation view passed to `launch()` was read with the
+  opposite sign. It is now rejected.
+- A prepared static launch on a thread with no CUDA context failed with an
+  invalid-context driver error. The launch now makes the prepared device's
+  context current.
 - Documentation: the README release boundary labels reductions that postdate
   `v0.5.1` and records the failed two-launch mixed gate; installation lists
   the binding prerequisites, the `sm_80` minimum, and the hosted build cost;
