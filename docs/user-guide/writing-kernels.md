@@ -19,9 +19,11 @@ share that property and raise outside a captured kernel; the types and
 markers work anywhere.
 
 Capture is fail closed. Anything outside the accepted grammar, a loop,
-an unsupported operator, a stray keyword argument, fails at decoration
-or emission time with a source-located `CompilationError` naming the
-file, line, and column. Nothing partial survives.
+an unsupported operator, a stray keyword argument, fails with a
+source-located `CompilationError` naming the file, line, and column.
+Nothing partial survives. Decoration rejects source it cannot read or
+parse and a stacked decorator; `emit_mlir()` rejects everything else in
+the parameter list and the body.
 
 ## The canonical kernel, line by line
 
@@ -44,8 +46,12 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
 
 - The parameters are the kernel's ABI, in order: three f32 pointers, an
   i32 count, and the compile-time block width. `BLOCK` is marked with
-  the exact annotation `sl.constexpr`, so it is bound at compile time
-  and never passed at launch.
+  the annotation `sl.constexpr`, so it is bound at compile time and
+  never passed at launch. No other annotation and no default value is
+  accepted.
+- `sl` is the conventional import name. The frontend recognizes the
+  `swage.language` module by object, so another import name works as
+  long as the kernel uses it for the marker and for every call.
 - `sl.program_id(0)` is the logical block coordinate. It is a semantic
   index, not a GPU thread ID; the lowering decides how it maps to
   hardware.
@@ -55,6 +61,34 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
   loads and the store, so the tail block reads the `other` value and
   writes nothing out of bounds. The launch geometry this implies is
   drawn on [Kernel Language](../reference/kernel-language.md).
+
+## Check a kernel without the native build
+
+`emit_mlir()` checks the parameter list and the body before it imports
+the native package, so the published wheel alone answers whether a
+kernel is inside the language (wheel-only tier):
+
+```python
+signature = {
+    "x_ptr": sl.pointer(sl.float32),
+    "y_ptr": sl.pointer(sl.float32),
+    "output_ptr": sl.pointer(sl.float32),
+    "n": sl.int32,
+}
+try:
+    add_kernel.emit_mlir(signature=signature, constexprs={"BLOCK": 128})
+except sw.CompilationError as error:
+    print(error)  # The kernel is outside the language.
+except RuntimeError as error:
+    print(error)  # The kernel passed; the native build is missing.
+```
+
+On a wheel-only install a kernel outside the language raises the same
+`CompilationError` it raises with the native build. A kernel inside it
+raises a `RuntimeError` that says the check passed and names the
+[Installation](../getting-started/installation.md) page. Passing the
+check means the kernel can be emitted. It does not mean the kernel can
+be launched: launch accepts only the canonical kernel above.
 
 ## Emit without a GPU
 
