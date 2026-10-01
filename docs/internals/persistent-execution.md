@@ -106,7 +106,8 @@ Queue reset, resident execution, and tensor retention use the current PyTorch
 stream. Launching on another device after preparation is rejected. A launch
 also raises if the offsets tensor was modified in place after preparation,
 which it detects through the tensor version counter, and the kernel clamps
-every loaded range that indexes the values buffer to the value count. CUDA
+every loaded range that indexes the values buffer to the value count and
+every merge range that indexes scratch to the partial count. CUDA
 graph capture is supported after an ordinary launch that observed task
 storage ready, matching the prepared static path's task-readiness contract.
 A first launch that only queued the wait for task storage does not count, so

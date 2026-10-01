@@ -617,8 +617,9 @@ def _prepare_planned_reduction(
         or aliases CTA when the preparation-time selection avoids splitting.
         Each callable raises RuntimeError instead of launching when offsets
         changed in place after preparation. Kernels are compiled once per
-        program and target and loaded once per CUDA context, so preparing
-        the same program for new offsets compiles and loads nothing.
+        kernel and target and loaded once per CUDA context, so a
+        preparation compiles and loads only the kernels the process has
+        not already compiled and loaded.
     """
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")

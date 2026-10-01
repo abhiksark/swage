@@ -54,7 +54,9 @@ preparation compiles and loads only the kernels that the process has not
 already compiled and loaded. A prepared launch raises if the offsets tensor
 was modified in place after preparation, which it detects through the tensor
 version counter; the kernels additionally clamp every loaded range that
-indexes the values buffer to the value count. CUDA graph capture needs an
+indexes the values buffer to the value count, and every merge range that
+indexes scratch to the partial count. Segment IDs read from a task buffer
+are not bounded on the device (ADR-0012). CUDA graph capture needs an
 earlier launch that observed task storage ready, so the protocol is launch,
 synchronize, launch again, then capture.
 

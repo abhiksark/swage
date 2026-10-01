@@ -41,9 +41,14 @@ semantic versioning (`0.x`; anything may change).
 - Warm launches dispatch through a compiled nanobind entry point that
   resolves `libcuda.so.1` with `dlopen`; ctypes remains the fallback.
 - Segmented GPU kernels clamp each segment range loaded from device memory
-  to the value count before indexing the values buffer.
+  to the value count before indexing the values buffer, and each merge
+  range to the partial count before indexing scratch. The softmax launch
+  bounds its store by the shorter of the values and output buffers.
+  Segment IDs read from a task buffer are not bounded on the device
+  (ADR-0012).
 - The segmented GPU lowering and the private launch helpers reject block
-  sizes whose warp count is not a power of two.
+  sizes whose warp count is not a power of two, and the lowering rejects
+  `persistent` combined with `use-task-ids`.
 - `swage.extent`, `swage.map`, `swage.reduce`, and `swage.map_store` declare
   a memory read on their segment operand. `swage.extent` is no longer `Pure`,
   so upstream CSE and LICM no longer merge or hoist segment readers across
@@ -59,11 +64,30 @@ semantic versioning (`0.x`; anything may change).
   checkout, and are published atomically. Incomplete entries are recompiled,
   and entries not owned by the current user are rejected. Existing entries
   are not reused.
+- The disk cache is used only when every frontend source and native library
+  is older than the process, so a process that loaded an earlier compiler
+  never publishes under the key of the files now on disk. A cache directory
+  that cannot be read or written degrades to process-local reuse with one
+  warning per process instead of failing the launch; unsafe and corrupt
+  entries still raise.
 - The private CPU oracle transports exact f32 bit patterns instead of
-  six-digit text. Segmented runtime tests use position-dependent exact inputs
-  and randomized float64 differential checks for each static policy.
+  six-digit text and takes its tools from the pinned LLVM install. Segmented
+  runtime tests use position-dependent exact inputs, exact ownership checks
+  on long segments, and randomized float64 accuracy checks for each static
+  policy.
 - The frontend accepts a docstring as the first statement of a kernel.
-- The trusted GPU workflow runs the whole `python/tests/mlir` directory.
+- The trusted GPU workflow runs the whole `python/tests/mlir` directory and
+  observes disk cache reuse across two processes with the real compiler
+  identity. The native binding and CUDA tests use a temporary kernel cache
+  unless `SWAGE_CACHE_DIR` is set.
+- `scripts/fetch_llvm.sh` unpacks the verified tarball through a temporary
+  directory, refuses a leftover unpack directory, and records the verified
+  digest in the source tree. An existing tree without that record is
+  accepted with a notice.
+- The fresh-offsets benchmark record identifies the imported `swage`
+  package, the runtime compiler identity, the native libraries, and the
+  linked LLVM version. A full run refuses a package from another checkout,
+  and candidate order is a recorded seeded permutation per iteration.
 - The codename test scans tracked files instead of walking the filesystem.
 
 ### Fixed
