@@ -170,10 +170,12 @@ def main():
             ),
             "prepare_ms": (
                 "One synchronized wall-time sample for the whole policy "
-                "bundle: validation, offset transfer, planning, compilation, "
-                "module loading, metadata/scratch allocation. Input/output "
-                "allocation and CUDA initialization excluded. First case "
-                "includes native initialization; no cold-cache claim."
+                "bundle: validation, offset transfer, planning, "
+                "metadata/scratch allocation, and, only for the first "
+                "preparation of each program in the process, compilation "
+                "and module loading. Input/output allocation and CUDA "
+                "initialization excluded. First case includes native "
+                "initialization; no cold-cache claim."
             ),
             "call": "Synchronized Python call latency, preparation excluded.",
             "graph": "CUDA events around 32 captured calls, divided by 32.",

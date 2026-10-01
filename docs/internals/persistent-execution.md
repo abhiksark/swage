@@ -39,6 +39,8 @@ The counter array has this layout:
 
 Preparation validates and materializes all metadata, allocates scratch and
 counters, compiles and loads the kernel, and records a task-readiness event.
+The compiled kernel is memoized per target and the loaded module per CUDA
+context, so only the first preparation in a process compiles and loads.
 Every launch resets its private counters on the current PyTorch stream before
 submitting the resident kernel. The reset is part of timed execution rather
 than hidden preparation.
@@ -101,11 +103,16 @@ softmax.
 ## Stream and graph behavior
 
 Queue reset, resident execution, and tensor retention use the current PyTorch
-stream. Launching on another device after preparation is rejected. CUDA graph
-capture is supported after one ordinary initialized launch, matching the
-prepared static path's task-readiness contract. One prepared object owns one
-counter array and must not have launches in flight concurrently on different
-streams; callers must serialize such reuse.
+stream. Launching on another device after preparation is rejected. A launch
+also raises if the offsets tensor was modified in place after preparation,
+which it detects through the tensor version counter, and the kernel clamps
+every loaded range that indexes the values buffer to the value count. CUDA
+graph capture is supported after an ordinary launch that observed task
+storage ready, matching the prepared static path's task-readiness contract.
+A first launch that only queued the wait for task storage does not count, so
+the protocol is launch, synchronize, launch again, then capture. One prepared
+object owns one counter array and must not have launches in flight
+concurrently on different streams; callers must serialize such reuse.
 
 Failures do not fall back to static mixed execution. Unsupported semantics,
 invalid metadata, invalid residency, compilation errors, allocation errors,
