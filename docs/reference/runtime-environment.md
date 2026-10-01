@@ -113,14 +113,48 @@ atomic write treatment as cache artifacts.
 python -m swage.env
 ```
 
-The command reports Swage and Python versions, platform, PyTorch version,
-the CUDA version used to build PyTorch, actual CUDA driver version when
-available, CUDA availability, GPU name and compute capability, repository
-LLVM pin when discoverable, and package backend status. It exits cleanly when
+The command reports the Swage version and checkout revision, Python version,
+platform, PyTorch version, the CUDA version used to build PyTorch, actual CUDA
+driver version when available, CUDA availability, GPU name and compute
+capability, repository LLVM pin when discoverable, the LLVM version the native
+bindings were linked against, and backend status. It exits cleanly when
 optional components are absent and reports them as unavailable.
 
-The package backend field describes what is built into the installed Python
-package. It does not detect a separate build-tree `mlir_swage` package.
+With the build-tree bindings on the path, the report looks like this:
+
+```text
+swage: 0.5.1
+revision: 0123456789ab
+python: 3.13.13
+platform: Linux-6.8.0-138-generic-x86_64-with-glibc2.35
+torch: 2.12.0+cu130
+torch_cuda_build: 13.0
+cuda_driver: 13.0
+cuda: True
+gpu: {'name': 'NVIDIA RTX A6000', 'compute_capability': '8.6'}
+llvm_pin: llvmorg-22.1.8
+llvm_linked: 22.1.8
+backends: {'mlir': 'available (linked LLVM 22.1.8)'}
+```
+
+Three fields identify the code and the native build:
+
+- `revision` is the abbreviated git HEAD of the checkout that `swage` was
+  imported from, with `-dirty` appended when tracked files are modified. It
+  is `None` outside a git checkout, for example in a wheel install.
+- `llvm_linked` is the LLVM version compiled into the `mlir_swage` extension.
+  It comes from the native library, not from `cmake/llvm-version.txt`, and
+  is `None` when the bindings cannot be imported or were built before they
+  recorded a version.
+- `backends` records whether `mlir_swage` imports in the reporting process.
+  It reads `available (linked LLVM <version>)` when the import succeeds and
+  `unavailable (build-tree mlir_swage bindings not importable)` when it
+  fails.
+
+`llvm_pin` is the release tag in `cmake/llvm-version.txt` and `llvm_linked`
+is a bare version, so a build against the pinned release shows
+`llvmorg-22.1.8` and `22.1.8`. Any other pair means the bindings were built
+against a different LLVM install than the repository pins.
 
 Continue with [swage](swage.md) for the public call
 surface, [Troubleshooting](../getting-started/troubleshooting.md) for common

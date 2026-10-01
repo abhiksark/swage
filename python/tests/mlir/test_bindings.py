@@ -1,9 +1,20 @@
 # python/tests/mlir/test_bindings.py
 """Integration tests for constructing Swage IR with Python bindings."""
 
+import pathlib
+
 import pytest
 from mlir_swage import ir
+from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import arith, builtin, func, math, swage
+
+
+def test_native_module_reports_the_pinned_llvm_version():
+    """Expose the linked LLVM version and keep it equal to the pin."""
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    pin = (repo_root / "cmake" / "llvm-version.txt").read_text().strip()
+
+    assert native_swage.__llvm_version__ == pin.removeprefix("llvmorg-")
 
 
 def test_builds_and_round_trips_every_swage_operation():
