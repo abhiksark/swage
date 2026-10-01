@@ -35,10 +35,10 @@ module {
   }
 }
 
-// NOT-POSITIVE: error: block-size must be a positive integer
+// NOT-POSITIVE: error: block-size must be a positive integer, got 0
 // NOT-POSITIVE-NOT: gpu.func
 
-// TOO-LARGE: error: block-size must be at most 1024
+// TOO-LARGE: error: block-size must be at most 1024, got 1025
 // TOO-LARGE-NOT: gpu.func
 
 // THREE-WARPS: error: block-size must give a power-of-two warp count, got 96 (3 warps)

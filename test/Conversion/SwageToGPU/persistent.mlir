@@ -557,5 +557,5 @@ module {
 
 // The persistent kernel is specialized to 512 threads, and the block-size
 // requirements keep it from being combined with the fused mixed schedule.
-// BLOCK-SIZE: error: persistent lowering requires block-size 512
-// FUSED: error: fused mixed lowering requires block-size 128
+// BLOCK-SIZE: error: persistent lowering requires block-size 512, got 128
+// FUSED: error: fused mixed lowering requires block-size 128, got 512

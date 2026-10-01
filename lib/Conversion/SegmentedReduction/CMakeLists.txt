@@ -11,6 +11,7 @@ add_mlir_conversion_library(MLIRSwageSegmentedReduction
   MLIRGPUDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIRNVVMDialect
   MLIRPass

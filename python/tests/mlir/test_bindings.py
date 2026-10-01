@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 
+import numpy
 import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
@@ -112,6 +113,36 @@ def _compile_all(modules=None):
         ]
 
 
+def _run_each(works):
+    """Run each callable on its own thread, all starting at the same moment.
+
+    Args:
+        works: Zero-argument callables, one per thread.
+
+    Returns:
+        What each callable returned, or the exception it raised, in order.
+    """
+    results = [None] * len(works)
+    barrier = threading.Barrier(len(works))
+
+    def run(index):
+        barrier.wait()
+        try:
+            results[index] = works[index]()
+        except BaseException as error:  # noqa: BLE001
+            results[index] = error
+
+    threads = [
+        threading.Thread(target=run, args=(index,))
+        for index in range(len(works))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
+
+
 def _run_together(count, work):
     """Run `work` on `count` threads that start at the same moment.
 
@@ -122,24 +153,7 @@ def _run_together(count, work):
     Returns:
         What each thread returned, or the exception it raised.
     """
-    results = [None] * count
-    barrier = threading.Barrier(count)
-
-    def run(index):
-        barrier.wait()
-        try:
-            results[index] = work()
-        except BaseException as error:  # noqa: BLE001
-            results[index] = error
-
-    threads = [
-        threading.Thread(target=run, args=(index,)) for index in range(count)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    return results
+    return _run_each([work] * count)
 
 
 def test_native_module_reports_the_pinned_llvm_version():
@@ -352,6 +366,52 @@ def test_two_threads_compile_one_module():
 
     for result in results:
         assert result == [expected] * 4
+
+
+def test_a_plan_call_keeps_off_a_context_that_is_compiling():
+    """Plan a module while another thread compiles it for the first time.
+
+    A compile gives up the GIL and the plan call keeps it, so the plan call
+    can start while the compile is still loading dialects and running its
+    pipeline in the same context. MLIR refuses that with a failed assertion
+    that ends the process, so the plan call takes the guard the compiles
+    take and waits. Each round uses a context neither call has touched, and
+    the plan call starts only after the compiling thread has signalled that
+    its next step is the native call.
+    """
+    name, text, options = _COMPILES[4]
+    assert name == "_compile_persistent_segmented_reduction_ptx"
+    compile_ptx = getattr(native_swage, name)
+    offsets = numpy.asarray([0, 32, 132, 8325], dtype=numpy.int32)
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        expected_ptx = compile_ptx(
+            ir.Module.parse(text), target="sm_86", **options
+        )
+    expected_plan = ([0], [1], [132, 4228, 4228, 8324, 8324, 8325], [2, 0, 3])
+
+    for _ in range(10):
+        with ir.Context() as context:
+            swage.register_dialects(context)
+            module = ir.Module.parse(text)
+            compiling = threading.Event()
+            compiled = []
+
+            def compile_once(module=module, compiling=compiling,
+                             compiled=compiled):
+                compiling.set()
+                compiled.append(compile_ptx(module, target="sm_86", **options))
+
+            thread = threading.Thread(target=compile_once)
+            thread.start()
+            compiling.wait()
+            records = native_swage._materialize_segmented_plan(
+                module, offsets=offsets, value_count=8325, segment_count=3
+            )
+            thread.join()
+
+        assert tuple(array.tolist() for array in records) == expected_plan
+        assert compiled == [expected_ptx]
 
 
 def test_a_failed_compile_on_another_thread_reports_its_diagnostic():

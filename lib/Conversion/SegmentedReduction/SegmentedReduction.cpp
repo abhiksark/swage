@@ -18,6 +18,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
@@ -25,6 +26,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
+#include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -42,8 +44,23 @@ bool isRankOneMemRef(Type type, Type elementType) {
          memref.getLayout().isIdentity() && !memref.getMemorySpace();
 }
 
-/// Classification of one operation inside a Swage region.
-enum class RegionOpStatus { Admitted, UnknownName, NonF32Result };
+/// A set of operation classes: the membership test and the names a
+/// diagnostic lists come from the same type pack, so they cannot drift.
+template <typename... Ops> struct OperationSet {
+  static bool contains(Operation &operation) { return isa<Ops...>(&operation); }
+
+  /// The operation names as prose: "a, b, and c".
+  static std::string describe() {
+    const StringRef names[] = {Ops::getOperationName()...};
+    std::string text;
+    for (auto [index, name] : llvm::enumerate(names)) {
+      if (index)
+        text += index + 1 == std::size(names) ? ", and " : ", ";
+      text += name;
+    }
+    return text;
+  }
+};
 
 /// Operations a Swage region may contain.
 ///
@@ -52,17 +69,10 @@ enum class RegionOpStatus { Admitted, UnknownName, NonF32Result };
 /// `math.exp2` of a scaled operand; `math.exp` is deliberately absent
 /// because `--convert-gpu-to-nvvm` turns every `math` operation into a
 /// libdevice call, and the PTX path links no libdevice.
-RegionOpStatus classifyRegionOperation(Operation &operation) {
-  static constexpr StringRef admitted[] = {
-      "arith.constant", "arith.addf",     "arith.subf",     "arith.mulf",
-      "arith.divf",     "arith.maximumf", "arith.minimumf", "math.exp2"};
-  if (!llvm::is_contained(admitted, operation.getName().getStringRef()))
-    return RegionOpStatus::UnknownName;
-  if (!llvm::all_of(operation.getResultTypes(),
-                    [](Type type) { return type.isF32(); }))
-    return RegionOpStatus::NonF32Result;
-  return RegionOpStatus::Admitted;
-}
+using RegionOperations =
+    OperationSet<arith::ConstantOp, arith::AddFOp, arith::SubFOp, arith::MulFOp,
+                 arith::DivFOp, arith::MaximumFOp, arith::MinimumFOp,
+                 math::Exp2Op>;
 
 /// Verify a Swage region: an f32 element argument followed by one f32
 /// argument per capture, admitted operations only, and an f32 yield.
@@ -82,16 +92,18 @@ LogicalResult verifyRegion(Operation *owner, Region &region,
         "segment region requires an f32 element argument followed by f32 "
         "captures");
   for (Operation &operation : body.without_terminator()) {
-    switch (classifyRegionOperation(operation)) {
-    case RegionOpStatus::Admitted:
-      break;
-    case RegionOpStatus::UnknownName:
-      return operation.emitError("operation is unsupported inside a segment "
-                                 "region; exponentials must use math.exp2");
-    case RegionOpStatus::NonF32Result:
-      return operation.emitError("operation is unsupported inside a segment "
-                                 "region; every result must be f32");
-    }
+    if (!RegionOperations::contains(operation))
+      return operation.emitError()
+             << "operation '" << operation.getName()
+             << "' is unsupported inside a segment region; a region accepts "
+             << RegionOperations::describe();
+    for (Type type : operation.getResultTypes())
+      if (!type.isF32())
+        return operation.emitError()
+               << "operation '" << operation.getName()
+               << "' is unsupported inside a segment region; every result "
+                  "must be f32, got "
+               << type;
   }
   auto yield = dyn_cast<YieldOp>(body.getTerminator());
   if (!yield || !yield.getValue().getType().isF32())
@@ -173,7 +185,7 @@ FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
     bool hasSwageOperation = false;
     function.walk([&](Operation *operation) {
       hasSwageOperation |=
-          operation->getName().getDialectNamespace() == "swage";
+          isa_and_nonnull<SwageDialect>(operation->getDialect());
     });
     if (hasSwageOperation)
       candidates.push_back(function);
@@ -210,12 +222,15 @@ LogicalResult verifySegmentedFunctionShape(func::FuncOp function) {
       !isRankOneMemRef(type.getInput(2), builder.getF32Type()) ||
       !type.getInput(3).isSignlessInteger(32) ||
       !type.getInput(4).isSignlessInteger(32))
-    return function.emitError(
-        "segmented reduction requires rank-one f32 values, rank-one i32 "
-        "offsets, rank-one f32 output, i32 value count, and i32 segment "
-        "count");
+    return function.emitError()
+           << "segmented reduction requires rank-one f32 values, rank-one i32 "
+              "offsets, rank-one f32 output, i32 value count, and i32 segment "
+              "count, got "
+           << type;
   if (!function.getBody().hasOneBlock())
-    return function.emitError("segmented reduction requires one block");
+    return function.emitError()
+           << "segmented reduction requires one block, got "
+           << function.getBody().getBlocks().size() << " blocks";
   return success();
 }
 
@@ -237,8 +252,9 @@ LogicalResult collectSegmentOperations(func::FuncOp function,
     else if (auto returnOp = dyn_cast<func::ReturnOp>(operation))
       analysis.returns.push_back(returnOp);
     else
-      return operation.emitError(
-          "operation is unsupported by segmented reduction lowering");
+      return operation.emitError()
+             << "operation '" << operation.getName()
+             << "' is unsupported by segmented reduction lowering";
   }
   return success();
 }
@@ -247,23 +263,31 @@ LogicalResult verifySegmentRoot(func::FuncOp function,
                                 SegmentProgramAnalysis &analysis) {
   if (analysis.segmentIds.size() != 1 || analysis.segments.size() != 1 ||
       analysis.reductions.empty() || analysis.returns.size() != 1)
-    return function.emitError(
-        "segmented reduction requires one segment_id, one make_segment, at "
-        "least one reduce, and one return");
+    return function.emitError()
+           << "segmented reduction requires one segment_id, one make_segment, "
+              "at least one reduce, and one return, found "
+           << analysis.segmentIds.size() << " segment_id, "
+           << analysis.segments.size() << " make_segment, "
+           << analysis.reductions.size() << " reduce, and "
+           << analysis.returns.size() << " return";
   SegmentIdOp segmentId = analysis.segmentIds.front();
   MakeSegmentOp segment = analysis.segments.front();
   if (segmentId.getAxis() != 0)
-    return segmentId.emitError("only swage.segment_id axis 0 is supported");
+    return segmentId.emitError()
+           << "only swage.segment_id axis 0 is supported, got axis "
+           << segmentId.getAxis();
   if (segment.getValues() != function.getArgument(0) ||
       segment.getOffsets() != function.getArgument(1) ||
       segment.getSegmentId() != segmentId.getResult())
     return segment.emitError(
         "make_segment must bind the function values and offsets at segment_id");
   if (analysis.stores.size() + analysis.mapStores.size() != 1)
-    return function.emitError(
-        "segmented reduction requires exactly one output terminal: a "
-        "memref.store of a reduction at output[segment_id] or a "
-        "swage.map_store into the output");
+    return function.emitError()
+           << "segmented reduction requires exactly one output terminal: a "
+              "memref.store of a reduction at output[segment_id] or a "
+              "swage.map_store into the output, found "
+           << analysis.stores.size() << " memref.store and "
+           << analysis.mapStores.size() << " swage.map_store";
   return success();
 }
 
@@ -309,8 +333,10 @@ LogicalResult verifyReductionKinds(SegmentProgramAnalysis &analysis) {
   for (ReduceOp reduction : analysis.reductions) {
     ReductionKind kind = reduction.getKind();
     if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
-      return reduction.emitError(
-          "segmented reduction supports only kind<sum> and kind<max>");
+      return reduction.emitError()
+             << "segmented reduction supports only kind<sum> and kind<max>, "
+                "got kind<"
+             << stringifyReductionKind(kind) << ">";
   }
   return success();
 }
@@ -1432,7 +1458,7 @@ public:
     return "swage-segmented-reduction-to-scf";
   }
   StringRef getDescription() const final {
-    return "Lower one canonical segmented sum or max to sequential SCF loops";
+    return "Lower one segment program to sequential SCF loops";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1481,7 +1507,9 @@ public:
     return "swage-segmented-reduction-to-gpu";
   }
   StringRef getDescription() const final {
-    return "Lower one canonical segmented sum or max to one CTA per segment";
+    return "Lower one segment program to a GPU kernel: one block per segment, "
+           "or the task-id, fused mixed, or persistent schedule an option "
+           "selects";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1491,19 +1519,26 @@ public:
 
   void runOnOperation() final {
     if (blockSize <= 0) {
-      getOperation().emitError("block-size must be a positive integer");
+      getOperation().emitError()
+          << "block-size must be a positive integer, got "
+          << blockSize.getValue();
       return signalPassFailure();
     }
     if (blockSize > 1024) {
-      getOperation().emitError("block-size must be at most 1024");
+      getOperation().emitError()
+          << "block-size must be at most 1024, got " << blockSize.getValue();
       return signalPassFailure();
     }
     if (fusedMixed && blockSize != 128) {
-      getOperation().emitError("fused mixed lowering requires block-size 128");
+      getOperation().emitError()
+          << "fused mixed lowering requires block-size 128, got "
+          << blockSize.getValue();
       return signalPassFailure();
     }
     if (persistent && blockSize != 512) {
-      getOperation().emitError("persistent lowering requires block-size 512");
+      getOperation().emitError()
+          << "persistent lowering requires block-size 512, got "
+          << blockSize.getValue();
       return signalPassFailure();
     }
     // The persistent and fused kernels have ABIs of their own and always
