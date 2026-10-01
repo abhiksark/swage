@@ -341,27 +341,47 @@ def test_effective_rate_counts_the_bytes_a_correct_sum_must_move(comparison):
     assert comparison._gb_per_s(1_000, 0.0) is None
 
 
-def test_launches_double_until_the_tick_is_below_one_percent(comparison):
+def test_batch_doubles_until_the_tick_is_below_one_percent(comparison):
     """Batch enough launches that one timer tick is under 1% of a sample."""
-    pilots = []
+    batches = []
 
     def elapsed_us(launches):
-        pilots.append(launches)
+        batches.append(launches)
         return 2.5 * launches
 
     # 32 launches take 80 us, 78 ticks of 1.024 us; 64 take 160 us.
-    assert comparison._launches_per_sample(elapsed_us, 1.024) == 64
-    assert set(pilots) == {32, 64}
-    assert comparison._launches_per_sample(elapsed_us, 0.032) == 32
-    assert comparison._launches_per_sample(elapsed_us, None) == 32
+    assert comparison._resolved_samples(elapsed_us, 3, 1.024) == (
+        [2.5] * 3,
+        64,
+    )
+    assert batches == [32] * 3 + [64] * 3
+    assert comparison._resolved_samples(elapsed_us, 3, 0.032)[1] == 32
+    assert comparison._resolved_samples(elapsed_us, 3, None)[1] == 32
     # Exactly one percent is not below one percent.
-    assert comparison._launches_per_sample(lambda n: 100.0 * n / 32, 1.0) == 64
+    assert (
+        comparison._resolved_samples(lambda n: 100.0 * n / 32, 3, 1.0)[1]
+        == 64
+    )
 
 
-def test_launches_stop_at_a_timer_that_never_resolves(comparison):
+def test_kept_samples_satisfy_the_limit_themselves(comparison):
+    """Judge the batch by the samples that are kept, not by a pilot."""
+    durations = iter([110.0, 101.0, 101.0, 210.0, 205.0, 204.0])
+
+    timings, launches = comparison._resolved_samples(
+        lambda launches: next(durations), 3, 1.024
+    )
+
+    # The first batch has one long sample, but its median of 101 us is
+    # under 100 ticks, so the batch doubles and is sampled again.
+    assert launches == 64
+    assert timings == [210.0 / 64, 205.0 / 64, 204.0 / 64]
+
+
+def test_batch_stops_at_a_timer_that_never_resolves(comparison):
     """Fail instead of looping when samples never outgrow the tick."""
     with pytest.raises(RuntimeError, match="below one percent"):
-        comparison._launches_per_sample(lambda launches: 0.0, 1.0)
+        comparison._resolved_samples(lambda launches: 0.0, 3, 1.0)
 
 
 class _Event:

@@ -179,35 +179,39 @@ def _resolution(tick_us, sample_us) -> dict[str, object]:
     }
 
 
-def _launches_per_sample(elapsed_us: Callable[[int], float], tick_us) -> int:
-    """Return how many launches one sample batches.
+def _resolved_samples(elapsed_us: Callable[[int], float], samples: int,
+                      tick_us) -> tuple[list[float], int]:
+    """Take per-launch samples from batches that outgrow the timer tick.
 
     A sample of a few timer ticks cannot resolve a difference of a few
-    percent. The batch starts at 32 launches and doubles until one tick is
-    below one percent of the fastest of three pilot samples.
+    percent. A sample starts as a batch of 32 launches. When one tick is
+    not below one percent of the median sample, the batch doubles and the
+    samples are taken again, so the samples that are kept satisfy the limit
+    themselves.
 
     Args:
         elapsed_us: Callable timing that many back-to-back launches once.
+        samples: Number of samples.
         tick_us: Measured timer tick, or None to keep the 32 launches.
 
     Returns:
-        The launches per sample.
+        The time per launch of each sample, and the launches per sample.
 
     Raises:
         RuntimeError: If no batch up to the limit outgrows the tick.
     """
     launches = _BATCHED_LAUNCHES
-    if tick_us is None:
-        return launches
-    while launches <= _MAX_BATCHED_LAUNCHES:
-        pilot = min(elapsed_us(launches) for _ in range(3))
-        if tick_us < _TICK_FRACTION * pilot:
-            return launches
+    while True:
+        timings = [elapsed_us(launches) / launches for _ in range(samples)]
+        sample_us = statistics.median(timings) * launches
+        if tick_us is None or tick_us < _TICK_FRACTION * sample_us:
+            return timings, launches
+        if launches >= _MAX_BATCHED_LAUNCHES:
+            raise RuntimeError(
+                f"a batch of {launches} launches does not bring the "
+                f"{tick_us} us timer tick below one percent of a sample"
+            )
         launches *= 2
-    raise RuntimeError(
-        f"a batch of {_MAX_BATCHED_LAUNCHES} launches does not bring the "
-        f"{tick_us} us timer tick below one percent of a sample"
-    )
 
 
 def _event_tick_us(torch, device, pairs: int = 256):
@@ -268,8 +272,7 @@ def _batched_event_us(torch, launch: Callable[[], object], warmups: int,
         end.synchronize()
         return start.elapsed_time(end) * 1_000.0
 
-    launches = _launches_per_sample(elapsed_us, tick_us)
-    timings = [elapsed_us(launches) / launches for _ in range(samples)]
+    timings, launches = _resolved_samples(elapsed_us, samples, tick_us)
     summary = _median_iqr(timings)
     return {
         "samples_us": timings,
@@ -315,8 +318,7 @@ def _graph_us(torch, launch: Callable[[], object], warmups: int,
         return start.elapsed_time(end) * 1_000.0
 
     try:
-        launches = _launches_per_sample(replay_us, tick_us)
-        timings = [replay_us(launches) / launches for _ in range(samples)]
+        timings, launches = _resolved_samples(replay_us, samples, tick_us)
     except _CaptureFailed as error:
         return {"available": False, "error": str(error)}
     summary = _median_iqr(timings)
@@ -1116,10 +1118,11 @@ def main():
             "graph_replay_launches": _BATCHED_LAUNCHES,
             "batching": (
                 "event-timed samples batch at least batched_launches "
-                "launches; the batch doubles until one event timer tick is "
-                "below one percent of a pilot sample, and every timing "
-                "entry records its launches_per_sample, the tick, and the "
-                "tick as a fraction of the sample"
+                "launches; while one event timer tick is not below one "
+                "percent of the median sample, the batch doubles and the "
+                "samples are taken again; every timing entry records its "
+                "launches_per_sample, the tick, and the tick as a fraction "
+                "of the sample"
             ),
             "timer_ticks_us": ticks,
             "timer_ticks": (
