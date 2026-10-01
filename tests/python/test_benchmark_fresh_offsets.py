@@ -3,6 +3,7 @@
 
 import collections
 import importlib
+import itertools
 import pathlib
 import subprocess
 import sys
@@ -123,10 +124,14 @@ class _EmulatedLoopedKernel:
     Args:
         extra: Elements admitted past the segment end by the block mask.
             Zero is the real kernel; one is a mask of ``index < end + 1``.
+        shift: Offset of the window that is read for every segment that
+            leaves room for it. Zero is the real kernel; minus one reads an
+            in-bounds window of the right length one element early.
     """
 
-    def __init__(self, extra=0):
+    def __init__(self, extra=0, shift=0):
         self._extra = extra
+        self._shift = shift
 
     def __getitem__(self, grid):
         (programs,) = grid
@@ -136,6 +141,8 @@ class _EmulatedLoopedKernel:
             bounds = offsets.tolist()
             for sid in range(programs):
                 begin, end = bounds[sid], bounds[sid + 1]
+                if 0 <= begin + self._shift and end + self._shift <= len(data):
+                    begin, end = begin + self._shift, end + self._shift
                 limit = min(end + self._extra, len(data))
                 output[sid] = sum(
                     sum(data[start : min(start + BLOCK, limit)])
@@ -427,6 +434,33 @@ def test_exact_values_make_any_extra_or_missing_element_visible(
     assert values.min() == 0.25
     assert values.max() == 1.75
     assert len(values.unique()) == 7
+
+
+def test_looped_check_rejects_what_all_ones_values_accept(triton_comparison):
+    """Check the looped baseline on values that expose a shifted window."""
+    torch = pytest.importorskip("torch")
+    lengths = [3, 0, 130, 7, 300, 1, 1024, 5]
+    offsets = torch.tensor(
+        [0, *itertools.accumulate(lengths)], dtype=torch.int32
+    )
+    configs = triton_comparison._triton_looped_configs()
+    shifted = _EmulatedLoopedKernel(shift=-1)
+
+    ones = torch.ones(sum(lengths))
+    output = torch.empty(len(lengths))
+    triton_comparison._launch_triton_looped(
+        shifted, ones, offsets, output, len(lengths), 128, 4
+    )
+    assert output.tolist() == lengths
+
+    triton_comparison._check_triton_looped(
+        torch, _EmulatedLoopedKernel(), configs, offsets, len(lengths)
+    )
+    for broken in (shifted, _EmulatedLoopedKernel(extra=1)):
+        with pytest.raises(AssertionError, match="triton_looped_b128_w1"):
+            triton_comparison._check_triton_looped(
+                torch, broken, configs, offsets, len(lengths)
+            )
 
 
 _DISTRIBUTIONS = (
