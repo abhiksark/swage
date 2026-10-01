@@ -171,9 +171,9 @@ def main():
             "prepare_ms": (
                 "One synchronized wall-time sample for the whole policy "
                 "bundle: validation, offset transfer, planning, "
-                "metadata/scratch allocation, and, only for the first "
-                "preparation of each program in the process, compilation "
-                "and module loading. Input/output allocation and CUDA "
+                "metadata/scratch allocation, and compilation and module "
+                "loading only for kernels the process has not already "
+                "compiled and loaded. Input/output allocation and CUDA "
                 "initialization excluded. First case includes native "
                 "initialization; no cold-cache claim."
             ),

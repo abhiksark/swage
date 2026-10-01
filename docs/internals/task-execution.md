@@ -49,14 +49,14 @@ only on valid input elements. See
 *The one-launch fused schedule and its task-ID indirection. [Open the full-size figure](../assets/figures/fused-mixed-schedule.svg).*
 
 The private preparation helpers memoize compiled kernels per program, code
-generation options, and target, and loaded modules per CUDA context, so only
-the first preparation of a program in a process compiles and loads. A
-prepared launch raises if the offsets tensor was modified in place after
-preparation, which it detects through the tensor version counter; the kernels
-additionally clamp every loaded range that indexes the values buffer to the
-value count. CUDA graph capture needs an earlier launch that observed task
-storage ready, so the protocol is launch, synchronize, launch again, then
-capture.
+generation options, and target, and loaded modules per CUDA context, so a
+preparation compiles and loads only the kernels that the process has not
+already compiled and loaded. A prepared launch raises if the offsets tensor
+was modified in place after preparation, which it detects through the tensor
+version counter; the kernels additionally clamp every loaded range that
+indexes the values buffer to the value count. CUDA graph capture needs an
+earlier launch that observed task storage ready, so the protocol is launch,
+synchronize, launch again, then capture.
 
 For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
