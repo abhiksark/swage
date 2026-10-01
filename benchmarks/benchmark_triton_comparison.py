@@ -258,6 +258,19 @@ def _offsets_from_lengths(torch, lengths: list[int]):
     return offsets, device_offsets
 
 
+def _exact_values(torch, count: int):
+    """Return seeded host values that expose any misplaced element read.
+
+    Every value is one of 0.25, 0.5, ..., 1.75. None is zero, so reading one
+    element too many or too few always changes a sum, and neighbouring
+    elements differ, so a shifted window changes it too. Sums of these
+    quarter multiples are exact in f32 in any order for segments shorter than
+    two million elements, which allows an exact comparison.
+    """
+    generator = torch.Generator().manual_seed(_SEED)
+    return torch.randint(1, 8, (count,), generator=generator).float() / 4
+
+
 def _make_triton_segmented_sum():
     """Define a one-program-per-segment Triton sum baseline lazily."""
     import triton

@@ -54,15 +54,74 @@ def _environment(fresh_offsets, triton_version="3.7.0"):
     )
 
 
-def _git_results(status):
-    """Return fake git output for one revision and one porcelain status."""
+def _git_results(status, calls):
+    """Return a fake git that logs each command and answers in order."""
     results = iter(
         [
             subprocess.CompletedProcess([], 0, "abc123\n"),
             subprocess.CompletedProcess([], 0, status),
         ]
     )
-    return lambda *args, **kwargs: next(results)
+
+    def run(command, **options):
+        calls.append((command, options))
+        return next(results)
+
+    return run
+
+
+def _assert_git_commands(calls, root):
+    """Require the exact revision and status commands, untracked included."""
+    options = {
+        "cwd": root,
+        "check": True,
+        "capture_output": True,
+        "text": True,
+    }
+    assert calls == [
+        (["git", "rev-parse", "HEAD"], options),
+        (["git", "status", "--porcelain"], options),
+    ]
+
+
+class _EmulatedLoopedKernel:
+    """Walk each segment in fixed blocks on the CPU, as the kernel does.
+
+    Args:
+        extra: Elements admitted past the segment end by the block mask.
+            Zero is the real kernel; one is a mask of ``index < end + 1``.
+    """
+
+    def __init__(self, extra=0):
+        self._extra = extra
+
+    def __getitem__(self, grid):
+        (programs,) = grid
+
+        def launch(values, offsets, output, *, BLOCK, num_warps):
+            data = values.tolist()
+            bounds = offsets.tolist()
+            for sid in range(programs):
+                begin, end = bounds[sid], bounds[sid + 1]
+                limit = min(end + self._extra, len(data))
+                output[sid] = sum(
+                    sum(data[start : min(start + BLOCK, limit)])
+                    for start in range(begin, end, BLOCK)
+                )
+
+        return launch
+
+
+def _reference_prepare(torch):
+    """Return a stand-in for the planned preparation that sums on the CPU."""
+
+    def prepare(values, offsets, output, *, warp_max_elements):
+        def mixed():
+            output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+
+        return types.SimpleNamespace(mixed=mixed)
+
+    return prepare
 
 
 def test_harnesses_import_without_torch_or_triton():
@@ -209,6 +268,129 @@ def test_measure_times_each_candidate_once_per_fresh_layout(fresh_offsets):
     assert samples == {"a": [2.0] * 3, "b": [2.0] * 3, "c": [2.0] * 3}
 
 
+def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
+    """Pin the timed region: synchronize, start, run, synchronize, stop."""
+    log = []
+    now = [0]
+
+    def clock():
+        log.append("clock")
+        return now[0]
+
+    def synchronize():
+        log.append("synchronize")
+        now[0] += 3_000
+
+    def candidate(layout):
+        log.append("candidate")
+        now[0] += 5_000
+        return f"result of {layout}"
+
+    def check(name, result, layout):
+        log.append("check")
+        now[0] += 100_000
+        assert (name, result) == ("only", f"result of {layout}")
+
+    samples = fresh_offsets._measure(
+        ["l0", "l1", "l2"],
+        {"only": candidate},
+        check,
+        warmups=1,
+        synchronize=synchronize,
+        clock=clock,
+    )
+
+    assert log == [
+        "synchronize",
+        "clock",
+        "candidate",
+        "synchronize",
+        "clock",
+        "check",
+    ] * 3
+    # The candidate and the device work it left behind: 5 us plus 3 us. The
+    # wait before the timer and the correctness check are outside.
+    assert samples == {"only": [8.0, 8.0]}
+
+
+def test_exact_values_make_any_extra_or_missing_element_visible(
+    triton_comparison,
+):
+    """Use nonzero quarter multiples so every boundary error changes a sum."""
+    torch = pytest.importorskip("torch")
+
+    values = triton_comparison._exact_values(torch, 100_000)
+
+    assert values.dtype == torch.float32
+    assert torch.equal(values, triton_comparison._exact_values(torch, 100_000))
+    assert torch.equal(values * 4, (values * 4).round())
+    assert values.min() == 0.25
+    assert values.max() == 1.75
+    assert len(values.unique()) == 7
+
+
+_DISTRIBUTIONS = (
+    "uniform",
+    "log-normal",
+    "bimodal",
+    "zipf-like",
+    "many-tiny",
+    "few-huge",
+    "one-outlier",
+    "alternating-empty",
+    "power-law",
+)
+
+
+@pytest.mark.parametrize("name", _DISTRIBUTIONS)
+def test_run_distribution_checks_and_records_every_candidate(
+    fresh_offsets, name
+):
+    """Run the whole measurement loop on the CPU with stand-in candidates."""
+    torch = pytest.importorskip("torch")
+
+    row = fresh_offsets._run_distribution(
+        torch,
+        _reference_prepare(torch),
+        _EmulatedLoopedKernel(),
+        name,
+        64,
+        1,
+        2,
+        device="cpu",
+        synchronize=lambda: None,
+    )
+
+    candidates = fresh_offsets._candidate_names(triton_available=True)
+    assert row["distribution"] == name
+    assert row["correctness_passed"] is True
+    assert set(row["raw_samples_us"]) == set(candidates)
+    assert all(len(row["raw_samples_us"][c]) == 2 for c in candidates)
+    assert set(row["summary_us"]) == set(candidates)
+    assert len(row["swage_mixed_prepare_samples_us"]) == 2
+
+
+@pytest.mark.parametrize("name", _DISTRIBUTIONS)
+def test_reading_one_element_past_a_segment_end_is_rejected(
+    fresh_offsets, name
+):
+    """Catch a looped block mask of ``index < end + 1`` on every input."""
+    torch = pytest.importorskip("torch")
+
+    with pytest.raises(AssertionError, match=f"triton_looped.* on {name}"):
+        fresh_offsets._run_distribution(
+            torch,
+            _reference_prepare(torch),
+            _EmulatedLoopedKernel(extra=1),
+            name,
+            64,
+            1,
+            2,
+            device="cpu",
+            synchronize=lambda: None,
+        )
+
+
 def test_headline_names_the_fastest_looped_configuration(fresh_offsets):
     """Print a short summary without dropping anything from the record."""
     summary = {
@@ -248,29 +430,40 @@ def test_measure_stops_at_the_first_wrong_result(fresh_offsets):
 
 def test_git_metadata_refuses_a_dirty_worktree(fresh_offsets, monkeypatch):
     """Do not label measurements from modified or untracked sources."""
+    calls = []
     monkeypatch.setattr(
-        fresh_offsets.subprocess, "run", _git_results("?? scratch.txt\n")
+        fresh_offsets.subprocess,
+        "run",
+        _git_results("?? scratch.txt\n", calls),
     )
 
     with pytest.raises(RuntimeError, match="clean source worktree"):
         fresh_offsets._git_metadata(pathlib.Path("."), allow_dirty=False)
+    _assert_git_commands(calls, pathlib.Path("."))
 
 
 def test_git_metadata_records_a_clean_revision(fresh_offsets, monkeypatch):
     """Carry the exact revision and the dirty flag in every record."""
-    monkeypatch.setattr(fresh_offsets.subprocess, "run", _git_results(""))
+    calls = []
+    monkeypatch.setattr(
+        fresh_offsets.subprocess, "run", _git_results("", calls)
+    )
 
     assert fresh_offsets._git_metadata(
-        pathlib.Path("."), allow_dirty=False
+        pathlib.Path("checkout"), allow_dirty=False
     ) == {"revision": "abc123", "worktree_clean": True, "dirty": []}
+    _assert_git_commands(calls, pathlib.Path("checkout"))
 
 
 def test_smoke_record_states_that_the_worktree_was_dirty(
     fresh_offsets, monkeypatch
 ):
     """Allow a smoke run on a dirty tree only with the flag recorded."""
+    calls = []
     monkeypatch.setattr(
-        fresh_offsets.subprocess, "run", _git_results("?? scratch.txt\n")
+        fresh_offsets.subprocess,
+        "run",
+        _git_results("?? scratch.txt\n", calls),
     )
 
     assert fresh_offsets._git_metadata(
@@ -280,6 +473,7 @@ def test_smoke_record_states_that_the_worktree_was_dirty(
         "worktree_clean": False,
         "dirty": ["?? scratch.txt"],
     }
+    _assert_git_commands(calls, pathlib.Path("."))
 
 
 def test_smoke_output_stays_out_of_the_evidence_directory(

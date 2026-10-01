@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from benchmark_triton_comparison import (
+    _exact_values,
     _launch_triton_looped,
     _make_triton_looped_sum,
     _median_iqr,
@@ -325,8 +326,8 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
             else "skipped: Triton is not installed"
         ),
         "values": (
-            "CPU seeded randint(-4, 4) / 4, float32; one buffer per "
-            "distribution, each layout reads its prefix"
+            "CPU seeded randint(1, 8) / 4, float32, never zero; one buffer "
+            "per distribution, each layout reads its prefix"
         ),
         "correctness": (
             "every candidate in every iteration, warmups included, exact "
@@ -398,19 +399,11 @@ def _record(*, source, environment, configuration, results, smoke):
     }
 
 
-def _upload(torch, pool):
+def _upload(torch, pool, device):
     """Upload one pool and compute each layout's PyTorch reference."""
     largest_total = max(layout.offsets[-1] for layout in pool)
-    host_values = (
-        torch.randint(
-            -4,
-            4,
-            (largest_total,),
-            generator=torch.Generator().manual_seed(_SEED),
-        ).float()
-        / 4
-    )
-    values = host_values.cuda()
+    host_values = _exact_values(torch, largest_total)
+    values = host_values.to(device)
     uploaded = []
     for layout in pool:
         total = layout.offsets[-1]
@@ -420,7 +413,7 @@ def _upload(torch, pool):
         )
         uploaded.append(
             _DeviceLayout(
-                values[:total], host_offsets.cuda(), expected.cuda()
+                values[:total], host_offsets.to(device), expected.to(device)
             )
         )
     return uploaded
@@ -444,15 +437,39 @@ def _looped_candidate(kernel, output, segment_count, block, warps):
 
 
 def _run_distribution(
-    torch, prepare, looped_kernel, name, segment_count, warmups, samples
+    torch,
+    prepare,
+    looped_kernel,
+    name,
+    segment_count,
+    warmups,
+    samples,
+    *,
+    device,
+    synchronize,
 ):
-    """Measure every candidate on one distribution's fresh layouts."""
+    """Measure every candidate on one distribution's fresh layouts.
+
+    Args:
+        torch: The PyTorch module.
+        prepare: The private planned-sum preparation function.
+        looped_kernel: The looped Triton kernel, or None without Triton.
+        name: Distribution name.
+        segment_count: Segments per layout.
+        warmups: Leading iterations that are checked but not recorded.
+        samples: Timed iterations.
+        device: Device that holds the inputs and outputs.
+        synchronize: Callable that waits for all work on that device.
+
+    Returns:
+        The record row for this distribution.
+    """
     pool = _layout_pool(name, segment_count, warmups + samples, _SEED)
-    layouts = _upload(torch, pool)
+    layouts = _upload(torch, pool, device)
     names = _candidate_names(triton_available=looped_kernel is not None)
     # A result that was never written must not pass the correctness check.
     outputs = {
-        candidate: torch.full((segment_count,), float("nan"), device="cuda")
+        candidate: torch.full((segment_count,), float("nan"), device=device)
         for candidate in names
         if candidate != "torch"
     }
@@ -499,7 +516,7 @@ def _run_distribution(
         candidates,
         check,
         warmups=warmups,
-        synchronize=torch.cuda.synchronize,
+        synchronize=synchronize,
     )
     return {
         "distribution": name,
@@ -578,6 +595,8 @@ def main():
             segment_count,
             warmups,
             samples,
+            device="cuda",
+            synchronize=torch.cuda.synchronize,
         )
         results.append(row)
         print(f"{name}: median_us={_headline(row['summary_us'])}", flush=True)
