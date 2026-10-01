@@ -1392,6 +1392,24 @@ def _load_cold(cache, key, driver, ptx, kernel_name):
     return loaded
 
 
+def _report_modules_left_loaded(count, error):
+    """Report modules that stay loaded, without ever raising.
+
+    The caller is loading an unrelated kernel and the modules are queued
+    again, so nothing is lost by going on. When the warning filters turn
+    the report into an exception, it is written to standard error instead.
+    """
+    noun = "module" if count == 1 else "modules"
+    try:
+        warnings.warn(
+            f"Swage left {count} unused CUDA {noun} loaded: {error}",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+    except RuntimeWarning as raised:
+        print(f"RuntimeWarning: {raised}", file=sys.stderr)
+
+
 def _capturing():
     """Return whether this thread is capturing a CUDA graph in PyTorch."""
     torch = sys.modules.get("torch")
@@ -1617,8 +1635,10 @@ class _CudaDriver:
         is invalidated, the synchronize fails, and the modules stay queued.
 
         A module of another context stays queued until that context is
-        current. A driver error is reported as a `RuntimeWarning` and is
-        never raised, because the caller is loading an unrelated kernel.
+        current. A driver error is reported once per call and is never
+        raised, because the caller is loading an unrelated kernel. Every
+        idle module is tried, and a module that was not unloaded stays
+        queued for the next call.
         """
         if not self._retired or _capturing():
             return
@@ -1639,21 +1659,23 @@ class _CudaDriver:
             self._call("cuCtxSynchronize")
         except RuntimeError as error:
             self._retired.extend((context, module) for module in idle)
-            warnings.warn(
-                f"Swage left {len(idle)} unused CUDA modules loaded: {error}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            _report_modules_left_loaded(len(idle), error)
             return
-        for module in idle:
-            try:
-                self._call("cuModuleUnload", ctypes.c_void_p(module))
-            except RuntimeError as error:
-                warnings.warn(
-                    f"Swage left an unused CUDA module loaded: {error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        kept = []
+        first_error = None
+        try:
+            while idle:
+                module = idle.pop()
+                try:
+                    self._call("cuModuleUnload", ctypes.c_void_p(module))
+                except RuntimeError as error:
+                    kept.append(module)
+                    first_error = first_error or error
+        finally:
+            # `idle` holds modules only when the loop was interrupted.
+            self._retired.extend((context, module) for module in kept + idle)
+        if kept:
+            _report_modules_left_loaded(len(kept), first_error)
 
     def _pin_if_capturing(self, function, stream):
         """Keep a kernel loaded for good when a CUDA graph captures it.
