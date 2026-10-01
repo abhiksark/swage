@@ -1277,10 +1277,21 @@ def test_persistent_split_sum_matches_nontrivial_oracles():
     )
 
 
+# The short tail segments have 31 elements, not 32. On the exact pattern a
+# 32-element window that starts at -7.75 sums to zero, which 31 of 2048
+# such segments would do, and a zero sum equals the empty-segment identity.
+_SKEW_LENGTHS = [1] * 2048 + [65_537] * 8 + [31] * 2048
+
+
+def test_extreme_skew_inputs_are_informative():
+    """Every skewed segment has a nonzero, window-dependent sum."""
+    _assert_informative(*_case(_SKEW_LENGTHS))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_extreme_skew_completes_without_starvation():
     """Drain many claims and dependency groups repeatedly with seven CTAs."""
-    lengths = [1] * 2048 + [65_537] * 8 + [32] * 2048
+    lengths = _SKEW_LENGTHS
     host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
