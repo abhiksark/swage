@@ -47,8 +47,9 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
 - The parameters are the kernel's ABI, in order: three f32 pointers, an
   i32 count, and the compile-time block width. `BLOCK` is marked with
   the annotation `sl.constexpr`, so it is bound at compile time and
-  never passed at launch. No other annotation and no default value is
-  accepted.
+  never passed at launch. No other parameter annotation and no default
+  value is accepted. A kernel returns nothing, so `-> None` is the only
+  return annotation accepted.
 - `sl` is the conventional import name. The frontend recognizes the
   `swage.language` module by object, so another import name works as
   long as the kernel uses it for the marker and for every call.

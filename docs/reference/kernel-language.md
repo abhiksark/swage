@@ -34,8 +34,10 @@ spelling:
   to the module, such as `sl.load`. A bare `load` from
   `from swage.language import load` is rejected, and so is the dotted path
   `swage.language.load`.
-- A kernel parameter or an assignment in the body that reuses the import
-  name hides the module for that kernel.
+- A kernel parameter that reuses the import name hides the module inside
+  that kernel's body.
+- An assignment in the body to the import name is rejected at the
+  assignment.
 
 ## Function shape
 
@@ -46,7 +48,9 @@ spelling:
 - No parameter default values. Every value is passed when the kernel is
   emitted or launched.
 - Compile-time parameters carry the annotation `sl.constexpr`. Any other
-  parameter annotation is rejected, and so is a return annotation.
+  parameter annotation is rejected, including the string `"sl.constexpr"`.
+- The return annotation `-> None` is accepted and changes nothing. Any other
+  return annotation is rejected.
 - A final empty `return` is optional. Return values and an earlier return are
   rejected.
 

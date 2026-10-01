@@ -93,14 +93,24 @@ class _Kernel:
             )
         self.function = parsed.body[0]
         self._plain_parameters = False
-        self.language_names = _language_names(function, self.function)
+        # Annotations are evaluated where the kernel is defined, so they see
+        # the module under a name that the kernel also takes as a parameter.
+        # Inside the body that name is the parameter.
+        self.enclosing_language_names = _language_names(
+            function, self.function
+        )
+        self.language_names = self.enclosing_language_names - {
+            node.arg
+            for node in ast.walk(self.function.args)
+            if isinstance(node, ast.arg)
+        }
         # The names bound to the language module are part of what the source
         # means, so two kernels with one spelling and different bindings
         # must not share a compiled artifact.
         self.source_digest = hashlib.sha256(
             (
                 ast.dump(self.function, include_attributes=False)
-                + repr(sorted(self.language_names))
+                + repr(sorted(self.enclosing_language_names))
             ).encode()
         ).hexdigest()
         self.parameter_names = [
@@ -416,16 +426,20 @@ class _Kernel:
                 continue
             self._raise(
                 annotation,
-                f"unsupported annotation '{ast.unparse(annotation)}' on "
+                f"unsupported {_describe_annotation(annotation)} on "
                 f"parameter '{parameter.arg}'; the only accepted annotation "
                 "is constexpr through a name bound to the swage.language "
                 "module, such as sl.constexpr",
             )
-        if self.function.returns is not None:
+        returns = self.function.returns
+        if returns is not None and not (
+            isinstance(returns, ast.Constant) and returns.value is None
+        ):
             self._raise(
-                self.function.returns,
-                "return annotations are unsupported; a kernel returns "
-                "nothing",
+                returns,
+                f"unsupported return {_describe_annotation(returns)}; a "
+                "kernel returns nothing, so the only accepted return "
+                "annotation is None",
             )
         self._plain_parameters = True
 
@@ -434,7 +448,7 @@ class _Kernel:
         return (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
-            and node.value.id in self.language_names
+            and node.value.id in self.enclosing_language_names
             and node.attr == "constexpr"
         )
 
@@ -532,6 +546,12 @@ class _Checker:
                 self._error(
                     target,
                     f"cannot assign to constexpr parameter '{target.id}'",
+                )
+            if target.id in self.kernel.enclosing_language_names:
+                self._error(
+                    target,
+                    f"cannot assign to '{target.id}'; the name is bound to "
+                    "the swage.language module",
                 )
             self.symbols[target.id] = self._expression(node.value)
             return
@@ -1068,13 +1088,21 @@ class _Emitter(_Checker):
         return self.ir.Location.name(self.kernel.__name__, child)
 
 
-def _language_names(function, syntax):
-    """Return the names a kernel uses that are bound to `swage.language`.
+def _describe_annotation(node):
+    """Return an annotation as written, saying when it is a string."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return f"string annotation {node.value!r}"
+    return f"annotation '{ast.unparse(node)}'"
 
-    A name counts when the function sees the module object through its
-    closure or its globals and the kernel neither takes the name as a
-    parameter nor assigns to it. The match is on the object, so any import
-    name works and a different object spelled `sl` does not.
+
+def _language_names(function, syntax):
+    """Return the names in a kernel that are bound to `swage.language`.
+
+    A name counts when the scope that defines the kernel binds it to the
+    module object, as seen through the function's closure or its globals.
+    The match is on the object, so any import name works and a different
+    object spelled `sl` does not. A name the kernel takes as a parameter or
+    assigns to is included; the caller decides what that means.
 
     Args:
         function: The Python function being captured.
@@ -1083,21 +1111,13 @@ def _language_names(function, syntax):
     Returns:
         A frozenset of names.
     """
-    loaded = set()
-    local = set()
-    for node in ast.walk(syntax):
-        if isinstance(node, ast.arg):
-            local.add(node.arg)
-        elif isinstance(node, ast.Name):
-            if isinstance(node.ctx, ast.Load):
-                loaded.add(node.id)
-            else:
-                local.add(node.id)
     cells = dict(
         zip(function.__code__.co_freevars, function.__closure__ or ())
     )
     names = set()
-    for name in loaded - local:
+    for name in {
+        node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)
+    }:
         if name in cells:
             try:
                 bound = cells[name].cell_contents
