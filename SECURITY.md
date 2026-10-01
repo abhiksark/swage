@@ -16,9 +16,10 @@ Within that model, the project still commits to:
 - Restricting frontend call targets to the `swage.language` builtins.
 - Validating tensor device, dtype, layout, and bounds metadata at the
   runtime boundary, including overflow-safe offset validation.
-- Cache integrity: cache keys include compiler revision and target; cache
-  artifacts are not world-writable; PTX is not loaded from cache entries
-  that fail metadata validation.
+- Cache integrity: cache keys include the frontend source digest, the loaded
+  native library identity, and the target; cache entries must be owned by
+  the current user and must not be world-writable or symlinks; PTX is not
+  loaded from cache entries that fail metadata validation.
 - CI secrets are not exposed to untrusted pull requests.
 
 ## Reporting a vulnerability

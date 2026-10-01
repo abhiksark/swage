@@ -10,6 +10,25 @@ semantic versioning (`0.x`; anything may change).
 
 - Generated TikZ figure atlas covering the GPU execution approaches, and a
   benchmarks page backed by a committed RTX 5090 snapshot.
+- Private persistent task queue for the canonical identity segmented sum
+  (ADR-0018). It is experimental: its predeclared performance gate failed and
+  the path stays private.
+- Private capture-free, single-stage f32 sum and max element programs and map
+  chains across warp, CTA, mixed, and split execution (ADR-0019).
+- `python -m swage.env` reports `revision`, `llvm_linked`, and whether the
+  build-tree bindings import. The native `swage` submodule exposes
+  `__llvm_version__`.
+- `scripts/fetch_llvm.sh` verifies the pinned LLVM source tarball against a
+  committed SHA-256 and accepts a `SWAGE_LLVM_URL` mirror. CMake rejects a
+  non-pinned LLVM at configure time.
+- The split partial and merge lowering and the experimental `persistent`
+  option are registered for `swage-opt`, with FileCheck tests that pin the
+  synchronization structure of the fused mixed, split, and persistent
+  lowerings. No lowering output changed.
+- A `power-law` benchmark distribution with an uncapped heavy tail, a looped
+  Triton baseline in the comparison harness, and
+  `benchmarks/benchmark_fresh_offsets.py`, which times segmented sum on a new
+  offsets layout every iteration with preparation inside the timed region.
 
 ### Changed
 
@@ -21,6 +40,41 @@ semantic versioning (`0.x`; anything may change).
   4096-element chunk fully occupies a CTA at eight elements per thread.
 - Warm launches dispatch through a compiled nanobind entry point that
   resolves `libcuda.so.1` with `dlopen`; ctypes remains the fallback.
+- Segmented GPU kernels clamp each segment range loaded from device memory
+  to the value count before indexing the values buffer.
+- The segmented GPU lowering and the private launch helpers reject block
+  sizes whose warp count is not a power of two.
+- `swage.extent`, `swage.map`, `swage.reduce`, and `swage.map_store` declare
+  a memory read on their segment operand. `swage.extent` is no longer `Pure`,
+  so upstream CSE and LICM no longer merge or hoist segment readers across
+  writes.
+- Private segmented kernels are compiled once per kernel, options, and target
+  and loaded once per CUDA context. Prepared launches reject an offsets
+  tensor modified in place, and validation rejects tensors that require grad.
+- CUDA graph capture of a prepared launch needs an earlier launch that
+  observed task storage ready: launch, synchronize, and launch again. The
+  error message now says so.
+- Disk cache entries are keyed on the frontend sources and the loaded native
+  library instead of the checkout revision, persist without a clean git
+  checkout, and are published atomically. Incomplete entries are recompiled,
+  and entries not owned by the current user are rejected. Existing entries
+  are not reused.
+- The private CPU oracle transports exact f32 bit patterns instead of
+  six-digit text. Segmented runtime tests use position-dependent exact inputs
+  and randomized float64 differential checks for each static policy.
+- The frontend accepts a docstring as the first statement of a kernel.
+- The trusted GPU workflow runs the whole `python/tests/mlir` directory.
+- The codename test scans tracked files instead of walking the filesystem.
+
+### Fixed
+
+- The private CPU oracle returned one unwritten value for a batch with zero
+  segments. It now returns an empty result.
+- Documentation: the README release boundary labels reductions that postdate
+  `v0.5.1` and records the failed two-launch mixed gate; installation lists
+  the binding prerequisites, the `sm_80` minimum, and the hosted build cost;
+  the cache, target-floor, and benchmark-baseline descriptions match the code
+  and records.
 
 ## [0.5.1] - 2026-08-24
 
