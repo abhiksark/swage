@@ -42,11 +42,20 @@ native build needs the MLIR Python binding requirements installed after
 `fetch_llvm.sh` and before `build_llvm.sh`; that page lists them and gives
 the command.
 
+The hosted workflows and the docs build install one hash-locked tool set
+from `requirements-ci.txt`, which pins every tool of the `dev` and `docs`
+extras and of the `ci` dependency group. To reproduce a hosted job locally,
+install it with `python -m pip install --require-hashes -r
+requirements-ci.txt`. The comment above the `ci` group in `pyproject.toml`
+gives the command that regenerates the file.
+
 ## Native Python bindings
 
 The `swage-compiler` wheel contains only the pure Python `swage` package. The
 native `mlir_swage` package is a build-tree artifact and native wheel
-packaging is deferred.
+packaging is deferred. A native build contains third-party code;
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists it and must go with
+any copy of the build that leaves the machine that built it.
 
 ```bash
 ninja -C build check-swage-python
@@ -59,7 +68,8 @@ bindings are enabled against an incompatible install.
 ## Contributor paths
 
 - Documentation: fix incorrect boundaries before improving presentation. Run
-  `mkdocs build --strict` and `ruff check .`.
+  `make docs`, which checks the diagrams and figures, builds the site
+  strictly, and checks its links, and `ruff check .`.
 - Public Python frontend: work under `python/swage/`. The accepted AST and API
   are narrow fixed-vector-add contracts. Run the Python tier and native
   binding integration when emission changes.
@@ -69,10 +79,13 @@ bindings are enabled against an incompatible install.
 - Runtime: public execution remains canonical fixed vector add.
   Segmented helpers are private qualification. Runtime changes require the
   hosted tests and, where CUDA behavior changes, trusted GPU evidence.
-- Benchmarks: preserve frozen inputs and gates. Prepare outside timing,
-  except in a benchmark that deliberately times preparation to measure
-  per-layout cost (`benchmarks/benchmark_fresh_offsets.py`), and commit raw
-  evidence with the exact hardware and revision.
+- Benchmarks: preserve frozen inputs and gates, and never overwrite a record
+  under `benchmarks/results/`. Prepare outside timing, except in a benchmark
+  that deliberately times preparation to measure per-layout cost
+  (`benchmarks/benchmark_fresh_offsets.py`). Repeat a configuration in
+  independent processes with `benchmarks/benchmark_processes.py`, which
+  writes to a directory outside the checkout, and commit raw evidence with
+  the exact hardware and revision.
 
 Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
 use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and

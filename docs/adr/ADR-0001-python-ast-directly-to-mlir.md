@@ -1,3 +1,4 @@
+<!-- docs/adr/ADR-0001-python-ast-directly-to-mlir.md -->
 # ADR-0001: Python AST directly to MLIR
 
 - Status: accepted
@@ -17,7 +18,7 @@ The frontend parses a restricted Python subset (`inspect.getsource` →
 `ast.parse`) and constructs Swage MLIR directly through the MLIR Python
 bindings and generated operation wrappers. MLIR is the only production IR
 between Python and LLVM. Textual MLIR is reserved for debugging, tests, and
-reproducers — the JIT path never serializes and reparses IR. Torch FX is
+reproducers; the JIT path never serializes and reparses IR. Torch FX is
 not the kernel frontend. User kernel bodies are never executed as normal
 Python.
 
