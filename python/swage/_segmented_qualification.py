@@ -10,7 +10,6 @@ import subprocess
 import threading
 import weakref
 from collections.abc import Callable
-from itertools import pairwise
 from typing import NamedTuple
 
 from . import _runtime
@@ -51,25 +50,56 @@ def _validate_counts(value_count, segment_count):
 
 
 def _validate_offset_sequence(offsets, value_count):
-    """Validate the offset array itself and return the segment count."""
-    if not offsets:
+    """Validate the offset array itself and return the segment count.
+
+    Args:
+        offsets: Host offsets. An int32 array, the host copy of a validated
+            tensor, is checked with array operations. Any other sequence is
+            checked one element at a time, which also rejects a value that
+            is not a signed i32 integer; the dtype rules that out for the
+            array.
+        value_count: Number of values the offsets index.
+
+    Returns:
+        The segment count, one less than the number of offsets.
+
+    Raises:
+        ValueError: If the offsets are empty, do not start at zero, hold a
+            value that is not a signed i32 integer, a negative value, or a
+            decrease, or end past the value count. The first invalid offset
+            decides the message, in both forms.
+    """
+    import numpy
+
+    if not len(offsets):
         raise ValueError("offsets must contain at least the initial zero")
     segment_count = len(offsets) - 1
     _validate_counts(value_count, segment_count)
     if offsets[0] != 0:
         raise ValueError("offsets must start at zero")
-    previous = 0
-    for offset in offsets:
-        if type(offset) is not int or not -(1 << 31) <= offset < _I32_LIMIT:
-            raise ValueError("offsets must contain signed i32 values")
-        if offset < 0:
-            raise ValueError("offsets must not be negative")
-        if offset < previous:
+    if isinstance(offsets, numpy.ndarray) and offsets.dtype == numpy.int32:
+        # The first decrease is the first invalid offset: every offset
+        # before it is at least the initial zero, so a negative offset is
+        # always a decrease.
+        decreasing = offsets[1:] < offsets[:-1]
+        if decreasing.any():
+            if offsets[1:][decreasing.argmax()] < 0:
+                raise ValueError("offsets must not be negative")
             raise ValueError("offsets must be nondecreasing")
-        previous = offset
-    if offsets[-1] > value_count:
+    else:
+        previous = 0
+        for offset in offsets:
+            if type(offset) is not int or not -(1 << 31) <= offset < _I32_LIMIT:
+                raise ValueError("offsets must contain signed i32 values")
+            if offset < 0:
+                raise ValueError("offsets must not be negative")
+            if offset < previous:
+                raise ValueError("offsets must be nondecreasing")
+            previous = offset
+    final = int(offsets[-1])
+    if final > value_count:
         raise ValueError(
-            f"final offset {offsets[-1]} exceeds value count {value_count}"
+            f"final offset {final} exceeds value count {value_count}"
         )
     return segment_count
 
@@ -92,7 +122,7 @@ def _validate_softmax_offsets(offsets, value_count, output_count):
     value count would reject a correctly sized output.
     """
     segment_count = _validate_offset_sequence(offsets, value_count)
-    required = offsets[-1]
+    required = int(offsets[-1])
     if type(output_count) is not int or output_count < required:
         raise ValueError(
             f"output has {output_count} elements for {required} values"
@@ -124,7 +154,14 @@ def _validate_disjoint(name, buffer, output):
 def _validate_shapes(
     values, offsets, output, validate_offsets, *, require_cuda=True
 ):
-    """Validate tensor shapes against one of the two output ABIs."""
+    """Validate tensor shapes against one of the two output ABIs.
+
+    Returns:
+        The value count, the segment count, and the offsets on the host as
+        one int32 array. Copying a CUDA tensor to the host waits for the
+        work queued on it; that copy is the only device synchronization
+        here, and no Python integer is created per offset.
+    """
     torch = _runtime._import_torch()
     for name, tensor in (
         ("values", values),
@@ -155,7 +192,7 @@ def _validate_shapes(
             )
 
     value_count = values.numel()
-    host_offsets = offsets.detach().cpu().tolist()
+    host_offsets = offsets.detach().cpu().numpy()
     segment_count = validate_offsets(host_offsets, value_count, output.numel())
     _validate_disjoint("values", values, output)
     _validate_disjoint("offsets", offsets, output)
@@ -468,12 +505,11 @@ def _launch_segmented_sum_tasks(
         raise TypeError("task_ids must be a CUDA tensor")
     if task_ids.device.index != torch.cuda.current_device():
         raise ValueError("task_ids must be on the current CUDA device")
-    host_task_ids = task_ids.detach().cpu().tolist()
+    host_task_ids = task_ids.detach().cpu().numpy()
     task_count = len(host_task_ids)
     _validate_counts(value_count, task_count)
-    if any(
-        type(task_id) is not int or not 0 <= task_id < segment_count
-        for task_id in host_task_ids
+    if task_count and not (
+        0 <= host_task_ids.min() and host_task_ids.max() < segment_count
     ):
         raise ValueError("task_ids must contain valid segment IDs")
     if block_size not in {_WARP_BLOCK, _CTA_BLOCK}:
@@ -585,6 +621,43 @@ def _has_small_element_program(module):
     return eligible
 
 
+# One parsed module per semantic module text, with the result of inspecting
+# its element program. Both depend only on the text, so a preparation with
+# new offsets reuses them. Threads share an entry, which is safe because
+# classification holds the GIL and leaves the module unchanged. Compiles do
+# not use these modules: on a miss `_compile_once` parses the text in a
+# context of its own, so a compile never runs on a context shared here.
+# ponytail: nothing is evicted. One context is kept per distinct program
+# text a process prepares; bound it with the kernel memo if a process
+# generates programs without bound.
+_module_memo = {}
+
+
+def _parsed_module(module_text):
+    """Parse and inspect one semantic module at most once per process.
+
+    Args:
+        module_text: Semantic module text that identifies the program.
+
+    Returns:
+        The module, parsed in a context that it keeps alive, and whether
+        `_has_small_element_program` holds for it. A text that does not
+        parse is not kept.
+    """
+    entry = _module_memo.get(module_text)
+    if entry is None:
+        from mlir_swage import ir
+        from mlir_swage.dialects import swage
+
+        context = ir.Context()
+        swage.register_dialects(context)
+        module = ir.Module.parse(module_text, context=context)
+        entry = _module_memo.setdefault(
+            module_text, (module, _has_small_element_program(module))
+        )
+    return entry
+
+
 def _prepare_planned_reduction(
     values,
     offsets,
@@ -629,130 +702,91 @@ def _prepare_planned_reduction(
     )
     offsets_version = _offsets_version(offsets)
 
-    from mlir_swage import ir
+    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
-    with ir.Context() as context:
-        swage.register_dialects(context)
-        module = ir.Module.parse(module_text)
-        warp_ids, cta_ids, partial_records, merge_records = (
-            native_swage._materialize_segmented_plan(
-                module,
-                offsets=host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
+    module, small_element_program = _parsed_module(module_text)
+    warp_ids, cta_ids, partial_records, merge_records = (
+        native_swage._materialize_segmented_plan(
+            module,
+            offsets=host_offsets,
+            value_count=value_count,
+            segment_count=segment_count,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
         )
-        expected_warp = []
-        expected_cta = []
-        expected_partial = []
-        expected_merge = []
-        max_length = 0
-        for segment_id, (begin, end) in enumerate(pairwise(host_offsets)):
-            length = end - begin
-            max_length = max(max_length, length)
-            if length <= warp_max_elements:
-                expected_warp.append(segment_id)
-            elif length <= cta_chunk_elements:
-                expected_cta.append(segment_id)
-            else:
-                partial_begin = len(expected_partial) // 2
-                for chunk_begin in range(begin, end, cta_chunk_elements):
-                    chunk_end = min(
-                        end, chunk_begin + cta_chunk_elements
-                    )
-                    expected_partial.extend(
-                        [chunk_begin, chunk_end]
-                    )
-                expected_merge.extend(
-                    [segment_id, partial_begin, len(expected_partial) // 2]
-                )
-        if (
-            warp_ids != expected_warp
-            or cta_ids != expected_cta
-            or partial_records != expected_partial
-            or merge_records != expected_merge
-        ):
-            raise RuntimeError(
-                "materialized plan does not match classified metadata"
-            )
-        partial_count = len(partial_records) // 2
-        merge_count = len(merge_records) // 3
-        direct_warp_count = len(warp_ids)
-        direct_cta_count = len(cta_ids)
-        direct_count = direct_warp_count + direct_cta_count
-        # ponytail: a measured two-chunk rule, not a general cost model.
-        # Retain splitting for sparse batches, larger tails, or mixed lengths.
-        use_direct_cta = (
-            select_schedule
-            and segment_count > 0
-            and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
-            and merge_count == segment_count
-            and max_length <= 2 * cta_chunk_elements
-            and segment_count
-            >= torch.cuda.get_device_properties(
-                values.device
-            ).multi_processor_count
-            and _has_small_element_program(module)
-        )
-        if segment_count == 0:
+    )
+    partial_count = len(partial_records) // 2
+    merge_count = len(merge_records) // 3
+    direct_warp_count = len(warp_ids)
+    direct_cta_count = len(cta_ids)
+    direct_count = direct_warp_count + direct_cta_count
+    # ponytail: a measured two-chunk rule, not a general cost model.
+    # Retain splitting for sparse batches, larger tails, or mixed lengths.
+    # Every segment is split when the merge count equals the segment count,
+    # so the longest segment is read only then.
+    use_direct_cta = (
+        select_schedule
+        and segment_count > 0
+        and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
+        and merge_count == segment_count
+        and int(numpy.diff(host_offsets).max()) <= 2 * cta_chunk_elements
+        and segment_count
+        >= torch.cuda.get_device_properties(
+            values.device
+        ).multi_processor_count
+        and small_element_program
+    )
+    if segment_count == 0:
 
-            def no_launch():
-                _require_unchanged_offsets(offsets, offsets_version)
-                return None
+        def no_launch():
+            _require_unchanged_offsets(offsets, offsets_version)
+            return None
 
-            return _PreparedReduction(no_launch, no_launch, no_launch)
-        warp_ptx = _compile_once(
-            native_swage._compile_segmented_reduction_ptx,
+        return _PreparedReduction(no_launch, no_launch, no_launch)
+    warp_ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name=kernel_name,
+        block_size=_WARP_BLOCK,
+        target=target,
+        use_task_ids=True,
+    )
+    cta_ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name=kernel_name,
+        block_size=_CTA_BLOCK,
+        target=target,
+        use_task_ids=True,
+    )
+    mixed_ptx = None
+    if direct_count:
+        mixed_ptx = _compile_once(
+            native_swage._compile_fused_segmented_reduction_ptx,
             module_text,
-            module=module,
             kernel_name=kernel_name,
-            block_size=_WARP_BLOCK,
             target=target,
-            use_task_ids=True,
         )
-        cta_ptx = _compile_once(
-            native_swage._compile_segmented_reduction_ptx,
+    partial_ptx = None
+    merge_ptx = None
+    if partial_count and not use_direct_cta:
+        partial_ptx = _compile_once(
+            native_swage._compile_split_partial_reduction_ptx,
             module_text,
-            module=module,
             kernel_name=kernel_name,
-            block_size=_CTA_BLOCK,
             target=target,
-            use_task_ids=True,
         )
-        mixed_ptx = None
-        if direct_count:
-            mixed_ptx = _compile_once(
-                native_swage._compile_fused_segmented_reduction_ptx,
-                module_text,
-                module=module,
-                kernel_name=kernel_name,
-                target=target,
-            )
-        partial_ptx = None
-        merge_ptx = None
-        if partial_count and not use_direct_cta:
-            partial_ptx = _compile_once(
-                native_swage._compile_split_partial_reduction_ptx,
-                module_text,
-                module=module,
-                kernel_name=kernel_name,
-                target=target,
-            )
-            merge_ptx = _compile_once(
-                native_swage._compile_split_merge_reduction_ptx,
-                module_text,
-                module=module,
-                kernel_name=kernel_name,
-                target=target,
-            )
+        merge_ptx = _compile_once(
+            native_swage._compile_split_merge_reduction_ptx,
+            module_text,
+            kernel_name=kernel_name,
+            target=target,
+        )
 
     driver = _runtime._get_driver()
     _, warp_function = _load_once(driver, warp_ptx, kernel_name)
@@ -775,7 +809,9 @@ def _prepare_planned_reduction(
     mixed_tasks = None
     if direct_count:
         mixed_tasks = torch.tensor(
-            [*warp_ids, *cta_ids], dtype=torch.int32, device=device
+            numpy.concatenate((warp_ids, cta_ids)),
+            dtype=torch.int32,
+            device=device,
         )
     partial_ranges = None
     merge_ranges = None
@@ -944,70 +980,39 @@ def _prepare_persistent_sum(
     )
     offsets_version = _offsets_version(offsets)
 
-    from mlir_swage import ir
+    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
-    with ir.Context() as context:
-        swage.register_dialects(context)
-        module = ir.Module.parse(module_text)
-        warp_ids, cta_ids, partial_records, merge_records = (
-            native_swage._materialize_segmented_plan(
-                module,
-                offsets=host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
+    module, _ = _parsed_module(module_text)
+    warp_ids, cta_ids, partial_records, merge_records = (
+        native_swage._materialize_segmented_plan(
+            module,
+            offsets=host_offsets,
+            value_count=value_count,
+            segment_count=segment_count,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
         )
-        expected_warp = []
-        expected_cta = []
-        expected_partial = []
-        expected_merge = []
-        for segment_id, (begin, end) in enumerate(pairwise(host_offsets)):
-            length = end - begin
-            if length <= warp_max_elements:
-                expected_warp.append(segment_id)
-            elif length <= cta_chunk_elements:
-                expected_cta.append(segment_id)
-            else:
-                partial_begin = len(expected_partial) // 2
-                for chunk_begin in range(begin, end, cta_chunk_elements):
-                    chunk_end = min(end, chunk_begin + cta_chunk_elements)
-                    expected_partial.extend([chunk_begin, chunk_end])
-                expected_merge.extend(
-                    [segment_id, partial_begin, len(expected_partial) // 2]
-                )
-        if (
-            warp_ids != expected_warp
-            or cta_ids != expected_cta
-            or partial_records != expected_partial
-            or merge_records != expected_merge
-        ):
-            raise RuntimeError(
-                "materialized plan does not match classified metadata"
-            )
-        if segment_count == 0:
+    )
+    if segment_count == 0:
 
-            def no_launch():
-                _require_unchanged_offsets(offsets, offsets_version)
-                return None
+        def no_launch():
+            _require_unchanged_offsets(offsets, offsets_version)
+            return None
 
-            return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
-        ptx = _compile_once(
-            native_swage._compile_persistent_segmented_reduction_ptx,
-            module_text,
-            module=module,
-            kernel_name=kernel_name,
-            target=target,
-        )
+        return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
+    ptx = _compile_once(
+        native_swage._compile_persistent_segmented_reduction_ptx,
+        module_text,
+        kernel_name=kernel_name,
+        target=target,
+    )
 
     partial_count = len(partial_records) // 2
     merge_count = len(merge_records) // 3
@@ -1026,16 +1031,20 @@ def _prepare_persistent_sum(
         resident_blocks = properties.multi_processor_count * 2
     active_blocks = min(resident_blocks, work_groups)
 
-    partial_merge_ids = [-1] * partial_count
-    for merge_id in range(merge_count):
-        partial_begin = merge_records[merge_id * 3 + 1]
-        partial_end = merge_records[merge_id * 3 + 2]
-        for partial_id in range(partial_begin, partial_end):
-            if partial_merge_ids[partial_id] != -1:
-                raise RuntimeError("partial task belongs to multiple merges")
-            partial_merge_ids[partial_id] = merge_id
-    if any(merge_id < 0 for merge_id in partial_merge_ids):
+    # A merge record is [segment_id, partial_begin, partial_end]. The
+    # partial ranges must follow one another from zero to the partial count;
+    # repeating each merge id by the length of its range then gives the
+    # merge of every partial task, which the kernel indexes unchecked.
+    range_begins = numpy.append(merge_records[1::3], partial_count)
+    range_ends = numpy.append(0, merge_records[2::3])
+    if (range_begins < range_ends).any():
+        raise RuntimeError("partial task belongs to multiple merges")
+    if (range_begins > range_ends).any():
         raise RuntimeError("partial task has no merge dependency")
+    partial_merge_ids = numpy.repeat(
+        numpy.arange(merge_count, dtype=numpy.int32),
+        merge_records[2::3] - merge_records[1::3],
+    )
 
     driver = _runtime._get_driver()
     _, function = _load_once(driver, ptx, kernel_name)
