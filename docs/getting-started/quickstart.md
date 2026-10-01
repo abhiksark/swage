@@ -69,6 +69,12 @@ retires lanes at or beyond `n`. The kernel is not directly callable;
 calling it raises. The accepted source forms are listed in
 [Kernel Language](../reference/kernel-language.md).
 
+The leading docstring is accepted on `main`. The released `0.5.1` wheel
+rejects a kernel that has one, reporting `unsupported expression 'Constant'`
+when the kernel is emitted or launched. With that wheel, remove the docstring
+line, or install `swage` from the same checkout as the native build with
+`python -m pip install -e .`.
+
 ## Emit and read the MLIR
 
 `emit_mlir()` needs the native bindings but no GPU and no PyTorch when

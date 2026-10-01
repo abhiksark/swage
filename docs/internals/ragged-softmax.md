@@ -19,7 +19,10 @@ sum, and normalize/store phases. Maps are fused into their consumer.
 
 The CPU path executes the phases sequentially. The GPU path executes all
 phases in one CTA per segment. Exact-target GPU compilation requires `sm_80`
-or newer because the path uses native `exp2`. The runner validates host-visible
+or newer because every Swage compile request must name a processor from the
+admitted list in [Runtime and Environment](../reference/runtime-environment.md).
+The floor is not specific to this path: native `exp2` on f32 is legal for
+every processor in the pinned NVPTX backend. The runner validates host-visible
 offset metadata, capacity, and output disjointness. Empty segments perform no
 map-store writes.
 

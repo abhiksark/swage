@@ -108,8 +108,13 @@ ownership claims.
 - PTX is emitted in process through LLVM NVPTX. NVRTC is not a production
   dependency.
 - Launch is asynchronous. Submitted tensors are recorded on the stream.
-- No path silently copies, casts, synchronizes, changes devices, creates a
-  context, or falls back to another backend or policy.
+- No path silently casts, changes devices, creates a context, or falls back
+  to another backend or policy. The public launch path also does not copy or
+  synchronize.
+- Private segmented qualification validates and classifies offsets, and
+  validates caller-supplied task IDs, on host copies made when a call is
+  validated or a plan is prepared. For CUDA tensors each copy synchronizes
+  with the device.
 
 Runtime and cache requirements live only in
 [`docs/reference/runtime-environment.md`](docs/reference/runtime-environment.md).

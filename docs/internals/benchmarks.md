@@ -17,9 +17,8 @@ committed snapshot
 [`benchmarks/results/perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json)
 records the aggregated medians, quartiles, and per-number provenance.
 Each value is the median of three independent process runs unless its
-provenance field states otherwise. The Triton baseline is the tuned
-per-segment kernel, the best of the swept and autotuned configurations,
-not the naive one.
+provenance field states otherwise. The Triton baseline is the per-segment
+kernel at the best of the swept and autotuned configurations.
 
 ## Timing methods
 
@@ -71,8 +70,15 @@ qualification.
 ## Segmented sum under graph timing
 
 Under graph replay, the best Swage policy per distribution beats
-`torch.segment_reduce` on all seven distributions and the tuned Triton
-baseline on six of seven. The uniform-4k row is parity, nominally
+`torch.segment_reduce` on all seven distributions and the Triton baseline on
+six of seven. The snapshot records that baseline as a per-segment kernel
+(`BLOCK=256`, `num_warps=8`, raw-log implementation name `triton-naive`), and
+the campaign's raw log is not committed. The later
+[A6000 comparison study](a6000-comparison.md), on a different GPU and
+distribution set, adds a matched Triton scheduler that receives the same
+heterogeneous tasks. There Swage is 16.2% faster on one distribution, within
+1.3% on five, and matched Triton is 8.3% faster on one. The uniform-4k
+row is parity, nominally
 Triton (2.5 versus Swage's 2.6 microseconds). The bimodal and few-huge Swage
 bars time one captured mixed sequence, the planner's fused warp launch
 plus the 512-thread split kernels; their provenance fields in the
