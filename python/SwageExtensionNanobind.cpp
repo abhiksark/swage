@@ -285,9 +285,9 @@ PlanRecords takePlanRecords(std::vector<int32_t> &&records) {
   return PlanRecords(owned->data(), {owned->size()}, owner);
 }
 
-/// The form of materializeSegmentedPlan the runtime uses. Offsets arrive as
-/// one host int32 buffer and the four record arrays leave as buffers. The C
-/// API classifies int64 offsets, so they are widened here in one pass.
+/// The Python entry point of materializeSegmentedPlan. Offsets arrive as one
+/// host int32 buffer and the four record arrays leave as buffers. The C API
+/// classifies int64 offsets, so they are widened here in one pass.
 std::tuple<PlanRecords, PlanRecords, PlanRecords, PlanRecords>
 materializeSegmentedPlanBuffers(nb::object moduleObject, PlanOffsets offsets,
                                 int64_t valueCount, int64_t segmentCount,
@@ -405,28 +405,12 @@ NB_MODULE(_swageDialectsNanobind, m) {
                           PTXKind::SplitMerge);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
-  // Two forms share one name. A contiguous rank-one host int32 buffer
-  // returns four int32 arrays and never converts: a buffer of another dtype,
-  // rank, or layout matches neither form. A list of integers returns four
-  // lists.
+  // Offsets are a contiguous rank-one host int32 buffer and the records come
+  // back as four int32 arrays. Nothing is converted: a list, a tuple, or a
+  // buffer of another dtype, rank, or layout is a TypeError.
   swageM.def("_materialize_segmented_plan", &materializeSegmentedPlanBuffers,
              nb::arg("module"), nb::arg("offsets").noconvert(),
              nb::arg("value_count"), nb::arg("segment_count"),
              nb::arg("warp_max_elements") = 32,
              nb::arg("cta_chunk_elements") = 4096);
-  swageM.def(
-      "_materialize_segmented_plan",
-      [](nb::object module, nb::list offsets, int64_t valueCount,
-         int64_t segmentCount, int64_t warpMaxElements,
-         int64_t ctaChunkElements) {
-        std::vector<int64_t> hostOffsets;
-        if (!nb::try_cast(offsets, hostOffsets))
-          throw nb::next_overload();
-        return materializeSegmentedPlan(std::move(module), hostOffsets,
-                                        valueCount, segmentCount,
-                                        warpMaxElements, ctaChunkElements);
-      },
-      nb::arg("module"), nb::arg("offsets"), nb::arg("value_count"),
-      nb::arg("segment_count"), nb::arg("warp_max_elements") = 32,
-      nb::arg("cta_chunk_elements") = 4096);
 }

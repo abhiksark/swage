@@ -229,8 +229,11 @@ def test_empty_layout_returns_four_empty_arrays(sum_module):
         numpy.asarray([[0, 1]], dtype=numpy.int32),
         numpy.asarray([0, 9, 1, 9], dtype=numpy.int32)[::2],
         (0, 1),
+        [0, 1],
     ],
-    ids=["int64", "uint32", "float32", "rank-two", "strided", "tuple"],
+    ids=[
+        "int64", "uint32", "float32", "rank-two", "strided", "tuple", "list",
+    ],
 )
 def test_other_offset_buffers_are_rejected_without_conversion(
     sum_module, offsets

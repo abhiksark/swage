@@ -3,12 +3,34 @@
 
 import re
 
+import numpy
 import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
 from swage._segmented_qualification import _has_small_element_program
+
+
+def _plan(module, offsets, **arguments):
+    """Classify host offsets through the native plan and return lists.
+
+    Args:
+        module: Parsed semantic module to plan.
+        offsets: Offsets as Python integers. They cross into native code as
+            one host int32 buffer, the only form the binding accepts.
+        **arguments: The value count, the segment count, and any limit.
+
+    Returns:
+        The warp ids, CTA ids, partial records, and merge records, each as
+        a list.
+    """
+    records = native_swage._materialize_segmented_plan(
+        module,
+        offsets=numpy.asarray(offsets, dtype=numpy.int32),
+        **arguments,
+    )
+    return tuple(array.tolist() for array in records)
 
 
 @pytest.mark.parametrize(
@@ -70,9 +92,9 @@ def test_static_schedules_share_reduction_program(kind, transform):
         swage.register_dialects(context)
         module = ir.Module.parse(reduction_module(kind, transform))
         original = module.operation.get_asm(enable_debug_info=False)
-        assert native_swage._materialize_segmented_plan(
+        assert _plan(
             module,
-            offsets=[0, 1, 34, 4131],
+            [0, 1, 34, 4131],
             value_count=4131,
             segment_count=3,
         ) == ([0], [1], [34, 4130, 4130, 4131], [2, 0, 2])
@@ -553,9 +575,9 @@ def test_materializes_stable_policy_segment_ids_without_mutating_source():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta, partial, merge = native_swage._materialize_segmented_plan(
+        warp, cta, partial, merge = _plan(
             module,
-            offsets=[0, 0, 32, 65, 65, 66],
+            [0, 0, 32, 65, 65, 66],
             value_count=66,
             segment_count=5,
             warp_max_elements=32,
@@ -575,15 +597,13 @@ def test_materializes_split_ranges_and_compact_merge_records():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta, partial, merge = (
-            native_swage._materialize_segmented_plan(
-                module,
-                offsets=[0, 32, 65, 4162, 12354],
-                value_count=12354,
-                segment_count=4,
-                warp_max_elements=32,
-                cta_chunk_elements=4096,
-            )
+        warp, cta, partial, merge = _plan(
+            module,
+            [0, 32, 65, 4162, 12354],
+            value_count=12354,
+            segment_count=4,
+            warp_max_elements=32,
+            cta_chunk_elements=4096,
         )
 
         assert warp == [0]
@@ -599,18 +619,18 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
         with pytest.raises(ValueError, match="offsets must be nondecreasing"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 module,
-                offsets=[0, 2, 1],
+                [0, 2, 1],
                 value_count=2,
                 segment_count=2,
                 warp_max_elements=32,
             )
 
         with pytest.raises(ValueError, match="planning limits must satisfy"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 module,
-                offsets=[0, 1],
+                [0, 1],
                 value_count=1,
                 segment_count=1,
                 warp_max_elements=33,
@@ -620,9 +640,9 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         transformed = ir.Module.parse(RAGGED_SOFTMAX)
         original = transformed.operation.get_asm(enable_debug_info=False)
         with pytest.raises(ValueError, match="capture-free maps"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 transformed,
-                offsets=[0, 1],
+                [0, 1],
                 value_count=1,
                 segment_count=1,
                 warp_max_elements=32,
