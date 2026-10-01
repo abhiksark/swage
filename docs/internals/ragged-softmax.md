@@ -106,5 +106,6 @@ f32, which is subnormal or zero and carries no relative accuracy. The
 comparison against float32 PyTorch in `test_segmented_runtime.py` keeps its
 relative tolerance of `2e-06`, which is sized for spreads of at most 8.
 
-Continue with [Task Planning](planning.md) for how segments become
+Continue with the [SwagePlan Dialect](swage-plan-dialect.md) for the
+planning IR, and then [Task Planning](planning.md) for how segments become
 schedulable tasks.

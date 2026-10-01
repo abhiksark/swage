@@ -33,7 +33,7 @@ passes.
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
 | `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
-| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`; optional `persistent`, requires block size 512 | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
+| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512 | Lower an admitted private segmented program to GPU form. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for a capture-free, single-stage f32 sum or max |
 | `--swage-split-segmented-reduction-to-gpu` | optional `merge` | Lower an admitted private capture-free, single-stage f32 sum or max to the split partial kernel, or to the split merge kernel when `merge` is set |
 
@@ -60,6 +60,12 @@ emits the experimental persistent queue kernel for the identity f32 sum
 described in [Persistent Execution](persistent-execution.md). It cannot be
 combined with `fused-mixed`, which requires block size 128.
 
+`use-task-ids` selects the task-ID ABI of the pure warp and pure CTA
+kernels. The pass rejects it together with `fused-mixed` and together with
+`persistent`, with a diagnostic, because the fused and persistent kernels
+have ABIs of their own and always load segment IDs from their own task
+buffers.
+
 These modes are registered so that their lowerings can be inspected and
 tested from the driver. Registration does not change their status. Split
 execution remains private qualification. Persistent execution remains a
@@ -70,7 +76,40 @@ constructs the same passes through compiler factories instead of pass
 arguments.
 
 The driver and passes expose the tested compiler surface, not a general
-optimizer pipeline. Continue with [Compiler Pipeline](compiler-pipeline.md)
-for data flow, [Swage Dialect](swage-dialect.md) for semantic operations, or
-[Segmented Reductions](segmented-reductions.md) for admitted
-segmented modules and ABIs.
+optimizer pipeline.
+
+## Using the libraries from another CMake project
+
+`cmake --install` of a Swage build tree installs the headers under
+`include/swage` and `include/swage-c`, the libraries, and a CMake package
+under `lib/cmake/swage`. A consumer loads it with
+`find_package(Swage REQUIRED CONFIG)`:
+
+- The imported targets are `MLIRSwage`, `MLIRSwagePlan`,
+  `MLIRSwageFixedBlockToGPU`, `MLIRSwageSegmentedReduction`, and
+  `SwageCAPI`.
+- The targets carry no include directories, as the MLIR targets do not, so
+  the consumer adds `SWAGE_INCLUDE_DIRS`, `MLIR_INCLUDE_DIRS`, and
+  `LLVM_INCLUDE_DIRS`.
+- The package finds MLIR itself and reports Swage as not found when that
+  MLIR is not the release Swage was built against.
+
+No workflow builds a consumer project against the installed package, so the
+package is an install rule and not a tested interface. Swage itself does not
+build in its source directory: configuration stops when the build directory
+is the source directory.
+
+## Test tools and lit features
+
+The lit suite needs `swage-opt` from the build tree and `FileCheck`, `not`,
+and `count` from the LLVM install. Four tests under
+`test/Conversion/SwageToCPU` also execute lowered code. They declare
+`REQUIRES: mlir-runner`, and lit reports them as unsupported unless the LLVM
+install holds all four of `mlir-opt`, `mlir-runner`, `libmlir_runner_utils`,
+and `libmlir_c_runner_utils`. A pinned install built by
+`scripts/build_llvm.sh` holds them.
+
+Continue with [Verification](verification.md) for the evidence behind each
+boundary. For data flow go back to
+[Compiler Pipeline](compiler-pipeline.md), and for admitted segmented
+modules and ABIs to [Segmented Reductions](segmented-reductions.md).

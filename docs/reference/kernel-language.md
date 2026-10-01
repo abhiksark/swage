@@ -15,11 +15,12 @@ decorator. Everything else on this page is checked by `emit_mlir()`.
 compiles the kernel.
 
 `emit_mlir()` checks the parameter list and the body before it imports the
-native `mlir_swage` package. With only the `swage-compiler` wheel installed,
+native `mlir_swage` package. With only the pure Python package installed,
 a kernel outside this page raises the same `CompilationError` as it does
 with the native build. A kernel inside it raises a `RuntimeError` that says
 the check passed and names the
-[Installation](../getting-started/installation.md) page.
+[Installation](../getting-started/installation.md) page. The released
+`0.5.1` wheel predates this order, as that page states.
 
 ## The language module
 
@@ -148,6 +149,7 @@ plus offset addresses. It emits standard `arith`, `func`, `memref`, and
 
 This language is the public fixed-block subset. The segment
 operations present in native MLIR are not exposed as Python language symbols.
-Continue with [swage](swage.md) for input modes and
-launch validation, or [Swage Dialect](../internals/swage-dialect.md) for the native
-semantic IR boundary.
+Continue with [Runtime and Environment](runtime-environment.md) for what a
+launch validates and how a kernel is compiled, cached, and loaded. The call
+contracts are on [swage](swage.md), and the native semantic IR boundary is
+on [Swage Dialect](../internals/swage-dialect.md).

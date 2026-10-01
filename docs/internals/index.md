@@ -15,15 +15,17 @@ find its content in the topic pages below.
 | [Compiler Pipeline](compiler-pipeline.md) | The spine, the admitted branches, and ownership |
 | [Swage Dialect](swage-dialect.md) | The semantic operations and types |
 | [Textual Swage IR](../language/swage-ir.md) | Textual syntax, SSA data flow, and one complete module |
-| [Segmented Reductions](segmented-reductions.md) | Direct segmented sum and max, CPU oracle, one CTA per segment |
-| [Ragged Softmax](ragged-softmax.md) | Fused multi-phase softmax in one CTA |
+| [Segmented Reductions](segmented-reductions.md) | Direct segmented sum and max, CPU oracle, one CTA per segment, and sum rounding |
+| [Ragged Softmax](ragged-softmax.md) | Fused multi-phase softmax in one CTA, and its accuracy |
+| [SwagePlan Dialect](swage-plan-dialect.md) | The private planning IR surface |
 | [Task Planning](planning.md) | Classification of segments into tasks |
 | [Task Execution](task-execution.md) | Warp, CTA, and fused mixed launches |
 | [Split Execution](split-execution.md) | Oversized segments, partials, and merges |
-| [SwagePlan Dialect](swage-plan-dialect.md) | The private planning IR surface |
-| [Compiler Tools and Passes](compiler-tools.md) | `swage-opt` and the registered passes |
+| [Persistent Execution](persistent-execution.md) | The experimental resident-queue kernel, whose performance gate failed |
+| [Compiler Tools and Passes](compiler-tools.md) | `swage-opt`, the registered passes, the CMake package, and lit features |
 | [Verification](verification.md) | The claim-to-test evidence matrix |
-| [Benchmarks](benchmarks.md) | The recorded performance campaign |
+| [Benchmarks](benchmarks.md) | The benchmark harnesses and the recorded performance campaign |
+| [A6000 Comparison Study](a6000-comparison.md) | One exploratory Swage and Triton campaign on skewed distributions |
 
 Use [Decisions](../decisions/index.md) for the rationale behind each
 boundary and [Verification](verification.md) for its executable evidence.

@@ -86,33 +86,20 @@ Task to Tile mappings. It does not yet provide a public general planner.
 ## What a schedule may change
 
 Deriving different tasks for one segment never changes which elements a
-reduction reads: every element contributes exactly once. It can change the
-order in which the elements are combined, because `swage.reduce` leaves that
+reduction combines: every element contributes exactly once. It can change
+the order in which they are combined, because `swage.reduce` leaves that
 order open. The two admitted kinds respond differently:
 
 - A maximum is the same in every order.
-- An f32 sum is not. Addition in f32 is not associative, so a warp task, a
-  CTA task, and a split task can return different sums of one segment. The
-  difference is rounding error: it is bounded relative to the sum of the
-  absolute values of the elements, and it can be large relative to the
-  result when the elements cancel.
+- An f32 sum is not. Addition in f32 is not associative, so two schedules
+  can return different sums of one segment, within rounding error.
 
-The private path chooses the task from the segment length and the planning
-limits. One preparation-time rule also reads the number of segments in the
-batch and the number of multiprocessors on the device. The same segment can
-therefore sum to a different result in another batch or on another GPU
-model.
-
-The qualification tests bound the error of each schedule against a float64
-reference, relative to the sum of absolute values, and compare maxima
-exactly. They require each schedule to reproduce its own bits across two
-launches of one prepared program on the qualification GPU. They do not
-require two schedules to agree bit for bit. See
-[Textual Swage IR](../language/swage-ir.md#swagereduce) for the operation
-contract, [Segmented Reductions](../internals/segmented-reductions.md) for
-the internal contracts of these paths, and
-[Task Planning](../internals/planning.md) for the selection rule and how to
-switch it off.
+[Sum rounding](../internals/segmented-reductions.md#sum-rounding) is the one
+place that states the reduction trees, the cases in which the schedule of a
+segment changes, the error bound and its tests, and how to pin a schedule
+with the private helpers.
+[Textual Swage IR](../language/swage-ir.md#swagereduce) states the operation
+contract.
 
 ## From model to machinery
 

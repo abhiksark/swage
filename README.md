@@ -73,7 +73,9 @@ backed by the repository's executable tests and committed benchmark record.
 
 The `swage-compiler` wheel contains only the pure Python `swage` package. It
 does not contain compiler libraries, build output, or the native
-`mlir_swage` package. Native wheel packaging is deferred.
+`mlir_swage` package. Native wheel packaging is deferred. A native build
+contains third-party code, which
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists.
 
 ```bash
 python -m pip install swage-compiler

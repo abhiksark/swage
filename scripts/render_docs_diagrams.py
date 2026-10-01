@@ -254,7 +254,7 @@ def capability_boundary() -> bytes:
             "PLANNED",
             "line",
             "gray_fill",
-            ("public segmented API", "packed work", "split max / softmax"),
+            ("public segmented API", "packed work", "split softmax"),
             "persistent scheduling",
             True,
         ),
@@ -591,7 +591,7 @@ def compiler_pipeline() -> bytes:
             785,
             "PRIVATE QUALIFICATION",
             "SwagePlan direct + split",
-            ("classification companion", "direct or split identity sum"),
+            ("classification companion", "direct or split sum or max"),
             "green",
             "green_fill",
         ),
@@ -684,7 +684,7 @@ def split_lifecycle() -> bytes:
     """Render the private split partial and merge ownership lifecycle."""
     svg = Svg(
         "split-lifecycle.svg",
-        "Private split CTA identity-sum lifecycle",
+        "Private split CTA reduction lifecycle",
         "An oversized segment is divided into ordered absolute input ranges, "
         "each partial writes one scratch slot, and one merge writes output "
         "once.",
@@ -692,12 +692,12 @@ def split_lifecycle() -> bytes:
     )
     svg.text(48, 54, "Private split lifecycle", size=32, weight=750)
     svg.status_tag(
-        900, 28, 245, "identity sum only", color="purple", fill="purple_fill"
+        900, 28, 245, "f32 sum or max", color="purple", fill="purple_fill"
     )
     svg.text(
         48,
         88,
-        "One oversized segment; split max and softmax remain planned.",
+        "One oversized segment; split softmax remains planned.",
         color="muted",
     )
 
@@ -781,7 +781,8 @@ def runtime_lifecycle() -> bytes:
     svg.text(
         48,
         84,
-        "Asynchronous launch with no synchronization or fallback.",
+        "Asynchronous launch with no fallback; a warm launch never "
+        "synchronizes.",
         color="muted",
     )
 
@@ -882,8 +883,8 @@ def runtime_lifecycle() -> bytes:
     svg.text(
         600,
         600,
-        "No copy, cast, device change, context creation, synchronization or "
-        "fallback.",
+        "No copy, cast, device change, context creation, or fallback. Only "
+        "loading a kernel may synchronize.",
         size=17,
         weight=650,
         anchor="middle",

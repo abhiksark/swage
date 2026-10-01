@@ -3,9 +3,10 @@
 # Quickstart
 
 This tutorial takes the canonical fixed vector-add kernel from source
-capture to a verified CUDA result. Capture works on a wheel-only install,
-emitting MLIR requires the native build, and the launch at the end
-requires a CUDA GPU. Two committed scripts follow the same steps.
+capture to a verified CUDA result. Capture and the kernel-language check
+work on a wheel-only install, emitting MLIR requires the native build, and
+the launch at the end requires a CUDA GPU. Two committed scripts follow the
+same steps.
 `examples/emit_fixed_vector_add.py` stops after emission, so it runs with
 the native build alone and needs no GPU and no PyTorch.
 [`examples/fixed_vector_add.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_add.py)
@@ -71,11 +72,11 @@ retires lanes at or beyond `n`. The kernel is not directly callable;
 calling it raises. The accepted source forms are listed in
 [Kernel Language](../reference/kernel-language.md).
 
-The leading docstring is accepted on `main`. The released `0.5.1` wheel
-rejects a kernel that has one, reporting `unsupported expression 'Constant'`
-when the kernel is emitted or launched. With that wheel, remove the docstring
-line, or install `swage` from the same checkout as the native build with
-`python -m pip install -e .`.
+The leading docstring is accepted by the current source tree. The released
+`0.5.1` wheel rejects a kernel that has one, reporting
+`unsupported expression 'Constant'` when the kernel is emitted or launched.
+With that wheel, remove the docstring line, or install `swage` from the same
+checkout as the native build with `python -m pip install -e .`.
 
 ## Emit and read the MLIR
 

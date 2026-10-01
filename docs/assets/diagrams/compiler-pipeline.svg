@@ -32,7 +32,7 @@
   <text x="932" y="291" font-size="16" font-weight="750" fill="#00664B" text-anchor="middle">PRIVATE QUALIFICATION</text>
   <text x="950" y="344" font-size="19" font-weight="750" fill="#17212B" text-anchor="middle">SwagePlan direct + split</text>
   <text x="950" y="384" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">classification companion</text>
-  <text x="950" y="414" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">direct or split identity sum</text>
+  <text x="950" y="414" font-size="16" font-weight="500" fill="#00664B" text-anchor="middle">direct or split sum or max</text>
   <line x1="600" y1="215" x2="220" y2="235" stroke="#59636E" stroke-width="3" marker-end="url(#compiler-pipeline-arrow)"/>
   <line x1="600" y1="215" x2="585" y2="235" stroke="#59636E" stroke-width="3" marker-end="url(#compiler-pipeline-arrow)"/>
   <line x1="600" y1="215" x2="950" y2="235" stroke="#59636E" stroke-width="3" marker-end="url(#compiler-pipeline-arrow)"/>
