@@ -98,6 +98,13 @@ def test_gate_runs_only_on_its_device_unless_asked(mixed_sum_benchmark):
     assert not mixed_sum_benchmark._gate_device(
         "NVIDIA GeForce RTX 5090", (12, 0), any_device=True
     )
+    # The name and the capability must both match the gate device.
+    assert not mixed_sum_benchmark._gate_device(
+        "NVIDIA GeForce RTX 3090", (8, 6), any_device=True
+    )
+    assert not mixed_sum_benchmark._gate_device(
+        "NVIDIA RTX A6000", (8, 9), any_device=True
+    )
 
 
 def test_status_separates_gate_evidence_from_a_rerun(mixed_sum_benchmark):
