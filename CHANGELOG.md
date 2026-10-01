@@ -179,6 +179,11 @@ semantic versioning (`0.x`; anything may change).
   honor `SWAGE_NO_COMPILE=1`. `launch()` errors name the kernel and where it
   is defined, and the missing-bindings error points to the installation
   page.
+- Prepared private launches are bound to the storage they were prepared
+  with and refuse a rebound tensor, and task IDs must not overlap the
+  output. Interpreter exit and `os.fork()` wait for a compile in flight.
+  `launch()` works on a thread that has not used CUDA. A failed module
+  unload is retried and never fails a load.
 - Documentation: the landing page, diagrams, reference, and internals pages
   match the merged runtime, frontend, CI, and benchmark changes;
   `installation.md` lists what the released `0.5.1` wheel lacks.
@@ -193,6 +198,8 @@ semantic versioning (`0.x`; anything may change).
   segments. It now returns an empty result.
 - A contiguous negation view passed to `launch()` was read with the
   opposite sign. It is now rejected.
+- An atomic cache write closed its file descriptor twice when the publish
+  failed, which could close a descriptor owned by another thread.
 - A prepared static launch on a thread with no CUDA context failed with an
   invalid-context driver error. The launch now makes the prepared device's
   context current.

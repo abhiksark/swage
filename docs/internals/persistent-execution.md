@@ -123,9 +123,10 @@ stream. Launching on another device after preparation is rejected, and so is
 launching in a CUDA context other than the one the object was prepared in,
 because the kernel is loaded in one context. A thread that has no current
 CUDA context is given the context of the prepared device before that
-comparison. A launch
-also raises if the offsets tensor was modified in place after preparation,
-which it detects through the tensor version counter, and the kernel clamps
+comparison. A launch raises if the values, offsets, or output tensor was
+rebound to other storage after preparation, and if the offsets tensor was
+modified in place, which it detects through the tensor version counter. The
+kernel clamps
 every loaded range that indexes the values buffer to the value count and
 every merge range that indexes scratch to the partial count. It skips a
 segment ID outside the segment count and a merge ID outside the merge count

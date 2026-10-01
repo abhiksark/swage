@@ -66,10 +66,13 @@ launches.
 A prepared launch raises on another device, and in a CUDA context other
 than the one it was prepared in, because its kernels are loaded in one
 context. A thread that has no current CUDA context is given the context of
-the prepared device before that comparison. A prepared launch also raises
-if the offsets tensor
-was modified in place after preparation, which it detects through the tensor
-version counter; the kernels additionally clamp every loaded range that
+the prepared device before that comparison. A prepared launch is bound to
+the storage it was prepared with: it raises if the values, offsets, or
+output tensor now has a different address, element count, or element type,
+so a rebound tensor is refused while in-place writes to values and output
+still launch. It also raises if the offsets tensor was modified in place
+after preparation, which it detects through the tensor version counter. The
+kernels additionally clamp every loaded range that
 indexes the values buffer to the value count, and every merge range that
 indexes scratch to the partial count. A segment ID read from a task buffer
 is compared with the segment count, and an ID outside it is skipped: the
