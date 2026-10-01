@@ -1,6 +1,7 @@
 # tests/python/test_frontend.py
 """LLVM-free tests for the public compile-only frontend API."""
 
+import inspect
 import subprocess
 import sys
 import types
@@ -34,14 +35,24 @@ def test_importing_swage_does_not_import_optional_dependencies():
     [
         lambda: sl.program_id(0),
         lambda: sl.arange(0, 1),
-        lambda: sl.load(None),
-        lambda: sl.store(None, None),
+        lambda: sl.load(None, mask=None, other=None),
+        lambda: sl.store(None, None, mask=None),
     ],
 )
 def test_symbolic_language_calls_fail_outside_jit(symbolic_call):
     """Reject symbolic operations instead of pretending to execute them."""
     with pytest.raises(RuntimeError, match="only available inside @swage.jit"):
         symbolic_call()
+
+
+def test_symbolic_signatures_declare_the_keywords_the_grammar_requires():
+    """Do not advertise a default for a keyword a kernel must pass."""
+    load = inspect.signature(sl.load).parameters
+    store = inspect.signature(sl.store).parameters
+
+    for parameter in (load["mask"], load["other"], store["mask"]):
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
 
 
 def test_decorating_a_kernel_does_not_execute_its_body():
