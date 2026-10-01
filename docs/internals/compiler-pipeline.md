@@ -12,7 +12,7 @@ fixed-block branch uses the fixed-block conversion for canonical vector
 add. Private direct segmented branches lower to the sequential CPU oracle
 or the one-CTA GPU path.
 The private SwagePlan branch adds the narrow classification companion for
-direct or split identity-sum lowering. GPU branches rejoin upstream GPU, SCF,
+direct or split capture-free sum/max lowering. GPU branches rejoin upstream GPU, SCF,
 NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the CUDA Driver API.
 No branch introduces a second production IR or a silent backend fallback.
 
@@ -71,11 +71,13 @@ Exact admitted module shapes and internal ABIs live in
 
 ## Private SwagePlan branch
 
-For one canonical identity segmented sum, admission can add a private planning
+For a capture-free, single-stage f32 sum or max, admission can add a planning
 companion without mutating the semantic function. Validated host metadata is
 then classified and materialized into direct IDs or split records. Private
 lowering factories produce the direct, partial, and merge kernels used by the
-qualification runtime.
+qualification runtime. Element programs and single-consumer map chains are
+reused by direct and partial kernels; merge kernels combine only the partial
+results.
 
 This branch implements narrow rule-based classification and split task
 decomposition. One private experimental lowering consumes those materialized

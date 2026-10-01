@@ -32,9 +32,9 @@ The current pre-alpha release is `v0.5.1`.
 
 - Canonical segmented sum, max, and stable ragged softmax are qualified
   through sequential CPU oracles and one-CTA GPU paths.
-- One canonical identity segmented sum is qualified through host
-  classification, direct warp and CTA work, one fused mixed kernel, and
-  split-CTA partial and merge kernels.
+- Capture-free, single-stage f32 sum/max programs, including element
+  expressions and map chains, execute through host classification, direct
+  warp and CTA work, a fused mixed kernel, and split partial/merge kernels.
 - The frozen NVIDIA RTX A6000 `sm_86` mixed-policy record has a
   mixed-to-best-pure ratio of `0.939394`, below its predeclared `1.05` limit.
 - Exact and nontrivial f32 split sums match PyTorch and the CPU oracle on
@@ -44,7 +44,7 @@ The current pre-alpha release is `v0.5.1`.
 ### Planned
 
 - Public segment syntax and public segmented launch.
-- Packed warps, split max, split softmax, device queues, persistent
+- Packed warps, split softmax, device queues, persistent
   scheduling, and broader policies.
 
 Private qualification is not a public segmented runtime. Current status is

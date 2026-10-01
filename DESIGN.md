@@ -44,7 +44,7 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
-        +-- private identity-sum planning and split execution
+        +-- private single-stage sum/max planning and split execution
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -82,7 +82,9 @@ surface. The canonical pipeline and links to exact references live in
 `swage_plan` is a distinct private dialect because scheduling and semantic
 meaning have different invariants. Its current surface records only warp and
 CTA policies, one opaque task-range result, and one classification operation
-for an admitted identity segmented sum.
+for an admitted capture-free, single-stage f32 sum or max. Static emitters
+reuse element programs and map chains; split merges combine scalar partials
+without reapplying element expressions.
 
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.

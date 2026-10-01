@@ -35,7 +35,10 @@ warp_task_count:i32, cta_task_count:i32
 
 Each initial block contains four independent one-segment warp slots. CTA
 tasks follow at one segment per block. An empty task set enqueues no kernel.
-This qualification is limited to canonical identity sum.
+Static execution admits capture-free, single-stage f32 sum/max programs,
+including fused map chains. Each schedule evaluates the same element program
+only on valid input elements. See
+[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -45,7 +48,7 @@ This qualification is limited to canonical identity sum.
 
 *The one-launch fused schedule and its task-ID indirection. [Open the full-size figure](../assets/figures/fused-mixed-schedule.svg).*
 
-The frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
+For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
 for fused mixed execution. The fused schedule it measures is the one drawn
 above. The mixed-to-best-pure ratio is `0.939394`, which passes the

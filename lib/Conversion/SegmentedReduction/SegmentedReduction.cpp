@@ -418,11 +418,11 @@ void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
   }
 }
 
-/// Accept only the private identity segmented-sum planning shape.
+/// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
-  if (!analysis.maps.empty())
-    return analysis.maps.front().emitError(
-        "planning does not support swage.map");
+  for (MapOp map : analysis.maps)
+    if (!map.getCaptures().empty())
+      return map.emitError("planning requires capture-free maps");
   for (ReduceOp reduction : analysis.reductions)
     if (!reduction.getCaptures().empty())
       return reduction.emitError("planning requires a capture-free reduction");
@@ -432,16 +432,26 @@ LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
   if (!analysis.mapStores.empty())
     return analysis.mapStores.front().emitError(
         "planning requires memref.store of the reduction result");
+  return success();
+}
+
+/// Persistent partials and merges still implement only identity sum.
+LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
+  if (failed(verifyPlanningProgram(analysis)))
+    return failure();
+  if (!analysis.maps.empty())
+    return analysis.maps.front().emitError(
+        "persistent execution does not support swage.map");
 
   ReduceOp reduction = analysis.reductions.front();
   if (reduction.getKind() != ReductionKind::Sum)
-    return reduction.emitError("planning requires kind<sum>");
+    return reduction.emitError("persistent execution requires kind<sum>");
   Block &body = reduction.getBody().front();
   auto yield = cast<YieldOp>(body.getTerminator());
   if (!body.without_terminator().empty() ||
       yield.getValue() != body.getArgument(0))
     return reduction.emitError(
-        "planning requires an identity reduction region");
+        "persistent execution requires an identity reduction region");
   return success();
 }
 
@@ -1125,7 +1135,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   source.erase();
 }
 
-void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
+void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
+                          const ReductionStage &stage, bool merge) {
   // 512 threads per split CTA: wide enough to stream oversized
   // segments at memory bandwidth, still fully occupied by one 4096-element
   // chunk (8 elements per thread).
@@ -1194,7 +1205,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
         Value end = arith::IndexCastOp::create(
             body, bodyLoc, body.getIndexType(), loadRecord(rangeField + 1));
         Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
-        Value identity = identityFor(body, bodyLoc, ReductionKind::Sum);
+        Value identity = identityFor(body, bodyLoc, stage.kind);
         auto local = scf::ForOp::create(
             body, bodyLoc, first, end, block, ValueRange(identity),
             [&](OpBuilder &loop, Location loopLoc, Value index,
@@ -1204,12 +1215,18 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source, bool merge) {
               Value address = LLVM::GEPOp::create(
                   loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
               Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+              // Only input elements are transformed; scratch holds completed
+              // partial reductions and must never run the element program.
+              if (!merge)
+                value = evaluateElement(loop, stage.element, value, {});
               scf::YieldOp::create(loop, loopLoc,
-                                   combine(loop, loopLoc, ReductionKind::Sum,
+                                   combine(loop, loopLoc, stage.kind,
                                            accumulator.front(), value));
             });
         auto operation = gpu::AllReduceOperationAttr::get(
-            module.getContext(), gpu::AllReduceOperation::ADD);
+            module.getContext(), stage.kind == ReductionKind::Sum
+                                     ? gpu::AllReduceOperation::ADD
+                                     : gpu::AllReduceOperation::MAXIMUMF);
         Value total = gpu::AllReduceOp::create(
             body, bodyLoc, local.getResult(0), operation, true);
         Value firstThread = arith::CmpIOp::create(
@@ -1323,6 +1340,8 @@ public:
     if ((useTaskIds || fusedMixed || persistent) &&
         failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
+    if (persistent && failed(verifyPersistentProgram(analysis)))
+      return signalPassFailure();
     RegionOwner owner;
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
@@ -1363,7 +1382,7 @@ public:
     return "swage-split-segmented-reduction-to-gpu";
   }
   StringRef getDescription() const final {
-    return "Lower one identity sum to a private split reduction stage";
+    return "Lower one capture-free sum or max to a private split stage";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1379,7 +1398,11 @@ public:
     if (failed(analyzeSegmentProgram(*function, analysis)) ||
         failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
-    buildSplitGPUProgram(getOperation(), *function, merge);
+    RegionOwner owner;
+    SegmentProgram program;
+    detachSegmentProgram(analysis, owner, program);
+    buildSplitGPUProgram(getOperation(), *function, program.reductions.front(),
+                         merge);
   }
 
 private:
@@ -1404,7 +1427,7 @@ public:
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
-    return "Add runtime classification for one identity segmented sum";
+    return "Add runtime classification for one capture-free sum or max";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {

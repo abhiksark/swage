@@ -243,7 +243,7 @@ module {
 _SENTINEL = -1.0
 
 
-class _PreparedSum(NamedTuple):
+class _PreparedReduction(NamedTuple):
     """Prepared pure and classified launch policies."""
 
     warp: Callable[[], None]
@@ -404,7 +404,90 @@ def _prepare_planned_sum(
     warp_max_elements=32,
     cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
 ):
-    """Validate, classify, compile, and prepare private sum policies."""
+    """Prepare the canonical identity sum used by existing qualification."""
+    return _prepare_planned_reduction(
+        values,
+        offsets,
+        output,
+        module_text=_semantic_module("sum"),
+        kernel_name="segmented_sum",
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+        select_schedule=False,
+    )
+
+
+def _has_small_element_program(module):
+    """Conservatively bound work in already-admitted element regions."""
+    from mlir_swage import ir
+    from mlir_swage.dialects import arith, math, swage
+
+    cheap_operations = (
+        arith.AddFOp, arith.SubFOp, arith.MulFOp,
+        arith.MaximumFOp, arith.MinimumFOp,
+    )
+    work = 0
+    eligible = True
+
+    def inspect(operation):
+        nonlocal work, eligible
+        if not isinstance(operation.opview, (swage.MapOp, swage.ReduceOp)):
+            return ir.WalkResult.ADVANCE
+        for instruction in operation.regions[0].blocks[0].operations:
+            if isinstance(instruction, (arith.ConstantOp, swage.YieldOp)):
+                continue
+            # Relative work units calibrated on the held-out GPU benchmarks.
+            # They are a bounded heuristic, not instruction latency estimates.
+            if isinstance(instruction, cheap_operations):
+                work += 1
+            elif isinstance(instruction, math.Exp2Op):
+                work += 8
+            elif isinstance(instruction, arith.DivFOp):
+                work += 16
+            else:
+                eligible = False
+                return ir.WalkResult.INTERRUPT
+            if work > 32:
+                eligible = False
+                return ir.WalkResult.INTERRUPT
+        return ir.WalkResult.SKIP
+
+    module.operation.walk(inspect, ir.WalkOrder.PRE_ORDER)
+    return eligible
+
+
+def _prepare_planned_reduction(
+    values,
+    offsets,
+    output,
+    *,
+    module_text,
+    kernel_name,
+    warp_max_elements=32,
+    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    select_schedule=True,
+):
+    """Prepare static policies for one private capture-free sum/max module.
+
+    Args:
+        values: Contiguous rank-one CUDA f32 input tensor.
+        offsets: Contiguous rank-one CUDA i32 segment offsets.
+        output: Disjoint contiguous CUDA f32 output, one value per segment.
+        module_text: Native qualification MLIR with the semantic program.
+        kernel_name: Name of its single semantic function.
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+        select_schedule: Allow a conservative direct-CTA choice for batches
+            of moderately long segments with the default chunk size and at
+            most 32 relative units of element arithmetic work.
+
+    Returns:
+        Prepared warp, CTA, and classified mixed launch callables. Mixed
+        execution includes ordered partial and merge launches for split work,
+        or aliases CTA when the preparation-time selection avoids splitting.
+    """
+    if type(select_schedule) is not bool:
+        raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
     value_count, segment_count, host_offsets = _validate_shapes(
         values, offsets, output, _validate_offsets
@@ -418,10 +501,9 @@ def _prepare_planned_sum(
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
-    kernel_name = "segmented_sum"
     with ir.Context() as context:
         swage.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
+        module = ir.Module.parse(module_text)
         warp_ids, cta_ids, partial_records, merge_records = (
             native_swage._materialize_segmented_plan(
                 module,
@@ -436,8 +518,10 @@ def _prepare_planned_sum(
         expected_cta = []
         expected_partial = []
         expected_merge = []
+        max_length = 0
         for segment_id, (begin, end) in enumerate(pairwise(host_offsets)):
             length = end - begin
+            max_length = max(max_length, length)
             if length <= warp_max_elements:
                 expected_warp.append(segment_id)
             elif length <= cta_chunk_elements:
@@ -468,12 +552,26 @@ def _prepare_planned_sum(
         direct_warp_count = len(warp_ids)
         direct_cta_count = len(cta_ids)
         direct_count = direct_warp_count + direct_cta_count
+        # ponytail: a measured two-chunk rule, not a general cost model.
+        # Retain splitting for sparse batches, larger tails, or mixed lengths.
+        use_direct_cta = (
+            select_schedule
+            and segment_count > 0
+            and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
+            and merge_count == segment_count
+            and max_length <= 2 * cta_chunk_elements
+            and segment_count
+            >= torch.cuda.get_device_properties(
+                values.device
+            ).multi_processor_count
+            and _has_small_element_program(module)
+        )
         if segment_count == 0:
 
             def no_launch():
                 return None
 
-            return _PreparedSum(no_launch, no_launch, no_launch)
+            return _PreparedReduction(no_launch, no_launch, no_launch)
         _, warp_ptx = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name=kernel_name,
@@ -499,7 +597,7 @@ def _prepare_planned_sum(
             )
         partial_ptx = None
         merge_ptx = None
-        if partial_count:
+        if partial_count and not use_direct_cta:
             _, partial_ptx = (
                 native_swage._compile_split_partial_reduction_ptx(
                     module,
@@ -541,7 +639,7 @@ def _prepare_planned_sum(
     partial_ranges = None
     merge_ranges = None
     scratch = None
-    if partial_count:
+    if partial_count and not use_direct_cta:
         partial_ranges = torch.tensor(
             partial_records, dtype=torch.int32, device=device
         )
@@ -562,7 +660,7 @@ def _prepare_planned_sum(
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
-                "prepared sum must launch once after task initialization "
+                "prepared reduction must launch once after task initialization "
                 "before CUDA graph capture"
             )
         if tasks_ready.query():
@@ -595,7 +693,9 @@ def _prepare_planned_sum(
 
     def current_stream():
         if torch.cuda.current_device() != device_index:
-            raise ValueError("prepared sum must launch on its prepared device")
+            raise ValueError(
+                "prepared reduction must launch on its prepared device"
+            )
         return torch.cuda.current_stream()
 
     def warp():
@@ -668,7 +768,7 @@ def _prepare_planned_sum(
                 tensor.record_stream(stream)
         return None
 
-    return _PreparedSum(warp, cta, mixed)
+    return _PreparedReduction(warp, cta, cta if use_direct_cta else mixed)
 
 
 def _prepare_persistent_sum(

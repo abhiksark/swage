@@ -10,8 +10,9 @@ contracts; none of them is a public API.
 [Verification](verification.md) for the executable evidence.*
 
 The admitted semantic module has one axis-zero segment ID, one segment over
-rank-one f32 values and rank-one i32 offsets, one capture-free identity
-reduction of kind `sum` or `max`, one rank-one f32 output, and explicit i32
+rank-one f32 values and rank-one i32 offsets, one capture-free
+reduction of kind `sum` or `max`, with an optional element expression and
+single-consumer map chains, one rank-one f32 output, and explicit i32
 value and segment counts.
 
 The internal ABI is:
@@ -23,7 +24,9 @@ values*, offsets*, output*, value_count:i32, segment_count:i32
 The CPU path lowers to sequential SCF and memref operations and executes with
 upstream `mlir-runner`. The GPU path uses one CTA per segment and block-stride
 loads. Empty sums produce zero; empty maxima produce negative infinity. Max
-uses NaN-propagating semantics.
+uses NaN-propagating semantics. The same single-stage programs also support
+private warp, fused mixed, and split execution; see [Task Planning](planning.md)
+and [Split Execution](split-execution.md).
 
 Continue with [Ragged Softmax](ragged-softmax.md) for the fused
 multi-phase case, or [Verification](verification.md) for the oracle

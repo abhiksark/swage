@@ -4,8 +4,8 @@
 
 !!! warning "Private qualification"
 
-    `swage_plan` is an internal compiler boundary for one admitted identity
-    segmented sum. It is not a public Python API or a general task scheduler.
+    `swage_plan` is an internal compiler boundary for capture-free,
+    single-stage f32 sum/max programs with optional map chains. It is not a public Python API or a general task scheduler.
 
 The current dialect contains only:
 

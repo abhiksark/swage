@@ -27,5 +27,11 @@ M7 was the `v0.5.0` feature gate, and `v0.5.0` was published on 2026-08-24.
 M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 `v0.3.0`, and `v0.4.0` versions remain outside this roadmap gate.
 
+The private static paths now also support capture-free, single-stage f32
+sum/max element programs and map chains across warp, CTA, mixed, and split
+execution (ADR-0019). This composition extension leaves the historical gates
+and frozen benchmark unchanged. Captured stages, split softmax, general cost
+inference, and public segmented execution remain follow-up work.
+
 Tracked as GitHub milestones; per-phase issues carry the detailed
 acceptance criteria.

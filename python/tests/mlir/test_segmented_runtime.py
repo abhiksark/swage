@@ -7,10 +7,14 @@ import weakref
 
 import pytest
 import torch
+from reduction_programs import reduction_module
 from swage._segmented_qualification import (
+    _execute,
     _launch_segmented_sum_tasks,
     _prepare_persistent_sum,
+    _prepare_planned_reduction,
     _prepare_planned_sum,
+    _runner_module,
     _validate_counts,
     _validate_offsets,
     _validate_tensors,
@@ -73,6 +77,313 @@ def _pytorch_reference(values, offsets, kind):
         else:
             results.append(torch.tensor(float("-inf"), dtype=torch.float32))
     return torch.stack(results)
+
+
+def _transformed_values(values, transform):
+    """Reference the element expression independently of the compiler."""
+    if transform == "square":
+        return values * values
+    if transform == "maps":
+        return (values + 1) * 2
+    if transform == "exp2":
+        return torch.exp2(values)
+    if transform == "exp2_chain":
+        for _ in range(8):
+            values = torch.exp2(-0.5 * values)
+    if transform == "rational8":
+        for _ in range(8):
+            values = (values + 0.125) / (1 + 0.25 * values * values)
+    if transform in ("affine4", "affine32"):
+        for _ in range(2 if transform == "affine4" else 16):
+            values = -0.5 * values + 0.125
+    return values
+
+
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("transform", ["identity", "square", "maps"])
+def test_composable_reduction_cpu_oracle(kind, transform):
+    """The same native program supplies a sequential composition oracle."""
+    values, offsets = _case([0, 1, 2, 3, 5, 6, 10, 11])
+    printed = _execute(
+        _runner_module(
+            values,
+            offsets,
+            reduction_module(kind, transform),
+            f"segmented_{kind}",
+            len(offsets) - 1,
+        )
+    )
+    expected = _pytorch_reference(
+        _transformed_values(values, transform), offsets, kind
+    )
+    torch.testing.assert_close(
+        torch.tensor(printed, dtype=torch.float32),
+        expected,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("transform", ["identity", "square", "maps"])
+@pytest.mark.parametrize("small_chunks", [False, True])
+def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
+    """Every static schedule executes one program, including split tails."""
+    lengths = (
+        [0, 1, 2, 3, 5, 6, 10, 11]
+        if small_chunks
+        else [0, 1, 31, 32, 33, 4095, 4096, 4097, 8192, 8193]
+    )
+    host_values, host_offsets = _case(lengths)
+    semantic = reduction_module(kind, transform)
+    expected = _pytorch_reference(
+        _transformed_values(host_values, transform), host_offsets, kind
+    )
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    output = torch.full((len(lengths) + 1,), -123.0, device="cuda")
+    limits = (
+        {"warp_max_elements": 2, "cta_chunk_elements": 5}
+        if (small_chunks)
+        else {}
+    )
+    prepared = _prepare_planned_reduction(
+        values,
+        offsets,
+        output,
+        module_text=semantic,
+        kernel_name=f"segmented_{kind}",
+        **limits,
+    )
+    if small_chunks:
+        printed = _execute(
+            _runner_module(
+                host_values,
+                host_offsets,
+                semantic,
+                f"segmented_{kind}",
+                len(lengths),
+            )
+        )
+        torch.testing.assert_close(
+            torch.tensor(printed, dtype=torch.float32),
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+    for launch in prepared:
+        for _ in range(2):
+            output[:-1].fill_(float("nan"))
+            launch()
+            torch.testing.assert_close(
+                output[:-1].cpu(),
+                expected,
+                rtol=0,
+                atol=0,
+            )
+            assert output[-1].item() == -123.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize(
+    "transform",
+    [
+        "square", "maps", "exp2", "exp2_chain", "rational8",
+        "affine4", "affine32",
+    ],
+)
+def test_composable_reduction_nontrivial_f32(kind, transform):
+    """Qualify rounding on finite non-dyadic data across static schedules."""
+    lengths = [0, 7, 33, 4097, 8193]
+    values = torch.sin(torch.arange(sum(lengths)) * 0.17) * 0.3 + 0.75
+    offsets = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+    )
+    expected = _pytorch_reference(
+        _transformed_values(values, transform), offsets, kind
+    )
+    output = torch.empty(len(lengths), device="cuda")
+    prepared = _prepare_planned_reduction(
+        values.cuda(),
+        offsets.cuda(),
+        output,
+        module_text=reduction_module(kind, transform),
+        kernel_name=f"segmented_{kind}",
+    )
+    for launch in prepared:
+        launch()
+        torch.testing.assert_close(
+            output.cpu(),
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize(
+    "transform", ["identity", "square", "maps", "affine4", "affine32", "exp2"]
+)
+def test_regular_split_batch_selects_cta_without_split_kernels(
+    kind, transform, monkeypatch
+):
+    """A selected CTA reuses the program, output guards, and graph support."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native
+
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    host_values, host_offsets = _case([8192] * count)
+    expected = _pytorch_reference(
+        _transformed_values(host_values, transform), host_offsets, kind
+    ).cuda()
+    output = torch.full((count + 1,), -123.0, device="cuda")
+
+    def unexpected_split(*args, **kwargs):
+        raise AssertionError("selected CTA must not compile split kernels")
+
+    for name in ("partial", "merge"):
+        monkeypatch.setattr(
+            native, f"_compile_split_{name}_reduction_ptx", unexpected_split
+        )
+    prepared = _prepare_planned_reduction(
+        host_values.cuda(), host_offsets.cuda(), output,
+        module_text=reduction_module(kind, transform),
+        kernel_name=f"segmented_{kind}",
+    )
+    assert prepared.mixed is prepared.cta
+    prepared.mixed()
+    tolerance = (
+        {"rtol": 1e-5, "atol": 1e-5}
+        if transform in ("exp2", "affine32") else {"rtol": 0, "atol": 0}
+    )
+    torch.testing.assert_close(output[:-1], expected, **tolerance)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        prepared.mixed()
+    output[:-1].fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(output[:-1], expected, **tolerance)
+    assert output[-1].item() == -123.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize(
+    "transform", ["exp2_chain", "rational8"]
+)
+def test_expensive_regular_batch_retains_split_execution(kind, transform):
+    """A shape eligible for CTA still splits an expensive element program."""
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    values, offsets = _case([8192] * count)
+    expected = _pytorch_reference(
+        _transformed_values(values, transform), offsets, kind
+    )
+    output = torch.empty(count, device="cuda")
+    prepared = _prepare_planned_reduction(
+        values.cuda(), offsets.cuda(), output,
+        module_text=reduction_module(kind, transform),
+        kernel_name=f"segmented_{kind}",
+    )
+    assert prepared.mixed is not prepared.cta
+    prepared.mixed()
+    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize(
+    "case", ["sparse", "long", "mixed", "empty", "custom", "disabled"]
+)
+def test_direct_cta_selection_retains_other_schedules(case):
+    """Keep fixed planning for unsupported shapes and explicit opt-out."""
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    lengths = [8192] * count
+    options = {}
+    if case == "sparse":
+        lengths.pop()
+    elif case == "long":
+        lengths[-1] = 8193
+    elif case == "mixed":
+        lengths[-1] = 4096
+    elif case == "empty":
+        lengths[-1] = 0
+    elif case == "custom":
+        options["cta_chunk_elements"] = 2048
+    else:
+        options["select_schedule"] = False
+    values, offsets = _case(lengths)
+    output = torch.empty(len(lengths), device="cuda")
+    prepared = _prepare_planned_reduction(
+        values.cuda(), offsets.cuda(), output,
+        module_text=reduction_module("sum", "identity"),
+        kernel_name="segmented_sum", **options,
+    )
+    assert prepared.mixed is not prepared.cta
+    prepared.mixed()
+    torch.testing.assert_close(
+        output.cpu(), _pytorch_reference(values, offsets, "sum"),
+        rtol=0, atol=0,
+    )
+
+
+def test_schedule_selection_requires_a_boolean():
+    """Reject accidental string configuration before preparing any work."""
+    with pytest.raises(TypeError, match="select_schedule must be a bool"):
+        _prepare_planned_reduction(
+            None, None, None, module_text="", kernel_name="",
+            select_schedule="false",
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_planned_max_preserves_special_values_across_chunks():
+    """Keep NaNs, infinities, and signed zero through partials and merges."""
+    length = 4097
+    host_values = torch.cat(
+        [
+            torch.full((length,), 3.0),
+            torch.full((length,), float("-inf")),
+            torch.full((length,), float("inf")),
+            torch.full((length,), -0.0),
+            torch.full((length,), -0.0),
+        ]
+    )
+    host_values[length - 1] = float("nan")
+    host_values[-1] = 0.0
+    offsets = torch.tensor(
+        [0, 0, length, 2 * length, 3 * length, 4 * length, 5 * length],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    output = torch.empty(6, device="cuda")
+    prepared = _prepare_planned_reduction(
+        host_values.cuda(),
+        offsets,
+        output,
+        module_text=reduction_module("max", "identity"),
+        kernel_name="segmented_max",
+    )
+    expected = torch.tensor(
+        [
+            float("-inf"),
+            float("nan"),
+            float("-inf"),
+            float("inf"),
+            -0.0,
+            0.0,
+        ]
+    )
+    for launch in prepared:
+        launch()
+        actual = output.cpu()
+        torch.testing.assert_close(
+            actual,
+            expected,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+        assert torch.equal(actual[-2:].signbit(), expected[-2:].signbit())
 
 
 @pytest.mark.parametrize(
