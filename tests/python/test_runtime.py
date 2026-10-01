@@ -3351,3 +3351,184 @@ def test_launch_does_not_touch_a_context_that_is_current(monkeypatch):
 
     assert made_current == []
     assert len(driver.launches) == 1
+
+
+def _run_script(script, tmp_path, timeout=60):
+    """Run `script` in a fresh interpreter with the package on its path."""
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(pathlib.Path(sw.__file__).parents[1]),
+            SWAGE_CACHE_DIR=str(tmp_path / "cache"),
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+_EXIT_DURING_A_COMPILE_SCRIPT = """
+import sys
+import threading
+import time
+
+from swage import _runtime
+
+in_flight = threading.Event()
+
+
+def compile_twice():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(0.5)
+        sys.stdout.write("first compile finished\\n")
+        sys.stdout.flush()
+    with _runtime._compile_lock:
+        sys.stdout.write("second compile started\\n")
+        sys.stdout.flush()
+
+
+threading.Thread(target=compile_twice, daemon=True).start()
+in_flight.wait()
+# The main thread ends here, while the daemon thread holds the lock.
+"""
+
+
+def test_interpreter_exit_waits_for_the_compile_in_flight(tmp_path):
+    """Let a compile finish before finalization and start no other."""
+    completed = _run_script(_EXIT_DURING_A_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "first compile finished\n"
+    assert completed.stderr == ""
+
+
+_EXIT_WITH_A_STUCK_COMPILE_SCRIPT = """
+import threading
+import time
+
+from swage import _runtime
+
+_runtime._EXIT_WAIT_SECONDS = 0.3
+in_flight = threading.Event()
+
+
+def never_finish():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(600)
+
+
+threading.Thread(target=never_finish, daemon=True).start()
+in_flight.wait()
+"""
+
+
+def test_interpreter_exit_does_not_wait_forever(tmp_path):
+    """Give up the wait at its bound, so a stuck thread cannot hold exit."""
+    started = time.monotonic()
+    completed = _run_script(_EXIT_WITH_A_STUCK_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert time.monotonic() - started < 30
+
+
+def test_exit_wait_is_bounded_by_a_few_seconds():
+    """Keep the bound above a slow compile and below a noticeable hang."""
+    from swage import _runtime
+
+    assert 1.0 <= _runtime._EXIT_WAIT_SECONDS <= 10.0
+
+
+_LATER_EXIT_HANDLER_SCRIPT = """
+import atexit
+import sys
+
+
+def use_the_cold_path():
+    from swage import _runtime
+
+    with _runtime._compile_lock:
+        sys.stdout.write("later handler took the lock\\n")
+        sys.stdout.flush()
+
+
+# Registered before the package is imported, so it runs after the handler
+# of the package, on the thread that then already keeps the lock.
+atexit.register(use_the_cold_path)
+
+import swage  # noqa: E402,F401
+"""
+
+
+def test_exit_handlers_that_run_later_can_still_use_the_cold_path(tmp_path):
+    """Do not block the exiting thread on the lock it keeps."""
+    completed = _run_script(_LATER_EXIT_HANDLER_SCRIPT, tmp_path, timeout=30)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "later handler took the lock\n"
+
+
+_FORK_DURING_A_COMPILE_SCRIPT = """
+import os
+import signal
+import sys
+import threading
+import time
+import warnings
+
+from swage import _runtime
+from swage import _segmented_qualification as qualification
+
+in_flight = threading.Event()
+options = {"kernel_name": "segmented_sum", "target": "sm_86"}
+
+
+def slow_compile(_module, **_options):
+    in_flight.set()
+    time.sleep(0.4)
+    return "lowered", "ptx of the parent"
+
+
+def fast_compile(_module, **_options):
+    return "lowered", "ptx of the child"
+
+
+thread = threading.Thread(
+    target=qualification._compile_once,
+    args=(slow_compile, "program"),
+    kwargs=dict(options, module=object()),
+)
+thread.start()
+in_flight.wait()
+warnings.simplefilter("ignore", DeprecationWarning)
+child = os.fork()
+if child == 0:
+    # SIGALRM ends a child that waits for a lock nobody will release.
+    signal.alarm(5)
+    ptx = qualification._compile_once(
+        fast_compile, "another program", module=object(), **options
+    )
+    with _runtime._compile_lock:
+        os._exit(0 if ptx == "ptx of the child" else 3)
+_, status = os.waitpid(child, 0)
+thread.join()
+if os.WIFSIGNALED(status):
+    print("child ended by signal", os.WTERMSIG(status))
+else:
+    print("child exited", os.WEXITSTATUS(status))
+with _runtime._compile_lock:
+    print("parent lock usable")
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_child_forked_during_a_compile_can_use_the_cold_path(tmp_path):
+    """Do not hand a forked child a lock held by a thread it lacks."""
+    completed = _run_script(_FORK_DURING_A_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "child exited 0\nparent lock usable\n"

@@ -2,6 +2,7 @@
 """Minimal CUDA Driver runtime for the canonical fixed vector-add subset."""
 
 import ast
+import atexit
 import collections
 import ctypes
 import errno
@@ -51,6 +52,54 @@ class _BoundedCache(dict):
             del self[next(iter(self))]
 
 
+class _ColdPathLock:
+    """A reentrant lock that interpreter exit closes to every other thread.
+
+    The thread that runs the exit handlers calls `close`. It waits for the
+    holder and then keeps the lock. From that call on, any other thread
+    that asks for the lock waits forever instead, so a thread that would
+    retake a released lock ahead of the exiting thread starts nothing new.
+    The exiting thread itself can still take the lock, because a later exit
+    handler may reach a cold path.
+    """
+
+    def __init__(self):
+        """Create an open lock that nothing holds."""
+        self._lock = threading.RLock()
+        self._closed_by = None
+
+    def acquire(self, timeout=-1):
+        """Take the lock; return whether it was taken within `timeout`."""
+        closed_by = self._closed_by
+        if closed_by is not None and closed_by != threading.get_ident():
+            # Only a daemon thread gets here, and its process is ending.
+            threading.Event().wait()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self):
+        """Give the lock back once."""
+        self._lock.release()
+
+    def close(self, timeout):
+        """Close the lock to other threads and wait for it.
+
+        Returns:
+            Whether the caller holds the lock. When the wait timed out, the
+            holder is still at work and later requests still wait forever.
+        """
+        self._closed_by = threading.get_ident()
+        return self._lock.acquire(timeout=timeout)
+
+    def __enter__(self):
+        """Take the lock for a `with` block."""
+        self.acquire()
+        return self
+
+    def __exit__(self, *_error):
+        """Give the lock back at the end of a `with` block."""
+        self.release()
+
+
 # The cold-path lock: every native compile and every first load of a kernel
 # in this process holds it, here and in the private segmented runner.
 # Compiles are serialized on purpose. The native compiler admits concurrent
@@ -58,7 +107,45 @@ class _BoundedCache(dict):
 # process, so a lock per key would add risk for little gain. The compiler
 # releases the GIL while it works, and a warm launch never takes this lock:
 # it reads the caches below with one `get` each.
-_compile_lock = threading.Lock()
+#
+# The lock is reentrant for the two handlers registered below. Interpreter
+# exit keeps it on the exiting thread, whose later exit handlers may still
+# reach a cold path, and a fork takes it on a thread that may hold it.
+_compile_lock = _ColdPathLock()
+# How long interpreter exit waits for a cold path in flight. A compile takes
+# 3 to 20 ms here and a module load about as long, so the wait normally ends
+# within one of them. The lock is also held while `unload_retired` waits for
+# the device, which nothing bounds, so the wait is cut off: a thread stuck
+# there must not hold the process open. Past the bound the exit goes on and
+# the risk described at `_wait_for_cold_path_at_exit` returns.
+_EXIT_WAIT_SECONDS = 5.0
+
+
+def _wait_for_cold_path_at_exit():
+    """Keep the interpreter from finalizing under a native compile.
+
+    The native compiler releases the GIL, so the interpreter can finalize
+    while a daemon thread is inside LLVM, and the process then aborts or
+    crashes. This handler closes the lock, which waits for the cold path in
+    flight and lets no other thread start a compile or a load afterwards.
+    Threads that are not daemons have ended before exit handlers run.
+
+    A native compile that was not started under the lock is not waited for.
+    """
+    _compile_lock.close(_EXIT_WAIT_SECONDS)
+
+
+atexit.register(_wait_for_cold_path_at_exit)
+if hasattr(os, "register_at_fork"):
+    # A fork copies the lock in the state it has. Taken by another thread,
+    # it would stay taken in the child, where that thread does not exist,
+    # and the child's first cold path would wait for it forever. The fork
+    # therefore waits for the cold path in flight and both sides release.
+    os.register_at_fork(
+        before=_compile_lock.acquire,
+        after_in_parent=_compile_lock.release,
+        after_in_child=_compile_lock.release,
+    )
 _ptx_cache = _BoundedCache(_CACHE_LIMIT)
 # Values are `(module, function)` as `_CudaDriver.load` returns them. A
 # kernel that leaves this cache is unloaded once nothing else holds its
