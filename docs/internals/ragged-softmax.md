@@ -34,5 +34,77 @@ map-store writes.
 
 *The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/ragged-softmax-phases.svg).*
 
+## Accuracy
+
+The kernel computes each exponential in f32 as `exp2((v - max) * log2e)`,
+with `log2e` the f32 constant `1.44269502`, and lowers `exp2` to the device
+instruction `ex2.approx.f32`. The subtraction, the multiplication, the sum,
+and the division are IEEE-754 round-to-nearest operations with no
+contraction, which a compile-only test checks in the PTX. `ex2.approx.f32`
+is the only approximate operation.
+
+The error of an output grows with the distance of its logit below the
+segment maximum, `d = max - v`, because rounding the exponent by a relative
+amount `t` changes `exp(-d)` by `d * t`. To first order the relative error
+of an output is at most
+
+```text
+(1.12 * (d + dbar) + 2 * E + 1.5 + k / 2) * eps32
+```
+
+where:
+
+- `eps32` is `2**-23`.
+- `1.12 * d` covers the rounding of the subtraction and of the
+  multiplication, half an `eps32` each, and the f32 constant, which is
+  `0.11 * eps32` below `log2(e)`.
+- `dbar` is the mean of `d` over the segment weighted by the softmax
+  probabilities. It is the error that the normalizer inherits from its
+  terms. It is about 1 when the logits are spread evenly, and it exceeds
+  neither the spread nor the natural logarithm of the segment length.
+- `E` is the relative error of `ex2.approx.f32` in units of `eps32`, counted
+  once for the output and once for the normalizer. The bound uses 1.5.
+- `k` is `ceil(n / 128) + 6`, the rounding additions of the 128-lane sum
+  over a segment of `n` elements (see
+  [Segmented Reductions](segmented-reductions.md#sum-rounding)).
+- `1.5` covers the division and the higher-order terms.
+
+Both `d` and `dbar` are at most the spread of the segment, the difference
+between its largest and smallest logit. As a function of spread alone the
+bound is therefore
+
+```text
+(2.24 * spread + 4.5 + k / 2) * eps32
+```
+
+for any distribution of the logits, which is `2.4e-05` at spread 80 for a
+4096-element segment.
+
+A test asserts the first form for every output against `torch.softmax` in
+float64, at spreads 8, 20, 50, and 80. Its segments hold logits on a grid
+of eighths, uniformly drawn logits in segments of up to 4096 elements, and
+one maximum above a single far level. The largest errors it measures on the
+RTX A6000 (`sm_86`) are:
+
+| Spread | Largest relative error | In `eps32` | Fraction of the bound |
+|---|---|---|---|
+| 8 | `5.5e-07` | 4.6 | 0.25 |
+| 20 | `1.0e-06` | 8.4 | 0.32 |
+| 50 | `3.4e-06` | 28.2 | 0.45 |
+| 80 | `3.7e-06` | 31.0 | 0.44 |
+
+The same file measures `ex2.approx.f32` alone, through one-element sums of
+`exp2`, over `2**20` evenly spaced arguments from -126 to 126. On the RTX
+A6000 every result is within 2 ulp of the correctly rounded f32 and within
+`1.22 * eps32` of the exact value, and every integer argument is exact. The
+test asserts 2 ulp and `1.5 * eps32`. No other architecture has been
+measured.
+
+The bound applies to outputs that are normal f32 numbers. A logit more than
+about 87 below its segment maximum has an output below the smallest normal
+f32, which is subnormal or zero and carries no relative accuracy. The
+comparison against float32 PyTorch in `test_segmented_runtime.py` keeps its
+relative tolerance of `2e-06`, which is sized for spreads of at most 8.
+
 Continue with [Task Planning](planning.md) for how segments become
 schedulable tasks.
