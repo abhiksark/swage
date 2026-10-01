@@ -785,7 +785,7 @@ def main():
         identity=identity,
         native_extension=pathlib.Path(native_extension.__file__).resolve(),
         native_library_paths=_native_library_paths(
-            identity["native"],
+            identity.get("native"),
             importlib.util.find_spec(
                 "mlir_swage._mlir_libs"
             ).submodule_search_locations,
