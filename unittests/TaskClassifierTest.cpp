@@ -144,33 +144,52 @@ TEST(TaskClassifierTest, RejectsMalformedAndOutOfI32Metadata) {
     int64_t segmentCount;
     int64_t warpMaxElements;
     int64_t ctaChunkElements;
+    const char *message;
   };
+  const char *const valueRange = "value count must be a nonnegative i32 value";
+  const char *const segmentRange =
+      "segment count must be a nonnegative i32 value";
+  const char *const warpRange =
+      "warp max elements must be a nonnegative i32 value";
+  const char *const warpPositive = "warp max elements must be positive";
+  const char *const ctaRange =
+      "CTA chunk elements must be a nonnegative i32 value";
+  const char *const ctaPositive = "CTA chunk elements must be positive";
+  const char *const warpAboveCta =
+      "warp max elements must not exceed CTA chunk elements";
+  const char *const offsetCount =
+      "offset count must equal segment count plus one";
+  const char *const offsetRange = "offset must be a nonnegative i32 value";
+  const char *const offsetOrder = "offsets must be nondecreasing";
+  const char *const offsetStart = "offsets must start at zero";
+  const char *const offsetEnd = "final offset must not exceed value count";
   const InvalidMetadata invalidInputs[] = {
-      {"negative value count", {0}, -1, 0, 32, 4096},
-      {"value count above i32", {0}, i32Overflow, 0, 32, 4096},
-      {"negative segment count", {0}, 0, -1, 32, 4096},
-      {"segment count above i32", {0}, 0, i32Overflow, 32, 4096},
+      {"negative value count", {0}, -1, 0, 32, 4096, valueRange},
+      {"value count above i32", {0}, i32Overflow, 0, 32, 4096, valueRange},
+      {"negative segment count", {0}, 0, -1, 32, 4096, segmentRange},
+      {"segment count above i32", {0}, 0, i32Overflow, 32, 4096, segmentRange},
       {"segment count addition overflow",
        {},
        0,
        std::numeric_limits<int64_t>::max(),
        32,
-       4096},
-      {"negative warp limit", {0}, 0, 0, -1, 4096},
-      {"zero warp limit", {0}, 0, 0, 0, 4096},
-      {"warp limit above i32", {0}, 0, 0, i32Overflow, i32Overflow},
-      {"negative CTA chunk", {0}, 0, 0, 32, -1},
-      {"zero CTA chunk", {0}, 0, 0, 32, 0},
-      {"CTA chunk above i32", {0}, 0, 0, 32, i32Overflow},
-      {"warp limit above CTA chunk", {0}, 0, 0, 33, 32},
-      {"empty offsets", {}, 0, 0, 32, 4096},
-      {"missing offset", {0}, 0, 1, 32, 4096},
-      {"extra offset", {0, 0}, 0, 0, 32, 4096},
-      {"nonzero first offset", {1, 1}, 1, 1, 32, 4096},
-      {"negative offset", {0, -1}, 0, 1, 32, 4096},
-      {"offset above i32", {0, i32Overflow}, i32Max, 1, 32, 4096},
-      {"decreasing offsets", {0, 2, 1}, 2, 2, 32, 4096},
-      {"final offset above value count", {0, 2}, 1, 1, 32, 4096},
+       4096,
+       segmentRange},
+      {"negative warp limit", {0}, 0, 0, -1, 4096, warpRange},
+      {"zero warp limit", {0}, 0, 0, 0, 4096, warpPositive},
+      {"warp limit above i32", {0}, 0, 0, i32Overflow, i32Overflow, warpRange},
+      {"negative CTA chunk", {0}, 0, 0, 32, -1, ctaRange},
+      {"zero CTA chunk", {0}, 0, 0, 32, 0, ctaPositive},
+      {"CTA chunk above i32", {0}, 0, 0, 32, i32Overflow, ctaRange},
+      {"warp limit above CTA chunk", {0}, 0, 0, 33, 32, warpAboveCta},
+      {"empty offsets", {}, 0, 0, 32, 4096, offsetCount},
+      {"missing offset", {0}, 0, 1, 32, 4096, offsetCount},
+      {"extra offset", {0, 0}, 0, 0, 32, 4096, offsetCount},
+      {"nonzero first offset", {1, 1}, 1, 1, 32, 4096, offsetStart},
+      {"negative offset", {0, -1}, 0, 1, 32, 4096, offsetRange},
+      {"offset above i32", {0, i32Overflow}, i32Max, 1, 32, 4096, offsetRange},
+      {"decreasing offsets", {0, 2, 1}, 2, 2, 32, 4096, offsetOrder},
+      {"final offset above value count", {0, 2}, 1, 1, 32, 4096, offsetEnd},
   };
 
   for (const InvalidMetadata &input : invalidInputs) {
@@ -178,9 +197,10 @@ TEST(TaskClassifierTest, RejectsMalformedAndOutOfI32Metadata) {
     auto tasks =
         classifyTasks(input.offsets, input.valueCount, input.segmentCount,
                       input.warpMaxElements, input.ctaChunkElements);
-    EXPECT_FALSE(static_cast<bool>(tasks));
-    if (!tasks)
-      llvm::consumeError(tasks.takeError());
+    ASSERT_FALSE(static_cast<bool>(tasks));
+    // The message names the rejected quantity, so a case refused for a
+    // different reason than the one it describes fails here.
+    EXPECT_EQ(llvm::toString(tasks.takeError()), input.message);
   }
 }
 
