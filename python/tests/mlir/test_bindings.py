@@ -2,11 +2,144 @@
 """Integration tests for constructing Swage IR with Python bindings."""
 
 import pathlib
+import sys
+import threading
+import time
 
 import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import arith, builtin, func, math, swage
+from reduction_programs import reduction_module
+
+_FIXED_VECTOR_ADD = """
+module {
+  func.func @add_kernel(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    %pid = swage.program_id 0
+    %block = arith.constant 128 : index
+    %base = arith.muli %pid, %block : index
+    %lane = vector.step : vector<128xindex>
+    %base_vector = vector.broadcast %base : index to vector<128xindex>
+    %offsets = arith.addi %base_vector, %lane : vector<128xindex>
+    %n_index = arith.index_cast %n : i32 to index
+    %n_vector = vector.broadcast %n_index : index to vector<128xindex>
+    %mask = arith.cmpi slt, %offsets, %n_vector : vector<128xindex>
+    %zero = arith.constant 0.0 : f32
+    %passthrough = vector.broadcast %zero : f32 to vector<128xf32>
+    %c0 = arith.constant 0 : index
+    %lhs = vector.gather %x[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %rhs = vector.gather %y[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %sum = arith.addf %lhs, %rhs : vector<128xf32>
+    vector.scatter %output[%c0] [%offsets], %mask, %sum
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+    return
+  }
+}
+"""
+
+# Every native compile entry point: the function, the module text it
+# compiles, and its keyword arguments.
+_COMPILES = (
+    (
+        "_compile_ptx",
+        _FIXED_VECTOR_ADD,
+        {"kernel_name": "add_kernel", "block_size": 128},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum", "block_size": 128},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum", "block_size": 32,
+         "use_task_ids": True},
+    ),
+    (
+        "_compile_fused_segmented_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum"},
+    ),
+    (
+        "_compile_persistent_segmented_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum"},
+    ),
+    (
+        "_compile_split_partial_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum"},
+    ),
+    (
+        "_compile_split_merge_reduction_ptx",
+        reduction_module("sum", "identity"),
+        {"kernel_name": "segmented_sum"},
+    ),
+)
+
+
+def _compile_all(modules=None):
+    """Compile every entry point once and return the results in order.
+
+    Args:
+        modules: Parsed modules to compile, one per entry of `_COMPILES`.
+            When omitted, each text is parsed into a context that only the
+            calling thread uses.
+
+    Returns:
+        The `(lowered, ptx)` pair of every entry point.
+    """
+    if modules is not None:
+        return [
+            getattr(native_swage, name)(module, target="sm_86", **options)
+            for (name, _, options), module in zip(
+                _COMPILES, modules, strict=True
+            )
+        ]
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        return [
+            getattr(native_swage, name)(
+                ir.Module.parse(text), target="sm_86", **options
+            )
+            for name, text, options in _COMPILES
+        ]
+
+
+def _run_together(count, work):
+    """Run `work` on `count` threads that start at the same moment.
+
+    Args:
+        count: Number of threads.
+        work: Zero-argument callable each thread runs once.
+
+    Returns:
+        What each thread returned, or the exception it raised.
+    """
+    results = [None] * count
+    barrier = threading.Barrier(count)
+
+    def run(index):
+        barrier.wait()
+        try:
+            results[index] = work()
+        except BaseException as error:  # noqa: BLE001
+            results[index] = error
+
+    threads = [
+        threading.Thread(target=run, args=(index,)) for index in range(count)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
 
 
 def test_native_module_reports_the_pinned_llvm_version():
@@ -182,3 +315,107 @@ def test_segment_type_constructor_needs_the_dialect_loaded():
             match="the swage dialect is not loaded in this context",
         ):
             swage.SegmentType.get(ir.F32Type.get())
+
+
+def test_two_threads_compile_on_separate_contexts():
+    """Compile every kernel kind at once from two threads.
+
+    Each thread parses into its own context, which is what the code
+    generation header requires of concurrent calls. The compile releases
+    the GIL, so the two pipelines overlap.
+    """
+    expected = _compile_all()
+
+    def work():
+        return [_compile_all() for _ in range(4)]
+
+    for result in _run_together(2, work):
+        assert result == [expected] * 4
+
+
+def test_two_threads_compile_one_module():
+    """Serialize compiles that share a context instead of racing them.
+
+    Python callers could always compile one module from two threads, because
+    the GIL kept the calls apart. The binding keeps that true after it
+    releases the GIL.
+    """
+    expected = _compile_all()
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        modules = [ir.Module.parse(text) for _, text, _ in _COMPILES]
+
+        def work():
+            return [_compile_all(modules) for _ in range(4)]
+
+        results = _run_together(2, work)
+
+    for result in results:
+        assert result == [expected] * 4
+
+
+def test_a_failed_compile_on_another_thread_reports_its_diagnostic():
+    """Keep the diagnostic text when the compile ran without the GIL."""
+
+    def work():
+        with ir.Context() as context:
+            swage.register_dialects(context)
+            with pytest.raises(ValueError) as caught:
+                native_swage._compile_ptx(
+                    ir.Module.parse(_FIXED_VECTOR_ADD),
+                    kernel_name="add_kernel",
+                    block_size=64,
+                    target="sm_86",
+                )
+            return str(caught.value)
+
+    for message in _run_together(2, work):
+        assert "vector width 128 does not match requested block size 64" in (
+            message
+        )
+
+
+def test_a_compile_does_not_stall_other_python_threads():
+    """Run Python on one thread while another compiles.
+
+    The main thread spins and adds up every pause longer than a millisecond.
+    A compile that held the GIL would pause it for the whole compile, about
+    18 ms for the persistent kernel, so nearly all of the run would count as
+    paused. The bound is half of the run, far from both outcomes.
+    """
+    name, text, options = _COMPILES[4]
+    assert name == "_compile_persistent_segmented_reduction_ptx"
+    finished = threading.Event()
+
+    def compile_repeatedly():
+        try:
+            with ir.Context() as context:
+                swage.register_dialects(context)
+                module = ir.Module.parse(text)
+                for _ in range(20):
+                    getattr(native_swage, name)(
+                        module, target="sm_86", **options
+                    )
+        finally:
+            finished.set()
+
+    interval = sys.getswitchinterval()
+    # A short switch interval hands the GIL back to the compiling thread as
+    # soon as it asks, so a compile that holds the GIL dominates the run.
+    sys.setswitchinterval(1e-4)
+    try:
+        thread = threading.Thread(target=compile_repeatedly)
+        paused = 0.0
+        start = previous = time.perf_counter()
+        thread.start()
+        while not finished.is_set():
+            now = time.perf_counter()
+            if now - previous > 1e-3:
+                paused += now - previous
+            previous = now
+        elapsed = time.perf_counter() - start
+        thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+
+    assert paused < 0.5 * elapsed, (paused, elapsed)
