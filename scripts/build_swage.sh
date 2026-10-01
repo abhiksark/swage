@@ -5,7 +5,8 @@
 #
 # Environment overrides:
 #   SWAGE_LLVM_HOME   LLVM root used by scripts/build_llvm.sh
-#   MLIR_DIR/LLVM_DIR explicit CMake package dirs (any MLIR install works)
+#   MLIR_DIR/LLVM_DIR explicit CMake package dirs of an install of the
+#                     pinned release; configure rejects any other version
 #   SWAGE_BUILD_DIR   build tree (default ./build)
 #   SWAGE_BUILD_TYPE  CMake build type (default RelWithDebInfo)
 set -euo pipefail
