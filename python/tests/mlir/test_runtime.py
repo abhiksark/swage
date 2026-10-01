@@ -124,6 +124,185 @@ def test_launch_rejects_invalid_runtime_inputs():
         )
 
 
+def test_launch_rejects_a_lazy_negation_view():
+    """Refuse a view whose storage holds the opposite of what it shows."""
+    base = torch.ones(129, device="cuda")
+    if not hasattr(base, "_neg_view"):
+        pytest.skip("this PyTorch cannot build a contiguous negation view")
+    view = base._neg_view()
+    y = torch.ones(129, device="cuda")
+    output = torch.full((129,), -777.0, device="cuda")
+    assert view.is_neg() and view.is_contiguous()
+    assert view.data_ptr() == base.data_ptr()
+
+    with pytest.raises(ValueError, match="'x_ptr' must not be a lazy negation"):
+        _launch(view, y, output, 129)
+    with pytest.raises(ValueError, match="'output_ptr' must not be a lazy"):
+        _launch(base, y, view, 129)
+    _launch(view.resolve_neg(), y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.all(base == 1.0)
+    assert torch.all(output == 0.0)
+
+
+@pytest.mark.parametrize("shift", [0, 1, 128, -1, -128])
+@pytest.mark.parametrize("overlapped", ["x_ptr", "y_ptr"])
+def test_launch_rejects_an_output_that_overlaps_an_input(overlapped, shift):
+    """Refuse an output sharing memory with a buffer the kernel reads."""
+    buffer = torch.arange(512, device="cuda", dtype=torch.float32)
+    expected = buffer.clone()
+    shared = buffer[128:257]
+    output = buffer[128 + shift:257 + shift]
+    other = torch.ones(129, device="cuda")
+    x, y = (shared, other) if overlapped == "x_ptr" else (other, shared)
+
+    with pytest.raises(
+        ValueError,
+        match=f"'output_ptr' must not overlap argument '{overlapped}'",
+    ):
+        _launch(x, y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(buffer, expected)
+
+
+def test_launch_accepts_adjacent_slices_and_one_tensor_for_both_inputs():
+    """Run buffers that only touch, and two inputs that share memory."""
+    buffer = torch.arange(258, device="cuda", dtype=torch.float32)
+    x, output = buffer[:129], buffer[129:]
+    expected = x + x
+
+    _launch(x, x, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(output, expected)
+    assert torch.equal(x, torch.arange(129, device="cuda", dtype=torch.float32))
+
+
+def _fresh_process_cache(monkeypatch, cache):
+    """Start from an empty in-process cache on the cache root `cache`."""
+    from swage import _runtime
+
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    monkeypatch.setattr(_runtime, "_ptx_cache", {})
+    monkeypatch.setattr(_runtime, "_cache_off", {})
+    for name in (
+        "SWAGE_CACHE_MAX_ENTRIES",
+        "SWAGE_CACHE_READ_ONLY",
+        "SWAGE_NO_COMPILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return _runtime
+
+
+def test_no_compile_mode_launches_from_the_cache_and_refuses_a_miss(
+    tmp_path, monkeypatch
+):
+    """Launch a published kernel without compiling, and refuse another."""
+    cache = tmp_path / "cache"
+    _runtime = _fresh_process_cache(monkeypatch, cache)
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+    _launch(x, y, output, 129, block=64)
+    torch.cuda.synchronize()
+    (entry,) = cache.iterdir()
+
+    def compile_nothing(*_arguments, **_keywords):
+        raise AssertionError("compiled although SWAGE_NO_COMPILE=1")
+
+    monkeypatch.setattr(_runtime, "_ptx_cache", {})
+    monkeypatch.setattr(_runtime, "_compile_native", compile_nothing)
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    warm = torch.full_like(x, -777.0)
+    untouched = torch.full_like(x, -777.0)
+
+    _launch(x, y, warm, 129, block=64)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "SWAGE_NO_COMPILE=1 refuses to compile kernel 'add_kernel': "
+            "no entry [0-9a-f]{64} in "
+        ),
+    ):
+        _launch(x, y, untouched, 129, block=256)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(warm, x + y)
+    assert torch.all(untouched == -777.0)
+    assert [path.name for path in cache.iterdir()] == [entry.name]
+
+
+def test_read_only_mode_launches_without_writing_the_cache(
+    tmp_path, monkeypatch
+):
+    """Compile and launch while leaving a missing cache root missing."""
+    cache = tmp_path / "cache"
+    _fresh_process_cache(monkeypatch, cache)
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+
+    for _ in range(2):
+        _launch(x, y, output, 129, block=32)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, x + y)
+    assert not cache.exists()
+
+
+def test_cache_bound_evicts_real_entries(tmp_path, monkeypatch):
+    """Keep the two newest specializations and recompile an evicted one."""
+    cache = tmp_path / "cache"
+    _runtime = _fresh_process_cache(monkeypatch, cache)
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "2")
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+    keys = []
+
+    for block in (32, 64, 128):
+        _launch(x, y, output, 129, block=block)
+        keys.append(list(_runtime._ptx_cache)[-1])
+    torch.cuda.synchronize()
+    assert sorted(path.name for path in cache.iterdir()) == sorted(keys[1:])
+
+    monkeypatch.setattr(_runtime, "_ptx_cache", {})
+    output.fill_(-777.0)
+    _launch(x, y, output, 129, block=32)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, x + y)
+    assert sorted(path.name for path in cache.iterdir()) == sorted(
+        [keys[2], keys[0]]
+    )
+
+
+def test_environment_report_describes_this_device(tmp_path, monkeypatch):
+    """Report the loaded bindings, the driver, the target, and the cache."""
+    import mlir_swage._mlir_libs._swageDialectsNanobind as extension
+    from swage import env
+
+    cache = tmp_path / "cache"
+    _fresh_process_cache(monkeypatch, cache)
+    major, minor = torch.cuda.get_device_capability()
+
+    report = env.report()
+
+    assert report["swage_file"] == sw.__file__
+    assert report["mlir_swage_file"] == extension.__file__
+    assert report["cuda_driver"]
+    assert report["target"].startswith(f"sm_{major}{minor} (")
+    assert report["cache_dir"] == str(cache)
+    assert report["cache"] == (
+        "active (reads and writes; 0 of at most 1024 entries)"
+    )
+    assert report["compile_on_miss"] == "allowed"
+    assert not cache.exists()
+
+
 def test_native_launcher_runs_the_fixed_kernel():
     """Dispatch one launch through the compiled path, not ctypes."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
