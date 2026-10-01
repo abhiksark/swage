@@ -271,11 +271,16 @@ def test_smallest_step_is_the_finest_gap_between_distinct_values(provenance):
     )
     assert provenance.smallest_step([5.0, 5.0]) is None
     assert provenance.smallest_step([]) is None
+    # Two float spellings of one reading are not a gap.
+    assert provenance.smallest_step(
+        [0.1 + 0.2, 0.3, 0.332]
+    ) == pytest.approx(0.032)
 
 
 def test_clock_tick_is_the_smallest_advance_of_back_to_back_reads(provenance):
     """Measure the host clock instead of trusting its nominal resolution."""
-    ticks = iter([0, 0, 50, 50, 90, 200, 200])
+    start = 250_000_000_000_000
+    ticks = iter(start + tick for tick in [0, 0, 50, 50, 90, 200, 200])
 
     assert provenance.clock_tick_us(lambda: next(ticks), reads=7) == 0.04
     assert provenance.clock_tick_us(lambda: 7, reads=5) is None

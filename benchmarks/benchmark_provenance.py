@@ -34,6 +34,7 @@ _GPU_FIELDS = (
     "utilization.gpu",
 )
 _PROCESS_FIELDS = ("gpu_uuid", "pid", "process_name", "used_memory")
+_SAME_READING = 1e-6
 
 
 def cpu_model(cpuinfo=pathlib.Path("/proc/cpuinfo")):
@@ -278,13 +279,19 @@ def finish(block, *, run=subprocess.run):
 
 
 def smallest_step(values):
-    """Return the finest gap between distinct values, or None.
+    """Return the finest gap between distinct timer readings, or None.
 
     A timer returns multiples of its tick, so the smallest gap between two
-    different readings is an upper bound of the tick.
+    different readings is an upper bound of the tick. Readings that differ
+    by less than one part in a million are one reading: float arithmetic on
+    the same tick count does not always give the same last digit.
     """
     distinct = sorted(set(values))
-    gaps = [later - earlier for earlier, later in zip(distinct, distinct[1:])]
+    gaps = [
+        later - earlier
+        for earlier, later in zip(distinct, distinct[1:])
+        if later - earlier > _SAME_READING * abs(later)
+    ]
     return min(gaps, default=None)
 
 
@@ -294,5 +301,10 @@ def clock_tick_us(clock=time.perf_counter_ns, reads=10_000):
     Back-to-back reads include the cost of the call, so the result is an
     upper bound of the clock tick. None when the clock never advanced.
     """
-    step = smallest_step([clock() for _ in range(reads)])
-    return None if step is None else step / 1_000.0
+    readings = [clock() for _ in range(reads)]
+    advances = [
+        later - earlier
+        for earlier, later in zip(readings, readings[1:])
+        if later > earlier
+    ]
+    return min(advances) / 1_000.0 if advances else None
