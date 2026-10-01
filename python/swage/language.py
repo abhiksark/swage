@@ -64,13 +64,19 @@ def arange(start, end):
     _symbolic_only("arange")
 
 
-def load(pointer_value, *, mask=None, other=None):
-    """Load a masked vector inside a compiled kernel."""
+def load(pointer_value, *, mask, other):
+    """Load a masked vector inside a compiled kernel.
+
+    The kernel language requires both keywords, so neither has a default.
+    """
     _symbolic_only("load")
 
 
-def store(pointer_value, value, *, mask=None):
-    """Store a masked vector inside a compiled kernel."""
+def store(pointer_value, value, *, mask):
+    """Store a masked vector inside a compiled kernel.
+
+    The kernel language requires the mask, so it has no default.
+    """
     _symbolic_only("store")
 
 
