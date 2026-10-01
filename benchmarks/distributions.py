@@ -9,6 +9,7 @@ from collections.abc import Sequence
 _I32_MAX = (1 << 31) - 1
 _MAX_LENGTH = 4096
 _MAX_COUNT = _I32_MAX // _MAX_LENGTH
+_POWER_LAW_EXPONENT = 1.25
 _NAMES = {
     "uniform",
     "log-normal",
@@ -18,14 +19,22 @@ _NAMES = {
     "few-huge",
     "one-outlier",
     "alternating-empty",
+    "power-law",
 }
 
 
 def generate_lengths(name: str, count: int, seed: int) -> list[int]:
     """Generate one deterministic segment-length distribution.
 
+    The eight ADR-0015 distributions cap every length at 4096 elements. The
+    additional ``power-law`` distribution has no fixed cap: it draws one
+    length per rank of a Pareto tail with shape 0.8, so its largest length is
+    between ``(count / 2) ** 1.25`` and ``count ** 1.25`` for every seed. At
+    32,768 segments that is at least 185,363 elements, far above the 4096
+    elements one CTA task covers.
+
     Args:
-        name: Distribution name from ADR-0015.
+        name: Distribution name from ADR-0015, or ``power-law``.
         count: Positive segment count whose worst-case total fits in i32.
         seed: Integer seed for an isolated random-number generator.
 
@@ -79,6 +88,16 @@ def generate_lengths(name: str, count: int, seed: int) -> list[int]:
         return lengths
     if name == "one-outlier":
         lengths = [rng.randint(1, 32) for _ in range(count - 1)] + [4096]
+        rng.shuffle(lengths)
+        return lengths
+    if name == "power-law":
+        # The jitter stays below one rank, which bounds the largest length
+        # from below and the total by zeta(1.25) * count ** 1.25, about
+        # 4.6 * count ** 1.25. That fits i32 for every accepted count.
+        lengths = [
+            int((count / (rank + rng.random())) ** _POWER_LAW_EXPONENT)
+            for rank in range(1, count + 1)
+        ]
         rng.shuffle(lengths)
         return lengths
     return [
