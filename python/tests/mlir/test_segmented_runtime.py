@@ -2,6 +2,7 @@
 """Differential qualification for native segmented reductions."""
 
 import gc
+import os
 import threading
 import weakref
 from itertools import pairwise
@@ -12,6 +13,7 @@ from reduction_programs import reduction_module
 from swage._segmented_qualification import (
     _execute,
     _launch_segmented_sum_tasks,
+    _llvm_tool,
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _prepare_planned_sum,
@@ -595,6 +597,67 @@ def test_cpu_oracle_returns_nothing_for_zero_segments(kind):
 
     assert actual.shape == (0,)
     assert actual.dtype == torch.float32
+
+
+def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
+    """A different LLVM on PATH must not become the oracle.
+
+    The runner libraries always come from the pinned install, so tools
+    from another LLVM would pair with them silently. Decoys placed first
+    on PATH record any use and fail.
+    """
+    marker = tmp_path / "used"
+    for name in ("mlir-opt", "mlir-runner"):
+        decoy = tmp_path / name
+        decoy.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    values, offsets = _case([3, 4])
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    torch.testing.assert_close(
+        actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
+    )
+    assert not marker.exists()
+
+
+def _fake_tool(directory, name):
+    """Create an executable placeholder and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_llvm_tool_prefers_the_pinned_install_over_path(tmp_path, monkeypatch):
+    """Use the install's tool even when PATH offers another one."""
+    pinned = _fake_tool(tmp_path / "install" / "bin", "mlir-opt")
+    _fake_tool(tmp_path / "elsewhere", "mlir-opt")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-opt") == pinned
+
+
+def test_llvm_tool_falls_back_to_path_when_the_install_lacks_it(
+    tmp_path, monkeypatch
+):
+    """An install without the tool defers to PATH."""
+    found = _fake_tool(tmp_path / "elsewhere", "mlir-runner")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-runner") == found
+
+
+def test_llvm_tool_names_both_places_when_the_tool_is_missing(
+    tmp_path, monkeypatch
+):
+    """Fail with the searched locations instead of an exec error."""
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    with pytest.raises(RuntimeError, match="neither at .*install.* nor on"):
+        _llvm_tool(tmp_path / "install", "mlir-opt")
 
 
 @pytest.mark.parametrize("count", [-1, 1 << 31])
