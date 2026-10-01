@@ -52,11 +52,11 @@ jobs:
             tests/python/test_runtime.py::test_cache_round_trip_and_corruption_rejection \
             tests/python/test_runtime.py::test_cache_rejects_unsafe_entries
 
+      # The whole directory, not a list of files: every CUDA-gated test,
+      # including any file added later, runs on this runner. Hosted CI has
+      # no GPU and skips those tests.
       - name: Test CUDA correctness, streams, and process reuse
-        run: |
-          python -m pytest -q \
-            python/tests/mlir/test_runtime.py \
-            python/tests/mlir/test_segmented_runtime.py
+        run: python -m pytest -q python/tests/mlir
 
       - name: Run the documented fixed vector-add walkthrough
         run: |
