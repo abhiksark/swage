@@ -83,6 +83,33 @@ The current public Python path uses a logical fixed-block coordinate for
 canonical vector add. The private segmented path proves selected Segment to
 Task to Tile mappings. It does not yet provide a public general planner.
 
+## What a schedule may change
+
+Deriving different tasks for one segment never changes which elements a
+reduction reads: every element contributes exactly once. It can change the
+order in which the elements are combined, because `swage.reduce` leaves that
+order open. The two admitted kinds respond differently:
+
+- A maximum is the same in every order.
+- An f32 sum is not. Addition in f32 is not associative, so a warp task, a
+  CTA task, and a split task can return different sums of one segment. The
+  difference is rounding error: it is bounded relative to the sum of the
+  absolute values of the elements, and it can be large relative to the
+  result when the elements cancel.
+
+The private path chooses the task from the segment length and the planning
+limits. One preparation-time rule also reads the number of segments in the
+batch and the number of multiprocessors on the device. The same segment can
+therefore sum to a different result in another batch or on another GPU
+model.
+
+The qualification tests bound the error of each schedule against a float64
+reference, relative to the sum of absolute values, and compare maxima
+exactly. They do not require two schedules to agree bit for bit. See
+[Textual Swage IR](../language/swage-ir.md#swagereduce) for the operation
+contract and [Task Planning](../internals/planning.md) for the selection
+rule and how to switch it off.
+
 ## From model to machinery
 
 Every level of this model has qualified machinery behind it, all of it
