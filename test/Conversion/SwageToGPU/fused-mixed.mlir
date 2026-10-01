@@ -36,7 +36,7 @@ module {
 }
 
 // CHECK: gpu.module @segmented_sum_module
-// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[WARP_COUNT_I32:[^,]+]]: i32, %[[CTA_COUNT_I32:[^)]+]]: i32) kernel
+// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[WARP_COUNT_I32:[^,]+]]: i32, %[[CTA_COUNT_I32:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
 // CHECK: %[[BLOCK_ID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
@@ -69,15 +69,22 @@ module {
 // CHECK-NEXT: %[[WARP_TASK_I64:.*]] = arith.index_cast %[[WARP_TASK]] : index to i64
 
 // The task word names the segment; its two offsets are the segment's range.
+// The word is compared with the segment count as loaded. An out-of-range
+// word selects offsets[0] for both ends, which is an empty range, so the
+// bound opens no branch around the reduction.
 // CHECK-NEXT: %[[WARP_ID_ADDRESS:.*]] = llvm.getelementptr %[[TASK_IDS]][%[[WARP_TASK_I64]]]
 // CHECK-NEXT: %[[WARP_ID_WORD:.*]] = llvm.load %[[WARP_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[WARP_ID_IN_RANGE:.*]] = arith.cmpi ult, %[[WARP_ID_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT: %[[WARP_SEGMENT:.*]] = arith.index_cast %[[WARP_ID_WORD]] : i32 to index
 // CHECK-NEXT: %[[WARP_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[WARP_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_START_INDEX:.*]] = arith.select %[[WARP_ID_IN_RANGE]], %[[WARP_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[WARP_START_INDEX_I64:.*]] = arith.index_cast %[[WARP_START_INDEX]] : index to i64
+// CHECK-NEXT: %[[WARP_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_START_INDEX_I64]]]
 // CHECK-NEXT: %[[WARP_START_WORD:.*]] = llvm.load %[[WARP_START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[WARP_NEXT_SEGMENT:.*]] = arith.addi %[[WARP_SEGMENT]], %[[ONE]] : index
-// CHECK-NEXT: %[[WARP_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_NEXT_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[WARP_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_END_INDEX:.*]] = arith.select %[[WARP_ID_IN_RANGE]], %[[WARP_NEXT_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[WARP_END_INDEX_I64:.*]] = arith.index_cast %[[WARP_END_INDEX]] : index to i64
+// CHECK-NEXT: %[[WARP_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_END_INDEX_I64]]]
 // CHECK-NEXT: %[[WARP_END_WORD:.*]] = llvm.load %[[WARP_END_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[WARP_FLOOR:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[WARP_START_FLOORED:.*]] = arith.maxsi %[[WARP_START_WORD]], %[[WARP_FLOOR]] : i32
@@ -120,9 +127,10 @@ module {
 // CHECK-NEXT: %[[WARP_S5:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T4]], %[[WARP_D5]], %[[WARP_W5]] : f32
 // CHECK-NEXT: %[[WARP_TOTAL:.*]] = arith.addf %[[WARP_T4]], %[[WARP_S5]] : f32
 // Lane zero of the warp is the only writer, and it stores the total at the
-// segment the task word named.
+// segment the task word named, unless that segment is out of range.
 // CHECK-NEXT: %[[WARP_WRITER:.*]] = arith.cmpi eq, %[[LANE]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[WARP_WRITER]] {
+// CHECK-NEXT: %[[WARP_MAY_STORE:.*]] = arith.andi %[[WARP_WRITER]], %[[WARP_ID_IN_RANGE]] : i1
+// CHECK-NEXT: scf.if %[[WARP_MAY_STORE]] {
 // CHECK-NEXT:   %[[WARP_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[WARP_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[WARP_TOTAL]], %[[WARP_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }
@@ -139,15 +147,22 @@ module {
 // CHECK-NEXT: %[[CTA_TASK_I64:.*]] = arith.index_cast %[[MIXED_TASK]] : index to i64
 
 // The task word names the segment; its two offsets are the segment's range.
+// The word is compared with the segment count as loaded. An out-of-range
+// word selects offsets[0] for both ends, which is an empty range, so the
+// bound opens no branch around the reduction.
 // CHECK-NEXT: %[[CTA_ID_ADDRESS:.*]] = llvm.getelementptr %[[TASK_IDS]][%[[CTA_TASK_I64]]]
 // CHECK-NEXT: %[[CTA_ID_WORD:.*]] = llvm.load %[[CTA_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[CTA_ID_IN_RANGE:.*]] = arith.cmpi ult, %[[CTA_ID_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT: %[[CTA_SEGMENT:.*]] = arith.index_cast %[[CTA_ID_WORD]] : i32 to index
 // CHECK-NEXT: %[[CTA_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[CTA_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_START_INDEX:.*]] = arith.select %[[CTA_ID_IN_RANGE]], %[[CTA_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[CTA_START_INDEX_I64:.*]] = arith.index_cast %[[CTA_START_INDEX]] : index to i64
+// CHECK-NEXT: %[[CTA_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_START_INDEX_I64]]]
 // CHECK-NEXT: %[[CTA_START_WORD:.*]] = llvm.load %[[CTA_START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[CTA_NEXT_SEGMENT:.*]] = arith.addi %[[CTA_SEGMENT]], %[[ONE]] : index
-// CHECK-NEXT: %[[CTA_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_NEXT_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[CTA_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_END_INDEX:.*]] = arith.select %[[CTA_ID_IN_RANGE]], %[[CTA_NEXT_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[CTA_END_INDEX_I64:.*]] = arith.index_cast %[[CTA_END_INDEX]] : index to i64
+// CHECK-NEXT: %[[CTA_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_END_INDEX_I64]]]
 // CHECK-NEXT: %[[CTA_END_WORD:.*]] = llvm.load %[[CTA_END_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[CTA_FLOOR:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[CTA_START_FLOORED:.*]] = arith.maxsi %[[CTA_START_WORD]], %[[CTA_FLOOR]] : i32
@@ -170,9 +185,10 @@ module {
 // CHECK-NEXT: %[[CTA_TOTAL:.*]] = gpu.all_reduce add %[[CTA_LOCAL]] uniform {
 // CHECK-NEXT: } : (f32) -> f32
 // Thread zero of the block is the only writer, and it stores the total at the
-// segment the task word named.
+// segment the task word named, unless that segment is out of range.
 // CHECK-NEXT: %[[CTA_WRITER:.*]] = arith.cmpi eq, %[[THREAD]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[CTA_WRITER]] {
+// CHECK-NEXT: %[[CTA_MAY_STORE:.*]] = arith.andi %[[CTA_WRITER]], %[[CTA_ID_IN_RANGE]] : i1
+// CHECK-NEXT: scf.if %[[CTA_MAY_STORE]] {
 // CHECK-NEXT:   %[[CTA_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[CTA_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[CTA_TOTAL]], %[[CTA_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }

@@ -27,7 +27,11 @@
 //     because both broadcast their claims through the same shared slot;
 //   - a partial writes scratch, then fences, then publishes completion, and
 //     the merging block fences before it reads scratch;
-//   - the warp queue uses shuffles and no block-wide synchronization.
+//   - the warp queue uses shuffles and no block-wide synchronization;
+//   - the bounds on loaded indices add no branch around a barrier or a
+//     shuffle: a segment ID and an output segment are bounded through
+//     selects and the store predicate, and the one new branch, on the merge
+//     ID, sits inside the leader-only publication.
 //
 // The data that moves through that structure is pinned as well. The first
 // run matches the kernel in order with captured operands: task word, range,
@@ -64,7 +68,7 @@ module {
 // CHECK-SAME: %[[WARP_IDS:[^,]+]]: !llvm.ptr, %[[CTA_IDS:[^,]+]]: !llvm.ptr,
 // CHECK-SAME: %[[RANGES:[^,]+]]: !llvm.ptr, %[[MERGE_IDS:[^,]+]]: !llvm.ptr, %[[MERGES:[^,]+]]: !llvm.ptr,
 // CHECK-SAME: %[[SCRATCH:[^,]+]]: !llvm.ptr, %[[COUNTERS:[^,]+]]: !llvm.ptr,
-// CHECK-SAME: %[[VALUE_COUNT:[^,]+]]: i32, %[[WARP_COUNT:[^,]+]]: i32, %[[CTA_COUNT:[^,]+]]: i32, %[[PARTIAL_COUNT:[^,]+]]: i32, %{{[^)]+}}: i32)
+// CHECK-SAME: %[[VALUE_COUNT:[^,]+]]: i32, %[[WARP_COUNT:[^,]+]]: i32, %[[CTA_COUNT:[^,]+]]: i32, %[[PARTIAL_COUNT:[^,]+]]: i32, %[[MERGE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32)
 // CHECK-SAME: workgroup(%[[SHARED:[^ ]+]] : memref<2xi32, #gpu.address_space<workgroup>>) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 512, 1, 1>
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
@@ -105,15 +109,22 @@ module {
 // CHECK-NEXT:   %[[CTA_TASK_I64:.*]] = arith.index_cast %[[CTA_TASK]] : index to i64
 
 // The task word names the segment; its two offsets are the segment's range.
+// The word is compared with the segment count as loaded. An out-of-range
+// word selects offsets[0] for both ends, which is an empty range, so the
+// bound opens no branch around the reduction.
 // CHECK-NEXT: %[[CTA_ID_ADDRESS:.*]] = llvm.getelementptr %[[CTA_IDS]][%[[CTA_TASK_I64]]]
 // CHECK-NEXT: %[[CTA_ID_WORD:.*]] = llvm.load %[[CTA_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[CTA_ID_IN_RANGE:.*]] = arith.cmpi ult, %[[CTA_ID_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT: %[[CTA_SEGMENT:.*]] = arith.index_cast %[[CTA_ID_WORD]] : i32 to index
 // CHECK-NEXT: %[[CTA_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[CTA_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_START_INDEX:.*]] = arith.select %[[CTA_ID_IN_RANGE]], %[[CTA_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[CTA_START_INDEX_I64:.*]] = arith.index_cast %[[CTA_START_INDEX]] : index to i64
+// CHECK-NEXT: %[[CTA_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_START_INDEX_I64]]]
 // CHECK-NEXT: %[[CTA_START_WORD:.*]] = llvm.load %[[CTA_START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[CTA_NEXT_SEGMENT:.*]] = arith.addi %[[CTA_SEGMENT]], %[[ONE]] : index
-// CHECK-NEXT: %[[CTA_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_NEXT_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[CTA_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_END_INDEX:.*]] = arith.select %[[CTA_ID_IN_RANGE]], %[[CTA_NEXT_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[CTA_END_INDEX_I64:.*]] = arith.index_cast %[[CTA_END_INDEX]] : index to i64
+// CHECK-NEXT: %[[CTA_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_END_INDEX_I64]]]
 // CHECK-NEXT: %[[CTA_END_WORD:.*]] = llvm.load %[[CTA_END_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[CTA_FLOOR:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[CTA_START_FLOORED:.*]] = arith.maxsi %[[CTA_START_WORD]], %[[CTA_FLOOR]] : i32
@@ -136,9 +147,10 @@ module {
 // CHECK-NEXT: %[[CTA_TOTAL:.*]] = gpu.all_reduce add %[[CTA_LOCAL]] uniform {
 // CHECK-NEXT: } : (f32) -> f32
 // Thread zero of the block is the only writer, and it stores the total at the
-// segment the task word named.
+// segment the task word named, unless that segment is out of range.
 // CHECK-NEXT: %[[CTA_WRITER:.*]] = arith.cmpi eq, %[[THREAD]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[CTA_WRITER]] {
+// CHECK-NEXT: %[[CTA_MAY_STORE:.*]] = arith.andi %[[CTA_WRITER]], %[[CTA_ID_IN_RANGE]] : i1
+// CHECK-NEXT: scf.if %[[CTA_MAY_STORE]] {
 // CHECK-NEXT:   %[[CTA_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[CTA_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[CTA_TOTAL]], %[[CTA_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }
@@ -238,10 +250,16 @@ module {
 // CHECK-NEXT: }
 // CHECK-NEXT: gpu.barrier
 // CHECK-NEXT: scf.if %[[LEADER]] {
-// The partial's merge group has its completion counter at 3 + group.
+// The partial's merge group is compared with the merge count before it
+// addresses anything. This branch runs in the leader alone, after the
+// barrier above and before the next one, so no barrier depends on it. An
+// out-of-range group updates no counter and reads no record.
 // CHECK-NEXT:   %[[GROUP_SLOT:.*]] = arith.index_cast %[[PARTIAL]] : index to i64
 // CHECK-NEXT:   %[[GROUP_ADDRESS:.*]] = llvm.getelementptr %[[MERGE_IDS]][%[[GROUP_SLOT]]]
 // CHECK-NEXT:   %[[GROUP_WORD:.*]] = llvm.load %[[GROUP_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT:   %[[GROUP_IN_RANGE:.*]] = arith.cmpi ult, %[[GROUP_WORD]], %[[MERGE_COUNT]] : i32
+// CHECK-NEXT:   %[[PUBLISHED:.*]] = scf.if %[[GROUP_IN_RANGE]] -> (i32) {
+// The group has its completion counter at 3 + group.
 // CHECK-NEXT:   %[[GROUP:.*]] = arith.index_cast %[[GROUP_WORD]] : i32 to index
 // CHECK-NEXT:   %[[COMPLETION_BASE:.*]] = arith.constant 3 : index
 // CHECK-NEXT:   %[[COMPLETION_INDEX:.*]] = arith.addi %[[COMPLETION_BASE]], %[[GROUP]] : index
@@ -268,15 +286,21 @@ module {
 // CHECK-NEXT:   %[[PREVIOUS:.*]] = llvm.atomicrmw add %[[COMPLETION]], %[[ONE_I32]] acq_rel : !llvm.ptr, i32
 // CHECK-NEXT:   %[[COMPLETED:.*]] = arith.addi %[[PREVIOUS]], %[[ONE_I32]] : i32
 // CHECK-NEXT:   %[[IS_LAST:.*]] = arith.cmpi eq, %[[COMPLETED]], %[[EXPECTED]] : i32
-// The leader broadcasts the ready merge, or -1, through shared slot 1.
+// The leader broadcasts the ready merge, or -1, through shared slot 1. An
+// out-of-range group broadcasts -1 as well, so the merge below only ever
+// sees a group inside the merge count.
 // CHECK-NEXT:   %[[READY:.*]] = scf.if %[[IS_LAST]] -> (i32) {
-// CHECK-NEXT:     %[[READY_ID:.*]] = arith.index_cast %[[GROUP]] : index to i32
-// CHECK-NEXT:     scf.yield %[[READY_ID]] : i32
+// CHECK-NEXT:     scf.yield %[[GROUP_WORD]] : i32
 // CHECK-NEXT:   } else {
 // CHECK-NEXT:     %[[NOT_READY:.*]] = arith.constant -1 : i32
 // CHECK-NEXT:     scf.yield %[[NOT_READY]] : i32
 // CHECK-NEXT:   }
-// CHECK-NEXT:   memref.store %[[READY]], %[[SHARED]][%[[ONE]]]
+// CHECK-NEXT:   scf.yield %[[READY]] : i32
+// CHECK-NEXT:   } else {
+// CHECK-NEXT:     %[[SKIPPED:.*]] = arith.constant -1 : i32
+// CHECK-NEXT:     scf.yield %[[SKIPPED]] : i32
+// CHECK-NEXT:   }
+// CHECK-NEXT:   memref.store %[[PUBLISHED]], %[[SHARED]][%[[ONE]]]
 // CHECK-NEXT: }
 // CHECK-NEXT: gpu.barrier
 // CHECK-NEXT: %[[READY_MERGE:.*]] = memref.load %[[SHARED]][%[[ONE]]]
@@ -287,7 +311,9 @@ module {
 // CHECK-NEXT: %[[HAS_MERGE:.*]] = arith.cmpi sge, %[[READY_MERGE]], %[[ZERO_I32]] : i32
 // CHECK-NEXT: scf.if %[[HAS_MERGE]] {
 // CHECK-NEXT:   nvvm.memory.barrier <gpu>
-// The first field of the ready merge's record names the output segment.
+// The first field of the ready merge's record names the output segment. It
+// is compared with the segment count as loaded; the comparison yields a
+// value for the store predicate and opens no branch here.
 // CHECK-NEXT:   %[[MERGE:.*]] = arith.index_cast %[[READY_MERGE]] : i32 to index
 // CHECK-NEXT:   %[[MERGE_FIELDS:.*]] = arith.constant 3 : index
 // CHECK-NEXT:   %[[MERGE_RECORD:.*]] = arith.muli %[[MERGE]], %[[MERGE_FIELDS]] : index
@@ -296,6 +322,7 @@ module {
 // CHECK-NEXT:   %[[SEGMENT_FIELD:.*]] = arith.index_cast %[[MERGE_RECORD]] : index to i64
 // CHECK-NEXT:   %[[SEGMENT_ADDRESS:.*]] = llvm.getelementptr %[[MERGES]][%[[SEGMENT_FIELD]]]
 // CHECK-NEXT:   %[[SEGMENT_WORD:.*]] = llvm.load %[[SEGMENT_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT:   %[[SEGMENT_IN_RANGE:.*]] = arith.cmpi ult, %[[SEGMENT_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT:   %[[SEGMENT:.*]] = arith.index_cast %[[SEGMENT_WORD]] : i32 to index
 // The next two casts to index are the scratch range; RANGE pins what they
 // cast. The merge sums the published partials themselves.
@@ -318,7 +345,10 @@ module {
 // CHECK-NEXT:   }
 // CHECK-NEXT:   %[[MERGE_TOTAL:.*]] = gpu.all_reduce add %[[MERGE_LOCAL]] uniform {
 // CHECK-NEXT:   } : (f32) -> f32
-// CHECK-NEXT:   scf.if %[[LEADER]] {
+// The leader is the only writer, and it stores the merged total at the
+// segment the record names, unless that segment is out of range.
+// CHECK-NEXT:   %[[MERGE_MAY_STORE:.*]] = arith.andi %[[LEADER]], %[[SEGMENT_IN_RANGE]] : i1
+// CHECK-NEXT:   scf.if %[[MERGE_MAY_STORE]] {
 // CHECK-NEXT:     %[[SEGMENT_I64:.*]] = arith.index_cast %[[SEGMENT]] : index to i64
 // CHECK-NEXT:     %[[MERGE_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[SEGMENT_I64]]]
 // CHECK-NEXT:     llvm.store %[[MERGE_TOTAL]], %[[MERGE_OUTPUT]] : f32, !llvm.ptr
@@ -373,15 +403,22 @@ module {
 // CHECK-NEXT:   %[[WARP_TASK_I64:.*]] = arith.index_cast %[[WARP_TASK]] : index to i64
 
 // The task word names the segment; its two offsets are the segment's range.
+// The word is compared with the segment count as loaded. An out-of-range
+// word selects offsets[0] for both ends, which is an empty range, so the
+// bound opens no branch around the reduction.
 // CHECK-NEXT: %[[WARP_ID_ADDRESS:.*]] = llvm.getelementptr %[[WARP_IDS]][%[[WARP_TASK_I64]]]
 // CHECK-NEXT: %[[WARP_ID_WORD:.*]] = llvm.load %[[WARP_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[WARP_ID_IN_RANGE:.*]] = arith.cmpi ult, %[[WARP_ID_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT: %[[WARP_SEGMENT:.*]] = arith.index_cast %[[WARP_ID_WORD]] : i32 to index
 // CHECK-NEXT: %[[WARP_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[WARP_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_START_INDEX:.*]] = arith.select %[[WARP_ID_IN_RANGE]], %[[WARP_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[WARP_START_INDEX_I64:.*]] = arith.index_cast %[[WARP_START_INDEX]] : index to i64
+// CHECK-NEXT: %[[WARP_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_START_INDEX_I64]]]
 // CHECK-NEXT: %[[WARP_START_WORD:.*]] = llvm.load %[[WARP_START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[WARP_NEXT_SEGMENT:.*]] = arith.addi %[[WARP_SEGMENT]], %[[ONE]] : index
-// CHECK-NEXT: %[[WARP_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_NEXT_SEGMENT]] : index to i64
-// CHECK-NEXT: %[[WARP_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_END_INDEX:.*]] = arith.select %[[WARP_ID_IN_RANGE]], %[[WARP_NEXT_SEGMENT]], %[[ZERO]] : index
+// CHECK-NEXT: %[[WARP_END_INDEX_I64:.*]] = arith.index_cast %[[WARP_END_INDEX]] : index to i64
+// CHECK-NEXT: %[[WARP_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_END_INDEX_I64]]]
 // CHECK-NEXT: %[[WARP_END_WORD:.*]] = llvm.load %[[WARP_END_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-NEXT: %[[WARP_FLOOR:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[WARP_START_FLOORED:.*]] = arith.maxsi %[[WARP_START_WORD]], %[[WARP_FLOOR]] : i32
@@ -424,9 +461,10 @@ module {
 // CHECK-NEXT: %[[WARP_S5:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T4]], %[[WARP_D5]], %[[WARP_W5]] : f32
 // CHECK-NEXT: %[[WARP_TOTAL:.*]] = arith.addf %[[WARP_T4]], %[[WARP_S5]] : f32
 // Lane zero of the warp is the only writer, and it stores the total at the
-// segment the task word named.
+// segment the task word named, unless that segment is out of range.
 // CHECK-NEXT: %[[WARP_WRITER:.*]] = arith.cmpi eq, %[[LANE]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[WARP_WRITER]] {
+// CHECK-NEXT: %[[WARP_MAY_STORE:.*]] = arith.andi %[[WARP_WRITER]], %[[WARP_ID_IN_RANGE]] : i1
+// CHECK-NEXT: scf.if %[[WARP_MAY_STORE]] {
 // CHECK-NEXT:   %[[WARP_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[WARP_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[WARP_TOTAL]], %[[WARP_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }
@@ -468,7 +506,7 @@ module {
 // Writer side: fields one and two of the record of the partial's merge group.
 // RANGE: %[[GROUP_ADDRESS:.*]] = llvm.getelementptr %[[MERGE_IDS]][
 // RANGE-NEXT: %[[GROUP_WORD:.*]] = llvm.load %[[GROUP_ADDRESS]] : !llvm.ptr -> i32
-// RANGE-NEXT: %[[GROUP:.*]] = arith.index_cast %[[GROUP_WORD]] : i32 to index
+// RANGE: %[[GROUP:.*]] = arith.index_cast %[[GROUP_WORD]] : i32 to index
 // RANGE: %[[GROUP_RECORD:.*]] = arith.muli %[[GROUP]], %{{.*}} : index
 // RANGE-NEXT: %[[GROUP_BEGIN_INDEX:.*]] = arith.addi %[[GROUP_RECORD]], %[[ONE]] : index
 // RANGE-NEXT: %[[GROUP_END_INDEX:.*]] = arith.addi %[[GROUP_BEGIN_INDEX]], %[[ONE]] : index

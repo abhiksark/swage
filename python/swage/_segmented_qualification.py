@@ -518,6 +518,7 @@ def _launch_segmented_sum_tasks(
             task_ids.data_ptr(),
             value_count,
             task_count,
+            segment_count,
         ),
     )
     for tensor in (values, offsets, output, task_ids):
@@ -828,6 +829,7 @@ def _prepare_planned_reduction(
                 task_ids.data_ptr(),
                 value_count,
                 task_count,
+                segment_count,
             ),
         )
         for tensor in (values, offsets, output, task_ids):
@@ -877,6 +879,7 @@ def _prepare_planned_reduction(
                     value_count,
                     direct_warp_count,
                     direct_cta_count,
+                    segment_count,
                 ),
             )
             for tensor in (values, offsets, output, mixed_tasks):
@@ -908,6 +911,7 @@ def _prepare_planned_reduction(
                     merge_ranges.data_ptr(),
                     partial_count,
                     merge_count,
+                    segment_count,
                 ),
             )
             for tensor in (offsets, output, merge_ranges, scratch):
@@ -1107,6 +1111,7 @@ def _prepare_persistent_sum(
                 len(cta_ids),
                 partial_count,
                 merge_count,
+                segment_count,
             ),
         )
         for tensor in (
