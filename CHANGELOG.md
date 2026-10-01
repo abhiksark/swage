@@ -70,6 +70,10 @@ semantic versioning (`0.x`; anything may change).
   that cannot be read or written degrades to process-local reuse with one
   warning per process instead of failing the launch; unsafe and corrupt
   entries still raise.
+- The process start time that gates the disk cache is sampled when `swage`
+  is imported, so a child forked after import inherits it. `import swage`
+  now also loads the private `swage._runtime` module; PyTorch and the
+  native bindings are still not loaded at import.
 - The private CPU oracle transports exact f32 bit patterns instead of
   six-digit text and takes its tools from the pinned LLVM install. Segmented
   runtime tests use position-dependent exact inputs, exact ownership checks
