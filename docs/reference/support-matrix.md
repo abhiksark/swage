@@ -38,7 +38,7 @@ other release. The pure Python package on another platform is unknown.
 | Python | Status | Evidence |
 |---|---|---|
 | 3.9 and older | Rejected | `requires-python = ">=3.10"` in `pyproject.toml` |
-| 3.10 | Tested in the pure Python tier. Unknown in the native and GPU tiers | `ci-python` matrix |
+| 3.10 | Tested in the pure Python tier. Admitted in the native and GPU tiers | `ci-python` matrix; accepted by `requires-python`, and no workflow builds the bindings or launches on it |
 | 3.11 and 3.12 | Admitted | Accepted by `requires-python`; no workflow uses them |
 | 3.13 | Tested in all three tiers | `ci-python` matrix; `ci-cpp` builds and tests the bindings on 3.13; the committed A6000 records name 3.13.13 on the GPU runner |
 | 3.14 and newer | Admitted | Accepted by `requires-python`, which has no upper bound; no workflow uses them |

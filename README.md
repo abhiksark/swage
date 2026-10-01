@@ -22,7 +22,7 @@ no public syntax and no public launch call.
 ## Current release boundary
 
 The current pre-alpha release is `v0.5.1`. The lists below describe that
-release, except for the one item marked as later work.
+release, except for the one item marked as completed after it.
 
 ### Public today
 
@@ -43,7 +43,7 @@ Each item names the programs and the paths they run through:
 - One canonical identity segmented sum runs through host classification,
   direct warp and CTA work, one fused mixed kernel, and split partial and
   merge kernels.
-- Not part of `v0.5.1`, developed after that release: capture-free,
+- Not part of `v0.5.1`, completed after that release: capture-free,
   single-stage f32 sum and max programs, including element expressions and
   map chains, run through the same host classification, direct warp and CTA
   work, fused mixed kernel, and split partial and merge kernels.
@@ -97,7 +97,7 @@ The native package is imported from `build/python_packages`. The published
 wheel remains useful for package import, source capture, and diagnostics, but
 does not independently emit MLIR or execute kernels.
 
-Two committed examples mark the two native tiers.
+Two committed examples use the native build.
 `examples/emit_fixed_vector_add.py` emits MLIR with the native build alone and
 needs no GPU and no PyTorch. `examples/fixed_vector_add.py` also launches the
 kernel and needs a CUDA GPU. The

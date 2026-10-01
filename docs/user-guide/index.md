@@ -25,7 +25,7 @@ Runnable snippets in this guide state one of three requirement tiers:
 - **CUDA GPU**: a CUDA-enabled PyTorch build, an admitted NVIDIA GPU, and
   the installed driver. Required to launch.
 
-Two committed examples mark the upper tiers:
+Two committed examples use the native build:
 `examples/emit_fixed_vector_add.py` runs at the native-build tier, and
 `examples/fixed_vector_add.py` runs at the CUDA GPU tier. The
 [Support Matrix](../reference/support-matrix.md) lists the versions each

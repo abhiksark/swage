@@ -109,8 +109,10 @@ exactly. They require each schedule to reproduce its own bits across two
 launches of one prepared program on the qualification GPU. They do not
 require two schedules to agree bit for bit. See
 [Textual Swage IR](../language/swage-ir.md#swagereduce) for the operation
-contract and [Task Planning](../internals/planning.md) for the selection
-rule and how to switch it off.
+contract, [Segmented Reductions](../internals/segmented-reductions.md) for
+the internal contracts of these paths, and
+[Task Planning](../internals/planning.md) for the selection rule and how to
+switch it off.
 
 ## From model to machinery
 
