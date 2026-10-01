@@ -23,6 +23,7 @@ does not turn private qualification into public API.
 | Fixed vector-add lowering and CUDA launch | Public today | `test/Conversion/SwageToGPU`, `python/tests/mlir/test_runtime.py`, `python/tests/mlir/test_cache_process_reuse.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Segmented sum and max CPU/GPU parity, device-side segment bounds, and block-size admission | Private qualification | `test/Conversion/SwageToCPU`, `test/Conversion/SwageToGPU`, including `segment-bounds.mlir` and `invalid-block-size.mlir`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_segmented_bounds.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Stable ragged-softmax parity and edge cases | Private qualification | ragged-softmax lit files and `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
+| Sum rounding and reproducibility by schedule, sum error bound, sum special values, and softmax accuracy by logit spread | Private qualification | `python/tests/mlir/test_segmented_numerics.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | Planning admission, limits, and descriptors | Private qualification | `test/Conversion/SwageToPlan`, `unittests/TaskClassifierTest.cpp` | `ninja -C build check-swage`; `ninja -C build check-swage-unit` |
 | Pure and fused mixed capture-free sum/max correctness | Private qualification | `test/Conversion/SwageToGPU/fused-mixed.mlir`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Prepared-launch kernel memoization, stale-offsets guard, and graph-capture protocol | Private qualification | `python/tests/mlir/test_segmented_cache.py`, `python/tests/mlir/test_prepared_capture.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
@@ -35,6 +36,32 @@ does not turn private qualification into public API.
 
 The sequential CPU oracle transports each f32 result as its exact bit
 pattern, so oracle comparisons involve no decimal rounding.
+
+Numerical claims have their own evidence in
+`python/tests/mlir/test_segmented_numerics.py`:
+
+- Reproducibility: each sum schedule returns the same f32 bits across
+  launches, across a new preparation, in a second process, and at another
+  position in the batch.
+- Schedule dependence: the warp, CTA, and split trees return different bits
+  for the same segment, automatic selection changes the bits of a segment
+  when the batch reaches the SM count of the device, and the pinned
+  schedules do not.
+- Sum accuracy: every schedule stays within `k * eps32 * sum(|x|)` of a
+  float64 reference at 100,003 to 1,048,577 elements, and propagates NaN,
+  infinities, and subnormal values.
+- Code generation: the PTX of every sum kernel and of the softmax kernel
+  uses round-to-nearest f32 operations with no fused multiply-add and no
+  flush-to-zero. This check needs no GPU.
+- Softmax accuracy: every output stays within a relative bound that grows
+  linearly with logit spread, at spreads 8, 20, 50, and 80, and
+  `ex2.approx.f32` is measured on its own.
+
+[Segmented Reductions](segmented-reductions.md#sum-rounding) states the sum
+trees, the bound, and how to pin a schedule.
+[Ragged Softmax](ragged-softmax.md#accuracy) states the softmax bound and
+the measured errors. All device measurements are from the RTX A6000
+(`sm_86`); no other GPU has run them.
 
 The trusted GPU workflow runs only on `main` through the self-hosted
 `swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every
