@@ -52,7 +52,11 @@ For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians 
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
 for fused mixed execution. The fused schedule it measures is the one drawn
 above. The mixed-to-best-pure ratio is `0.939394`, which passes the
-predeclared maximum of `1.05`. The committed raw record is
+predeclared maximum of `1.05`; the first two-launch schedule measured
+`1.238806` on the same frozen input and failed that gate before the fused
+schedule was predeclared in
+[ADR-0016](../adr/ADR-0016-fused-mixed-policy-schedule.md). The committed
+raw record is
 [`benchmarks/results/mixed-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/mixed-sum-a6000-sm86.json).
 
 Continue with [Split Execution](split-execution.md) for oversized

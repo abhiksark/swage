@@ -58,7 +58,10 @@ than saved in an intermediate buffer. The semantic program expresses `exp(x)`
 as `math.exp2((x - max) * log2(e))`. GPU code generation replaces the
 unlinked libdevice call with LLVM's native `exp2` intrinsic, which lowers to
 the NVPTX native approximation. NVPTX compilation fails closed for targets
-older than `sm_80`; this path was qualified on an RTX A6000 at `sm_86`.
+older than `sm_80`; this path was qualified on an RTX A6000 at `sm_86`. The
+`sm_80` floor comes from the admitted-processor list that every Swage compile
+request is checked against (`lib/CAPI/Codegen.cpp`), not from `exp2`: native
+f32 `exp2` is legal for every processor in the pinned NVPTX backend.
 
 ## Consequences
 

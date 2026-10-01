@@ -44,9 +44,9 @@ work, and final merge work without adding an operation, type, policy, or
 public Python API. Exact record layouts live in
 [Split Execution](../internals/split-execution.md).
 
-The partial and merge lowering passes are available only through private
-compiler factories. They are intentionally not registered as public
-`swage-opt` pass arguments.
+The partial and merge lowering passes are registered for `swage-opt` so that
+they can be inspected and tested; runtime code constructs them through
+private compiler factories, and their status is unchanged.
 
 ### Private GPU execution
 

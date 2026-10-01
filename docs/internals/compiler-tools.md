@@ -33,7 +33,7 @@ passes.
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
 | `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
-| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed` | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
+| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`; optional `persistent`, requires block size 512 | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for a capture-free, single-stage f32 sum or max |
 | `--swage-split-segmented-reduction-to-gpu` | optional `merge` | Lower an admitted private capture-free, single-stage f32 sum or max to the split partial kernel, or to the split merge kernel when `merge` is set |
 
