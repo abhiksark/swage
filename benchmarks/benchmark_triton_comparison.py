@@ -22,6 +22,7 @@ _BATCHED_LAUNCHES = 32
 _SEGMENT_COUNT = 32_768
 _SEED = 7
 _WARP_MAX_ELEMENTS = 32
+_LOOPED_BLOCKS = (128, 256, 512, 1024)
 
 
 def _arguments():
@@ -331,6 +332,49 @@ def _triton_sum_configs(max_length: int) -> list[tuple[int, int]]:
     return configs
 
 
+def _make_triton_looped_sum():
+    """Define a looping one-program-per-segment Triton sum lazily.
+
+    Each program walks its own segment in fixed blocks and accumulates, so
+    the block does not have to cover the longest segment and the baseline
+    needs no host classification.
+    """
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def looped_sum_kernel(values, offsets, output, BLOCK: tl.constexpr):
+        sid = tl.program_id(0)
+        begin = tl.load(offsets + sid)
+        end = tl.load(offsets + sid + 1)
+        total = tl.zeros((BLOCK,), dtype=tl.float32)
+        for start in range(begin, end, BLOCK):
+            index = start + tl.arange(0, BLOCK)
+            total += tl.load(values + index, mask=index < end, other=0.0)
+        tl.store(output + sid, tl.sum(total, axis=0))
+
+    return looped_sum_kernel
+
+
+def _triton_looped_configs() -> list[tuple[int, int]]:
+    """Return the looped Triton sweep, independent of segment lengths."""
+    return [
+        (block, warps)
+        for block in _LOOPED_BLOCKS
+        for warps in (1, 2, 4, 8)
+        if warps <= block // 32
+    ]
+
+
+def _launch_triton_looped(kernel, values, offsets, output, segment_count,
+                          block: int, warps: int):
+    """Launch the looped Triton sum with one program per segment."""
+    kernel[(segment_count,)](
+        values, offsets, output, BLOCK=block, num_warps=warps
+    )
+    return output
+
+
 def _run_segmented_sum(torch, warmups: int,
                        samples: int) -> list[dict[str, object]]:
     """Benchmark private segmented sum against Triton and torch baselines."""
@@ -338,6 +382,8 @@ def _run_segmented_sum(torch, warmups: int,
     from swage._segmented_qualification import _prepare_planned_sum
 
     triton_kernel = _make_triton_segmented_sum()
+    triton_looped_kernel = _make_triton_looped_sum()
+    triton_looped_configs = _triton_looped_configs()
     triton_packed_kernel, triton_cta_kernel = _make_triton_planned_sum()
     distributions = (
         "many-tiny",
@@ -456,6 +502,23 @@ def _run_segmented_sum(torch, warmups: int,
                 return None
 
             launches[launch_name] = launch_planned
+        # Registered last so the earlier candidates keep their run order.
+        for block, warps in triton_looped_configs:
+            output = torch.empty(_SEGMENT_COUNT, device="cuda")
+            launch_name = f"triton_looped_b{block}_w{warps}"
+            outputs[launch_name] = output
+            launches[launch_name] = (
+                lambda out=output, block=block, warps=warps:
+                _launch_triton_looped(
+                    triton_looped_kernel,
+                    values,
+                    offsets,
+                    out,
+                    _SEGMENT_COUNT,
+                    block,
+                    warps,
+                )
+            )
         for launch in launches.values():
             launch()
         torch.cuda.synchronize()
@@ -476,6 +539,10 @@ def _run_segmented_sum(torch, warmups: int,
             "triton_sweep_configs": [
                 {"block": block, "num_warps": warps}
                 for block, warps in triton_configs
+            ],
+            "triton_looped_sweep_configs": [
+                {"block": block, "num_warps": warps}
+                for block, warps in triton_looped_configs
             ],
             "triton_planned": {
                 "warp_threshold": _WARP_MAX_ELEMENTS,
@@ -534,6 +601,14 @@ def main():
             "compilation_excluded": True,
             "correctness_checked_before_timing": True,
             "triton_dependency": "optional runtime import; not a project dep",
+            "triton_fixed": (
+                "one program per segment, one masked block; blocks smaller "
+                "than the longest segment are excluded"
+            ),
+            "triton_looped": (
+                "one program per segment, a loop over the segment in fixed "
+                "blocks; no block is excluded for the longest segment"
+            ),
         },
         "results": [],
     }
