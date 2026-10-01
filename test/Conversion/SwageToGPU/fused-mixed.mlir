@@ -5,6 +5,8 @@
 // RUN:   | FileCheck %s --check-prefix=SYNC
 // RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=64 fused-mixed' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=BLOCK-SIZE
+// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=128 fused-mixed use-task-ids' %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=TASK-IDS
 
 // One kernel runs two schedules. The leading blocks pack four warp tasks
 // each and reduce with shuffles; the remaining blocks run one CTA task each
@@ -202,3 +204,9 @@ module {
 
 // The fused kernel is specialized to four warps per block.
 // BLOCK-SIZE: error: fused mixed lowering requires block-size 128
+
+// The fused kernel has its own ABI and always loads segment IDs from its
+// task buffer, so it cannot also honor the task-ID ABI option. The pair is
+// refused by option, before the module is admitted.
+// TASK-IDS: error: fused mixed lowering does not accept use-task-ids
+// TASK-IDS-NOT: gpu.func

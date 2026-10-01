@@ -394,7 +394,7 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
   std::string lowered;
   std::string ptx;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
-                        KernelKind::SegmentedReduction, true, true, lowered,
+                        KernelKind::SegmentedReduction, false, true, lowered,
                         ptx)))
     return mlirLogicalResultFailure();
   loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
