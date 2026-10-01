@@ -28,7 +28,11 @@ _SENTINEL = -5.0
 @pytest.fixture(autouse=True)
 def _fresh_memo(monkeypatch):
     """Start every test from empty memos so counts ignore test order."""
-    monkeypatch.setattr(qualification, "_ptx_memo", {})
+    monkeypatch.setattr(
+        qualification,
+        "_ptx_memo",
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
+    )
     monkeypatch.setattr(
         qualification, "_load_memo", weakref.WeakKeyDictionary()
     )
@@ -380,6 +384,117 @@ def test_driver_without_a_context_is_never_memoized():
     second = qualification._load_once(driver, "ptx", "segmented_sum")
 
     assert (first, second) == ((1, 1), (1, 2))
+
+
+class _ForbiddenLock:
+    """A lock that fails the test when anything tries to take it."""
+
+    def __enter__(self):
+        pytest.fail("a memo hit took the cold-path lock")
+
+    def __exit__(self, *_error):
+        return False
+
+
+def test_memo_hits_take_no_lock(monkeypatch):
+    """Serve a compiled and a loaded kernel without the cold-path lock."""
+    compiler = _FakeCompiler()
+    driver = _FakeDriver()
+    module = object()
+    ptx = qualification._compile_once(
+        compiler, "program", module=module, **_OPTIONS
+    )
+    handles = qualification._load_once(driver, ptx, "segmented_sum")
+    monkeypatch.setattr(qualification, "_memo_lock", _ForbiddenLock())
+
+    again = qualification._compile_once(
+        compiler, "program", module=module, **_OPTIONS
+    )
+
+    assert again == ptx
+    assert qualification._load_once(driver, ptx, "segmented_sum") == handles
+    assert len(compiler.calls) == len(driver.loads) == 1
+
+
+def test_memo_hits_do_not_wait_for_a_cold_compile():
+    """Serve known kernels while another thread compiles a new program."""
+    compiler = _FakeCompiler()
+    driver = _FakeDriver()
+    compiling = threading.Event()
+    finish = threading.Event()
+
+    def slow_compile(module, **options):
+        compiling.set()
+        # Longer than the reader below is given, so a blocked reader is
+        # seen blocked before the compile ends.
+        finish.wait(60)
+        return compiler(module, **options)
+
+    warm = qualification._compile_once(
+        compiler, "warm", module=object(), **_OPTIONS
+    )
+    handles = qualification._load_once(driver, warm, "segmented_sum")
+    served = []
+
+    def serve():
+        served.append(
+            qualification._compile_once(
+                compiler, "warm", module=object(), **_OPTIONS
+            )
+        )
+        served.append(qualification._load_once(driver, warm, "segmented_sum"))
+
+    cold = threading.Thread(
+        target=lambda: qualification._compile_once(
+            slow_compile, "cold", module=object(), **_OPTIONS
+        )
+    )
+    reader = threading.Thread(target=serve)
+    cold.start()
+    try:
+        started = compiling.wait(5)
+        reader.start()
+        reader.join(5)
+        blocked = reader.is_alive()
+    finally:
+        finish.set()
+        cold.join()
+        reader.join()
+
+    assert started
+    assert not blocked
+    assert served == [warm, handles]
+    assert len(driver.loads) == 1
+
+
+def test_compile_memo_forgets_its_oldest_program_at_the_bound(monkeypatch):
+    """Keep at most the bound and compile a forgotten program again."""
+    monkeypatch.setattr(qualification, "_ptx_memo", _runtime._BoundedCache(2))
+    compiler = _FakeCompiler()
+    module = object()
+
+    results = [
+        qualification._compile_once(compiler, text, module=module, **_OPTIONS)
+        for text in ("a", "b", "a", "c", "a")
+    ]
+
+    assert results == ["ptx1", "ptx2", "ptx1", "ptx3", "ptx4"]
+    assert len(qualification._ptx_memo) == 2
+
+
+def test_load_memo_forgets_its_oldest_kernel_at_the_bound(monkeypatch):
+    """Keep at most the bound per driver and load a forgotten kernel again."""
+    monkeypatch.setattr(_runtime, "_CACHE_LIMIT", 2)
+    driver = _FakeDriver()
+
+    results = [
+        qualification._load_once(driver, ptx, "segmented_sum")
+        for ptx in ("a", "b", "a", "c", "a")
+    ]
+
+    assert [function for _, function in results] == [1, 2, 1, 3, 4]
+    assert len(qualification._load_memo[driver]) == 2
+    assert qualification._load_memo[driver].limit == 2
 
 
 @pytest.mark.parametrize("name", ["values", "output"])
