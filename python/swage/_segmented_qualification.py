@@ -304,6 +304,57 @@ def _require_unchanged_offsets(offsets, version):
         raise RuntimeError("offsets changed after preparation; prepare again")
 
 
+def _storage_binding(values, offsets, output):
+    """Return what ties a prepared launch to the storage of its tensors.
+
+    A prepared launch passes the counts taken at preparation with the data
+    pointers read at launch. PyTorch can give a tensor object other storage
+    without advancing its version counter, for example through
+    `tensor.data = other`, so the counts would then describe memory the
+    tensor no longer has. The data pointer, the element count, and the
+    dtype of each tensor together fix the bytes a kernel may touch, and a
+    launch compares them with this record. Reading them is host work only.
+
+    It cannot see a tensor that was rebound and then bound back to the
+    prepared address, count, and dtype over storage that was freed and
+    allocated again in between.
+
+    Returns:
+        The data pointer, element count, and dtype of values, then of
+        offsets, then of output, so every third entry is a data pointer.
+    """
+    return (
+        values.data_ptr(),
+        values.numel(),
+        values.dtype,
+        offsets.data_ptr(),
+        offsets.numel(),
+        offsets.dtype,
+        output.data_ptr(),
+        output.numel(),
+        output.dtype,
+    )
+
+
+def _refuse_rebound_storage(binding, prepared):
+    """Raise for the first tensor whose storage is not the prepared one.
+
+    Args:
+        binding: The `_storage_binding` of the tensors now.
+        prepared: The one recorded at preparation, which differs.
+    """
+    for index, name in enumerate(("values", "offsets", "output")):
+        pointer, count, dtype = binding[3 * index:3 * index + 3]
+        was = prepared[3 * index:3 * index + 3]
+        if (pointer, count, dtype) != was:
+            raise RuntimeError(
+                f"{name} is bound to other storage than at preparation: "
+                f"found {count} {dtype} elements at {pointer:#x}, prepared "
+                f"with {was[1]} {was[2]} elements at {was[0]:#x}; prepare "
+                "again"
+            )
+
+
 def _compile_once(compile_ptx, module_text, *, module=None, **options):
     """Compile one kernel at most once per process and return its PTX.
 
@@ -591,6 +642,10 @@ def _launch_segmented_sum_tasks(
     if not task_ids.is_contiguous():
         raise ValueError("task_ids must be contiguous")
     _validate_storage("task_ids", task_ids)
+    # A kernel loads a task ID after other CTAs have stored through the
+    # output, so IDs that share its memory are read after they were
+    # overwritten.
+    _validate_disjoint("task_ids", task_ids, output)
     if task_ids.device.type != "cuda":
         raise TypeError("task_ids must be a CUDA tensor")
     if task_ids.device.index != torch.cuda.current_device():
@@ -780,10 +835,14 @@ def _prepare_planned_reduction(
         execution includes ordered partial and merge launches for split work,
         or aliases CTA when the preparation-time selection avoids splitting.
         Each callable raises RuntimeError instead of launching when offsets
-        changed in place after preparation. Kernels are compiled once per
-        kernel and target and loaded once per CUDA context, so a
-        preparation compiles and loads only the kernels the process has
-        not already compiled and loaded.
+        changed in place after preparation. Each callable is bound to the
+        storage of values, offsets, and output at preparation: in-place
+        writes to values and output are fine, and a tensor that was given
+        another data pointer, element count, or dtype since, for example
+        through `tensor.data = other`, raises RuntimeError before anything
+        is enqueued. Kernels are compiled once per kernel and target and
+        loaded once per CUDA context, so a preparation compiles and loads
+        only the kernels the process has not already compiled and loaded.
     """
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
@@ -792,6 +851,9 @@ def _prepare_planned_reduction(
         values, offsets, output, _validate_offsets
     )
     offsets_version = _offsets_version(offsets)
+    # Each launch builds this record again and compares the two. The record
+    # also carries the data pointers that the launch passes to the kernel.
+    prepared_storage = _storage_binding(values, offsets, output)
 
     import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -836,6 +898,9 @@ def _prepare_planned_reduction(
 
         def no_launch():
             _require_unchanged_offsets(offsets, offsets_version)
+            storage = _storage_binding(values, offsets, output)
+            if storage != prepared_storage:
+                _refuse_rebound_storage(storage, prepared_storage)
             return None
 
         return _PreparedReduction(no_launch, no_launch, no_launch)
@@ -938,7 +1003,7 @@ def _prepare_planned_reduction(
         else:
             stream.wait_event(tasks_ready)
 
-    def submit(function, block_size, task_ids, stream):
+    def submit(function, block_size, task_ids, stream, storage):
         task_count = task_ids.numel()
         if task_count == 0:
             return None
@@ -949,9 +1014,9 @@ def _prepare_planned_reduction(
             block_size,
             stream.cuda_stream,
             (
-                values.data_ptr(),
-                offsets.data_ptr(),
-                output.data_ptr(),
+                storage[0],
+                storage[3],
+                storage[6],
                 task_ids.data_ptr(),
                 value_count,
                 task_count,
@@ -988,24 +1053,36 @@ def _prepare_planned_reduction(
 
     def warp():
         _require_unchanged_offsets(offsets, offsets_version)
+        storage = _storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _refuse_rebound_storage(storage, prepared_storage)
         return submit(
             warp_function,
             _WARP_BLOCK,
             all_tasks,
             current_stream(),
+            storage,
         )
 
     def cta():
         _require_unchanged_offsets(offsets, offsets_version)
+        storage = _storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _refuse_rebound_storage(storage, prepared_storage)
         return submit(
             cta_function,
             _CTA_BLOCK,
             all_tasks,
             current_stream(),
+            storage,
         )
 
     def mixed():
         _require_unchanged_offsets(offsets, offsets_version)
+        storage = _storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _refuse_rebound_storage(storage, prepared_storage)
+        values_pointer, offsets_pointer, output_pointer = storage[::3]
         stream = current_stream()
         wait_for_tasks(stream)
         if direct_count:
@@ -1015,9 +1092,9 @@ def _prepare_planned_reduction(
                 _CTA_BLOCK,
                 stream.cuda_stream,
                 (
-                    values.data_ptr(),
-                    offsets.data_ptr(),
-                    output.data_ptr(),
+                    values_pointer,
+                    offsets_pointer,
+                    output_pointer,
                     mixed_tasks.data_ptr(),
                     value_count,
                     direct_warp_count,
@@ -1034,7 +1111,7 @@ def _prepare_planned_reduction(
                 _SPLIT_BLOCK,
                 stream.cuda_stream,
                 (
-                    values.data_ptr(),
+                    values_pointer,
                     partial_ranges.data_ptr(),
                     scratch.data_ptr(),
                     value_count,
@@ -1050,7 +1127,7 @@ def _prepare_planned_reduction(
                 stream.cuda_stream,
                 (
                     scratch.data_ptr(),
-                    output.data_ptr(),
+                    output_pointer,
                     merge_ranges.data_ptr(),
                     partial_count,
                     merge_count,
@@ -1077,7 +1154,12 @@ def _prepare_persistent_sum(
 
     The offsets must not change in place after preparation; the prepared
     launch raises RuntimeError instead of launching when they did. The
-    kernel is compiled once per target and loaded once per CUDA context.
+    launch is bound to the storage of values, offsets, and output at
+    preparation: in-place writes to values and output are fine, and a
+    tensor that was given another data pointer, element count, or dtype
+    since, for example through `tensor.data = other`, raises RuntimeError
+    before anything is enqueued. The kernel is compiled once per target and
+    loaded once per CUDA context.
     """
     if resident_blocks is not None and (
         type(resident_blocks) is not int
@@ -1090,6 +1172,9 @@ def _prepare_persistent_sum(
         values, offsets, output, _validate_offsets
     )
     offsets_version = _offsets_version(offsets)
+    # Each launch builds this record again and compares the two. The record
+    # also carries the data pointers that the launch passes to the kernel.
+    prepared_storage = _storage_binding(values, offsets, output)
 
     import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -1115,6 +1200,9 @@ def _prepare_persistent_sum(
 
         def no_launch():
             _require_unchanged_offsets(offsets, offsets_version)
+            storage = _storage_binding(values, offsets, output)
+            if storage != prepared_storage:
+                _refuse_rebound_storage(storage, prepared_storage)
             return None
 
         return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
@@ -1243,6 +1331,10 @@ def _prepare_persistent_sum(
     def launch():
         nonlocal in_flight_stream
         _require_unchanged_offsets(offsets, offsets_version)
+        storage = _storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _refuse_rebound_storage(storage, prepared_storage)
+        values_pointer, offsets_pointer, output_pointer = storage[::3]
         if not launching.acquire(blocking=False):
             raise RuntimeError(
                 "prepared persistent sum is already launching on another "
@@ -1260,9 +1352,9 @@ def _prepare_persistent_sum(
                 _PERSISTENT_BLOCK,
                 stream.cuda_stream,
                 (
-                    values.data_ptr(),
-                    offsets.data_ptr(),
-                    output.data_ptr(),
+                    values_pointer,
+                    offsets_pointer,
+                    output_pointer,
                     warp_tasks.data_ptr(),
                     cta_tasks.data_ptr(),
                     partial_ranges.data_ptr(),

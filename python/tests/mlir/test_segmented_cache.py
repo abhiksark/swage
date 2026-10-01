@@ -998,6 +998,176 @@ def test_in_place_offsets_change_stops_an_empty_prepared_launch():
             launch()
 
 
+_GUARD = 8
+
+
+def _rebind_into_an_arena(tensor, length):
+    """Rebind `tensor` to `length` elements inside a larger tensor.
+
+    `tensor.data = other` changes the storage, the length, and even the
+    dtype of a tensor object without advancing its version counter. The new
+    storage lies inside an arena that is longer than the prepared tensor
+    was, with guard elements before it, so whatever a launch with the
+    prepared counts would read or write stays inside this test's memory.
+
+    Returns:
+        The arena, and the storage the tensor had, which the caller keeps
+        alive so that its address is not handed out again.
+    """
+    prepared = tensor.data
+    fill = 0 if tensor.dtype == torch.int32 else -7.0
+    arena = torch.full(
+        (prepared.numel() + 2 * _GUARD,),
+        fill,
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    tensor.data = arena[_GUARD:_GUARD + length]
+    return arena, prepared
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+@pytest.mark.parametrize("name", ["values", "offsets", "output"])
+@pytest.mark.parametrize("length", ["one element", "the prepared length"])
+def test_rebound_tensor_stops_the_next_launch(
+    policy, name, length, monkeypatch
+):
+    """Raise before anything is enqueued when a tensor has other storage."""
+    values, offsets, expected = _case([1, 33, 4097, 2])
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    tensors = {"values": values, "offsets": offsets, "output": output}
+    launch = _prepared_launch(policy, values, offsets, output)
+    launch()
+    torch.cuda.synchronize()
+    launch()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output.cpu(), expected["sum"], rtol=0, atol=0)
+    prepared_output = output.data
+    prepared_output.fill_(_SENTINEL)
+    count = tensors[name].numel()
+
+    arena, prepared = _rebind_into_an_arena(
+        tensors[name], 1 if length == "one element" else count
+    )
+    untouched = arena.clone()
+    torch.cuda.synchronize()
+    with monkeypatch.context() as patch:
+        _forbid_host_readback(patch)
+        for _ in range(2):
+            with pytest.raises(
+                RuntimeError,
+                match=(
+                    f"^{name} is bound to other storage than at "
+                    f"preparation: found {tensors[name].numel()} .* "
+                    f"prepared with {count} .*; prepare again$"
+                ),
+            ):
+                launch()
+    torch.cuda.synchronize()
+
+    assert torch.equal(arena, untouched)
+    assert prepared_output.cpu().tolist() == [_SENTINEL] * 4
+    assert prepared.numel() == count
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_tensor_rebound_to_another_dtype_in_place_stops_the_launch(policy):
+    """Refuse the prepared address and count under another element type."""
+    values, offsets, _ = _case([1, 33, 4097, 2])
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+    torch.cuda.synchronize()
+    address = values.data_ptr()
+
+    values.data = values.data.view(torch.int32)
+    assert (values.data_ptr(), values.numel()) == (address, 4133)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "values is bound to other storage than at preparation: found "
+            "4133 torch.int32 .* prepared with 4133 torch.float32"
+        ),
+    ):
+        launch()
+    torch.cuda.synchronize()
+    assert output.cpu().tolist() == [_SENTINEL] * 4
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_in_place_writes_to_values_and_output_still_launch(policy):
+    """Keep a prepared launch usable while its buffers are refilled."""
+    values, offsets, expected = _case([1, 33, 4097, 2])
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+
+    for scale in (1, 3, 5):
+        values.copy_(_case([1, 33, 4097, 2])[0] * scale)
+        output.fill_(_SENTINEL)
+        launch()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"] * scale, rtol=0, atol=0
+        )
+
+
+@_requires_cuda
+def test_rebound_tensor_stops_an_empty_prepared_launch():
+    """Apply the same contract when the prepared batch has no segments."""
+    values = torch.empty(0, device="cuda")
+    offsets = torch.zeros(1, device="cuda", dtype=torch.int32)
+    output = torch.empty(0, device="cuda")
+    planned = qualification._prepare_planned_sum(values, offsets, output)
+    persistent = qualification._prepare_persistent_sum(values, offsets, output)
+    launches = [*planned, persistent.launch]
+    assert [launch() for launch in launches] == [None] * 4
+
+    output.data = torch.zeros(3, device="cuda")
+
+    for launch in launches:
+        with pytest.raises(
+            RuntimeError,
+            match="output is bound to other storage than at preparation",
+        ):
+            launch()
+
+
+@_requires_cuda
+def test_task_ids_must_not_overlap_the_output(counts):
+    """Refuse task IDs that a kernel would overwrite while it reads them."""
+    count = 1 << 10
+    values = torch.ones(count, device="cuda")
+    offsets = torch.arange(count + 1, dtype=torch.int32, device="cuda")
+    output = torch.full((count,), _SENTINEL, device="cuda")
+    arena = torch.arange(2 * count, dtype=torch.int32, device="cuda") % count
+    # The same bytes as the output, read as task IDs, and every ID valid.
+    shared = output.view(torch.int32)
+    shared.copy_(arena[:count].flip(0))
+    kept = output.clone()
+
+    with pytest.raises(
+        ValueError, match="^output must not overlap the task_ids buffer$"
+    ):
+        qualification._launch_segmented_sum_tasks(
+            values, offsets, output, shared, block_size=32
+        )
+    torch.cuda.synchronize()
+    assert torch.equal(output, kept)
+    assert counts.compiles == counts.loads == []
+
+    # Task IDs that only touch the output are admitted and run.
+    for task_ids in (arena[:count], arena[count:]):
+        output.fill_(_SENTINEL)
+        qualification._launch_segmented_sum_tasks(
+            values, offsets, output, task_ids, block_size=32
+        )
+        torch.cuda.synchronize()
+        assert torch.all(output == 1.0)
+
+
 @_requires_cuda
 @pytest.mark.parametrize(
     "prepare",
