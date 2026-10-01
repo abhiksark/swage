@@ -551,7 +551,8 @@ def test_minimum_pytorch_matches_the_declared_dependency():
     from swage import _runtime
 
     project = pathlib.Path(__file__).parents[2] / "pyproject.toml"
-    declared = re.search(r'"torch>=(\d+)\.(\d+)"', project.read_text())
+    # No closing quote: a patch level or an upper bound may follow.
+    declared = re.search(r'"torch>=(\d+)\.(\d+)', project.read_text())
 
     assert declared is not None
     assert _runtime._MIN_TORCH == (int(declared[1]), int(declared[2]))
