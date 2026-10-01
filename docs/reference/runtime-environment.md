@@ -65,6 +65,16 @@ Validation fails closed before specialization, compilation, or private
 allocation. Nonzero work specializes and checks the cache, then compiles and
 loads when needed.
 
+A `TypeError` or `ValueError` from a public launch keeps the message of the
+check that failed and ends with the kernel and the place it is defined, as
+in `grid must equal (2,) for n and BLOCK (in launch of kernel 'add_kernel',
+defined at /path/to/kernels.py:12)`. A kernel whose parameter list has a
+default value or an annotation other than `sl.constexpr` raises the
+source-located `CompilationError` of the frontend before anything is
+compiled. The private qualification helpers reject lazy negation and
+conjugate views of their values, offsets, output, and task buffers in the
+same way as the public launch.
+
 <div class="doc-figure" tabindex="0" markdown="1">
 
 ![Fail-closed validation, current-stream launch, and tensor retention](../assets/diagrams/runtime-lifecycle.svg)
@@ -298,9 +308,14 @@ launch each kernel once with the same block size, on the same device target,
 with the same `swage` sources and native libraries, in a process that may
 compile.
 
-`SWAGE_NO_COMPILE` governs the public `launch()` path. The private
-qualification helpers compile in process without the persistent cache and do
-not consult either switch.
+`SWAGE_NO_COMPILE=1` also stops the private qualification helpers. They keep
+compiled kernels in the process only and never use the persistent cache, so
+with the switch set they launch a kernel that the process already holds and
+raise the same `RuntimeError` for any other. A process that starts with the
+switch set therefore cannot run them. The host planning pass of a
+preparation is not a kernel compile and still runs. `SWAGE_CACHE_DIR`,
+`SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY` have no effect on the
+private helpers.
 
 A value other than the ones listed is an error, not a default. A mistyped
 variable raises a `ValueError` that names it at the first lookup, before

@@ -156,6 +156,25 @@ def _validate_disjoint(name, buffer, output):
         raise ValueError(f"output must not overlap the {name} buffer")
 
 
+def _validate_storage(name, tensor):
+    """Reject a lazy view, whose storage does not hold the values it shows.
+
+    The kernels read and write tensor storage through raw pointers, so for
+    a negation or conjugate view they would compute with the base. The
+    public launch applies the same rule.
+    """
+    if tensor.is_neg():
+        raise ValueError(
+            f"{name} must not be a lazy negation view; pass "
+            "tensor.resolve_neg()"
+        )
+    if tensor.is_conj():
+        raise ValueError(
+            f"{name} must not be a lazy conjugate view; pass "
+            "tensor.resolve_conj()"
+        )
+
+
 def _validate_shapes(
     values, offsets, output, validate_offsets, *, require_cuda=True
 ):
@@ -189,6 +208,7 @@ def _validate_shapes(
             raise TypeError(f"{name} must have rank one")
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous")
+        _validate_storage(name, tensor)
     for name, tensor in (("values", values), ("output", output)):
         if tensor.requires_grad:
             raise ValueError(
@@ -302,6 +322,11 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
         The PTX text of the compiled kernel. A failed compile is not kept.
         A kernel compiled before is returned without taking a lock, so it
         never waits for another thread's compile.
+
+    Raises:
+        RuntimeError: SWAGE_NO_COMPILE=1 is set and this process does not
+            hold the kernel. Nothing is parsed or compiled.
+        ValueError: SWAGE_NO_COMPILE has a value other than 0 or 1.
     """
     key = (compile_ptx, module_text, tuple(sorted(options.items())))
     ptx = _ptx_memo.get(key)
@@ -310,6 +335,8 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
     with _memo_lock:
         ptx = _ptx_memo.get(key)
         if ptx is None:
+            if _runtime._switch_on("SWAGE_NO_COMPILE"):
+                raise _compile_refusal(options)
             if module is None:
                 from mlir_swage import ir
                 from mlir_swage.dialects import swage
@@ -323,6 +350,28 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
                 _, ptx = compile_ptx(module, **options)
             _ptx_memo[key] = ptx
     return ptx
+
+
+def _compile_refusal(options):
+    """Return the error for a kernel this process may not compile.
+
+    The public launch can answer a miss from the persistent cache. This
+    path keeps its kernels in the process only, so a kernel it does not
+    hold stays unavailable while compiling is switched off.
+
+    Args:
+        options: The code generation options of the refused compile.
+    """
+    held_for = " and ".join(
+        f"{label} {options[name]}"
+        for name, label in (("block_size", "block size"), ("target", "target"))
+        if name in options
+    )
+    return _runtime._compile_refusal(
+        options.get("kernel_name"),
+        f"this process does not hold it for {held_for}, and the private "
+        "segmented path has no persistent cache",
+    )
 
 
 def _load_once(driver, ptx, kernel_name):
@@ -563,6 +612,7 @@ def _launch_segmented_sum_tasks(
         raise TypeError("task_ids must have rank one")
     if not task_ids.is_contiguous():
         raise ValueError("task_ids must be contiguous")
+    _validate_storage("task_ids", task_ids)
     if task_ids.device.type != "cuda":
         raise TypeError("task_ids must be a CUDA tensor")
     if task_ids.device.index != torch.cuda.current_device():
