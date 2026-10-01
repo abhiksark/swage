@@ -69,21 +69,50 @@ same driver call with the same error shape and a slower per-launch cost.
 
 The specialization key contains normalized source, kernel name, ordered ABI
 descriptors, sorted compile-time values, exact compute capability, code
-generation options, Swage revision, dialect version, and LLVM version.
+generation options, frontend identity, native compiler identity, dialect
+version, and LLVM version.
 
-An identified clean checkout with an LLVM pin may use the persistent cache.
-A dirty or unidentified build uses process-local reuse only. The cache root is
-selected in this order:
+The two compiler identities describe the code the process loads, not the
+checkout it came from:
+
+- Frontend identity is the SHA-256 digest of every Python source file in the
+  installed `swage` package, taken in sorted name order.
+- Native compiler identity is the file name, size, and modification time of
+  the nanobind extension and the `libSwagePythonCAPI` library in
+  `mlir_swage/_mlir_libs`.
+
+Editing a frontend file or rebuilding the native libraries therefore changes
+the key, and entries written by the earlier compiler are no longer matched.
+The native identity reads file metadata, not file contents: a library
+replaced by one with the same name, size, and modification time is not
+detected.
+
+The persistent cache is used whenever both identities are available. It does
+not require a git checkout or a clean working tree. A process that cannot
+find the native bindings or the package sources uses process-local reuse
+only. The cache root is selected in this order:
 
 1. `SWAGE_CACHE_DIR`;
 2. `$XDG_CACHE_HOME/swage`;
 3. `~/.cache/swage`.
 
-Each persistent entry contains `metadata.json`, `lowered.mlir`, and
-`kernel.ptx`. Metadata and content digests are verified before module load.
-Cache directories use user-only permissions; files use mode `0600` and are
-replaced atomically. Symlinked, world-writable, incomplete, unreadable,
-corrupt, or specialization-mismatched entries are rejected.
+Each persistent entry is a directory named by the key digest that contains
+`metadata.json`, `lowered.mlir`, and `kernel.ptx`. Cache directories use
+user-only permissions and files use mode `0600`.
+
+Entries are published atomically. A writer stages the three files in a
+`.staging-` directory inside the cache root and renames that directory to the
+entry name, so a concurrent process sees either no entry or a complete one.
+When several processes compile the same key, the first rename wins and the
+other processes discard their staged copy and use the published entry. A
+writer that is killed leaves only its staging directory, which lookups never
+read. Staging directories and old entries are not removed automatically.
+
+Metadata and content digests are verified before module load. An entry
+directory that lacks any of the three files is treated as a miss: it is
+removed and the key is compiled and published again. Symlinked,
+world-writable, unreadable, corrupt, or specialization-mismatched entries,
+and entries not owned by the current user, are rejected with an error.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 

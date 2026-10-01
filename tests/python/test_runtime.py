@@ -4,7 +4,10 @@
 import ctypes
 import gc
 import json
+import multiprocessing
+import os
 import pathlib
+import signal
 import stat
 import sys
 import types
@@ -24,6 +27,69 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
     sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+_SHARED_KEY = {"kernel": "add_kernel", "target": "sm_86"}
+
+
+def _identity(**overrides):
+    """Return a fully identified compiler, adjusted by `overrides`."""
+    identity = {
+        "revision": "abc",
+        "clean": True,
+        "llvm": "llvmorg-test",
+        "frontend": "f" * 64,
+        "native": [["_swageDialectsNanobind.so", 1, 2]],
+    }
+    identity.update(overrides)
+    return identity
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    """Keep every test away from the user's persistent cache."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path / "isolated-cache"))
+
+
+def _use_shared_cache(cache_dir):
+    """Point a spawned process at one cache with a stubbed identity."""
+    from swage import _runtime
+
+    os.environ["SWAGE_CACHE_DIR"] = cache_dir
+    _runtime._compiler_identity = _identity
+    return _runtime
+
+
+def _cold_start(cache_dir, results_dir, barrier, rounds):
+    """Cold-start one key per round, in step with the other processes."""
+    _runtime = _use_shared_cache(cache_dir)
+    ptx = f"ptx from process {os.getpid()}"
+    _runtime._compile_native = lambda *_args: ("lowered", ptx)
+    try:
+        for round_id in range(rounds):
+            barrier.wait(timeout=60)
+            artifact = _runtime._compile_cached(
+                dict(_SHARED_KEY, round=round_id), "add_kernel", 128, object
+            )
+            result = pathlib.Path(results_dir) / f"{round_id}-{os.getpid()}"
+            result.write_text(artifact.ptx)
+    except BaseException:
+        barrier.abort()  # Release the other processes instead of timing out.
+        raise
+
+
+def _killed_writer(cache_dir):
+    """Die from SIGKILL after writing one of the three entry files."""
+    _runtime = _use_shared_cache(cache_dir)
+    _runtime._compile_native = lambda *_args: ("lowered", "ptx")
+    write = _runtime._atomic_write
+
+    def write_then_die(path, contents):
+        write(path, contents)
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    _runtime._atomic_write = write_then_die
+    _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
 
 
 class _Device:
@@ -272,22 +338,37 @@ def test_launch_requires_pytorch_and_cuda(monkeypatch):
         )
 
 
-def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
-    """Reuse verified PTX and never return corrupted cache contents."""
+def _stub_compiler(monkeypatch, identity=_identity):
+    """Stub the compiler identity and count native compiles."""
     from swage import _runtime
 
     calls = []
-    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        _runtime,
-        "_compiler_identity",
-        lambda: {"revision": "abc", "clean": True, "llvm": "llvmorg-test"},
-    )
+    monkeypatch.setattr(_runtime, "_compiler_identity", identity)
     monkeypatch.setattr(
         _runtime,
         "_compile_native",
         lambda *_args: calls.append(True) or ("lowered", "ptx"),
     )
+    _runtime._ptx_cache.clear()
+    return _runtime, calls
+
+
+def _assert_complete_entry(entry):
+    """Check one published entry holds exactly the three private files."""
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o700
+    assert sorted(path.name for path in entry.iterdir()) == [
+        "kernel.ptx",
+        "lowered.mlir",
+        "metadata.json",
+    ]
+    for path in entry.iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
+    """Reuse verified PTX and never return corrupted cache contents."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
     key_data = {"kernel": "add_kernel", "target": "sm_86"}
 
     first = _runtime._compile_cached(key_data, "add_kernel", 128, object)
@@ -296,9 +377,9 @@ def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
 
     assert first == second
     assert len(calls) == 1
+    assert [path.name for path in tmp_path.iterdir()] == [first.key]
     entry = tmp_path / first.key
-    assert stat.S_IMODE(entry.stat().st_mode) == 0o700
-    assert stat.S_IMODE((entry / "kernel.ptx").stat().st_mode) == 0o600
+    _assert_complete_entry(entry)
     (entry / "kernel.ptx").write_text("corrupt")
     _runtime._ptx_cache.clear()
     with pytest.raises(RuntimeError, match="digest mismatch"):
@@ -306,15 +387,9 @@ def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
 
 
 def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
-    """Reject symlinked and world-writable cache content."""
-    from swage import _runtime
-
+    """Reject symlinked, world-writable, and foreign-owned cache content."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        _runtime,
-        "_compiler_identity",
-        lambda: {"revision": "abc", "clean": True, "llvm": "llvmorg-test"},
-    )
+    _runtime, calls = _stub_compiler(monkeypatch)
     key_data = {"kernel": "add_kernel"}
     key = _runtime._cache_key(key_data)
     entry = tmp_path / key
@@ -332,23 +407,53 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="world-writable"):
         _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
+    (entry / "metadata.json").chmod(0o600)
+    other_user = os.geteuid() + 1
+    with monkeypatch.context() as patch:
+        patch.setattr(_runtime.os, "geteuid", lambda: other_user)
+        with pytest.raises(RuntimeError, match="not owned by the current"):
+            _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
-def test_dirty_build_uses_only_process_cache(tmp_path, monkeypatch):
-    """Do not persist artifacts for dirty or unidentified compiler builds."""
-    from swage import _runtime
+    assert calls == []
+    assert (entry / "metadata.json").read_text() == "{}"
 
-    calls = []
+
+def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
+    """Check ownership of every file, not only of the cache root."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        _runtime,
-        "_compiler_identity",
-        lambda: {"revision": "abc", "clean": False, "llvm": "llvmorg-test"},
-    )
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_native",
-        lambda *_args: calls.append(True) or ("lowered", "ptx"),
-    )
+    _runtime, _ = _stub_compiler(monkeypatch)
+    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    foreign = tmp_path / artifact.key / "kernel.ptx"
+    lstat = pathlib.Path.lstat
+
+    def lstat_with_foreign_ptx(path):
+        details = lstat(path)
+        if path != foreign:
+            return details
+        fields = list(details)
+        fields[stat.ST_UID] = details.st_uid + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat_with_foreign_ptx)
+    _runtime._ptx_cache.clear()
+    with pytest.raises(RuntimeError, match="not owned.*kernel.ptx"):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        _identity(native=None),
+        _identity(frontend=None),
+        _identity(revision=None, clean=False, frontend=None, native=None),
+    ],
+)
+def test_unidentified_compiler_uses_only_process_cache(
+    tmp_path, monkeypatch, identity
+):
+    """Do not persist artifacts when the loaded compiler is unidentified."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
 
     first = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
     second = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
@@ -356,6 +461,169 @@ def test_dirty_build_uses_only_process_cache(tmp_path, monkeypatch):
     assert first == second
     assert len(calls) == 1
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        _identity(clean=False),
+        _identity(revision=None, clean=False, llvm=None),
+    ],
+)
+def test_identified_compiler_persists_without_a_clean_checkout(
+    tmp_path, monkeypatch, identity
+):
+    """Persist for dirty checkouts and for installs outside a checkout."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
+
+    first = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
+    _runtime._ptx_cache.clear()
+    second = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
+
+    assert first == second
+    assert len(calls) == 1
+    _assert_complete_entry(tmp_path / first.key)
+
+
+@pytest.mark.parametrize(
+    "leftover",
+    [(), ("lowered.mlir",), ("lowered.mlir", "kernel.ptx"), ("metadata.json",)],
+)
+def test_incomplete_entry_is_a_miss_and_is_replaced(
+    tmp_path, monkeypatch, leftover
+):
+    """Recover from a writer that died after creating the entry directory."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    entry = tmp_path / _runtime._cache_key(_SHARED_KEY)
+    entry.mkdir(mode=0o700)
+    for name in leftover:
+        (entry / name).write_text("stale")
+
+    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._ptx_cache.clear()
+    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert first == second == _runtime._Artifact(entry.name, "lowered", "ptx")
+    assert len(calls) == 1
+    assert [path.name for path in tmp_path.iterdir()] == [entry.name]
+    _assert_complete_entry(entry)
+    assert (entry / "lowered.mlir").read_text() == "lowered"
+
+
+def test_leftover_staging_directories_are_ignored(tmp_path, monkeypatch):
+    """Never read, publish, or fail on another writer's staging directory."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    leftover = pathlib.Path(
+        _runtime.tempfile.mkdtemp(dir=tmp_path, prefix=_runtime._STAGING_PREFIX)
+    )
+    (leftover / "lowered.mlir").write_text("stale")
+
+    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._ptx_cache.clear()
+    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert first == second
+    assert len(calls) == 1
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [leftover.name, first.key]
+    )
+    assert [path.name for path in leftover.iterdir()] == ["lowered.mlir"]
+    _assert_complete_entry(tmp_path / first.key)
+
+
+def test_losing_writer_uses_the_published_entry(tmp_path, monkeypatch):
+    """Discard the staged copy when another writer published the key."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, _ = _stub_compiler(monkeypatch)
+    winner = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    loser = _runtime._Artifact(winner.key, "lowered", "ptx from the loser")
+
+    used = _runtime._write_cache_entry(loser, _SHARED_KEY)
+
+    assert used == winner
+    assert [path.name for path in tmp_path.iterdir()] == [winner.key]
+    assert (tmp_path / winner.key / "kernel.ptx").read_text() == "ptx"
+
+
+def test_failed_publish_leaves_no_staging_directory(tmp_path, monkeypatch):
+    """Report a publish failure and clean the staged copy up."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, _ = _stub_compiler(monkeypatch)
+
+    def refuse(_source, _destination):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(_runtime.os, "rename", refuse)
+    with pytest.raises(PermissionError):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
+    """Let eight processes cold-start one key on one cache directory."""
+    from swage import _runtime
+
+    processes, rounds = 8, 5
+    cache = tmp_path / "shared"
+    results = tmp_path / "results"
+    results.mkdir()
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(processes)
+    workers = [
+        context.Process(
+            target=_cold_start,
+            args=(str(cache), str(results), barrier, rounds),
+        )
+        for _ in range(processes)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=120)
+
+    assert [worker.exitcode for worker in workers] == [0] * processes
+    keys = {
+        _runtime._cache_key(dict(_SHARED_KEY, round=round_id)): round_id
+        for round_id in range(rounds)
+    }
+    assert sorted(path.name for path in cache.iterdir()) == sorted(keys)
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    for key, round_id in keys.items():
+        _assert_complete_entry(cache / key)
+        published = _runtime._read_cache_entry(
+            key, dict(_SHARED_KEY, round=round_id)
+        )
+        used = [path.read_text() for path in results.glob(f"{round_id}-*")]
+        assert used == [published.ptx] * processes
+
+
+def test_writer_killed_mid_entry_does_not_poison_the_key(
+    tmp_path, monkeypatch
+):
+    """Recompile after a writer was killed between entry files."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    key = _runtime._cache_key(_SHARED_KEY)
+    writer = multiprocessing.get_context("spawn").Process(
+        target=_killed_writer, args=(str(tmp_path),)
+    )
+    writer.start()
+    writer.join(timeout=120)
+
+    assert writer.exitcode == -signal.SIGKILL
+    assert key not in [path.name for path in tmp_path.iterdir()]
+
+    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._ptx_cache.clear()
+    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert first == second == _runtime._Artifact(key, "lowered", "ptx")
+    assert len(calls) == 1
+    _assert_complete_entry(tmp_path / key)
 
 
 def test_dump_switches_write_requested_artifacts(tmp_path, monkeypatch):
@@ -377,11 +645,7 @@ def test_compiler_key_contains_every_specialization_input(monkeypatch):
     """Keep cache identity complete and deterministic."""
     from swage import _runtime
 
-    monkeypatch.setattr(
-        _runtime,
-        "_compiler_identity",
-        lambda: {"revision": "abc", "clean": True, "llvm": "llvmorg-test"},
-    )
+    monkeypatch.setattr(_runtime, "_compiler_identity", _identity)
     data = _runtime._specialization_data(
         add_kernel,
         descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
@@ -396,12 +660,193 @@ def test_compiler_key_contains_every_specialization_input(monkeypatch):
         "constexprs": [["BLOCK", 128]],
         "compute_capability": "sm_86",
         "codegen": {"block_size": 128, "index_bits": 64},
-        "swage_revision": "abc",
+        "frontend": "f" * 64,
+        "native": [["_swageDialectsNanobind.so", 1, 2]],
         "dialect_version": 1,
         "llvm_version": "llvmorg-test",
     }
     assert len(data["source"]) == 64
     assert _runtime._cache_key(data) == _runtime._cache_key(data)
+    assert json.loads(json.dumps(data)) == data
+
+
+def _fake_package(tmp_path, monkeypatch):
+    """Point the frontend identity at a package outside any checkout."""
+    from swage import _runtime
+
+    package = tmp_path / "site" / "python" / "swage"
+    (package / "nested").mkdir(parents=True)
+    (package / "__init__.py").write_text("VERSION = 1\n")
+    (package / "_frontend.py").write_text("LOWERING = 1\n")
+    (package / "nested" / "helper.py").write_text("HELPER = 1\n")
+    (package / "notes.txt").write_text("not a source file\n")
+    monkeypatch.setattr(_runtime, "_package_dir", lambda: package)
+    return package
+
+
+def _fresh_key(_runtime):
+    """Recompute the launch cache key from a newly derived identity."""
+    _runtime._identity_cache = None
+    data = _runtime._specialization_data(
+        add_kernel,
+        descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
+        constexprs={"BLOCK": 128},
+        target="sm_86",
+    )
+    return _runtime._cache_key(data)
+
+
+def test_cache_key_tracks_the_frontend_and_native_identity(
+    tmp_path, monkeypatch
+):
+    """Change the key when any frontend byte or native library changes."""
+    from swage import _runtime
+
+    package = _fake_package(tmp_path, monkeypatch)
+    native = [["_swageDialectsNanobind.so", 10, 20]]
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
+    original = _fresh_key(_runtime)
+    assert _fresh_key(_runtime) == original
+
+    native[0][2] = 21
+    rebuilt = _fresh_key(_runtime)
+    native[0][2] = 20
+    assert rebuilt != original
+    assert _fresh_key(_runtime) == original
+
+    (package / "notes.txt").write_text("still not a source file\n")
+    assert _fresh_key(_runtime) == original
+    (package / "_frontend.py").write_text("LOWERING = 2\n")
+    edited = _fresh_key(_runtime)
+    (package / "_frontend.py").write_text("LOWERING = 1\n")
+    assert edited not in (original, rebuilt)
+    assert _fresh_key(_runtime) == original
+
+    (package / "nested" / "helper.py").write_text("HELPER = 2\n")
+    assert _fresh_key(_runtime) != original
+    (package / "nested" / "helper.py").write_text("HELPER = 1\n")
+    (package / "_frontend.py").rename(package / "_lowering.py")
+    assert _fresh_key(_runtime) != original
+    _runtime._identity_cache = None
+
+
+def test_frontend_identity_is_absent_without_sources(tmp_path):
+    """Leave a package without Python sources unidentified."""
+    from swage import _runtime
+
+    (tmp_path / "module.pyc").write_bytes(b"bytecode")
+    assert _runtime._frontend_digest(tmp_path) is None
+
+
+def test_persistence_does_not_need_a_git_checkout(tmp_path, monkeypatch):
+    """Persist from an sdist or installed tree that has no `.git`."""
+    from swage import _runtime
+
+    _fake_package(tmp_path, monkeypatch)
+    native = [["_swageDialectsNanobind.so", 10, 20]]
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
+
+    def no_git(*_args, **_kwargs):
+        raise AssertionError("git must not run outside a checkout")
+
+    monkeypatch.setattr(_runtime.subprocess, "run", no_git)
+    monkeypatch.setattr(
+        _runtime,
+        "_compile_native",
+        lambda *_args: ("lowered", "ptx"),
+    )
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    _runtime._identity_cache = None
+    _runtime._ptx_cache.clear()
+
+    identity = _runtime._cached_identity()
+    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._identity_cache = None
+
+    assert identity == {
+        "revision": None,
+        "clean": False,
+        "llvm": None,
+        "frontend": mock.ANY,
+        "native": native,
+    }
+    assert len(identity["frontend"]) == 64
+    _assert_complete_entry(cache / artifact.key)
+
+
+def _fake_bindings(tmp_path, monkeypatch):
+    """Stand in for the directory `mlir_swage._mlir_libs` is found in."""
+    from swage import _runtime
+
+    libraries = tmp_path / "mlir_swage" / "_mlir_libs"
+    libraries.mkdir(parents=True)
+    extension = libraries / "_swageDialectsNanobind.cpython-313-x86_64.so"
+    extension.write_bytes(b"extension")
+    versioned = libraries / "libSwagePythonCAPI.so.22.1"
+    versioned.write_bytes(b"compiler library")
+    (libraries / "libSwagePythonCAPI.so").symlink_to(versioned.name)
+    (libraries / "libnanobind-mlir_swage.so").write_bytes(b"support")
+    (libraries / "__init__.py").write_text("")
+    for path in (extension, versioned):
+        os.utime(path, ns=(1_000, 2_000))
+    spec = types.SimpleNamespace(submodule_search_locations=[str(libraries)])
+    names = []
+    monkeypatch.setattr(
+        _runtime.importlib.util,
+        "find_spec",
+        lambda name: names.append(name) or spec,
+    )
+    return extension, versioned, names
+
+
+def test_native_identity_describes_the_compiler_libraries(
+    tmp_path, monkeypatch
+):
+    """Identify the native compiler by name, size, and modification time."""
+    from swage import _runtime
+
+    extension, versioned, names = _fake_bindings(tmp_path, monkeypatch)
+
+    identity = _runtime._native_identity()
+
+    assert names == ["mlir_swage._mlir_libs"]
+    assert identity == [
+        [extension.name, 9, 2_000],
+        ["libSwagePythonCAPI.so", 16, 2_000],
+        [versioned.name, 16, 2_000],
+    ]
+    os.utime(versioned, ns=(1_000, 3_000))
+    relinked = _runtime._native_identity()
+    assert relinked != identity
+    assert relinked[0] == identity[0]
+    os.utime(versioned, ns=(1_000, 2_000))
+    extension.write_bytes(b"new extension")
+    os.utime(extension, ns=(1_000, 2_000))
+    assert _runtime._native_identity()[0] == [extension.name, 13, 2_000]
+
+    extension.unlink()
+    assert _runtime._native_identity() is None
+
+
+@pytest.mark.parametrize("fake", [None, types.ModuleType("mlir_swage")])
+def test_native_identity_is_absent_without_the_bindings(monkeypatch, fake):
+    """Report no native identity, without raising, when bindings are gone."""
+    from swage import _runtime
+
+    monkeypatch.setitem(sys.modules, "mlir_swage", fake)
+    monkeypatch.delitem(sys.modules, "mlir_swage._mlir_libs", raising=False)
+    assert _runtime._native_identity() is None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mlir_swage._mlir_libs",
+        types.ModuleType("mlir_swage._mlir_libs"),
+    )
+    assert _runtime._native_identity() is None
+    _runtime._identity_cache = None
+    assert _runtime._cached_identity()["native"] is None
+    _runtime._identity_cache = None
 
 
 def test_cache_path_defaults_to_user_cache(monkeypatch):
@@ -593,7 +1038,7 @@ def test_driver_error_contains_stable_name_code_and_text():
         driver._call("cuBad")
 
 
-def test_compiler_identity_is_cached_per_process(monkeypatch):
+def test_compiler_identity_is_cached_per_process(tmp_path, monkeypatch):
     """Spawn the git subprocesses once, not twice per launch."""
     import subprocess
 
@@ -602,15 +1047,32 @@ def test_compiler_identity_is_cached_per_process(monkeypatch):
     commands = []
 
     def fake_run(command, **kwargs):
-        commands.append(command)
+        commands.append((command, kwargs["cwd"]))
         return subprocess.CompletedProcess(command, 0, stdout="abc\n",
                                            stderr="")
 
+    package = _fake_package(tmp_path, monkeypatch)
+    checkout = package.parents[1]
+    (checkout / ".git").mkdir()
+    (checkout / "cmake").mkdir()
+    (checkout / "cmake" / "llvm-version.txt").write_text("llvmorg-test\n")
+    native = [["_swageDialectsNanobind.so", 10, 20]]
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
     monkeypatch.setattr(_runtime.subprocess, "run", fake_run)
     _runtime._identity_cache = None
     results = [_runtime._cached_identity() for _ in range(3)]
-    assert results[0] == results[1] == results[2]
-    assert len(commands) == 2
+    _runtime._identity_cache = None
+
+    assert results[0] is results[1] is results[2]
+    assert [cwd for _, cwd in commands] == [checkout, checkout]
+    assert results[0] == {
+        "revision": "abc",
+        "clean": False,
+        "llvm": "llvmorg-test",
+        "frontend": mock.ANY,
+        "native": native,
+    }
+    assert len(results[0]["frontend"]) == 64
 
 
 def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
@@ -619,7 +1081,7 @@ def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
 
     _runtime._identity_cache = None
     _runtime._cached_identity()
-    fake = {"revision": "r", "clean": True, "llvm": "l"}
+    fake = _identity(revision="r")
     monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
     assert _runtime._cached_identity() == fake
 
@@ -642,7 +1104,7 @@ def test_warm_launch_emits_mlir_only_once(monkeypatch):
         "_compile_native",
         lambda *_args, **_kwargs: ("lowered", "ptx"),
     )
-    fake = {"revision": None, "clean": False, "llvm": None}
+    fake = _identity(revision=None, clean=False, llvm=None, native=None)
     monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
     _runtime._identity_cache = None
