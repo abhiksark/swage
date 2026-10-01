@@ -19,6 +19,7 @@
 #include "nanobind/stl/pair.h"
 #include "nanobind/stl/tuple.h"
 #include "nanobind/stl/vector.h"
+#include "llvm/Config/llvm-config.h"
 
 #include <array>
 #include <cstdint>
@@ -200,6 +201,10 @@ materializeSegmentedPlan(nb::object moduleObject,
 
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
+
+  // The LLVM release this extension was compiled and linked against, so the
+  // Python side reports the real toolchain instead of the repository pin.
+  swageM.attr("__llvm_version__") = LLVM_VERSION_STRING;
 
   // The GIL is deliberately held across cuLaunchKernel: the enqueue is
   // microseconds, the driver never re-enters Python, and releasing it per
