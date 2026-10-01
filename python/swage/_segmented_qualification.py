@@ -32,11 +32,16 @@ _LOWERING_PIPELINE = (
 # generation option (kernel name, block size, target). Loaded handles are
 # keyed per driver by CUDA context, PTX digest, and kernel name, so a hit
 # never crosses a context or a target.
-# ponytail: nothing is evicted or unloaded. Loaded modules are bounded by the
-# distinct (program, policy, target, context) a process uses; move to an LRU
-# that calls cuModuleUnload if a process generates programs without bound.
-_memo_lock = threading.Lock()
-_ptx_memo = {}
+#
+# Both memos are bounded: each keeps `_runtime._CACHE_LIMIT` kernels and then
+# forgets its oldest. A forgotten kernel is compiled or loaded again on its
+# next use. Its module is unloaded once no prepared launch holds its function
+# handle any more; see `_runtime._Function`.
+#
+# A hit takes no lock. A miss takes the process-wide cold-path lock, which
+# serializes native compiles; see `_runtime._compile_lock`.
+_memo_lock = _runtime._compile_lock
+_ptx_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
 _load_memo = weakref.WeakKeyDictionary()
 
 
@@ -258,8 +263,13 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
 
     Returns:
         The PTX text of the compiled kernel. A failed compile is not kept.
+        A kernel compiled before is returned without taking a lock, so it
+        never waits for another thread's compile.
     """
     key = (compile_ptx, module_text, tuple(sorted(options.items())))
+    ptx = _ptx_memo.get(key)
+    if ptx is not None:
+        return ptx
     with _memo_lock:
         ptx = _ptx_memo.get(key)
         if ptx is None:
@@ -289,7 +299,12 @@ def _load_once(driver, ptx, kernel_name):
     Returns:
         The module and function handles, as returned by `driver.load`. A
         driver that cannot name its current context is never memoized,
-        because a handle is valid only in the context that loaded it.
+        because a handle is valid only in the context that loaded it. A
+        kernel loaded before is returned without taking a lock.
+
+        The caller must keep the function handle for as long as it may
+        launch it: the memo forgets its oldest kernel at its bound, and a
+        module is unloaded once nothing holds its function handle.
     """
     current_context = getattr(driver, "current_context", None)
     if current_context is None:
@@ -299,13 +314,38 @@ def _load_once(driver, ptx, kernel_name):
         hashlib.sha256(ptx.encode()).hexdigest(),
         kernel_name,
     )
-    with _memo_lock:
-        loaded = _load_memo.setdefault(driver, {})
-        handles = loaded.get(key)
-        if handles is None:
-            handles = driver.load(ptx, kernel_name)
-            loaded[key] = handles
+    loaded = _load_memo.get(driver)
+    if loaded is None:
+        with _memo_lock:
+            loaded = _load_memo.setdefault(
+                driver, _runtime._BoundedCache(_runtime._CACHE_LIMIT)
+            )
+    handles = loaded.get(key)
+    if handles is None:
+        handles = _runtime._load_cold(loaded, key, driver, ptx, kernel_name)
     return handles
+
+
+def _make_context_current(torch, current_context, device_index):
+    """Give a thread that has no CUDA context the context of its device.
+
+    A thread that has not used CUDA has no current context, and PyTorch
+    makes the device's context current with its first CUDA call there. A
+    prepared launch may make no such call before it reaches the driver, so
+    the context is made current here. This is the path of a thread's first
+    launch only; a context that is already current is never replaced.
+
+    Args:
+        torch: The PyTorch module.
+        current_context: The driver's bound `current_context` method.
+        device_index: Index of the prepared device, which the caller has
+            checked to be the current device.
+
+    Returns:
+        The context that is current now.
+    """
+    torch.cuda.set_device(device_index)
+    return current_context()
 
 
 def _semantic_module(kind):
@@ -376,7 +416,16 @@ _SENTINEL = -1.0
 
 
 class _PreparedReduction(NamedTuple):
-    """Prepared pure and classified launch policies."""
+    """Prepared pure and classified launch policies.
+
+    Each callable owns what it launches: it keeps its kernels loaded and its
+    task storage allocated for as long as it is referenced, also after the
+    kernel memo has forgotten them. A CUDA graph that captured a launch
+    borrows both, so the callable must outlive the graph.
+
+    A callable raises RuntimeError instead of launching when the current
+    CUDA context is not the one it was prepared in.
+    """
 
     warp: Callable[[], None]
     cta: Callable[[], None]
@@ -384,7 +433,20 @@ class _PreparedReduction(NamedTuple):
 
 
 class _PreparedPersistentSum(NamedTuple):
-    """One prepared persistent launch and its fixed task metadata."""
+    """One prepared persistent launch and its fixed task metadata.
+
+    `launch` owns its kernel, its task storage, and one queue: it keeps them
+    for as long as it is referenced, and a CUDA graph that captured a launch
+    borrows them, so `launch` must outlive the graph.
+
+    One queue admits one launch at a time. `launch` raises RuntimeError
+    instead of launching when another thread is inside it, when an earlier
+    launch is still in flight on another stream, and when the current CUDA
+    context is not the one it was prepared in. A launch queued behind an
+    earlier one on the same stream is ordered by the stream and admitted.
+    Two things are not checked: launches recorded during a graph capture,
+    and replays of a graph.
+    """
 
     launch: Callable[[], None]
     resident_blocks: int
@@ -834,11 +896,28 @@ def _prepare_planned_reduction(
             tensor.record_stream(stream)
         return None
 
+    current_context = getattr(driver, "current_context", None)
+    prepared_context = None if current_context is None else current_context()
+
     def current_stream():
         if torch.cuda.current_device() != device_index:
             raise ValueError(
                 "prepared reduction must launch on its prepared device"
             )
+        # The kernels are loaded in one CUDA context and are not valid in
+        # another, also on the same device.
+        if current_context is not None:
+            try:
+                context = current_context()
+            except RuntimeError:
+                context = _make_context_current(
+                    torch, current_context, device_index
+                )
+            if context != prepared_context:
+                raise RuntimeError(
+                    "prepared reduction must launch in its prepared CUDA "
+                    "context"
+                )
         return torch.cuda.current_stream()
 
     def warp():
@@ -1057,13 +1136,52 @@ def _prepare_persistent_sum(
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream())
     tasks_ready_complete = False
+    current_context = getattr(driver, "current_context", None)
+    prepared_context = None if current_context is None else current_context()
+    # One prepared object has one counter array and one scratch buffer, so
+    # two launches must not run at once. `launching` keeps a second thread
+    # out of `launch`; `in_flight` is recorded behind each launch and tells
+    # a launch on another stream whether the previous one has finished.
+    launching = threading.Lock()
+    in_flight = torch.cuda.Event()
+    in_flight_stream = None
 
     def current_stream():
         if torch.cuda.current_device() != device_index:
             raise ValueError(
                 "prepared persistent sum must launch on its prepared device"
             )
+        # The kernel is loaded in one CUDA context and is not valid in
+        # another, also on the same device.
+        if current_context is not None:
+            try:
+                context = current_context()
+            except RuntimeError:
+                context = _make_context_current(
+                    torch, current_context, device_index
+                )
+            if context != prepared_context:
+                raise RuntimeError(
+                    "prepared persistent sum must launch in its prepared "
+                    "CUDA context"
+                )
         return torch.cuda.current_stream()
+
+    def require_idle(stream, capturing):
+        # A launch on the stream of the previous one is ordered behind it.
+        # CUDA forbids an event query during a capture, so a launch that is
+        # being captured is not checked.
+        if (
+            capturing
+            or in_flight_stream is None
+            or in_flight_stream == stream.cuda_stream
+        ):
+            return
+        if not in_flight.query():
+            raise RuntimeError(
+                "prepared persistent sum still has a launch in flight on "
+                "another stream; synchronize that stream first"
+            )
 
     def wait_for_tasks(stream):
         nonlocal tasks_ready_complete
@@ -1082,46 +1200,60 @@ def _prepare_persistent_sum(
             stream.wait_event(tasks_ready)
 
     def launch():
+        nonlocal in_flight_stream
         _require_unchanged_offsets(offsets, offsets_version)
-        stream = current_stream()
-        wait_for_tasks(stream)
-        counters.zero_()
-        driver.launch_persistent(
-            function,
-            (active_blocks,),
-            _PERSISTENT_BLOCK,
-            stream.cuda_stream,
-            (
-                values.data_ptr(),
-                offsets.data_ptr(),
-                output.data_ptr(),
-                warp_tasks.data_ptr(),
-                cta_tasks.data_ptr(),
-                partial_ranges.data_ptr(),
-                partial_merges.data_ptr(),
-                merge_ranges.data_ptr(),
-                scratch.data_ptr(),
-                counters.data_ptr(),
-                value_count,
-                len(warp_ids),
-                len(cta_ids),
-                partial_count,
-                merge_count,
-            ),
-        )
-        for tensor in (
-            values,
-            offsets,
-            output,
-            warp_tasks,
-            cta_tasks,
-            partial_ranges,
-            partial_merges,
-            merge_ranges,
-            scratch,
-            counters,
-        ):
-            tensor.record_stream(stream)
+        if not launching.acquire(blocking=False):
+            raise RuntimeError(
+                "prepared persistent sum is already launching on another "
+                "thread; one prepared object admits one launch at a time"
+            )
+        try:
+            stream = current_stream()
+            capturing = torch.cuda.is_current_stream_capturing()
+            require_idle(stream, capturing)
+            wait_for_tasks(stream)
+            counters.zero_()
+            driver.launch_persistent(
+                function,
+                (active_blocks,),
+                _PERSISTENT_BLOCK,
+                stream.cuda_stream,
+                (
+                    values.data_ptr(),
+                    offsets.data_ptr(),
+                    output.data_ptr(),
+                    warp_tasks.data_ptr(),
+                    cta_tasks.data_ptr(),
+                    partial_ranges.data_ptr(),
+                    partial_merges.data_ptr(),
+                    merge_ranges.data_ptr(),
+                    scratch.data_ptr(),
+                    counters.data_ptr(),
+                    value_count,
+                    len(warp_ids),
+                    len(cta_ids),
+                    partial_count,
+                    merge_count,
+                ),
+            )
+            for tensor in (
+                values,
+                offsets,
+                output,
+                warp_tasks,
+                cta_tasks,
+                partial_ranges,
+                partial_merges,
+                merge_ranges,
+                scratch,
+                counters,
+            ):
+                tensor.record_stream(stream)
+            if not capturing:
+                in_flight.record(stream)
+                in_flight_stream = stream.cuda_stream
+        finally:
+            launching.release()
         return None
 
     return _PreparedPersistentSum(

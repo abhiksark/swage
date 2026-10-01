@@ -2,6 +2,7 @@
 """Minimal CUDA Driver runtime for the canonical fixed vector-add subset."""
 
 import ast
+import collections
 import ctypes
 import errno
 import hashlib
@@ -12,6 +13,7 @@ import pathlib
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -23,10 +25,44 @@ from typing import NamedTuple
 from . import language
 
 _DIALECT_VERSION = 1
+# Entries an in-process kernel cache keeps before it forgets its oldest.
+_CACHE_LIMIT = 128
+
+
+class _BoundedCache(dict):
+    """A dict that forgets its oldest entry once it holds more than `limit`.
+
+    Entries leave in the order they were first stored, so a kernel that is
+    still in use may leave; its next use compiles or loads it again. Every
+    writer holds `_compile_lock`. A reader takes no lock, because a single
+    `get` is atomic.
+    """
+
+    def __init__(self, limit):
+        """Create an empty cache that keeps at most `limit` entries."""
+        super().__init__()
+        self.limit = limit
+
+    def __setitem__(self, key, value):
+        """Store one entry, then drop the oldest entries over the limit."""
+        super().__setitem__(key, value)
+        while len(self) > self.limit:
+            del self[next(iter(self))]
+
+
+# The cold-path lock: every native compile and every first load of a kernel
+# in this process holds it, here and in the private segmented runner.
+# Compiles are serialized on purpose. The native compiler states no contract
+# for two compiles running at once, it holds the GIL for a whole compile, and
+# an LLVM fatal error ends the process, so a lock per key would add risk and
+# no concurrency. A warm launch never takes this lock: it reads the caches
+# below with one `get` each.
 _compile_lock = threading.Lock()
-# ponytail: one global lock; use per-key locks only if compilation contends.
-_ptx_cache = {}
-_loaded_functions = {}
+_ptx_cache = _BoundedCache(_CACHE_LIMIT)
+# Values are `(module, function)` as `_CudaDriver.load` returns them. A
+# kernel that leaves this cache is unloaded once nothing else holds its
+# function handle; see `_Function`.
+_loaded_functions = _BoundedCache(_CACHE_LIMIT)
 _driver = None
 _identity_cache = None
 # Device facts cannot change within a process, but tests inject fresh fake
@@ -86,11 +122,11 @@ def launch(kernel, *, arguments, constexprs, grid):
     driver = _get_driver()
     context = driver.current_context()
     loaded_key = (artifact.key, context)
-    with _compile_lock:
-        loaded = _loaded_functions.get(loaded_key)
-        if loaded is None:
-            loaded = driver.load(artifact.ptx, kernel.__name__)
-            _loaded_functions[loaded_key] = loaded
+    loaded = _loaded_functions.get(loaded_key)
+    if loaded is None:
+        loaded = _load_cold(
+            _loaded_functions, loaded_key, driver, artifact.ptx, kernel.__name__
+        )
     _, function = loaded
     abi_arguments = tuple(tensor.data_ptr() for tensor in spec.tensors) + (
         spec.n,
@@ -626,6 +662,10 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
     """
     if key is None:
         key = _cache_key(specialization)
+    # A warm launch stops here and never waits for a compile in progress.
+    cached = _ptx_cache.get(key)
+    if cached is not None:
+        return cached
     with _compile_lock:
         cached = _ptx_cache.get(key)
         if cached is not None:
@@ -878,6 +918,58 @@ def _write_dumps(artifact):
         _atomic_write(root / f"{artifact.key}.ptx", artifact.ptx)
 
 
+def _load_cold(cache, key, driver, ptx, kernel_name):
+    """Load one kernel into `cache` unless another thread just did.
+
+    This is the miss path of a loaded-kernel cache. It takes the cold-path
+    lock, which a cache hit never takes.
+
+    Returns:
+        The `(module, function)` entry of `key`.
+    """
+    with _compile_lock:
+        loaded = cache.get(key)
+        if loaded is None:
+            loaded = driver.load(ptx, kernel_name)
+            cache[key] = loaded
+    return loaded
+
+
+def _capturing():
+    """Return whether this thread is capturing a CUDA graph in PyTorch."""
+    torch = sys.modules.get("torch")
+    return torch is not None and torch.cuda.is_current_stream_capturing()
+
+
+class _Function(int):
+    """The handle of a loaded kernel, which keeps its CUDA module loaded.
+
+    The value is the function handle that `cuLaunchKernel` takes. Its module
+    is queued for unloading when this object is collected, so the module
+    stays loaded for whoever still holds the handle: a kernel cache, a
+    prepared launch, or a launch in progress. A plain copy of the value,
+    such as `int(function)`, keeps nothing loaded.
+    """
+
+    def __new__(cls, handle, module, retired):
+        """Wrap a function handle resolved from a loaded module.
+
+        Args:
+            handle: Function handle returned by the driver.
+            module: `(context, module handle)` to queue when this object
+                is collected.
+            retired: The driver's queue of modules that nothing references.
+        """
+        function = super().__new__(cls, handle)
+        function._module = module
+        function._retired = retired
+        return function
+
+    def __del__(self):
+        """Queue the module. The driver unloads it before its next load."""
+        self._retired.append(self._module)
+
+
 class _CudaDriver:
     """Small lazy wrapper around the Linux CUDA Driver API."""
 
@@ -908,6 +1000,28 @@ class _CudaDriver:
             ctypes.c_char_p,
         ]
         self.library.cuModuleGetFunction.restype = ctypes.c_int
+        self.library.cuModuleUnload.argtypes = [pointer]
+        self.library.cuModuleUnload.restype = ctypes.c_int
+        self.library.cuCtxSynchronize.argtypes = []
+        self.library.cuCtxSynchronize.restype = ctypes.c_int
+        self.library.cuStreamIsCapturing.argtypes = [
+            pointer,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        self.library.cuStreamIsCapturing.restype = ctypes.c_int
+        # Context ids exist from CUDA 12. An older driver has only handles.
+        self._context_id = getattr(self.library, "cuCtxGetId", None)
+        if self._context_id is not None:
+            self._context_id.argtypes = [
+                pointer,
+                ctypes.POINTER(ctypes.c_ulonglong),
+            ]
+            self._context_id.restype = ctypes.c_int
+        # `(context, module handle)` of each module whose `_Function` was
+        # collected, waiting for `unload_retired`.
+        self._retired = collections.deque()
+        # Functions that a CUDA graph may replay; their modules stay loaded.
+        self._pinned = set()
         self.library.cuLaunchKernel.argtypes = [
             pointer,
             ctypes.c_uint,
@@ -971,6 +1085,24 @@ class _CudaDriver:
         return f"{version.value // 1000}.{(version.value % 1000) // 10}"
 
     def current_context(self):
+        """Identify the CUDA context that is current on this thread.
+
+        Returns:
+            The driver's id of the context, which is unique for the life of
+            the process. A context handle is not: the driver places a new
+            context at the address of a destroyed one, so by its handle a
+            kernel loaded in the destroyed context would pass for a kernel
+            of the new one. A driver without context ids returns the
+            handle.
+
+        Raises:
+            RuntimeError: No CUDA context is current on this thread.
+        """
+        if self._context_id is not None:
+            identifier = ctypes.c_ulonglong()
+            # A null context asks for the id of the current context.
+            if not self._context_id(None, ctypes.byref(identifier)):
+                return identifier.value
         context = ctypes.c_void_p()
         self._call("cuCtxGetCurrent", ctypes.byref(context))
         if not context.value:
@@ -978,6 +1110,18 @@ class _CudaDriver:
         return context.value
 
     def load(self, ptx, kernel_name):
+        """Load one module and resolve one kernel in it.
+
+        Modules that nothing references any more are unloaded first. A
+        module whose kernel cannot be resolved is not left loaded.
+
+        Returns:
+            `(module, function)`. `function` is a `_Function`: the module
+            stays loaded for as long as that object is referenced, and
+            `module` is only its handle.
+        """
+        self.unload_retired()
+        owner = self.current_context()
         module = ctypes.c_void_p()
         image = ctypes.create_string_buffer(ptx.encode())
         self._call(
@@ -986,15 +1130,94 @@ class _CudaDriver:
             ctypes.cast(image, ctypes.c_void_p),
         )
         function = ctypes.c_void_p()
-        self._call(
-            "cuModuleGetFunction",
-            ctypes.byref(function),
-            module,
-            kernel_name.encode(),
+        try:
+            self._call(
+                "cuModuleGetFunction",
+                ctypes.byref(function),
+                module,
+                kernel_name.encode(),
+            )
+        except RuntimeError:
+            self._retired.append((owner, module.value))
+            self.unload_retired()
+            raise
+        return module.value, _Function(
+            function.value, (owner, module.value), self._retired
         )
-        return module.value, function.value
+
+    def unload_retired(self):
+        """Unload the modules of the current context that nothing holds.
+
+        A module is queued only after its `_Function` was collected, so no
+        thread can launch it again. Launches of it that are still queued on
+        a stream are waited for: the context is synchronized once before
+        the first unload.
+
+        CUDA forbids both calls while a stream of the context captures a
+        graph, and the attempt invalidates the capture. While this thread
+        captures, nothing is unloaded and the modules wait for a later
+        call. A capture open on another thread cannot be seen from here: it
+        is invalidated, the synchronize fails, and the modules stay queued.
+
+        A module of another context stays queued until that context is
+        current. A driver error is reported as a `RuntimeWarning` and is
+        never raised, because the caller is loading an unrelated kernel.
+        """
+        if not self._retired or _capturing():
+            return
+        context = self.current_context()
+        idle = []
+        for _ in range(len(self._retired)):
+            try:
+                owner, module = self._retired.popleft()
+            except IndexError:
+                break
+            if owner == context:
+                idle.append(module)
+            else:
+                self._retired.append((owner, module))
+        if not idle:
+            return
+        try:
+            self._call("cuCtxSynchronize")
+        except RuntimeError as error:
+            self._retired.extend((context, module) for module in idle)
+            warnings.warn(
+                f"Swage left {len(idle)} unused CUDA modules loaded: {error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        for module in idle:
+            try:
+                self._call("cuModuleUnload", ctypes.c_void_p(module))
+            except RuntimeError as error:
+                warnings.warn(
+                    f"Swage left an unused CUDA module loaded: {error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    def _pin_if_capturing(self, function, stream):
+        """Keep a kernel loaded for good when a CUDA graph captures it.
+
+        A graph replays a captured launch for as long as the graph lives,
+        and nothing ties the graph to the `_Function`.
+        """
+        status = ctypes.c_int()
+        self._call(
+            "cuStreamIsCapturing",
+            ctypes.c_void_p(stream),
+            ctypes.byref(status),
+        )
+        if status.value:
+            self._pinned.add(function)
 
     def launch(self, function, grid, block, stream, arguments):
+        # The NULL stream cannot capture, which keeps the capture query off
+        # the default-stream path.
+        if stream and type(function) is _Function:
+            self._pin_if_capturing(function, stream)
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,
@@ -1073,11 +1296,15 @@ class _CudaDriver:
 
 
 def _get_driver():
+    """Return the process-wide driver, creating it on first use."""
     global _driver
-    with _compile_lock:
-        if _driver is None:
-            _driver = _CudaDriver()
-        return _driver
+    driver = _driver
+    if driver is None:
+        with _compile_lock:
+            if _driver is None:
+                _driver = _CudaDriver()
+            driver = _driver
+    return driver
 
 
 def driver_version():
