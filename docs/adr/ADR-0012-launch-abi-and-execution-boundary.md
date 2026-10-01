@@ -29,6 +29,20 @@ Persistent reuse is limited to identified clean builds, cached artifacts are
 verified before loading, and loaded modules remain scoped to their CUDA
 context.
 
+The private segmented kernels reload each segment range from device memory
+at every launch, while host validation sees only the snapshot taken when the
+launch was prepared. Every GPU kernel therefore clamps each loaded range that
+indexes the values buffer, as signed i32, so that
+`0 <= start <= end <= value_count`, before the range becomes a loop bound. It
+uses the value count that its ABI already carries. This covers the direct,
+task-ID, fused, and persistent warp and CTA paths, and the split and
+persistent partial ranges. Host validation remains the contract for a correct
+result: for validated offsets the clamp is the identity, and for a range that
+changed after validation it produces a bounded read and a clamped result, not
+a diagnostic. Split and persistent merge ranges index scratch and are used as
+loaded, because those ABIs carry the partial count and not the value count.
+The sequential CPU lowering is unchanged.
+
 The exact public call surface lives in
 [Public Python API](../reference/swage.md). Current validation,
 target, zero-work, stream, retention, and cache contracts live in

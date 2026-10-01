@@ -10,6 +10,8 @@
 
 #include <limits>
 #include <string>
+#include <tuple>
+#include <utility>
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -26,6 +28,7 @@
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 
@@ -580,6 +583,42 @@ void buildSequentialProgram(func::FuncOp function,
   func::ReturnOp::create(builder, loc);
 }
 
+/// Whether `blockSize` threads occupy a power-of-two number of warps, counting
+/// a partly filled last warp as one.
+///
+/// Every CTA-wide reduction lowers through `gpu.all_reduce`. Its second stage
+/// combines the per-warp partials with an XOR butterfly and stores the result
+/// from every participating lane. Each of those lanes holds the complete
+/// reduction only when the warp count is a power of two; for any other count
+/// the surviving store is unspecified and may carry an incomplete reduction.
+constexpr bool hasPowerOfTwoWarpCount(int64_t blockSize) {
+  return blockSize > 0 && llvm::isPowerOf2_64((blockSize - 1) / 32 + 1);
+}
+
+/// Clamp one half-open range loaded from device memory, as signed i32, so
+/// that `0 <= start <= end <= valueCount`, and return it as index values.
+///
+/// Host validation sees a snapshot of the range, but the kernel reloads it at
+/// every launch, so a range that changed after validation would otherwise
+/// index outside the values buffer. A decreasing pair becomes an empty range.
+/// For validated ranges both clamps are the identity.
+std::pair<Value, Value> clampRange(OpBuilder &builder, Location loc,
+                                   Value startI32, Value endI32,
+                                   Value valueCount) {
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  Value startFloored = arith::MaxSIOp::create(builder, loc, startI32, zero);
+  Value startClamped =
+      arith::MinSIOp::create(builder, loc, startFloored, valueCount);
+  Value endFloored = arith::MaxSIOp::create(builder, loc, endI32, startClamped);
+  Value endClamped =
+      arith::MinSIOp::create(builder, loc, endFloored, valueCount);
+  Value start = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                           startClamped);
+  Value end = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                         endClamped);
+  return {start, end};
+}
+
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program, int64_t blockSize,
                      bool useTaskIds, bool fusedMixed, bool persistent) {
@@ -629,13 +668,25 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
   Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
+  // Every ABI built here passes the value count as its first i32, directly
+  // after the pointers.
+  unsigned valueCountIndex = 3;
+  if (persistent)
+    valueCountIndex = 10;
+  else if (useTaskIds || fusedMixed)
+    valueCountIndex = 4;
+  Value valueCount = entry->getArgument(valueCountIndex);
+  auto loadTaskWord = [&](OpBuilder &body, Location bodyLoc, Value words,
+                          Value wordIndex) {
+    Value wordIndex64 =
+        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), wordIndex);
+    Value wordAddress =
+        LLVM::GEPOp::create(body, bodyLoc, pointer, i32, words, wordIndex64);
+    return Value(LLVM::LoadOp::create(body, bodyLoc, i32, wordAddress));
+  };
   auto loadSegmentId = [&](OpBuilder &body, Location bodyLoc, Value taskIds,
                            Value taskId) {
-    Value taskId64 =
-        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), taskId);
-    Value taskAddress =
-        LLVM::GEPOp::create(body, bodyLoc, pointer, i32, taskIds, taskId64);
-    Value segmentIdI32 = LLVM::LoadOp::create(body, bodyLoc, i32, taskAddress);
+    Value segmentIdI32 = loadTaskWord(body, bodyLoc, taskIds, taskId);
     return Value(arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
                                             segmentIdI32));
   };
@@ -653,10 +704,12 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value endAddress = LLVM::GEPOp::create(
         body, bodyLoc, pointer, i32, entry->getArgument(1), nextSegment64);
     Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
-    Value start = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
-                                             startI32);
-    Value end =
-        arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(), endI32);
+    // The offsets come from the caller's buffer at launch time; bound them
+    // here because host validation only saw an earlier snapshot.
+    Value start;
+    Value end;
+    std::tie(start, end) =
+        clampRange(body, bodyLoc, startI32, endI32, valueCount);
     Value first = arith::AddIOp::create(body, bodyLoc, start, logicalThreadId);
 
     SmallVector<Value> results;
@@ -841,10 +894,17 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value partialBase = arith::MulIOp::create(builder, loc, partialIndex, two);
     Value partialEndIndex =
         arith::AddIOp::create(builder, loc, partialBase, one);
-    Value partialBegin =
-        loadSegmentId(builder, loc, entry->getArgument(5), partialBase);
-    Value partialEnd =
-        loadSegmentId(builder, loc, entry->getArgument(5), partialEndIndex);
+    Value partialBeginI32 =
+        loadTaskWord(builder, loc, entry->getArgument(5), partialBase);
+    Value partialEndI32 =
+        loadTaskWord(builder, loc, entry->getArgument(5), partialEndIndex);
+    // Partial ranges index the values buffer, so they take the same bound as
+    // the direct ranges. Merge ranges below index scratch, whose length this
+    // ABI carries as the partial count, not the value count.
+    Value partialBegin;
+    Value partialEnd;
+    std::tie(partialBegin, partialEnd) =
+        clampRange(builder, loc, partialBeginI32, partialEndI32, valueCount);
     Value partialFirst =
         arith::AddIOp::create(builder, loc, partialBegin, threadId);
     Value partialIdentity = identityFor(builder, loc, ReductionKind::Sum);
@@ -1141,6 +1201,8 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
   // segments at memory bandwidth, still fully occupied by one 4096-element
   // chunk (8 elements per thread).
   constexpr int64_t blockSize = 512;
+  static_assert(hasPowerOfTwoWarpCount(blockSize),
+                "the split CTA reduces through gpu.all_reduce");
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   std::string suffix = merge ? "__merge" : "__partial";
@@ -1200,10 +1262,23 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
               body, bodyLoc, body.getIndexType(), loadRecord(0));
           rangeField = 1;
         }
-        Value begin = arith::IndexCastOp::create(
-            body, bodyLoc, body.getIndexType(), loadRecord(rangeField));
-        Value end = arith::IndexCastOp::create(
-            body, bodyLoc, body.getIndexType(), loadRecord(rangeField + 1));
+        Value begin;
+        Value end;
+        if (merge) {
+          // Merge ranges index scratch. This ABI carries the partial count,
+          // not the value count, so they are used as loaded.
+          begin = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
+                                             loadRecord(rangeField));
+          end = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
+                                           loadRecord(rangeField + 1));
+        } else {
+          // Partial ranges index the values buffer; bound them by the value
+          // count this ABI passes as its first i32.
+          Value beginI32 = loadRecord(rangeField);
+          Value endI32 = loadRecord(rangeField + 1);
+          std::tie(begin, end) = clampRange(body, bodyLoc, beginI32, endI32,
+                                            entry->getArgument(3));
+        }
         Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
         Value identity = identityFor(body, bodyLoc, stage.kind);
         auto local = scf::ForOp::create(
@@ -1329,6 +1404,15 @@ public:
     }
     if (persistent && blockSize != 512) {
       getOperation().emitError("persistent lowering requires block-size 512");
+      return signalPassFailure();
+    }
+    if (!hasPowerOfTwoWarpCount(blockSize)) {
+      // Read the option first: streaming the option object itself prints its
+      // value as a character.
+      int64_t requested = blockSize;
+      getOperation().emitError()
+          << "block-size must give a power-of-two warp count, got " << requested
+          << " (" << (requested + 31) / 32 << " warps)";
       return signalPassFailure();
     }
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());

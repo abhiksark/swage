@@ -32,8 +32,12 @@ module {
 // CHECK:   %[[START_I32:.*]] = llvm.load %[[START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK:   %[[END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK:   %[[END_I32:.*]] = llvm.load %[[END_ADDRESS]] : !llvm.ptr -> i32
-// CHECK:   %[[START:.*]] = arith.index_cast %[[START_I32]] : i32 to index
-// CHECK:   %[[END:.*]] = arith.index_cast %[[END_I32]] : i32 to index
+// Both loaded offsets are clamped against the value count before they become
+// loop bounds; segment-bounds.mlir pins the full clamp.
+// CHECK:   %[[START_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[VALUE_COUNT]] : i32
+// CHECK:   %[[END_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[VALUE_COUNT]] : i32
+// CHECK:   %[[START:.*]] = arith.index_cast %[[START_CLAMPED]] : i32 to index
+// CHECK:   %[[END:.*]] = arith.index_cast %[[END_CLAMPED]] : i32 to index
 // CHECK:   %[[FIRST:.*]] = arith.addi %[[START]], %[[THREAD]] : index
 // CHECK:   %[[IDENTITY:.*]] = arith.constant 0.000000e+00 : f32
 // CHECK:   %[[LOCAL:.*]] = scf.for %[[I:.*]] = %[[FIRST]] to %[[END]] step %{{.*}} iter_args(%[[ACC:.*]] = %[[IDENTITY]]) -> (f32) {
