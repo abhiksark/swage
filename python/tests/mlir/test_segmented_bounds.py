@@ -5,7 +5,9 @@ Host validation sees one snapshot of the offsets. The kernels reload them
 from device memory at every launch, so the bound that keeps every read inside
 ``[0, value_count)`` has to live in the kernel. The CUDA tests here launch
 through the driver, below the Python validation, with ranges that validation
-would reject.
+would reject. Plan-owned ranges take the same bound against the buffer they
+index: partial ranges against the value count, merge ranges against the
+partial count.
 """
 
 import re
@@ -18,8 +20,10 @@ from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from swage import _runtime
 from swage._segmented_qualification import (
+    _SOFTMAX_MODULE,
     _semantic_module,
     _validate_offsets,
+    _validate_softmax_tensors,
     launch_gpu,
 )
 
@@ -47,47 +51,59 @@ INVALID_OFFSETS = [
 # a decreasing pair.
 _MIXED_OFFSETS = (-300, 250, 1500, 700, 300, 1900)
 
-# The value count is the first i32 of each ABI, directly after the pointers.
-# The last column is the number of ranges the kernel loads to index values.
+# Each kernel maps the parameter index of a buffer length to the number of
+# ranges it clamps against that length. The value count is the first i32 of
+# every ABI that reads values, directly after the pointers, and bounds the
+# ranges into values. The partial count bounds the merge ranges into scratch:
+# it is the fourth i32 of the persistent ABI and the first of the merge ABI.
 CLAMPED_KERNELS = [
     pytest.param(
-        "_compile_segmented_reduction_ptx", {"block_size": 32}, 3, 1,
+        "_compile_segmented_reduction_ptx", {"block_size": 32}, {3: 1},
         id="direct-32",
     ),
     pytest.param(
-        "_compile_segmented_reduction_ptx", {"block_size": 128}, 3, 1,
+        "_compile_segmented_reduction_ptx", {"block_size": 128}, {3: 1},
         id="direct-128",
     ),
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 32, "use_task_ids": True}, 4, 1,
+        {"block_size": 32, "use_task_ids": True}, {4: 1},
         id="task-ids-warp",
     ),
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 128, "use_task_ids": True}, 4, 1,
+        {"block_size": 128, "use_task_ids": True}, {4: 1},
         id="task-ids-cta",
     ),
     pytest.param(
-        "_compile_fused_segmented_reduction_ptx", {}, 4, 2, id="fused"
+        "_compile_fused_segmented_reduction_ptx", {}, {4: 2}, id="fused"
     ),
     pytest.param(
-        "_compile_persistent_segmented_reduction_ptx", {}, 10, 3,
+        "_compile_persistent_segmented_reduction_ptx", {}, {10: 3, 13: 1},
         id="persistent",
     ),
     pytest.param(
-        "_compile_split_partial_reduction_ptx", {}, 3, 1, id="split-partial"
+        "_compile_split_partial_reduction_ptx", {}, {3: 1}, id="split-partial"
+    ),
+    pytest.param(
+        "_compile_split_merge_reduction_ptx", {}, {3: 1}, id="split-merge"
     ),
 ]
 
 
-def _compile(compiler, target, **arguments):
-    """Compile the canonical identity sum through one native entry point."""
+def _compile(
+    compiler, target, *, module_text=None, kernel_name=_KERNEL, **arguments
+):
+    """Compile one program through one native entry point.
+
+    The program is the canonical identity sum unless ``module_text`` names
+    another one.
+    """
     with ir.Context() as context:
         swage.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
+        module = ir.Module.parse(module_text or _semantic_module("sum"))
         return getattr(native_swage, compiler)(
-            module, kernel_name=_KERNEL, target=target, **arguments
+            module, kernel_name=kernel_name, target=target, **arguments
         )
 
 
@@ -99,13 +115,23 @@ def _load(compiler, entry=_KERNEL, **arguments):
     return function
 
 
-def _guarded_values():
-    """Place the kernel's values between two NaN guards.
+def _guarded(host_values):
+    """Place a buffer the kernel reads between two NaN guards.
 
-    The kernel receives a pointer to ``_VALUE_COUNT`` valid elements. The
-    ``_VALUE_COUNT`` elements after them are NaN, so a read past the value
-    count poisons its sum. An equal guard precedes them, so a read before
-    element zero does too, and neither stray read leaves the allocation.
+    The kernel receives a pointer to the valid elements. Each guard is at
+    least as long as the buffer, so a read past its end or before element
+    zero poisons the result and neither stray read leaves the allocation.
+    """
+    count = host_values.numel()
+    guard = max(count, 32)
+    buffer = torch.full((count + 2 * guard,), float("nan"), device="cuda")
+    guarded = buffer[guard : guard + count]
+    guarded.copy_(host_values)
+    return guarded
+
+
+def _guarded_values():
+    """Build the guarded values every out-of-range launch reads.
 
     Returns:
         The device view the kernel reads, and a host copy of its values.
@@ -113,10 +139,7 @@ def _guarded_values():
         exact in f32 and a shifted window changes it.
     """
     host_values = ((torch.arange(_VALUE_COUNT) * 7) % 13 + 1).to(torch.float32)
-    buffer = torch.full((3 * _VALUE_COUNT,), float("nan"), device="cuda")
-    values = buffer[_VALUE_COUNT : 2 * _VALUE_COUNT]
-    values.copy_(host_values)
-    return values, host_values
+    return _guarded(host_values), host_values
 
 
 def _clamped_sums(host_values, ranges):
@@ -167,13 +190,11 @@ def test_native_compiler_rejects_non_power_of_two_warp_counts(
         )
 
 
-@pytest.mark.parametrize(
-    ("compiler", "arguments", "value_count_index", "ranges"), CLAMPED_KERNELS
-)
-def test_values_ranges_are_clamped_against_the_abi_value_count(
-    compiler, arguments, value_count_index, ranges
+@pytest.mark.parametrize(("compiler", "arguments", "bounds"), CLAMPED_KERNELS)
+def test_loaded_ranges_are_clamped_against_the_abi_buffer_length(
+    compiler, arguments, bounds
 ):
-    """Bound every loaded values range by the count its own ABI carries."""
+    """Bound every loaded range by the buffer length its own ABI carries."""
     lowered, _ = _compile(compiler, "sm_86", **arguments)
 
     signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
@@ -182,23 +203,35 @@ def test_values_ranges_are_clamped_against_the_abi_value_count(
         parameter.split(":")[0].strip()
         for parameter in signature.group(1).split(",")
     ]
-    value_count = re.escape(parameters[value_count_index])
     # A clamp is two signed maxima and two signed minima; both minima take
-    # the value count as their upper bound.
-    upper_bounds = re.findall(
-        rf"llvm\.intr\.smin\(%\w+, {value_count}\) : \(i32, i32\)", lowered
-    )
-    assert len(upper_bounds) == 2 * ranges
-    assert lowered.count("llvm.intr.smin") == 2 * ranges
-    assert lowered.count("llvm.intr.smax") == 2 * ranges
+    # the buffer length as their upper bound.
+    for length_index, ranges in bounds.items():
+        length = re.escape(parameters[length_index])
+        upper_bounds = re.findall(
+            rf"llvm\.intr\.smin\(%\w+, {length}\) : \(i32, i32\)", lowered
+        )
+        assert len(upper_bounds) == 2 * ranges
+    total = 2 * sum(bounds.values())
+    assert lowered.count("llvm.intr.smin") == total
+    assert lowered.count("llvm.intr.smax") == total
 
 
-def test_split_merge_ranges_stay_unclamped():
-    """Leave scratch ranges as loaded: the merge ABI has no value count."""
-    lowered, _ = _compile("_compile_split_merge_reduction_ptx", "sm_86")
+@pytest.mark.parametrize(
+    ("value_count", "output_count", "bound"),
+    [(10, 6, 6), (10, 10, 10), (10, 16, 10)],
+    ids=["shorter-output", "equal", "longer-output"],
+)
+def test_softmax_validation_returns_the_shorter_buffer_as_the_kernel_bound(
+    value_count, output_count, bound
+):
+    """Give the map_store kernel a count that fits both element buffers."""
+    values = torch.ones(value_count)
+    offsets = torch.tensor([0, 2, 6], dtype=torch.int32)
+    output = torch.zeros(output_count)
 
-    assert "llvm.intr.smin" not in lowered
-    assert "llvm.intr.smax" not in lowered
+    assert _validate_softmax_tensors(
+        values, offsets, output, require_cuda=False
+    ) == (bound, 2)
 
 
 @requires_cuda
@@ -298,22 +331,33 @@ def test_fused_kernel_clamps_offsets_in_both_branches():
 
 
 @requires_cuda
-def test_persistent_kernel_clamps_offsets_and_partial_ranges():
-    """Clamp the warp queue, the CTA queue, and the split partial queue."""
+def test_persistent_kernel_clamps_offsets_partial_and_merge_ranges():
+    """Clamp the warp, CTA, and split partial queues, and the merge."""
     direct_count = len(_MIXED_OFFSETS) - 1
     values, host_values = _guarded_values()
     device_offsets = _device_i32(_MIXED_OFFSETS)
-    # One extra output slot receives the merge of two partials whose ranges
-    # start before element zero and end past the value count.
-    partial_ranges = [(-200, 450), (450, 1800)]
-    output = _nan_output(direct_count + 1)
+    # Two extra output slots receive one merge each. The first group's
+    # partials start before element zero and end past the value count. The
+    # second group's partials are valid, but its merge record names scratch
+    # slots 3 and 4 of four: the length still matches its two partials, so
+    # the merge runs, and it must read slot 3 alone.
+    partial_ranges = [(-200, 450), (450, 1800), (100, 300), (300, 500)]
+    merge_ranges = [(0, 2), (3, 5)]
+    merge_count = len(merge_ranges)
+    output = _nan_output(direct_count + merge_count)
     warp_tasks = _device_i32([0, 2, 3])
     cta_tasks = _device_i32([1, 4])
     device_partials = _device_ranges(partial_ranges)
-    partial_merges = _device_i32([0, 0])
-    merge_records = _device_i32([direct_count, 0, len(partial_ranges)])
-    scratch = _nan_output(len(partial_ranges))
-    counters = torch.zeros(3 + 1, dtype=torch.int32, device="cuda")
+    partial_merges = _device_i32([0, 0, 1, 1])
+    merge_records = _device_i32(
+        [
+            field
+            for merge_id, (begin, end) in enumerate(merge_ranges)
+            for field in (direct_count + merge_id, begin, end)
+        ]
+    )
+    scratch = _guarded(torch.full((len(partial_ranges),), float("nan")))
+    counters = torch.zeros(3 + merge_count, dtype=torch.int32, device="cuda")
     function = _load("_compile_persistent_segmented_reduction_ptx")
 
     _runtime._get_driver().launch_persistent(
@@ -336,17 +380,17 @@ def test_persistent_kernel_clamps_offsets_and_partial_ranges():
             warp_tasks.numel(),
             cta_tasks.numel(),
             len(partial_ranges),
-            1,
+            merge_count,
         ),
     )
 
+    partial_sums = _clamped_sums(host_values, partial_ranges)
     _assert_clamped(
-        output,
-        host_values,
-        [*pairwise(_MIXED_OFFSETS), (0, _VALUE_COUNT)],
+        output[:direct_count], host_values, pairwise(_MIXED_OFFSETS)
     )
+    assert torch.equal(scratch.cpu(), partial_sums)
     assert torch.equal(
-        scratch.cpu(), _clamped_sums(host_values, partial_ranges)
+        output[direct_count:].cpu(), _clamped_sums(partial_sums, merge_ranges)
     )
 
 
@@ -399,3 +443,101 @@ def test_partly_filled_last_warp_gives_exact_sums(block_size):
         torch.cuda.synchronize()
 
         assert torch.equal(output.cpu(), expected)
+
+
+@requires_cuda
+def test_split_merge_kernel_clamps_plan_ranges():
+    """Clamp plan-owned merge ranges by the partial count they index."""
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    ranges = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+    ]
+    scratch = _guarded(host_scratch)
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in enumerate(ranges)
+            for field in (segment, begin, end)
+        ]
+    )
+    output = _nan_output(len(ranges))
+    function = _load(
+        "_compile_split_merge_reduction_ptx", entry=f"{_KERNEL}__merge"
+    )
+
+    _runtime._get_driver().launch_segmented(
+        function,
+        (len(ranges),),
+        512,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            scratch.data_ptr(),
+            output.data_ptr(),
+            records.data_ptr(),
+            partial_count,
+            len(ranges),
+        ),
+    )
+
+    _assert_clamped(output, host_scratch, ranges)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_softmax_store_stays_inside_the_validated_output(block_size):
+    """Bound the map_store write by the output the host validated.
+
+    The softmax kernel stores one element per input element, so its range
+    bounds a write as well as a read. The output may be shorter than the
+    values. The offsets then change through a path the host cannot see, and
+    the last segment claims every value.
+    """
+    covered = 600
+    values, host_values = _guarded_values()
+    values.div_(4)
+    host_values = host_values / 4
+    output_buffer = torch.full((covered + _VALUE_COUNT,), -1.0, device="cuda")
+    output = output_buffer[:covered]
+    offsets = _device_i32((0, 400, covered))
+    bound, segment_count = _validate_softmax_tensors(values, offsets, output)
+    stale = (0, 400, _VALUE_COUNT)
+    with pytest.raises(ValueError, match="output has 600 elements"):
+        _validate_softmax_tensors(values, _device_i32(stale), output)
+    offsets.copy_(_device_i32(stale))
+    function = _load(
+        "_compile_segmented_reduction_ptx",
+        entry="ragged_softmax",
+        module_text=_SOFTMAX_MODULE,
+        kernel_name="ragged_softmax",
+        block_size=block_size,
+    )
+
+    _runtime._get_driver().launch_segmented(
+        function,
+        (segment_count,),
+        block_size,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            offsets.data_ptr(),
+            output.data_ptr(),
+            bound,
+            segment_count,
+        ),
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(
+        output_buffer[covered:].cpu(), torch.full((_VALUE_COUNT,), -1.0)
+    )
+    expected = torch.cat(
+        [
+            torch.softmax(host_values[begin:end].double(), 0)
+            for begin, end in ((0, 400), (400, covered))
+        ]
+    ).float()
+    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=0)

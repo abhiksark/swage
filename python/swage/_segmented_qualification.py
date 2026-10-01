@@ -185,7 +185,16 @@ def _validate_tensors(values, offsets, output, *, require_cuda=True):
 
 
 def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
-    """Validate the softmax tensors, including the aliasing obligation."""
+    """Validate the softmax tensors, including the aliasing obligation.
+
+    Returns:
+        The element bound the kernel receives in its value-count slot, and
+        the segment count. The map_store kernel reads values and writes
+        output at the same element index, and clamps every range it loads
+        from the device to that bound, so the bound is the length of the
+        shorter buffer. Validated offsets end at or below both lengths, so
+        the bound never shortens a validated segment.
+    """
     value_count, segment_count, _ = _validate_shapes(
         values,
         offsets,
@@ -193,7 +202,7 @@ def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
         _validate_softmax_offsets,
         require_cuda=require_cuda,
     )
-    return value_count, segment_count
+    return min(value_count, output.numel()), segment_count
 
 
 def _validate_warp_count(block_size):
