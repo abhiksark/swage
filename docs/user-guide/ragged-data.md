@@ -30,7 +30,9 @@ Segments are not usable from Python yet, so nothing in this section is a
 public call. It records what the private qualification path validates
 today, on a host copy of the offsets, before it compiles or launches
 anything. An input that breaks a rule is rejected with an error. Nothing is
-cast, moved to another device, or repaired.
+cast, moved to another device, or repaired. The private path needs the
+native build, PyTorch, and `numpy`, which the binding requirements in
+[Installation](../getting-started/installation.md) already include.
 
 For `N` segments over one values buffer:
 
@@ -117,10 +119,10 @@ output = output.masked_fill(empty, 0.0)
 ```
 
 An f32 sum has one more property that a caller should know: its rounding
-depends on the schedule. [Execution Model](execution-model.md) states what
-is and is not guaranteed. The internal module shapes and ABIs behind this
-contract are recorded in
-[Segmented Reductions](../internals/segmented-reductions.md).
+depends on the schedule. [Execution Model](execution-model.md) introduces
+that, and [Segmented Reductions](../internals/segmented-reductions.md)
+states the bound, the evidence, what a sum does with NaN and infinities,
+and the internal module shapes and ABIs behind this contract.
 
 ## Three questions, three levels
 

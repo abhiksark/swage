@@ -2,9 +2,14 @@
 
 # Writing Kernels
 
+[Ragged Data](ragged-data.md) described segments, which only private
+qualification executes. This page leaves them aside: the public kernel
+language has no segment syntax, and the one kernel that can be launched is a
+fixed-block vector add.
+
 A Swage kernel is ordinary-looking Python that is captured, never
 executed. This page explains what each line of the canonical kernel
-means and what the frontend does with it. The exact accepted grammar is
+means and what the frontend does with it. The accepted grammar is
 normative in [Kernel Language](../reference/kernel-language.md).
 
 ## Capture, not execution
@@ -27,7 +32,7 @@ the parameter list and the body.
 
 ## The canonical kernel, line by line
 
-Capture itself needs only the published wheel (wheel-only tier):
+Capture itself needs only the pure Python package (wheel-only tier):
 
 ```python
 import swage as sw
@@ -66,8 +71,10 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
 ## Check a kernel without the native build
 
 `emit_mlir()` checks the parameter list and the body before it imports
-the native package, so the published wheel alone answers whether a
-kernel is inside the language (wheel-only tier):
+the native package, so the pure Python package alone answers whether a
+kernel is inside the language (wheel-only tier). The released `0.5.1`
+wheel predates this check;
+[Installation](../getting-started/installation.md) lists what it lacks.
 
 ```python
 signature = {

@@ -35,8 +35,21 @@ python -m pip install -e ".[dev]"
 The wheel does not contain compiler libraries, `swage-opt`, generated MLIR
 bindings, or the native `mlir_swage` package. Native wheel packaging is
 deferred. A wheel-only install can import `swage`, report package and
-environment facts, and capture kernel source. It cannot emit MLIR or launch a
-kernel.
+environment facts, capture kernel source, and check a kernel against the
+kernel language. It cannot emit MLIR or launch a kernel.
+
+These pages describe the current source tree. The released `0.5.1` wheel
+predates part of them:
+
+- It imports the native package before it checks a kernel, so a wheel-only
+  install reports the missing bindings for every kernel.
+- It rejects a kernel that has a docstring.
+- Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
+- Its environment report has fewer fields.
+
+The [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
+lists every change since that release under Unreleased. To match these
+pages, install the package from a checkout with the editable install above.
 
 ## Build LLVM, MLIR, and Swage
 
@@ -57,9 +70,15 @@ build and to run. The pinned LLVM release lists them in its
 LLVM configuration stops if `nanobind` cannot be imported. `build_swage.sh`
 runs the lit suite with the `lit` found on `PATH`, and the binding tests run
 under `pytest`. The `dev` extra above provides `lit` and `pytest` but not the
-binding requirements. `build_llvm.sh` configures the bindings for the
-`python3` found on `PATH`, so `python` in the commands on this page must be
-that interpreter.
+binding requirements.
+
+`build_llvm.sh` and `build_swage.sh` build the bindings for the `python`
+found on `PATH`, which is the interpreter the commands on this page run.
+Where `python` is absent or older than Python 3.10, they fall back to
+`python3`. Each script prints the interpreter it chose as
+`Python interpreter: <path>` and stops with an error when neither name is
+Python 3.10 or newer. Install the binding requirements into that
+interpreter.
 
 With the default `RelWithDebInfo` build type, the pinned LLVM/MLIR build uses
 about 25 GB. Build time depends on the machine. The hosted CI workflow uses
@@ -136,9 +155,13 @@ PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
 `check-swage-python` supplies the build-tree `PYTHONPATH` itself. Both
 commands need `pytest` and PyTorch, because several binding test modules
 import `torch`. The hosted CI job installs a CPU-only PyTorch build for them,
-and the CUDA tests skip without a GPU. The second command imports `swage`
+and the CUDA tests skip without a GPU. The private segmented qualification
+helpers also import `numpy`, which the binding requirements above already
+install. The public `swage` package does not need it. The second command
+imports `swage`
 from the installed package, so it needs the editable install from the same
-checkout. The released `0.5.1` wheel does not match the tests on `main`.
+checkout. The released `0.5.1` wheel does not match the tests of the
+current source tree.
 
 If CMake is asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install
 without Python bindings, configuration fails instead of silently omitting the
