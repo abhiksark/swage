@@ -20,9 +20,11 @@ from datetime import datetime, timezone
 import benchmark_provenance
 from benchmark_triton_comparison import (
     _call_us,
+    _event_tick_us,
     _gb_per_s,
     _git_metadata,
     _graph_us,
+    _resolution,
     _useful_bytes,
 )
 from distributions import generate_lengths, summarize_lengths
@@ -124,6 +126,10 @@ def main():
     provenance = benchmark_provenance.start(
         torch, benchmark_provenance.swage_build()
     )
+    ticks = {
+        "call": benchmark_provenance.clock_tick_us(),
+        "graph": _event_tick_us(torch, "cuda"),
+    }
     native_path = pathlib.Path(_swageDialectsNanobind.__file__)
     paths = [
         pathlib.Path(__file__).resolve(),
@@ -193,6 +199,13 @@ def main():
             "effective_gb_per_s": (
                 "The row's useful_bytes (f32 values and i32 offsets read, "
                 "f32 results written) divided by the median time."
+            ),
+            "timer_ticks_us": ticks,
+            "tick_fraction_of_sample": (
+                "The measured host clock or CUDA event tick divided by one "
+                "sample: a call, or the 32 captured calls of a graph "
+                "replay. The batch is fixed and is not raised to meet a "
+                "resolution limit."
             ),
             "order": "Rotate policy order across cases; sequential samples.",
             "torch": (
@@ -283,10 +296,17 @@ def main():
                 }
                 if name != "torch":
                     torch.testing.assert_close(output, expected, **tolerance)
-                for timing in row["policies"][name].values():
+                for method, timing in row["policies"][name].items():
                     if "summary_us" in timing:
+                        median = timing["summary_us"]["median"]
                         timing["effective_gb_per_s"] = _gb_per_s(
-                            useful_bytes, timing["summary_us"]["median"]
+                            useful_bytes, median
+                        )
+                        timing.update(
+                            _resolution(
+                                ticks[method],
+                                median * timing["launches_per_sample"],
+                            )
                         )
             row["correctness_passed"] = True
             report["results"].append(row)

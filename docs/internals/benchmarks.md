@@ -139,8 +139,7 @@ values and the i32 offsets read and the f32 sums written, for vector add two
 inputs read and one output written. A baseline that moves more bytes, such
 as a padded matrix, is rated by the same bytes.
 
-The fresh-offsets and comparison harnesses also report the timer tick as a
-fraction of one sample:
+Every harness also relates the timer tick to one sample:
 
 - The host clock tick is the smallest advance of back-to-back
   `time.perf_counter_ns` reads in the process.
@@ -149,13 +148,21 @@ fraction of one sample:
   of a coarser one, and the coarser step is what limits a sample. The
   harness measures it in the process and does not assume a value.
 
-An event-timed sample is a batch of launches. The batch starts at 32. While
-one tick is not below one percent of the median sample, the batch doubles
-and the samples are taken again. Each timing records `launches_per_sample`,
-`timer_tick_us`, and `tick_fraction_of_sample`. A fresh-offsets sample is
-one call on one fresh layout and is never a batch, because a second call on
-the same layout would not be fresh; the row records the tick fraction of
-each candidate.
+In the comparison harness an event-timed sample is a batch of launches. The
+batch starts at 32. While one tick is not below one percent of the median
+sample, the batch doubles and the samples are taken again. Each timing
+records `launches_per_sample`, `timer_tick_us`, and
+`tick_fraction_of_sample`.
+
+The other harnesses report the resolution and do not batch for it:
+
+- A fresh-offsets sample is one call on one fresh layout, because a second
+  call on the same layout would not be fresh. The row records the tick
+  fraction of each candidate.
+- A gate sample is one launch, as the gate declares. The record gives each
+  median in ticks.
+- A composable-reductions graph sample is a fixed batch of 32 launches. Each
+  timing records its tick fraction.
 
 A ratio of two medians carries no more digits than the tick fraction and
 the spread across processes support.
