@@ -57,7 +57,13 @@ def _isolated_cache(tmp_path, monkeypatch):
     from swage import _runtime
 
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path / "isolated-cache"))
-    monkeypatch.setattr(_runtime, "_cache_off", set(), raising=False)
+    monkeypatch.setattr(_runtime, "_cache_off", {}, raising=False)
+    for name in (
+        "SWAGE_CACHE_MAX_ENTRIES",
+        "SWAGE_CACHE_READ_ONLY",
+        "SWAGE_NO_COMPILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _use_shared_cache(cache_dir):
@@ -83,6 +89,29 @@ def _cold_start(cache_dir, results_dir, barrier, rounds):
             )
             result = pathlib.Path(results_dir) / f"{round_id}-{os.getpid()}"
             result.write_text(artifact.ptx)
+    except BaseException:
+        barrier.abort()  # Release the other processes instead of timing out.
+        raise
+
+
+def _churn(cache_dir, barrier, rounds, bound):
+    """Publish a contended key and a private key per round, bounded."""
+    os.environ["SWAGE_CACHE_MAX_ENTRIES"] = str(bound)
+    _runtime = _use_shared_cache(cache_dir)
+    _runtime._compile_native = lambda *_args: ("lowered", "ptx")
+    # A cache that gives up warns, and here a warning fails the process.
+    warnings.simplefilter("error")
+    try:
+        for round_id in range(rounds):
+            barrier.wait(timeout=60)
+            for owner in ("every process", os.getpid()):
+                artifact = _runtime._compile_cached(
+                    dict(_SHARED_KEY, round=round_id, owner=owner),
+                    "add_kernel",
+                    128,
+                    object,
+                )
+                assert artifact.ptx == "ptx"
     except BaseException:
         barrier.abort()  # Release the other processes instead of timing out.
         raise
@@ -1083,7 +1112,7 @@ def test_debris_in_a_read_only_cache_is_a_miss_for_its_key_only(
     assert reread == warm
     assert repeated == later == cold == []
     assert len(calls) == 3
-    assert _runtime._cache_off == {"write"}
+    assert set(_runtime._cache_off) == {"write"}
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [warm.key, debris.name]
     )
@@ -1189,6 +1218,526 @@ def test_a_file_in_place_of_an_entry_is_rejected(tmp_path, monkeypatch):
     assert [path.name for path in tmp_path.iterdir()] == [entry.name]
 
 
+def _snapshot(root):
+    """Return every path under `root` with its change time and contents."""
+    return {
+        str(path.relative_to(root)): (
+            path.lstat().st_mtime_ns,
+            path.read_text() if path.is_file() else None,
+        )
+        for path in sorted(root.rglob("*"))
+    }
+
+
+def test_read_only_mode_reads_entries_and_writes_nothing(tmp_path, monkeypatch):
+    """Serve published entries and keep new kernels in the process only."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    debris = tmp_path / _runtime._cache_key({"kernel": "debris"})
+    debris.mkdir(mode=0o700)
+    (debris / "lowered.mlir").write_text("stale")
+    before = _snapshot(tmp_path)
+    _runtime._ptx_cache.clear()
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+
+    reread, on_hit = _compile_recording_warnings(_runtime)
+    cold, on_miss = _compile_recording_warnings(_runtime, {"kernel": "cold"})
+    again, repeated = _compile_recording_warnings(_runtime, {"kernel": "cold"})
+    missed, on_debris = _compile_recording_warnings(
+        _runtime, {"kernel": "debris"}
+    )
+
+    assert reread == warm
+    assert cold == again
+    assert cold.ptx == missed.ptx == "ptx"
+    assert len(calls) == 3
+    assert on_hit == on_miss == repeated == on_debris == []
+    assert _snapshot(tmp_path) == before
+    assert not _runtime._cache_off
+
+
+def test_read_only_mode_does_not_create_the_cache_root(tmp_path, monkeypatch):
+    """Leave a missing cache root missing."""
+    root = tmp_path / "absent" / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    artifact, messages = _compile_recording_warnings(_runtime)
+
+    assert artifact.ptx == "ptx"
+    assert len(calls) == 1
+    assert messages == []
+    assert not root.parent.exists()
+
+
+def test_read_only_mode_still_rejects_unsafe_entries(tmp_path, monkeypatch):
+    """Keep treating a corrupt entry as tamper evidence."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    (tmp_path / warm.key / "kernel.ptx").write_text("corrupt")
+    _runtime._ptx_cache.clear()
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert len(calls) == 1
+
+
+def test_no_compile_mode_serves_entries_and_refuses_a_miss(
+    tmp_path, monkeypatch
+):
+    """Launch from the cache and raise instead of compiling on a miss."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    before = _snapshot(tmp_path)
+    _runtime._ptx_cache.clear()
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    emissions = []
+    cold = {"kernel": "cold"}
+
+    reread, on_hit = _compile_recording_warnings(_runtime)
+    in_process, _ = _compile_recording_warnings(_runtime)
+    for _ in range(2):
+        with pytest.raises(RuntimeError) as refusal:
+            _runtime._compile_cached(
+                cold, "cold_kernel", 128, lambda: emissions.append(1)
+            )
+
+    assert reread == in_process == warm
+    assert on_hit == []
+    message = str(refusal.value)
+    assert "SWAGE_NO_COMPILE=1 refuses to compile kernel 'cold_kernel'" in (
+        message
+    )
+    assert f"no entry {_runtime._cache_key(cold)} in {tmp_path}" in message
+    assert len(calls) == 1
+    assert emissions == []
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("identity", "reason"),
+    [
+        (_identity(native=None), "native compiler libraries are not found"),
+        (_identity(frontend=None), "frontend sources are not identified"),
+    ],
+)
+def test_no_compile_mode_says_why_the_cache_was_not_read(
+    tmp_path, monkeypatch, identity, reason
+):
+    """Name the cause when the refusal follows from an unusable cache."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
+    for _ in range(2):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RuntimeError) as refusal:
+                _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        assert "SWAGE_NO_COMPILE=1 refuses to compile" in str(refusal.value)
+        assert "the persistent cache is off for this process" in str(
+            refusal.value
+        )
+        assert reason in str(refusal.value)
+
+    assert calls == []
+
+
+def test_no_compile_mode_says_when_the_cache_root_is_unreadable(
+    tmp_path, monkeypatch
+):
+    """Keep the cause of an unreadable root in every later refusal."""
+    root = tmp_path / "file" / "cache"
+    root.parent.write_text("a file where a directory is expected")
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    for _ in range(2):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RuntimeError) as refusal:
+                _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        assert f"cannot use {root}" in str(refusal.value)
+        assert "Not a directory" in str(refusal.value)
+
+    assert calls == []
+
+
+def test_no_compile_mode_refuses_a_launch_before_any_driver_work(
+    tmp_path, monkeypatch
+):
+    """Raise from the public launch with nothing loaded or enqueued."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _Driver()
+    emissions = []
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(
+        add_kernel, "emit_mlir", lambda **_kwargs: emissions.append(1)
+    )
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _runtime, calls = _stub_compiler(monkeypatch)
+    _runtime._loaded_functions.clear()
+    monkeypatch.delitem(
+        add_kernel.__dict__, "_specialization_memo", raising=False
+    )
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    arguments = _arguments(torch)
+
+    try:
+        with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
+            add_kernel.launch(
+                arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+            )
+    finally:
+        _runtime._identity_cache = None
+
+    assert calls == emissions == []
+    assert driver.loads == driver.launches == []
+    assert arguments["output_ptr"].recorded_streams == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["SWAGE_CACHE_READ_ONLY", "SWAGE_NO_COMPILE"])
+@pytest.mark.parametrize("value", ["true", "yes", "2", " 1", "on"])
+def test_cache_switches_reject_unknown_values(
+    tmp_path, monkeypatch, name, value
+):
+    """Fail instead of guessing what a mistyped safety switch meant."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv(name, value)
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    with pytest.raises(
+        ValueError, match=rf"{name} must be 0 or 1; found '{value}'"
+    ):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["SWAGE_CACHE_READ_ONLY", "SWAGE_NO_COMPILE"])
+@pytest.mark.parametrize("value", ["", "0"])
+def test_cache_switches_are_off_when_empty_or_zero(
+    tmp_path, monkeypatch, name, value
+):
+    """Treat an empty switch and `0` like an unset switch."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv(name, value)
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert len(calls) == 1
+    _assert_complete_entry(tmp_path / artifact.key)
+
+
+def _publish(_runtime, name, age_seconds):
+    """Publish one entry and date it `age_seconds` before now."""
+    artifact = _runtime._compile_cached({"kernel": name}, name, 128, object)
+    entry = _runtime._cache_dir() / artifact.key
+    published = time.time() - age_seconds
+    os.utime(entry, (published, published))
+    return artifact.key
+
+
+def test_cache_keeps_the_newest_entries_within_the_bound(tmp_path, monkeypatch):
+    """Remove the entries published longest ago once the bound is passed."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "3")
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    # Published out of age order, so the age decides, not the name or the
+    # order of arrival.
+    middle = _publish(_runtime, "middle", 200)
+    oldest = _publish(_runtime, "oldest", 400)
+    newer = _publish(_runtime, "newer", 100)
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [middle, oldest, newer]
+    )
+    # This publish is not dated back, so it is the newest of the four.
+    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [middle, newer, latest.key]
+    )
+    one_more = _publish(_runtime, "one more", 0)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [newer, latest.key, one_more]
+    )
+    for key in (newer, latest.key, one_more):
+        _assert_complete_entry(tmp_path / key)
+
+    # An evicted key is a plain miss and is published again.
+    _runtime._ptx_cache.clear()
+    compiles = len(calls)
+    assert _publish(_runtime, "oldest", 0) == oldest
+    assert len(calls) == compiles + 1
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [latest.key, one_more, oldest]
+    )
+
+
+def test_cache_is_bounded_without_configuration(tmp_path, monkeypatch):
+    """Apply the default bound when the variable is unset or empty."""
+    from swage import _runtime
+
+    monkeypatch.delenv("SWAGE_CACHE_MAX_ENTRIES", raising=False)
+    assert _runtime._max_entries() == 1024
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "")
+    assert _runtime._max_entries() == 1024
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "7")
+    assert _runtime._max_entries() == 7
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "many", " 8", "0x10"])
+def test_cache_bound_rejects_values_that_are_not_positive_integers(
+    tmp_path, monkeypatch, value
+):
+    """Fail instead of guessing a bound, before compiling or writing."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", value)
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "SWAGE_CACHE_MAX_ENTRIES must be a positive integer; "
+            f"found '{re.escape(value)}'"
+        ),
+    ):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_trimming_leaves_everything_that_is_not_an_old_entry(
+    tmp_path, monkeypatch
+):
+    """Remove only entry directories and dead staging directories."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
+    _runtime, _ = _stub_compiler(monkeypatch)
+    long_ago = time.time() - 30 * 24 * 3600
+    outside = tmp_path.parent / "outside"
+    outside.mkdir()
+    (outside / "kept.txt").write_text("kept")
+
+    def old(path):
+        os.utime(path, (long_ago, long_ago), follow_symlinks=False)
+        return path
+
+    live_staging = pathlib.Path(
+        _runtime.tempfile.mkdtemp(dir=tmp_path, prefix=_runtime._STAGING_PREFIX)
+    )
+    dead_staging = pathlib.Path(
+        _runtime.tempfile.mkdtemp(dir=tmp_path, prefix=_runtime._STAGING_PREFIX)
+    )
+    (dead_staging / "lowered.mlir").write_text("stale")
+    old(dead_staging)
+    kept = [live_staging]
+    for name in ("notes", "a" * 63, "A" * 64, "g" * 64, "a" * 65):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "data").write_text("unrelated")
+        kept.append(old(directory))
+    file_named_like_an_entry = tmp_path / ("b" * 64)
+    file_named_like_an_entry.write_text("not a directory")
+    kept.append(old(file_named_like_an_entry))
+    for name in ("c" * 64, f"{_runtime._STAGING_PREFIX}link"):
+        link = tmp_path / name
+        link.symlink_to(outside, target_is_directory=True)
+        kept.append(old(link))
+    evicted = _publish(_runtime, "evicted", 3600)
+
+    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [path.name for path in kept] + [latest.key]
+    )
+    assert evicted not in os.listdir(tmp_path)
+    assert (outside / "kept.txt").read_text() == "kept"
+    assert (tmp_path / "notes" / "data").read_text() == "unrelated"
+
+
+def test_trimming_skips_directories_of_another_user(tmp_path, monkeypatch):
+    """Leave a foreign entry for the lookup that will reject it."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
+    _runtime, _ = _stub_compiler(monkeypatch)
+    foreign = tmp_path / _publish(_runtime, "foreign", 3600)
+    _make_foreign(monkeypatch, foreign)
+    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [foreign.name, latest.key]
+    )
+
+
+def test_an_entry_evicted_by_another_process_is_not_an_error(
+    tmp_path, monkeypatch
+):
+    """Treat an entry that vanished during trimming as already removed."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
+    _runtime, _ = _stub_compiler(monkeypatch)
+    raced = tmp_path / _publish(_runtime, "raced", 3600)
+    rename = os.rename
+
+    def rename_after_another_process_removed_it(source, destination):
+        if pathlib.Path(source) == raced:
+            shutil.rmtree(raced)
+        return rename(source, destination)
+
+    monkeypatch.setattr(
+        _runtime.os, "rename", rename_after_another_process_removed_it
+    )
+    latest, messages = _compile_recording_warnings(_runtime)
+
+    assert messages == []
+    assert [path.name for path in tmp_path.iterdir()] == [latest.key]
+
+
+def test_failed_trimming_stops_publishing_with_one_warning(
+    tmp_path, monkeypatch
+):
+    """Stop adding entries when the bound cannot be kept."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
+    _runtime, calls = _stub_compiler(monkeypatch)
+    stuck = _publish(_runtime, "stuck", 3600)
+    rename = os.rename
+
+    def refuse_to_move_the_old_entry(source, destination):
+        if pathlib.Path(source).name == stuck:
+            raise PermissionError(13, "Permission denied")
+        return rename(source, destination)
+
+    monkeypatch.setattr(_runtime.os, "rename", refuse_to_move_the_old_entry)
+    latest, messages = _compile_recording_warnings(_runtime)
+    later, repeated = _compile_recording_warnings(_runtime, {"kernel": "later"})
+
+    assert latest.ptx == later.ptx == "ptx"
+    assert len(calls) == 3
+    assert len(messages) == 1
+    assert "persistent cache is not written by this process" in messages[0]
+    assert "Permission denied" in messages[0]
+    assert repeated == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [stuck, latest.key]
+    )
+
+
+def test_cache_status_describes_an_active_cache_without_touching_it(
+    tmp_path, monkeypatch
+):
+    """Report the root, the entry count, and the modes, and change nothing."""
+    root = tmp_path / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    _runtime, _ = _stub_compiler(monkeypatch)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        absent = _runtime._cache_status()
+    assert not root.exists()
+    assert absent == _runtime._CacheStatus(
+        directory=root,
+        problem=None,
+        rejected=False,
+        writes=True,
+        entries=0,
+        max_entries=1024,
+        compiles=True,
+    )
+
+    _publish(_runtime, "first", 10)
+    _publish(_runtime, "second", 0)
+    (root / "notes").mkdir()
+    (root / ("b" * 64)).write_text("a file named like an entry")
+    before = _snapshot(root)
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "5")
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        status = _runtime._cache_status()
+
+    assert status == _runtime._CacheStatus(
+        directory=root,
+        problem=None,
+        rejected=False,
+        writes=False,
+        entries=2,
+        max_entries=5,
+        compiles=False,
+    )
+    assert _snapshot(root) == before
+    assert not _runtime._cache_off
+
+
+@pytest.mark.parametrize(
+    ("identity", "reason"),
+    [
+        (_identity(native=None), "native compiler libraries are not found"),
+        (_identity(frontend=None), "frontend sources are not identified"),
+    ],
+)
+def test_cache_status_says_why_the_cache_is_off(
+    tmp_path, monkeypatch, identity, reason
+):
+    """Give the reason a launch would warn about, without warning."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, _ = _stub_compiler(monkeypatch, lambda: identity)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        status = _runtime._cache_status()
+
+    assert reason in status.problem
+    assert not status.rejected
+    assert not _runtime._cache_off
+
+
+def test_cache_status_reports_what_this_process_gave_up(tmp_path, monkeypatch):
+    """Describe the process that asks, including a cache it turned off."""
+    root = tmp_path / "file" / "cache"
+    root.parent.write_text("a file where a directory is expected")
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    _runtime, _ = _stub_compiler(monkeypatch)
+
+    fresh = _runtime._cache_status()
+    _compile_recording_warnings(_runtime)
+    after = _runtime._cache_status()
+
+    assert f"cannot use {root}" in fresh.problem
+    assert after.problem == fresh.problem
+    assert not after.rejected
+
+
+def test_cache_status_reports_an_unsafe_root_as_rejected(tmp_path, monkeypatch):
+    """Say that lookups raise, which is not the same as the cache being off."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, _ = _stub_compiler(monkeypatch)
+    tmp_path.chmod(0o707)
+
+    try:
+        status = _runtime._cache_status()
+    finally:
+        tmp_path.chmod(0o700)
+
+    assert status.rejected
+    assert status.problem == f"cache entry is world-writable: {tmp_path}"
+
+
 def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
     """Let eight processes cold-start one key on one cache directory."""
     from swage import _runtime
@@ -1229,6 +1778,34 @@ def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
         )
         used = [path.read_text() for path in results.glob(f"{round_id}-*")]
         assert used == [published.ptx] * processes
+
+
+def test_concurrent_publishers_keep_the_cache_within_its_bound(tmp_path):
+    """Let eight processes publish and evict on one small cache directory."""
+    processes, rounds, bound = 8, 6, 4
+    cache = tmp_path / "shared"
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(processes)
+    workers = [
+        context.Process(
+            target=_churn, args=(str(cache), barrier, rounds, bound)
+        )
+        for _ in range(processes)
+    ]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=120)
+        exit_codes = [worker.exitcode for worker in workers]
+    finally:
+        _stop(workers)
+
+    assert exit_codes == [0] * processes
+    entries = list(cache.iterdir())
+    assert 1 <= len(entries) <= bound
+    for entry in entries:
+        _assert_complete_entry(entry)
 
 
 def test_hung_workers_are_terminated_and_reaped():
@@ -1766,7 +2343,7 @@ import swage  # Runs under -W error: a warning here is a failure.
 from swage import _runtime
 
 assert _runtime._PROCESS_START_NS is None
-assert _runtime._cache_off == set()
+assert not _runtime._cache_off
 
 compiles = []
 _runtime._native_identity = lambda: [["_swageDialectsNanobind.so", 1, 2]]

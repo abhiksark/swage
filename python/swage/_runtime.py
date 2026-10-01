@@ -641,16 +641,68 @@ def _cache_key(specialization):
     return hashlib.sha256(encoded).hexdigest()
 
 
-# The uses of the disk cache this process has given up, each warned once:
-# "identity" and "read" end reading and publishing, "write" ends publishing.
-_cache_off = set()
+# The uses of the disk cache this process has given up, each with the reason
+# it warned about once: "identity" and "read" end reading and publishing,
+# "write" ends publishing.
+_cache_off = {}
+# The most entries the cache root holds after a publish, unless
+# SWAGE_CACHE_MAX_ENTRIES says otherwise.
+_DEFAULT_MAX_ENTRIES = 1024
+
+
+def _switch_on(name):
+    """Return whether the environment switch `name` is set to `1`.
+
+    Unset, empty, and `0` are off. Any other value raises: a mistyped switch
+    that stayed off would let the process write or compile after its
+    operator asked it not to.
+    """
+    value = os.environ.get(name, "")
+    if value in ("", "0"):
+        return False
+    if value == "1":
+        return True
+    raise ValueError(f"{name} must be 0 or 1; found {value!r}")
+
+
+def _max_entries():
+    """Return the most entries the cache root may hold after a publish."""
+    value = os.environ.get("SWAGE_CACHE_MAX_ENTRIES", "")
+    if not value:
+        return _DEFAULT_MAX_ENTRIES
+    if not (value.isascii() and value.isdigit()) or int(value) == 0:
+        raise ValueError(
+            "SWAGE_CACHE_MAX_ENTRIES must be a positive integer; "
+            f"found {value!r}"
+        )
+    return int(value)
+
+
+def _cache_settings():
+    """Read the three cache variables, raising on a mistyped value.
+
+    Returns:
+        `(read_only, no_compile, max_entries)`.
+    """
+    return (
+        _switch_on("SWAGE_CACHE_READ_ONLY"),
+        _switch_on("SWAGE_NO_COMPILE"),
+        _max_entries(),
+    )
+
+
+def _cache_writable():
+    """Return whether this process may still change the cache root."""
+    return "write" not in _cache_off and not _switch_on(
+        "SWAGE_CACHE_READ_ONLY"
+    )
 
 
 def _warn_cache_off(use, reason):
     """Give up one use of the disk cache, warning the first time."""
     if use in _cache_off:
         return
-    _cache_off.add(use)
+    _cache_off[use] = reason
     if use == "write":
         effect = "is not written by this process"
         reuse = (
@@ -667,26 +719,120 @@ def _warn_cache_off(use, reason):
     )
 
 
-def _cache_usable(identity):
-    """Decide whether this process may read and publish disk entries.
+def _cache_problem(identity):
+    """Return why `identity` rules out disk entries, or None when it does not.
 
-    That needs a native compiler, an identified frontend, and an identity
-    known to describe the loaded code. A process that can compile but fails
-    the other two is warned once and keeps to process-local reuse.
+    Reading and publishing need a native compiler, an identified frontend,
+    and an identity known to describe the loaded code. Nothing is warned
+    about and nothing is recorded here.
     """
-    if identity["native"] is None or _cache_off & {"identity", "read"}:
-        return False
+    if identity["native"] is None:
+        return "the native compiler libraries are not found"
     if identity["frontend"] is None:
-        problem = (
+        return (
             _hash_frontend(_package_dir())[1]
             or "the frontend sources are not identified"
         )
-    else:
-        problem = _stale_identity(identity)
+    return _stale_identity(identity)
+
+
+def _cache_off_reason(identity):
+    """Return why this process reads no disk entry, or None when it does."""
+    return (
+        _cache_off.get("identity")
+        or _cache_off.get("read")
+        or _cache_problem(identity)
+    )
+
+
+def _cache_usable(identity):
+    """Decide whether this process may read and publish disk entries.
+
+    A process that can compile but whose identity rules the cache out is
+    warned once and keeps to process-local reuse.
+    """
+    if identity["native"] is None or _cache_off.keys() & {"identity", "read"}:
+        return False
+    problem = _cache_problem(identity)
     if problem is None:
         return True
     _warn_cache_off("identity", problem)
     return False
+
+
+class _CacheStatus(NamedTuple):
+    """How this process would use the disk cache right now."""
+
+    directory: pathlib.Path
+    # Why no disk entry is read, or None when lookups read the cache.
+    problem: str | None
+    # Whether `problem` makes every lookup raise instead of compiling.
+    rejected: bool
+    writes: bool
+    entries: int
+    max_entries: int
+    compiles: bool
+
+
+def _cache_status():
+    """Describe how this process would use the disk cache, changing nothing.
+
+    Unlike a lookup, this does not warn, does not record a cache it finds
+    unusable, and does not create or clean the cache root. A mistyped cache
+    variable raises `ValueError`, as it does for a launch.
+    """
+    read_only, no_compile, max_entries = _cache_settings()
+    root = _cache_dir()
+    problem = _cache_off_reason(_cached_identity())
+    rejected = False
+    entries = 0
+    if problem is None:
+        try:
+            _check_safe(root)
+            with os.scandir(root) as listing:
+                entries = sum(
+                    1
+                    for item in listing
+                    if _ENTRY_NAME.fullmatch(item.name)
+                    and item.is_dir(follow_symlinks=False)
+                )
+        except FileNotFoundError:
+            pass  # The first publish creates the root.
+        except OSError as error:
+            problem = f"cannot use {root}: {error}"
+        except RuntimeError as error:
+            problem, rejected = str(error), True
+    return _CacheStatus(
+        directory=root,
+        problem=problem,
+        rejected=rejected,
+        writes=problem is None and not read_only and "write" not in _cache_off,
+        entries=entries,
+        max_entries=max_entries,
+        compiles=not no_compile,
+    )
+
+
+def _refuse_compile(kernel_name, key, looked_up):
+    """Raise for a kernel that is not cached while compiling is switched off.
+
+    Args:
+        kernel_name: Name of the kernel the caller asked for.
+        key: Cache key of the specialization.
+        looked_up: Whether the disk cache was read and held no entry. When
+            it was not read, the error says why.
+    """
+    if looked_up:
+        reason = f"no entry {key} in {_cache_dir()}"
+    else:
+        reason = (
+            "the persistent cache is off for this process: "
+            f"{_cache_off_reason(_cached_identity())}"
+        )
+    raise RuntimeError(
+        f"SWAGE_NO_COMPILE=1 refuses to compile kernel '{kernel_name}': "
+        f"{reason}"
+    )
 
 
 def _compile_cached(specialization, kernel_name, block_size, emit, *,
@@ -699,6 +845,10 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
     A cache directory that cannot be read or written never fails the call:
     the artifact is kept for the process and one warning names the cause.
     An unsafe or corrupt entry is tamper evidence and still raises.
+
+    SWAGE_CACHE_READ_ONLY=1 keeps a new artifact in the process without
+    publishing it. SWAGE_NO_COMPILE=1 raises `RuntimeError` on a miss instead
+    of compiling. A mistyped cache variable raises `ValueError`.
     """
     if key is None:
         key = _cache_key(specialization)
@@ -706,6 +856,9 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         cached = _ptx_cache.get(key)
         if cached is not None:
             return cached
+        # Read before any cache or compiler work, so a mistyped value fails
+        # the call instead of being ignored.
+        _, no_compile, _ = _cache_settings()
         identity = _cached_identity()
         persistent = _cache_usable(identity)
         if persistent:
@@ -717,6 +870,8 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
             if cached is not None:
                 _ptx_cache[key] = cached
                 return cached
+        if no_compile:
+            _refuse_compile(kernel_name, key, looked_up=persistent)
         target = specialization.get(
             "compute_capability", specialization.get("target")
         )
@@ -728,7 +883,7 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         _ptx_cache[key] = artifact
         # The identity is checked again: the compile may have loaded code
         # that changed on disk since the lookup above.
-        if persistent and "write" not in _cache_off and _cache_usable(identity):
+        if persistent and _cache_writable() and _cache_usable(identity):
             try:
                 artifact = _write_cache_entry(artifact, specialization)
             except OSError as error:
@@ -783,9 +938,10 @@ def _read_cache_entry(key, specialization):
     debris from a writer that died before entries were published atomically,
     and it is removed so the key can be published again. When the cache
     directory cannot be written, the debris stays, publishing is given up
-    with a warning, and the miss still concerns this key only. Unsafe,
-    unreadable, mismatched, and corrupt entries raise `RuntimeError`. A
-    cache directory that cannot be inspected raises `OSError`.
+    with a warning, and the miss still concerns this key only. A read-only
+    process leaves the debris and does not warn. Unsafe, unreadable,
+    mismatched, and corrupt entries raise `RuntimeError`. A cache directory
+    that cannot be inspected raises `OSError`.
     """
     root = _cache_dir()
     entry = root / key
@@ -803,12 +959,13 @@ def _read_cache_entry(key, specialization):
     except FileNotFoundError:
         return None
     if len(present) != len(paths):
-        try:
-            _remove_incomplete_entry(entry)
-        except OSError as error:
-            # The debris stays, so this key stays a miss and is not
-            # published. Entries of other keys are still read.
-            _warn_cache_off("write", f"cannot use {root}: {error}")
+        if _cache_writable():
+            try:
+                _remove_incomplete_entry(entry)
+            except OSError as error:
+                # The debris stays, so this key stays a miss and is not
+                # published. Entries of other keys are still read.
+                _warn_cache_off("write", f"cannot use {root}: {error}")
         return None
     try:
         metadata = json.loads(paths["metadata"].read_text())
@@ -833,7 +990,13 @@ def _read_cache_entry(key, specialization):
 
 _ENTRY_FILES = ("metadata.json", "lowered.mlir", "kernel.ptx")
 # Entry names are SHA-256 hex digests, so a staging name never collides.
+_ENTRY_NAME = re.compile(r"[0-9a-f]{64}")
 _STAGING_PREFIX = ".staging-"
+# A writer needs milliseconds between creating its staging directory and
+# renaming it, so a staging directory this old belongs to a dead writer. A
+# writer that was only stalled for longer finds its directory gone, fails
+# to publish, and keeps its kernel for the process with one warning.
+_STAGING_MAX_AGE_NS = 3600 * 1_000_000_000
 
 
 def _remove_incomplete_entry(entry):
@@ -866,8 +1029,62 @@ def _remove_incomplete_entry(entry):
         shutil.rmtree(aside, ignore_errors=True)
 
 
+def _discard_entry(entry):
+    """Remove one published entry without showing a reader part of it.
+
+    The entry is renamed to a private name first, so a concurrent lookup
+    finds the whole entry or a plain miss.
+    """
+    aside = pathlib.Path(
+        tempfile.mkdtemp(dir=entry.parent, prefix=_STAGING_PREFIX)
+    )
+    try:
+        os.rename(entry, aside)
+    except FileNotFoundError:
+        pass  # Another process evicted it first.
+    finally:
+        shutil.rmtree(aside, ignore_errors=True)
+
+
+def _trim_cache(root, keep):
+    """Remove dead staging directories and the oldest entries over the bound.
+
+    Only a directory that the current user owns and that is named like an
+    entry or like a staging directory is ever removed; anything else under
+    the cache root is left alone. Entries go in the order they were
+    published, oldest first, until the root holds at most `_max_entries()`.
+    Reading an entry does not renew it.
+
+    Args:
+        root: The cache root.
+        keep: Name of the entry just published, which always stays.
+    """
+    limit = _max_entries()
+    dead_before = time.time_ns() - _STAGING_MAX_AGE_NS
+    entries = []
+    for name in os.listdir(root):
+        staging = name.startswith(_STAGING_PREFIX)
+        if not staging and (name == keep or not _ENTRY_NAME.fullmatch(name)):
+            continue
+        path = root / name
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            continue  # Another process removed it first.
+        if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.geteuid():
+            continue
+        if not staging:
+            entries.append((details.st_mtime_ns, name))
+        elif details.st_mtime_ns < dead_before:
+            shutil.rmtree(path, ignore_errors=True)
+    # `keep` is not in `entries` and takes one place under the bound.
+    excess = max(len(entries) + 1 - limit, 0)
+    for _, name in sorted(entries)[:excess]:
+        _discard_entry(root / name)
+
+
 def _write_cache_entry(artifact, specialization):
-    """Publish one cache entry atomically.
+    """Publish one cache entry atomically, then keep the root in its bound.
 
     The three files are written into a staging directory inside the cache
     root, which is then renamed to the entry name. A reader therefore sees
@@ -893,8 +1110,6 @@ def _write_cache_entry(artifact, specialization):
             "ptx": hashlib.sha256(artifact.ptx.encode()).hexdigest(),
         },
     }
-    # ponytail: staging directories of killed writers are never swept and
-    # entries are never evicted; add an age-bounded sweep if the root grows.
     staging = pathlib.Path(tempfile.mkdtemp(dir=root, prefix=_STAGING_PREFIX))
     try:
         _atomic_write(staging / "lowered.mlir", artifact.lowered)
@@ -912,6 +1127,7 @@ def _write_cache_entry(artifact, specialization):
                 raise
             published = _read_cache_entry(artifact.key, specialization)
             return artifact if published is None else published
+        _trim_cache(root, artifact.key)
         return artifact
     finally:
         shutil.rmtree(staging, ignore_errors=True)
