@@ -136,9 +136,9 @@ FIGURES = (
         title="Segmented sum under graph timing",
         description=(
             "Grouped bars compare graph-replay medians for the best "
-            "Swage policy, the tuned Triton baseline, and torch "
-            "segment_reduce across seven segment distributions on an "
-            "RTX 5090."
+            "Swage policy, the recorded per-segment Triton baseline, and "
+            "torch segment_reduce across seven segment distributions on "
+            "an RTX 5090."
         ),
         data=("benchmarks/results/perf-5090-sm120.json",),
     ),
