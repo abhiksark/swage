@@ -35,7 +35,10 @@ ruff check .
 ```
 
 See [`docs/getting-started/installation.md`](docs/getting-started/installation.md)
-for prerequisites, build overrides, and the published-package boundary.
+for prerequisites, build overrides, and the published-package boundary. The
+native build needs the MLIR Python binding requirements installed after
+`fetch_llvm.sh` and before `build_llvm.sh`; that page lists them and gives
+the command.
 
 ## Native Python bindings
 
@@ -64,8 +67,10 @@ bindings are enabled against an incompatible install.
 - Runtime: public execution remains canonical fixed vector add.
   Segmented helpers are private qualification. Runtime changes require the
   hosted tests and, where CUDA behavior changes, trusted GPU evidence.
-- Benchmarks: preserve frozen inputs and gates. Prepare outside timing and
-  commit raw evidence with the exact hardware and revision.
+- Benchmarks: preserve frozen inputs and gates. Prepare outside timing,
+  except in a benchmark that deliberately times preparation to measure
+  per-layout cost (`benchmarks/benchmark_fresh_offsets.py`), and commit raw
+  evidence with the exact hardware and revision.
 
 Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
 use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and

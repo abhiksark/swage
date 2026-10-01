@@ -71,7 +71,10 @@ python -m pip install "swage-compiler[pytorch]"  # optional
 ```
 
 Compiler emission and execution require a native build against the pinned
-LLVM/MLIR release:
+LLVM/MLIR release. The MLIR Python binding requirements must be installed
+between `fetch_llvm.sh` and `build_llvm.sh`;
+[Installation](docs/getting-started/installation.md) lists them and gives the
+command.
 
 ```bash
 ./scripts/fetch_llvm.sh

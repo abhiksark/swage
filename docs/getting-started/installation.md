@@ -38,8 +38,8 @@ kernel.
 ## Build LLVM, MLIR, and Swage
 
 The native build requires Linux x86-64, CMake 3.20 or newer, Ninja, and a
-C++17 compiler. `scripts/fetch_llvm.sh` also uses `curl` and a `tar` that can
-extract `.tar.xz` archives.
+C++17 compiler. `scripts/fetch_llvm.sh` also uses `curl`, `sha256sum` or
+`shasum`, and a `tar` that can extract `.tar.xz` archives.
 
 The MLIR Python bindings are built by default and need Python packages to
 build and to run. The pinned LLVM release lists them in its
@@ -83,6 +83,13 @@ bindings, and runs the lit suite. The LLVM pin is recorded in
 `cmake/llvm-version.txt` and must not be changed as part of an unrelated
 change.
 
+`fetch_llvm.sh` downloads the source tarball of the pinned release from the
+llvm-project GitHub releases and checks its SHA-256 against
+`cmake/llvm-source-sha256.txt` before extraction, whether the tarball was
+just downloaded or was already present. On a mismatch it stops and extracts
+nothing. Set `SWAGE_LLVM_URL` to the full URL of that tarball to download it
+from a mirror; the same digest check applies.
+
 An existing install of the exact pinned LLVM/MLIR release can be selected
 instead:
 
@@ -91,6 +98,9 @@ MLIR_DIR=/path/to/lib/cmake/mlir \
 LLVM_DIR=/path/to/lib/cmake/llvm \
     ./scripts/build_swage.sh
 ```
+
+CMake configuration compares the LLVM version of the install it finds with
+`cmake/llvm-version.txt` and stops with an error for any other release.
 
 The helper accepts these build-location and configuration overrides:
 
