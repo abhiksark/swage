@@ -12,6 +12,7 @@ add_mlir_conversion_library(MLIRSwageSegmentedReduction
   MLIRIR
   MLIRLLVMDialect
   MLIRMemRefDialect
+  MLIRNVVMDialect
   MLIRPass
   MLIRSCFDialect
   MLIRSwage

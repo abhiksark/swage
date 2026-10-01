@@ -38,3 +38,20 @@ tool_dirs = [config.swage_tools_dir, config.llvm_tools_dir]
 tools = ["swage-opt"]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
+
+# The CPU runner tests execute lowered code. They need mlir-opt, mlir-runner,
+# and the two runner support libraries, which a minimal LLVM install does not
+# carry, so they declare `REQUIRES: mlir-runner` and are reported as
+# unsupported when any of the four is missing.
+runner_tools = ["mlir-opt", "mlir-runner"]
+runner_libraries = ["libmlir_runner_utils", "libmlir_c_runner_utils"]
+if all(
+    os.path.isfile(os.path.join(config.llvm_tools_dir, tool))
+    for tool in runner_tools
+) and all(
+    os.path.isfile(
+        os.path.join(config.llvm_lib_dir, library + config.llvm_shlib_ext)
+    )
+    for library in runner_libraries
+):
+    config.available_features.add("mlir-runner")

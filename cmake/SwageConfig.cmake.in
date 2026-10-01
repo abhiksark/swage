@@ -1,0 +1,28 @@
+# cmake/SwageConfig.cmake.in
+#
+# Package configuration for an installed Swage. A consumer writes
+# `find_package(Swage REQUIRED CONFIG)` and links the imported targets
+# MLIRSwage, MLIRSwagePlan, MLIRSwageFixedBlockToGPU,
+# MLIRSwageSegmentedReduction, or SwageCAPI. The targets carry no include
+# directories, as with MLIR itself, so the consumer also adds
+# SWAGE_INCLUDE_DIRS, MLIR_INCLUDE_DIRS, and LLVM_INCLUDE_DIRS.
+
+include(CMakeFindDependencyMacro)
+find_dependency(MLIR CONFIG)
+
+# The installed archives were compiled against exactly this LLVM/MLIR
+# release (ADR-0004). Linking them against another one is not supported.
+set(SWAGE_LLVM_VERSION "@LLVM_PACKAGE_VERSION@")
+if(NOT "${LLVM_PACKAGE_VERSION}" STREQUAL "${SWAGE_LLVM_VERSION}")
+  set(Swage_FOUND FALSE)
+  set(Swage_NOT_FOUND_MESSAGE
+    "Swage was built against LLVM/MLIR ${SWAGE_LLVM_VERSION}, but "
+    "find_package(MLIR) found ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}.")
+  return()
+endif()
+
+get_filename_component(SWAGE_INSTALL_PREFIX
+  "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(SWAGE_INCLUDE_DIRS "${SWAGE_INSTALL_PREFIX}/include")
+
+include("${CMAKE_CURRENT_LIST_DIR}/SwageTargets.cmake")

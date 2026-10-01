@@ -1,5 +1,18 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20.0)
+
+# Checked before project(), which would otherwise write compiler detection
+# files into the source tree.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR
+    "Swage does not support in-source builds: the build directory is the "
+    "source directory ${CMAKE_SOURCE_DIR}.\n"
+    "Configure into a separate directory:\n"
+    "  cmake -S . -B build\n"
+    "Then delete the CMakeCache.txt and CMakeFiles/ that this attempt left "
+    "in the source directory.")
+endif()
+
 project(swage LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
@@ -84,3 +97,25 @@ if(SWAGE_PYTHON_BINDINGS)
 else()
   message(STATUS "Swage Python bindings: OFF")
 endif()
+
+# Install tree. The libraries install through the MLIR library macros, which
+# also place them in the MLIRTargets export set. The rules below add the
+# headers and the package that an out-of-tree project loads with
+# `find_package(Swage CONFIG)`.
+install(DIRECTORY include/swage include/swage-c
+  DESTINATION include
+  FILES_MATCHING
+  PATTERN "*.h"
+  PATTERN "*.td")
+install(DIRECTORY ${SWAGE_BINARY_DIR}/include/swage
+  DESTINATION include
+  FILES_MATCHING
+  PATTERN "*.inc"
+  PATTERN "CMakeFiles" EXCLUDE)
+install(EXPORT MLIRTargets
+  FILE SwageTargets.cmake
+  DESTINATION lib/cmake/swage)
+configure_file(cmake/SwageConfig.cmake.in
+  ${SWAGE_BINARY_DIR}/lib/cmake/swage/SwageConfig.cmake @ONLY)
+install(FILES ${SWAGE_BINARY_DIR}/lib/cmake/swage/SwageConfig.cmake
+  DESTINATION lib/cmake/swage)

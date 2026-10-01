@@ -22,7 +22,10 @@
 #include "llvm/Config/llvm-config.h"
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -121,51 +124,116 @@ MlirModule unwrapModule(nb::object moduleObject) {
   return module;
 }
 
+/// Keeps two compiles off one MLIR context.
+///
+/// A compile runs without the GIL, and swage-c/Codegen.h requires that no
+/// other thread uses the context of the module until the call returns. Two
+/// compiles of one context, for example of the same module from two threads,
+/// would break that rule and abort inside MLIR, so the second one waits
+/// here. Compiles on different contexts do not wait for each other.
+///
+/// The guard covers compiles only. While a compile runs, a Python thread
+/// that parses into the same context, builds IR in it, or loads a dialect
+/// into it is a data race the guard cannot see. The upstream bindings do not
+/// meet this case, because their PassManager.run keeps the GIL, so it is an
+/// obligation of this binding's callers: give each thread its own context,
+/// or keep a shared context idle until the compile returns.
+///
+/// The guard is taken after the GIL is released and dropped before the GIL is
+/// taken back, so a thread never waits for one while it holds the other. An
+/// entry point of this module that keeps the GIL and runs passes on a
+/// caller's context is not covered either: it must take this guard if it can
+/// overlap a compile of the same context.
+class ContextUse {
+public:
+  explicit ContextUse(MlirContext context) : context(context.ptr) {
+    std::unique_lock<std::mutex> lock(state().mutex);
+    state().released.wait(
+        lock, [&] { return state().busy.insert(this->context).second; });
+  }
+  ContextUse(const ContextUse &) = delete;
+  ContextUse &operator=(const ContextUse &) = delete;
+  ~ContextUse() {
+    {
+      std::lock_guard<std::mutex> lock(state().mutex);
+      state().busy.erase(context);
+    }
+    state().released.notify_all();
+  }
+
+private:
+  struct State {
+    std::mutex mutex;
+    std::condition_variable released;
+    std::set<const void *> busy;
+  };
+  static State &state() {
+    static State shared;
+    return shared;
+  }
+
+  const void *context;
+};
+
+/// `blockSize` and `useTaskIds` reach only the kinds whose C entry point
+/// takes them, the fixed and the segmented one. The other kinds compile at a
+/// width the C API fixes, so their callers pass neither.
 std::pair<std::string, std::string>
-compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
-           std::string target, PTXKind kind, bool useTaskIds = false) {
+compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
+           PTXKind kind, int64_t blockSize = 0, bool useTaskIds = false) {
   MlirModule module = unwrapModule(moduleObject);
+  MlirContext context = mlirModuleGetContext(module);
 
   std::string lowered;
   std::string ptx;
+  std::string message;
   auto store = [](MlirStringRef value, void *output) {
     static_cast<std::string *>(output)->assign(value.data, value.length);
   };
-  mlir::python::CollectDiagnosticsToStringScope diagnostics(
-      mlirModuleGetContext(module));
   MlirStringRef kernel =
       mlirStringRefCreate(kernelName.data(), kernelName.size());
   MlirStringRef chip = mlirStringRefCreate(target.data(), target.size());
   MlirLogicalResult result;
-  switch (kind) {
-  case PTXKind::Fixed:
-    result = swageCompileFixedBlockToPTX(module, kernel, blockSize, chip, store,
-                                         &lowered, store, &ptx);
-    break;
-  case PTXKind::Segmented:
-    result = swageCompileSegmentedReductionToPTX(module, kernel, blockSize,
-                                                 chip, useTaskIds, store,
-                                                 &lowered, store, &ptx);
-    break;
-  case PTXKind::Fused:
-    result = swageCompileFusedSegmentedReductionToPTX(
-        module, kernel, chip, store, &lowered, store, &ptx);
-    break;
-  case PTXKind::Persistent:
-    result = swageCompilePersistentSegmentedReductionToPTX(
-        module, kernel, chip, store, &lowered, store, &ptx);
-    break;
-  case PTXKind::SplitPartial:
-    result = swageCompileSplitPartialReductionToPTX(module, kernel, chip, store,
+  {
+    // A cold compile takes milliseconds and never calls back into Python, so
+    // the other Python threads run meanwhile. Everything in this scope is
+    // plain C++ on locals. The diagnostics handler is attached inside the
+    // guard: attached earlier, it would also collect the diagnostics of the
+    // compile this thread is waiting for.
+    nb::gil_scoped_release release;
+    ContextUse use(context);
+    mlir::python::CollectDiagnosticsToStringScope diagnostics(context);
+    switch (kind) {
+    case PTXKind::Fixed:
+      result = swageCompileFixedBlockToPTX(module, kernel, blockSize, chip,
+                                           store, &lowered, store, &ptx);
+      break;
+    case PTXKind::Segmented:
+      result = swageCompileSegmentedReductionToPTX(module, kernel, blockSize,
+                                                   chip, useTaskIds, store,
+                                                   &lowered, store, &ptx);
+      break;
+    case PTXKind::Fused:
+      result = swageCompileFusedSegmentedReductionToPTX(
+          module, kernel, chip, store, &lowered, store, &ptx);
+      break;
+    case PTXKind::Persistent:
+      result = swageCompilePersistentSegmentedReductionToPTX(
+          module, kernel, chip, store, &lowered, store, &ptx);
+      break;
+    case PTXKind::SplitPartial:
+      result = swageCompileSplitPartialReductionToPTX(
+          module, kernel, chip, store, &lowered, store, &ptx);
+      break;
+    case PTXKind::SplitMerge:
+      result = swageCompileSplitMergeReductionToPTX(module, kernel, chip, store,
                                                     &lowered, store, &ptx);
-    break;
-  case PTXKind::SplitMerge:
-    result = swageCompileSplitMergeReductionToPTX(module, kernel, chip, store,
-                                                  &lowered, store, &ptx);
-    break;
+      break;
+    }
+    message = diagnostics.takeMessage();
   }
   if (mlirLogicalResultIsFailure(result))
-    throw nb::value_error(diagnostics.takeMessage().c_str());
+    throw nb::value_error(message.c_str());
   return {std::move(lowered), std::move(ptx)};
 }
 
@@ -234,12 +302,31 @@ NB_MODULE(_swageDialectsNanobind, m) {
       },
       nb::arg("context"), nb::arg("load") = true);
 
+  // `!swage.segment<T>`. A type that reaches Python from the parser or from
+  // an operation arrives as this class through its registered type ID.
+  auto segmentType = mlir::python::nanobind_adaptors::mlir_type_subclass(
+      swageM, "SegmentType", swageTypeIsASegment, swageSegmentTypeGetTypeID);
+  segmentType.def_classmethod(
+      "get",
+      [](const nb::object &cls, MlirType elementType) {
+        mlir::python::CollectDiagnosticsToStringScope diagnostics(
+            mlirTypeGetContext(elementType));
+        MlirType segment = swageSegmentTypeGet(elementType);
+        if (mlirTypeIsNull(segment))
+          throw nb::value_error(diagnostics.takeMessage().c_str());
+        return cls(segment);
+      },
+      nb::arg("cls"), nb::arg("element_type"));
+  segmentType.def_property_readonly("element_type", [](MlirType self) {
+    return swageSegmentTypeGetElementType(self);
+  });
+
   swageM.def(
       "_compile_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target) {
-        return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), PTXKind::Fixed);
+        return compilePTX(module, std::move(kernelName), std::move(target),
+                          PTXKind::Fixed, blockSize);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"));
@@ -247,36 +334,36 @@ NB_MODULE(_swageDialectsNanobind, m) {
       "_compile_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target, bool useTaskIds) {
-        return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), PTXKind::Segmented, useTaskIds);
+        return compilePTX(module, std::move(kernelName), std::move(target),
+                          PTXKind::Segmented, blockSize, useTaskIds);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"), nb::arg("use_task_ids") = false);
   swageM.def(
       "_compile_fused_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::Fused);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_persistent_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 512, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::Persistent);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_split_partial_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::SplitPartial);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_split_merge_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::SplitMerge);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));

@@ -1,3 +1,4 @@
+// lib/Conversion/FixedBlockToGPU/FixedBlockToGPU.cpp
 //===- FixedBlockToGPU.cpp - Fixed-block GPU lowering --------------------===//
 //
 // Part of the Swage project, under the MIT License.
@@ -39,8 +40,12 @@ LogicalResult verifyVectorWidth(Operation *op, int64_t blockSize) {
     auto vector = dyn_cast<VectorType>(type);
     if (!vector)
       continue;
-    if (vector.getRank() != 1)
-      return op->emitError("only rank-one vectors are supported");
+    // A scalable vector of N has N lanes times a runtime factor, so it
+    // cannot name the fixed number of threads in a block.
+    if (vector.getRank() != 1 || vector.isScalable())
+      return op->emitError()
+             << "only fixed-length rank-one vectors are supported, got "
+             << vector;
     if (vector.getShape().front() != blockSize)
       return op->emitError()
              << "vector width " << vector.getShape().front()
@@ -91,17 +96,21 @@ LogicalResult verifyFixedVectorAddSignature(func::FuncOp function) {
       failed(verifyPointerType(type.getInput(1))) ||
       failed(verifyPointerType(type.getInput(2))) ||
       !type.getInput(3).isInteger(32))
-    return function.emitError(
-        "fixed vector add requires three rank-one identity-layout f32 memrefs "
-        "and one i32");
-  if (!llvm::all_of(type.getInputs().take_front(3), [](Type input) {
-        return cast<MemRefType>(input).getMemorySpaceAsInt() == 0;
-      }))
-    return function.emitError(
-        "only default-memory-space pointers are supported");
+    return function.emitError()
+           << "fixed vector add requires three rank-one identity-layout f32 "
+              "memrefs and one i32, got "
+           << type;
+  // A memory space is an arbitrary attribute, so it is compared with the
+  // default, which is the null attribute, and never read as an integer.
+  for (Type input : type.getInputs().take_front(3))
+    if (cast<MemRefType>(input).getMemorySpace())
+      return function.emitError()
+             << "only default-memory-space pointers are supported, got "
+             << input;
   if (!function.getBody().hasOneBlock())
-    return function.emitError(
-        "fixed vector add requires one straight-line block");
+    return function.emitError()
+           << "fixed vector add requires one straight-line block, got "
+           << function.getBody().getBlocks().size() << " blocks";
   return success();
 }
 
@@ -119,7 +128,9 @@ LogicalResult classifyFixedVectorAddOperation(Operation *op, int64_t blockSize,
   if (auto programId = dyn_cast<ProgramIdOp>(op)) {
     ++counts.programIds;
     if (programId.getAxis() != 0)
-      return programId.emitError("only swage.program_id axis 0 is supported");
+      return programId.emitError()
+             << "only swage.program_id axis 0 is supported, got axis "
+             << programId.getAxis();
   } else if (isa<vector::GatherOp>(op)) {
     ++counts.gathers;
   } else if (isa<vector::ScatterOp>(op)) {
@@ -130,8 +141,8 @@ LogicalResult classifyFixedVectorAddOperation(Operation *op, int64_t blockSize,
   } else if (!isa<arith::ConstantOp, arith::MulIOp, vector::StepOp,
                   vector::BroadcastOp, arith::AddIOp, arith::IndexCastOp,
                   arith::CmpIOp, func::ReturnOp>(op)) {
-    return op->emitError(
-        "operation is unsupported by fixed vector-add lowering");
+    return op->emitError() << "operation '" << op->getName()
+                           << "' is unsupported by fixed vector-add lowering";
   }
   return success();
 }
@@ -156,8 +167,12 @@ LogicalResult verifyFixedVectorAddCounts(func::FuncOp function,
                                          const FixedVectorAddOpCounts &counts) {
   if (counts.programIds != 1 || counts.gathers != 2 || counts.scatters != 1 ||
       counts.floatAdds != 1)
-    return function.emitError(
-        "expected one program_id, two gathers, one f32 add, and one scatter");
+    return function.emitError()
+           << "expected one program_id, two gathers, one f32 add, and one "
+              "scatter, found "
+           << counts.programIds << " program_id, " << counts.gathers
+           << " gathers, " << counts.floatAdds << " f32 adds, and "
+           << counts.scatters << " scatters";
   return success();
 }
 
@@ -301,16 +316,20 @@ public:
 
   void runOnOperation() final {
     if (blockSize <= 0) {
-      getOperation().emitError("block-size must be a positive integer");
+      getOperation().emitError()
+          << "block-size must be a positive integer, got "
+          << blockSize.getValue();
       return signalPassFailure();
     }
     if (blockSize > 1024) {
-      getOperation().emitError("block-size must be at most 1024");
+      getOperation().emitError()
+          << "block-size must be at most 1024, got " << blockSize.getValue();
       return signalPassFailure();
     }
     auto functions = llvm::to_vector(getOperation().getOps<func::FuncOp>());
     if (functions.size() != 1) {
-      getOperation().emitError("expected exactly one kernel function");
+      getOperation().emitError()
+          << "expected exactly one kernel function, found " << functions.size();
       return signalPassFailure();
     }
     if (failed(verifyFixedVectorAdd(functions.front(), blockSize)))

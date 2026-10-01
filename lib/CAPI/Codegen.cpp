@@ -151,7 +151,8 @@ LogicalResult verifyPTXFunctionNames(ModuleOp source) {
   WalkResult invalidName = source.walk([](func::FuncOp function) {
     if (isPTXIdentifier(function.getName()))
       return WalkResult::advance();
-    function.emitError("function name is not a valid PTX identifier");
+    function.emitError() << "function name '" << function.getName()
+                         << "' is not a valid PTX identifier";
     return WalkResult::interrupt();
   });
   return failure(invalidName.wasInterrupted());
@@ -163,22 +164,26 @@ LogicalResult validateCompileRequest(ModuleOp source,
                                      llvm::StringRef target) {
   unsigned smValue = 0;
   if (!isSupportedTarget(target, smValue))
-    return source.emitError(
-        "target must match sm_<major><minor> and be sm_80 or newer");
+    return source.emitError()
+           << "target must match sm_<major><minor> and be sm_80 or newer, got '"
+           << target << "'";
   if (!isPinnedProcessor(smValue))
     return source.emitError("target ")
            << target << " is not a processor supported by the pinned LLVM";
   if (blockSize <= 0)
-    return source.emitError("block_size must be a positive integer");
+    return source.emitError()
+           << "block_size must be a positive integer, got " << blockSize;
   if (blockSize > 1024)
-    return source.emitError("block_size must be at most 1024");
+    return source.emitError()
+           << "block_size must be at most 1024, got " << blockSize;
   // The pass manager verifies only after each pass, never before the first
   // one, so an unverified module would reach pass code that dereferences
   // region internals.
   if (failed(verify(source)))
     return failure();
   if (!source.lookupSymbol<func::FuncOp>(kernelName))
-    return source.emitError("kernel_name does not name the module function");
+    return source.emitError() << "kernel_name '" << kernelName
+                              << "' does not name a function of the module";
   return verifyPTXFunctionNames(source);
 }
 
@@ -244,8 +249,10 @@ FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
     return failure();
 
   auto gpuModules = module.getOps<gpu::GPUModuleOp>();
-  if (std::distance(gpuModules.begin(), gpuModules.end()) != 1) {
-    source.emitError("lowering did not produce exactly one GPU module");
+  auto gpuModuleCount = std::distance(gpuModules.begin(), gpuModules.end());
+  if (gpuModuleCount != 1) {
+    source.emitError() << "lowering did not produce exactly one GPU module, "
+                       << "found " << gpuModuleCount;
     return failure();
   }
   return *gpuModules.begin();
@@ -349,13 +356,50 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   return emitPTX(source, gpuModule, target, ptx);
 }
 
+/// A null module has no context to report on, so it is the one failure
+/// without a diagnostic. Every other rejected argument is reported on the
+/// module, which keeps the header's promise that a failed call always leaves
+/// a diagnostic behind.
+LogicalResult verifyStringCallbacks(MlirModule module,
+                                    SwageStringCallback loweredCallback,
+                                    SwageStringCallback ptxCallback) {
+  if (mlirModuleIsNull(module))
+    return failure();
+  if (!loweredCallback)
+    return unwrap(module).emitError("loweredCallback must not be null");
+  if (!ptxCallback)
+    return unwrap(module).emitError("ptxCallback must not be null");
+  return success();
+}
+
+/// Reports why swageMaterializeSegmentedPlan refused its buffer or callback
+/// arguments. The offsets pointer is only tested, so its element type is not
+/// part of this signature.
+MlirLogicalResult reportInvalidPlanArguments(MlirModule module,
+                                             const void *offsets,
+                                             intptr_t offsetCount) {
+  if (mlirModuleIsNull(module))
+    return mlirLogicalResultFailure();
+  ModuleOp source = unwrap(module);
+  if (offsetCount < 0)
+    source.emitError() << "offsetCount must not be negative, got "
+                       << offsetCount;
+  else if (offsetCount && !offsets)
+    source.emitError() << "offsets must not be null when offsetCount is "
+                       << offsetCount;
+  else
+    source.emitError("warpCallback, ctaCallback, partialCallback, and "
+                     "mergeCallback must not be null");
+  return mlirLogicalResultFailure();
+}
+
 } // namespace
 
 MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -372,7 +416,7 @@ MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -389,7 +433,7 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -406,7 +450,7 @@ MlirLogicalResult swageCompilePersistentSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -423,7 +467,7 @@ MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -440,7 +484,7 @@ MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -460,9 +504,10 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
     void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData) {
-  if (offsetCount < 0 || (offsetCount && !offsets) || !warpCallback ||
-      !ctaCallback || !partialCallback || !mergeCallback)
-    return mlirLogicalResultFailure();
+  if (mlirModuleIsNull(module) || offsetCount < 0 ||
+      (offsetCount && !offsets) || !warpCallback || !ctaCallback ||
+      !partialCallback || !mergeCallback)
+    return reportInvalidPlanArguments(module, offsets, offsetCount);
 
   ModuleOp source = unwrap(module);
   if (failed(verify(source)))

@@ -1,4 +1,5 @@
 // test/Conversion/SwageToCPU/segmented-sum-map-runner.mlir
+// REQUIRES: mlir-runner
 // RUN: swage-opt --swage-segmented-reduction-to-scf %s \
 // RUN:   | mlir-opt -pass-pipeline='builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,convert-arith-to-llvm),finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner -e main -entry-point-result=void \
