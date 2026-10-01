@@ -36,6 +36,8 @@ def _fresh_memo(monkeypatch):
     monkeypatch.setattr(
         qualification, "_load_memo", weakref.WeakKeyDictionary()
     )
+    # A caller's switch would make every miss in this file a refusal.
+    monkeypatch.delenv("SWAGE_NO_COMPILE", raising=False)
 
 
 class _CountingDriver:
@@ -508,11 +510,7 @@ def test_load_memo_forgets_its_oldest_kernel_at_the_bound(monkeypatch):
 )
 def test_rejects_tensors_that_require_grad(validate, name):
     """Refuse a raw-pointer write into or from an autograd leaf."""
-    tensors = {
-        "values": torch.ones(6),
-        "offsets": torch.tensor([0, 2, 6], dtype=torch.int32),
-        "output": torch.zeros(6),
-    }
+    tensors = _reduction_tensors()
     assert validate(**tensors, require_cuda=False) == (6, 2)
     tensors[name].requires_grad_()
 
@@ -524,6 +522,228 @@ def test_rejects_tensors_that_require_grad(validate, name):
         ),
     ):
         validate(**tensors, require_cuda=False)
+
+
+def _reduction_tensors():
+    """Return host tensors that both private validators accept."""
+    return {
+        "values": torch.ones(6),
+        "offsets": torch.tensor([0, 2, 6], dtype=torch.int32),
+        "output": torch.zeros(6),
+    }
+
+
+@pytest.mark.parametrize("name", ["values", "offsets", "output"])
+@pytest.mark.parametrize(
+    "validate",
+    [
+        qualification._validate_tensors,
+        qualification._validate_softmax_tensors,
+    ],
+    ids=["reduction", "softmax"],
+)
+def test_rejects_lazy_negation_views(validate, name):
+    """Refuse a view whose storage holds the opposite of what it shows."""
+    tensors = _reduction_tensors()
+    assert validate(**tensors, require_cuda=False) == (6, 2)
+    tensors[name] = tensors[name]._neg_view()
+    assert tensors[name].is_neg() and tensors[name].is_contiguous()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"^{name} must not be a lazy negation view; pass "
+            r"tensor.resolve_neg\(\)$"
+        ),
+    ):
+        validate(**tensors, require_cuda=False)
+
+
+@pytest.mark.parametrize("name", ["values", "offsets", "output"])
+def test_rejects_lazy_conjugate_views(monkeypatch, name):
+    """Refuse a conjugate view, which no admitted dtype can build today."""
+    tensors = _reduction_tensors()
+    target = tensors[name]
+    monkeypatch.setattr(
+        torch.Tensor, "is_conj", lambda tensor: tensor is target
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"^{name} must not be a lazy conjugate view; pass "
+            r"tensor.resolve_conj\(\)$"
+        ),
+    ):
+        qualification._validate_tensors(**tensors, require_cuda=False)
+
+
+def test_cpu_oracle_rejects_the_negation_view_the_review_summed():
+    """Refuse the view of ones that the kernels would sum as plus four."""
+    view = torch.ones(4)._neg_view()
+    offsets = torch.tensor([0, 4], dtype=torch.int32)
+    assert float(view.sum()) == -4.0
+
+    with pytest.raises(ValueError, match="values must not be a lazy negation"):
+        qualification._validate_tensors(
+            view, offsets, torch.zeros(1), require_cuda=False
+        )
+    with pytest.raises(ValueError, match="values must not be a lazy negation"):
+        qualification.cpu_oracle(view, offsets, "sum")
+    assert qualification._validate_tensors(
+        view.resolve_neg(), offsets, torch.zeros(1), require_cuda=False
+    ) == (4, 1)
+
+
+@_requires_cuda
+def test_gpu_entry_points_reject_a_negation_view(counts):
+    """Refuse the view before any compile, load, or launch on the device."""
+    values, offsets, _ = _case([3, 5])
+    output = torch.full((8,), _SENTINEL, device="cuda")
+    view = values._neg_view()
+    task_ids = torch.arange(2, device="cuda", dtype=torch.int32)
+    reason = "values must not be a lazy negation view"
+
+    with pytest.raises(ValueError, match=reason):
+        qualification.launch_gpu(view, offsets, output, "sum")
+    with pytest.raises(ValueError, match=reason):
+        qualification.launch_softmax_gpu(view, offsets, output)
+    with pytest.raises(ValueError, match=reason):
+        _prepare_planned("sum", view, offsets, output)
+    with pytest.raises(ValueError, match=reason):
+        qualification._prepare_persistent_sum(view, offsets, output)
+    with pytest.raises(
+        ValueError, match="task_ids must not be a lazy negation view"
+    ):
+        qualification._launch_segmented_sum_tasks(
+            values, offsets, output, task_ids._neg_view(), block_size=32
+        )
+
+    torch.cuda.synchronize()
+    assert counts.compiles == counts.loads == []
+    assert torch.all(output == _SENTINEL)
+
+
+@pytest.fixture
+def _no_compile(monkeypatch):
+    """Switch compiling off for one test, whatever the caller exported."""
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+
+
+def test_no_compile_mode_serves_a_held_kernel_and_refuses_another(
+    monkeypatch,
+):
+    """Return what the process compiled and raise instead of compiling."""
+    compiler = _FakeCompiler()
+    held = qualification._compile_once(
+        compiler, "program", module=object(), **_OPTIONS
+    )
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+
+    again = qualification._compile_once(
+        compiler, "program", module=object(), **_OPTIONS
+    )
+    for _ in range(2):
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^SWAGE_NO_COMPILE=1 refuses to compile kernel "
+                "'segmented_sum': this process does not hold it for block "
+                "size 32 and target sm_86, and the private segmented path "
+                "has no persistent cache$"
+            ),
+        ):
+            qualification._compile_once(
+                compiler,
+                "program",
+                module=object(),
+                **{**_OPTIONS, "block_size": 32},
+            )
+
+    assert held == again == "ptx1"
+    assert len(compiler.calls) == 1
+    assert len(qualification._ptx_memo) == 1
+
+
+def test_no_compile_mode_does_not_parse_the_program(_no_compile):
+    """Refuse before the semantic text is parsed for the compiler."""
+    compiler = _FakeCompiler()
+
+    with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
+        qualification._compile_once(compiler, "not a module", **_OPTIONS)
+
+    assert compiler.calls == []
+
+
+def test_no_compile_mode_names_a_kernel_without_a_block_size(_no_compile):
+    """Describe a fused, split, or persistent kernel by its target alone."""
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "refuses to compile kernel 'segmented_sum': this process does "
+            "not hold it for target sm_86, and"
+        ),
+    ):
+        qualification._compile_once(
+            _FakeCompiler(),
+            "program",
+            module=object(),
+            kernel_name="segmented_sum",
+            target="sm_86",
+        )
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "2"])
+def test_compile_memo_rejects_a_mistyped_no_compile_switch(monkeypatch, value):
+    """Fail on a miss instead of compiling under an unreadable switch."""
+    compiler = _FakeCompiler()
+    monkeypatch.setenv("SWAGE_NO_COMPILE", value)
+
+    with pytest.raises(
+        ValueError, match=f"SWAGE_NO_COMPILE must be 0 or 1; found '{value}'"
+    ):
+        qualification._compile_once(
+            compiler, "program", module=object(), **_OPTIONS
+        )
+
+    assert compiler.calls == []
+
+
+@_requires_cuda
+def test_no_compile_mode_stops_every_private_entry_point(
+    counts, monkeypatch
+):
+    """Launch kernels the process holds and refuse the ones it does not."""
+    values, offsets, expected = _case([3, 5, 40])
+    output = torch.full((3,), _SENTINEL, device="cuda")
+    qualification.launch_gpu(values, offsets, output, "sum")
+    torch.cuda.synchronize()
+    counts.reset()
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    refusal = "SWAGE_NO_COMPILE=1 refuses to compile kernel"
+
+    output.fill_(_SENTINEL)
+    qualification.launch_gpu(values, offsets, output, "sum")
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output.cpu(), expected["sum"], rtol=0, atol=0)
+
+    output.fill_(_SENTINEL)
+    softmax_output = torch.full((48,), _SENTINEL, device="cuda")
+    with pytest.raises(RuntimeError, match=f"{refusal} 'segmented_max'"):
+        qualification.launch_gpu(values, offsets, output, "max")
+    with pytest.raises(RuntimeError, match=f"{refusal} 'segmented_sum'"):
+        qualification.launch_gpu(values, offsets, output, "sum", block_size=64)
+    with pytest.raises(RuntimeError, match=f"{refusal} 'ragged_softmax'"):
+        qualification.launch_softmax_gpu(values, offsets, softmax_output)
+    with pytest.raises(RuntimeError, match=f"{refusal} 'segmented_sum'"):
+        _prepare_planned("sum", values, offsets, output)
+    with pytest.raises(RuntimeError, match=f"{refusal} 'segmented_sum'"):
+        qualification._prepare_persistent_sum(values, offsets, output)
+
+    torch.cuda.synchronize()
+    assert counts.compiles == counts.loads == []
+    assert torch.all(output == _SENTINEL)
+    assert torch.all(softmax_output == _SENTINEL)
 
 
 def test_rejects_values_computed_from_a_tensor_that_requires_grad():

@@ -865,7 +865,16 @@ def _refuse_compile(kernel_name, key, looked_up):
             "the persistent cache is off for this process: "
             f"{_cache_off_reason(_cached_identity())}"
         )
-    raise RuntimeError(
+    raise _compile_refusal(kernel_name, reason)
+
+
+def _compile_refusal(kernel_name, reason):
+    """Return the error for a kernel that SWAGE_NO_COMPILE=1 keeps uncompiled.
+
+    The public launch and the private segmented runner both raise it, so
+    the two refusals read alike and differ only in `reason`.
+    """
+    return RuntimeError(
         f"SWAGE_NO_COMPILE=1 refuses to compile kernel '{kernel_name}': "
         f"{reason}"
     )
