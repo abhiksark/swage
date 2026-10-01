@@ -3,10 +3,13 @@
 
 import ast
 import ctypes
+import errno
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -281,18 +284,95 @@ def _specialization_data(kernel, *, descriptors, constexprs, target):
         "constexprs": [[key, constexprs[key]] for key in sorted(constexprs)],
         "compute_capability": target,
         "codegen": {"block_size": block, "index_bits": 64},
-        "swage_revision": identity["revision"],
+        "frontend": identity["frontend"],
+        "native": identity["native"],
         "dialect_version": _DIALECT_VERSION,
         "llvm_version": identity["llvm"],
     }
 
 
-def _compiler_identity():
-    root = pathlib.Path(__file__).resolve().parents[2]
-    pin = root / "cmake" / "llvm-version.txt"
-    llvm = pin.read_text().strip() if pin.is_file() else None
+def _package_dir():
+    """Return the directory of the loaded `swage` package."""
+    return pathlib.Path(__file__).resolve().parent
+
+
+def _frontend_digest(package):
+    """Hash every Python source file of the package in sorted name order.
+
+    Args:
+        package: Directory of the `swage` package.
+
+    Returns:
+        The SHA-256 hex digest over each file's relative name, length, and
+        bytes, or None when the package holds no Python source to identify.
+    """
+    sources = sorted(
+        (path.relative_to(package).as_posix(), path)
+        for path in package.rglob("*.py")
+    )
+    if not sources:
+        return None
+    digest = hashlib.sha256()
+    for name, path in sources:
+        contents = path.read_bytes()
+        digest.update(f"{name}\0{len(contents)}\0".encode())
+        digest.update(contents)
+    return digest.hexdigest()
+
+
+_NATIVE_EXTENSION = "_swageDialectsNanobind"
+_NATIVE_LIBRARY_PATTERNS = (
+    f"{_NATIVE_EXTENSION}*.so",
+    "libSwagePythonCAPI.so*",
+)
+
+
+def _native_identity():
+    """Describe the native compiler libraries without importing them.
+
+    Importing the bindings loads all of LLVM, so the libraries are located
+    through the import system and identified by their file metadata.
+
+    Returns:
+        A sorted list of `[file name, size, st_mtime_ns]`, one per file of
+        the nanobind extension and the C API library in
+        `mlir_swage/_mlir_libs`, or None when the bindings are not
+        importable.
+    """
+    try:
+        spec = importlib.util.find_spec("mlir_swage._mlir_libs")
+    except (ImportError, ValueError):
+        return None
+    if spec is None:
+        return None
+    libraries = []
+    for location in spec.submodule_search_locations or ():
+        for pattern in _NATIVE_LIBRARY_PATTERNS:
+            for path in pathlib.Path(location).glob(pattern):
+                try:
+                    details = path.stat()
+                except OSError:
+                    continue
+                libraries.append(
+                    [path.name, details.st_size, details.st_mtime_ns]
+                )
+    if not any(name.startswith(_NATIVE_EXTENSION) for name, *_ in libraries):
+        return None
+    return sorted(libraries)
+
+
+def _git_identity(root):
+    """Return the HEAD revision of a checkout and whether it is clean.
+
+    Args:
+        root: Directory expected to hold `.git`.
+
+    Returns:
+        `(revision, clean)`, or `(None, False)` when `root` is not a git
+        checkout or git cannot describe it.
+    """
     if not (root / ".git").exists():
-        return {"revision": None, "clean": False, "llvm": llvm}
+        return None, False
     try:
         revision = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -309,16 +389,41 @@ def _compiler_identity():
             text=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
-        return {"revision": None, "clean": False, "llvm": llvm}
-    return {"revision": revision, "clean": not dirty, "llvm": llvm}
+        return None, False
+    return revision, not dirty
+
+
+def _compiler_identity():
+    """Identify the compiler this process loads.
+
+    `frontend` and `native` identify the code that produces PTX and are the
+    compiler fields of the cache key. `revision` and `clean` describe the
+    surrounding git checkout for diagnostics; they do not gate the cache.
+
+    Returns:
+        A dict with the keys `revision`, `clean`, `llvm`, `frontend`, and
+        `native`. Each value is None (False for `clean`) when unavailable.
+    """
+    package = _package_dir()
+    root = package.parents[1]
+    pin = root / "cmake" / "llvm-version.txt"
+    revision, clean = _git_identity(root)
+    return {
+        "revision": revision,
+        "clean": clean,
+        "llvm": pin.read_text().strip() if pin.is_file() else None,
+        "frontend": _frontend_digest(package),
+        "native": _native_identity(),
+    }
 
 
 def _cached_identity():
     """Return `_compiler_identity()` computed once per process.
 
-    The identity spawns two git subprocesses, which dominated launch cost
-    when derived on every call. The cache is keyed on the identity function
-    itself so a monkeypatched `_compiler_identity` is always honored.
+    The identity spawns two git subprocesses and hashes the frontend, which
+    would dominate launch cost if derived on every call. The cache is keyed
+    on the identity function itself so a monkeypatched `_compiler_identity`
+    is always honored.
     """
     global _identity_cache
     if _identity_cache is None or _identity_cache[0] is not _compiler_identity:
@@ -347,8 +452,8 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         if cached is not None:
             return cached
         identity = _cached_identity()
-        persistent = bool(
-            identity["revision"] and identity["clean"] and identity["llvm"]
+        persistent = (
+            identity["frontend"] is not None and identity["native"] is not None
         )
         if persistent:
             cached = _read_cache_entry(key, specialization)
@@ -363,7 +468,7 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         )
         artifact = _Artifact(key, lowered, ptx)
         if persistent:
-            _write_cache_entry(artifact, specialization)
+            artifact = _write_cache_entry(artifact, specialization)
         _ptx_cache[key] = artifact
         return artifact
 
@@ -399,33 +504,47 @@ def _check_safe(path):
     details = path.lstat()
     if stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"cache entry is a symlink: {path}")
+    if details.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"cache entry is not owned by the current user: {path}"
+        )
     if details.st_mode & stat.S_IWOTH:
         raise RuntimeError(f"cache entry is world-writable: {path}")
 
 
 def _read_cache_entry(key, specialization):
+    """Return the verified entry for `key`, or None on a cache miss.
+
+    A missing entry is a miss. An incomplete entry is also a miss: it is
+    debris from a writer that died before entries were published atomically,
+    and it is removed so the key can be published again. Unsafe, unreadable,
+    mismatched, and corrupt entries raise.
+    """
     root = _cache_dir()
-    if not os.path.lexists(root):
-        return None
-    _check_safe(root)
     entry = root / key
-    if not os.path.lexists(entry):
-        return None
-    _check_safe(entry)
     paths = {
         "metadata": entry / "metadata.json",
         "lowered": entry / "lowered.mlir",
         "ptx": entry / "kernel.ptx",
     }
-    for path in paths.values():
-        if os.path.lexists(path):
+    try:
+        _check_safe(root)
+        _check_safe(entry)
+        present = [path for path in paths.values() if os.path.lexists(path)]
+        for path in present:
             _check_safe(path)
-    if not all(os.path.lexists(path) for path in paths.values()):
-        raise RuntimeError(f"cache entry is incomplete: {entry}")
+    except FileNotFoundError:
+        return None
+    if len(present) != len(paths):
+        _remove_incomplete_entry(entry)
+        return None
     try:
         metadata = json.loads(paths["metadata"].read_text())
         lowered = paths["lowered"].read_text()
         ptx = paths["ptx"].read_text()
+    except FileNotFoundError:
+        # Another process is removing this entry as incomplete.
+        return None
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"cache entry is unreadable: {entry}") from error
     if metadata.get("version") != 1 or metadata.get("key") != key:
@@ -440,17 +559,42 @@ def _read_cache_entry(key, specialization):
     return _Artifact(key, lowered, ptx)
 
 
+def _remove_incomplete_entry(entry):
+    """Delete an entry directory that a dead writer left incomplete."""
+    try:
+        shutil.rmtree(entry)
+    except FileNotFoundError:
+        return  # Another process removed it first.
+    except OSError as error:
+        if error.errno == errno.ENOTEMPTY:
+            return  # A writer published into the emptied directory.
+        raise RuntimeError(
+            f"cache entry is incomplete and cannot be removed: {entry}"
+        ) from error
+
+
+# Entry names are SHA-256 hex digests, so a staging name never collides.
+_STAGING_PREFIX = ".staging-"
+
+
 def _write_cache_entry(artifact, specialization):
+    """Publish one cache entry atomically.
+
+    The three files are written into a staging directory inside the cache
+    root, which is then renamed to the entry name. A reader therefore sees
+    no entry or a complete one, and a writer killed at any point leaves only
+    a staging directory that no lookup reads.
+
+    Returns:
+        The artifact to use: `artifact` when this call published it, or the
+        verified entry of the writer that published the same key first.
+    """
     root = _cache_dir()
-    if os.path.lexists(root):
-        _check_safe(root)
-    else:
+    try:
         root.mkdir(parents=True, mode=0o700)
-    entry = root / artifact.key
-    if os.path.lexists(entry):
-        _check_safe(entry)
-    else:
-        entry.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    _check_safe(root)
     metadata = {
         "version": 1,
         "key": artifact.key,
@@ -460,12 +604,28 @@ def _write_cache_entry(artifact, specialization):
             "ptx": hashlib.sha256(artifact.ptx.encode()).hexdigest(),
         },
     }
-    _atomic_write(entry / "lowered.mlir", artifact.lowered)
-    _atomic_write(entry / "kernel.ptx", artifact.ptx)
-    _atomic_write(
-        entry / "metadata.json",
-        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-    )
+    # ponytail: staging directories of killed writers are never swept and
+    # entries are never evicted; add an age-bounded sweep if the root grows.
+    staging = pathlib.Path(tempfile.mkdtemp(dir=root, prefix=_STAGING_PREFIX))
+    try:
+        _atomic_write(staging / "lowered.mlir", artifact.lowered)
+        _atomic_write(staging / "kernel.ptx", artifact.ptx)
+        _atomic_write(
+            staging / "metadata.json",
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        )
+        try:
+            # Renaming onto an empty directory replaces it; a published
+            # entry is never empty, so it is never replaced.
+            os.rename(staging, root / artifact.key)
+        except OSError as error:
+            if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                raise
+            published = _read_cache_entry(artifact.key, specialization)
+            return artifact if published is None else published
+        return artifact
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _atomic_write(path, contents):
