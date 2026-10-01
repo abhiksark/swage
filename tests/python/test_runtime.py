@@ -3236,3 +3236,352 @@ def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
     assert driver._native_launch is None
     driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
     assert driver.library.cuLaunchKernel.called
+
+
+def test_atomic_write_closes_its_descriptor_only_once(tmp_path, monkeypatch):
+    """Leave a descriptor that reuses the number alone when a publish fails."""
+    from swage import _runtime
+
+    unrelated = {}
+
+    def fail_after_another_open(_source, _target):
+        # Another thread opens a file now. It receives the lowest free
+        # number, which is the descriptor the write has just closed.
+        unrelated["descriptor"] = os.open(
+            tmp_path / "unrelated", os.O_CREAT | os.O_WRONLY, 0o600
+        )
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_runtime.os, "replace", fail_after_another_open)
+    with pytest.raises(OSError, match="No space left on device"):
+        _runtime._atomic_write(tmp_path / "kernel.ptx", "payload")
+
+    try:
+        assert os.write(unrelated["descriptor"], b"still open") == 10
+    finally:
+        try:
+            os.close(unrelated["descriptor"])
+        except OSError:
+            pass  # The defect closed it; the assertion above reports that.
+    assert [path.name for path in tmp_path.iterdir()] == ["unrelated"]
+
+
+def test_atomic_write_closes_a_descriptor_it_could_not_wrap(
+    tmp_path, monkeypatch
+):
+    """Close the raw descriptor when no file object took ownership of it."""
+    from swage import _runtime
+
+    opened = []
+    mkstemp = _runtime.tempfile.mkstemp
+
+    def recording_mkstemp(**options):
+        descriptor, name = mkstemp(**options)
+        opened.append(descriptor)
+        return descriptor, name
+
+    def refuse(_descriptor, _mode):
+        raise MemoryError("no file object")
+
+    monkeypatch.setattr(_runtime.tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(_runtime.os, "fdopen", refuse)
+    with pytest.raises(MemoryError, match="no file object"):
+        _runtime._atomic_write(tmp_path / "kernel.ptx", "payload")
+
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(opened[0])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_launch_gives_a_thread_without_a_context_its_device_context(
+    monkeypatch,
+):
+    """Make the validated device's context current and launch in it."""
+    torch, _ = _fake_torch(current_device=0)
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    def current_context():
+        if not made_current:
+            raise RuntimeError("PyTorch has no current CUDA context")
+        return 0xCAFE
+
+    driver.current_context = current_context
+    arguments = _arguments(torch)
+
+    add_kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
+
+    assert made_current == [0]
+    assert driver.loads == [("ptx", "add_kernel")]
+    assert len(driver.launches) == 1
+
+
+def test_launch_reports_a_context_it_could_not_make_current(monkeypatch):
+    """Keep the driver's error when the device has no context to give."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    def no_context():
+        raise RuntimeError("PyTorch has no current CUDA context")
+
+    driver.current_context = no_context
+
+    with pytest.raises(RuntimeError, match="no current CUDA context"):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert made_current == [0]
+    assert driver.loads == driver.launches == []
+
+
+def test_launch_does_not_touch_a_context_that_is_current(monkeypatch):
+    """Never set the device on a thread that already has a context."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    made_current = []
+    torch.cuda.set_device = made_current.append
+
+    add_kernel.launch(
+        arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+    )
+
+    assert made_current == []
+    assert len(driver.launches) == 1
+
+
+def _run_script(script, tmp_path, timeout=60):
+    """Run `script` in a fresh interpreter with the package on its path."""
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(pathlib.Path(sw.__file__).parents[1]),
+            SWAGE_CACHE_DIR=str(tmp_path / "cache"),
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+_EXIT_DURING_A_COMPILE_SCRIPT = """
+import sys
+import threading
+import time
+
+from swage import _runtime
+
+in_flight = threading.Event()
+
+
+def compile_twice():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(0.5)
+        sys.stdout.write("first compile finished\\n")
+        sys.stdout.flush()
+    with _runtime._compile_lock:
+        sys.stdout.write("second compile started\\n")
+        sys.stdout.flush()
+
+
+threading.Thread(target=compile_twice, daemon=True).start()
+in_flight.wait()
+# The main thread ends here, while the daemon thread holds the lock.
+"""
+
+
+def test_interpreter_exit_waits_for_the_compile_in_flight(tmp_path):
+    """Let a compile finish before finalization and start no other."""
+    completed = _run_script(_EXIT_DURING_A_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "first compile finished\n"
+    assert completed.stderr == ""
+
+
+_EXIT_WITH_A_STUCK_COMPILE_SCRIPT = """
+import threading
+import time
+
+from swage import _runtime
+
+_runtime._EXIT_WAIT_SECONDS = 0.3
+in_flight = threading.Event()
+
+
+def never_finish():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(600)
+
+
+threading.Thread(target=never_finish, daemon=True).start()
+in_flight.wait()
+"""
+
+
+def test_interpreter_exit_does_not_wait_forever(tmp_path):
+    """Give up the wait at its bound, so a stuck thread cannot hold exit."""
+    started = time.monotonic()
+    completed = _run_script(_EXIT_WITH_A_STUCK_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert time.monotonic() - started < 30
+
+
+_STUCK_COMPILE_AND_A_LATER_HANDLER_SCRIPT = """
+import atexit
+import sys
+import threading
+import time
+
+
+def use_the_cold_path():
+    from swage import _runtime
+
+    try:
+        with _runtime._compile_lock:
+            sys.stdout.write("took a lock that another thread holds\\n")
+    except RuntimeError as error:
+        sys.stdout.write(f"refused: {error}\\n")
+    sys.stdout.flush()
+
+
+atexit.register(use_the_cold_path)
+
+from swage import _runtime  # noqa: E402
+
+_runtime._EXIT_WAIT_SECONDS = 0.3
+in_flight = threading.Event()
+
+
+def never_finish():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(600)
+
+
+threading.Thread(target=never_finish, daemon=True).start()
+in_flight.wait()
+"""
+
+
+def test_exit_does_not_hang_behind_a_stuck_compile_in_a_later_handler(
+    tmp_path,
+):
+    """Refuse the cold path, not wait again, once the exit wait ran out."""
+    completed = _run_script(
+        _STUCK_COMPILE_AND_A_LATER_HANDLER_SCRIPT, tmp_path, timeout=30
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == (
+        "refused: Swage cannot compile or load a kernel while the "
+        "interpreter exits: another thread still holds the cold-path "
+        "lock\n"
+    )
+
+
+def test_exit_wait_is_bounded_by_a_few_seconds():
+    """Keep the bound above a slow compile and below a noticeable hang."""
+    from swage import _runtime
+
+    assert 1.0 <= _runtime._EXIT_WAIT_SECONDS <= 10.0
+
+
+_LATER_EXIT_HANDLER_SCRIPT = """
+import atexit
+import sys
+
+
+def use_the_cold_path():
+    from swage import _runtime
+
+    with _runtime._compile_lock:
+        sys.stdout.write("later handler took the lock\\n")
+        sys.stdout.flush()
+
+
+# Registered before the package is imported, so it runs after the handler
+# of the package, on the thread that then already keeps the lock.
+atexit.register(use_the_cold_path)
+
+import swage  # noqa: E402,F401
+"""
+
+
+def test_exit_handlers_that_run_later_can_still_use_the_cold_path(tmp_path):
+    """Do not block the exiting thread on the lock it keeps."""
+    completed = _run_script(_LATER_EXIT_HANDLER_SCRIPT, tmp_path, timeout=30)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "later handler took the lock\n"
+
+
+_FORK_DURING_A_COMPILE_SCRIPT = """
+import os
+import signal
+import sys
+import threading
+import time
+import warnings
+
+from swage import _runtime
+from swage import _segmented_qualification as qualification
+
+in_flight = threading.Event()
+options = {"kernel_name": "segmented_sum", "target": "sm_86"}
+
+
+def slow_compile(_module, **_options):
+    in_flight.set()
+    time.sleep(0.4)
+    return "lowered", "ptx of the parent"
+
+
+def fast_compile(_module, **_options):
+    return "lowered", "ptx of the child"
+
+
+thread = threading.Thread(
+    target=qualification._compile_once,
+    args=(slow_compile, "program"),
+    kwargs=dict(options, module=object()),
+)
+thread.start()
+in_flight.wait()
+warnings.simplefilter("ignore", DeprecationWarning)
+child = os.fork()
+if child == 0:
+    # SIGALRM ends a child that waits for a lock nobody will release.
+    signal.alarm(5)
+    ptx = qualification._compile_once(
+        fast_compile, "another program", module=object(), **options
+    )
+    with _runtime._compile_lock:
+        os._exit(0 if ptx == "ptx of the child" else 3)
+_, status = os.waitpid(child, 0)
+thread.join()
+if os.WIFSIGNALED(status):
+    print("child ended by signal", os.WTERMSIG(status))
+else:
+    print("child exited", os.WEXITSTATUS(status))
+with _runtime._compile_lock:
+    print("parent lock usable")
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_child_forked_during_a_compile_can_use_the_cold_path(tmp_path):
+    """Do not hand a forked child a lock held by a thread it lacks."""
+    completed = _run_script(_FORK_DURING_A_COMPILE_SCRIPT, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "child exited 0\nparent lock usable\n"

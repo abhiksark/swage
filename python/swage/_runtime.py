@@ -2,6 +2,7 @@
 """Minimal CUDA Driver runtime for the canonical fixed vector-add subset."""
 
 import ast
+import atexit
 import collections
 import ctypes
 import errno
@@ -51,6 +52,72 @@ class _BoundedCache(dict):
             del self[next(iter(self))]
 
 
+class _ColdPathLock:
+    """A reentrant lock that interpreter exit closes to every other thread.
+
+    The thread that runs the exit handlers calls `close`. It waits for the
+    holder and then keeps the lock. From that call on, any other thread
+    that asks for the lock waits forever instead, so a thread that would
+    retake a released lock ahead of the exiting thread starts nothing new.
+    The exiting thread itself can still take the lock, because a later exit
+    handler may reach a cold path. When the wait of `close` ran out, the
+    exiting thread does not wait a second time behind the same holder: its
+    next request fails at once.
+    """
+
+    def __init__(self):
+        """Create an open lock that nothing holds."""
+        self._lock = threading.RLock()
+        self._closed_by = None
+        self._wait_ran_out = False
+
+    def acquire(self, timeout=-1):
+        """Take the lock; return whether it was taken within `timeout`."""
+        closed_by = self._closed_by
+        if closed_by is not None:
+            if closed_by != threading.get_ident():
+                # Only a daemon thread gets here, and its process is ending.
+                threading.Event().wait()
+            if self._wait_ran_out:
+                timeout = 0
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self):
+        """Give the lock back once."""
+        self._lock.release()
+
+    def close(self, timeout):
+        """Close the lock to other threads and wait for it.
+
+        Returns:
+            Whether the caller holds the lock. When the wait timed out, the
+            holder is still at work and later requests still wait forever.
+        """
+        self._closed_by = threading.get_ident()
+        acquired = self._lock.acquire(timeout=timeout)
+        self._wait_ran_out = not acquired
+        return acquired
+
+    def __enter__(self):
+        """Take the lock for a `with` block.
+
+        Raises:
+            RuntimeError: The interpreter exits and the thread that held
+                the lock when the exit wait ran out still holds it.
+        """
+        if not self.acquire():
+            raise RuntimeError(
+                "Swage cannot compile or load a kernel while the "
+                "interpreter exits: another thread still holds the "
+                "cold-path lock"
+            )
+        return self
+
+    def __exit__(self, *_error):
+        """Give the lock back at the end of a `with` block."""
+        self.release()
+
+
 # The cold-path lock: every native compile and every first load of a kernel
 # in this process holds it, here and in the private segmented runner.
 # Compiles are serialized on purpose. The native compiler admits concurrent
@@ -58,7 +125,45 @@ class _BoundedCache(dict):
 # process, so a lock per key would add risk for little gain. The compiler
 # releases the GIL while it works, and a warm launch never takes this lock:
 # it reads the caches below with one `get` each.
-_compile_lock = threading.Lock()
+#
+# The lock is reentrant for the two handlers registered below. Interpreter
+# exit keeps it on the exiting thread, whose later exit handlers may still
+# reach a cold path, and a fork takes it on a thread that may hold it.
+_compile_lock = _ColdPathLock()
+# How long interpreter exit waits for a cold path in flight. A compile takes
+# 3 to 20 ms here and a module load about as long, so the wait normally ends
+# within one of them. The lock is also held while `unload_retired` waits for
+# the device, which nothing bounds, so the wait is cut off: a thread stuck
+# there must not hold the process open. Past the bound the exit goes on and
+# the risk described at `_wait_for_cold_path_at_exit` returns.
+_EXIT_WAIT_SECONDS = 5.0
+
+
+def _wait_for_cold_path_at_exit():
+    """Keep the interpreter from finalizing under a native compile.
+
+    The native compiler releases the GIL, so the interpreter can finalize
+    while a daemon thread is inside LLVM, and the process then aborts or
+    crashes. This handler closes the lock, which waits for the cold path in
+    flight and lets no other thread start a compile or a load afterwards.
+    Threads that are not daemons have ended before exit handlers run.
+
+    A native compile that was not started under the lock is not waited for.
+    """
+    _compile_lock.close(_EXIT_WAIT_SECONDS)
+
+
+atexit.register(_wait_for_cold_path_at_exit)
+if hasattr(os, "register_at_fork"):
+    # A fork copies the lock in the state it has. Taken by another thread,
+    # it would stay taken in the child, where that thread does not exist,
+    # and the child's first cold path would wait for it forever. The fork
+    # therefore waits for the cold path in flight and both sides release.
+    os.register_at_fork(
+        before=_compile_lock.acquire,
+        after_in_parent=_compile_lock.release,
+        after_in_child=_compile_lock.release,
+    )
 _ptx_cache = _BoundedCache(_CACHE_LIMIT)
 # Values are `(module, function)` as `_CudaDriver.load` returns them. A
 # kernel that leaves this cache is unloaded once nothing else holds its
@@ -128,7 +233,12 @@ def launch(kernel, *, arguments, constexprs, grid):
         )
         _write_dumps(artifact)
         driver = _get_driver()
-        context = driver.current_context()
+        try:
+            context = driver.current_context()
+        except RuntimeError:
+            context = _make_context_current(
+                torch, driver.current_context, spec.tensors[0].device.index
+            )
         loaded_key = (artifact.key, context)
         loaded = _loaded_functions.get(loaded_key)
         if loaded is None:
@@ -379,6 +489,33 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
         stream,
         descriptors,
     )
+
+
+def _make_context_current(torch, current_context, device_index):
+    """Give a thread that has no CUDA context the context of its device.
+
+    A thread that has not used CUDA has no current context, and PyTorch
+    makes the device's context current with its first CUDA call there. A
+    launch may make no such call before it reaches the driver, so the
+    context is made current here. No context is created: the device holds
+    validated tensors, so its context exists. This is the path of a
+    thread's first launch only; a context that is already current is never
+    replaced.
+
+    Args:
+        torch: The PyTorch module.
+        current_context: The driver's bound `current_context` method.
+        device_index: Index of the device of the validated tensors, which
+            the caller has checked to be the current device.
+
+    Returns:
+        The context that is current now.
+
+    Raises:
+        RuntimeError: The thread still has no current context.
+    """
+    torch.cuda.set_device(device_index)
+    return current_context()
 
 
 def _device_facts(torch, index):
@@ -1217,17 +1354,22 @@ def _write_cache_entry(artifact, specialization):
 def _atomic_write(path, contents):
     descriptor, temporary = tempfile.mkstemp(dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w") as output:
+        try:
+            output = os.fdopen(descriptor, "w")
+        except BaseException:
+            # No file object owns the descriptor, so it is closed here.
+            os.close(descriptor)
+            raise
+        # From here the file object closes the descriptor, exactly once. A
+        # second close could hit a file that another thread opened under
+        # the same number in the meantime.
+        with output:
+            os.fchmod(output.fileno(), 0o600)
             output.write(contents)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
     except BaseException:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
         if os.path.exists(temporary):
             os.unlink(temporary)
         raise
@@ -1266,6 +1408,24 @@ def _load_cold(cache, key, driver, ptx, kernel_name):
             loaded = driver.load(ptx, kernel_name)
             cache[key] = loaded
     return loaded
+
+
+def _report_modules_left_loaded(count, error):
+    """Report modules that stay loaded, without ever raising.
+
+    The caller is loading an unrelated kernel and the modules are queued
+    again, so nothing is lost by going on. When the warning filters turn
+    the report into an exception, it is written to standard error instead.
+    """
+    noun = "module" if count == 1 else "modules"
+    try:
+        warnings.warn(
+            f"Swage left {count} unused CUDA {noun} loaded: {error}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    except RuntimeWarning as raised:
+        print(f"RuntimeWarning: {raised}", file=sys.stderr)
 
 
 def _capturing():
@@ -1493,8 +1653,10 @@ class _CudaDriver:
         is invalidated, the synchronize fails, and the modules stay queued.
 
         A module of another context stays queued until that context is
-        current. A driver error is reported as a `RuntimeWarning` and is
-        never raised, because the caller is loading an unrelated kernel.
+        current. A driver error is reported once per call and is never
+        raised, because the caller is loading an unrelated kernel. Every
+        idle module is tried, and a module that was not unloaded stays
+        queued for the next call.
         """
         if not self._retired or _capturing():
             return
@@ -1515,21 +1677,24 @@ class _CudaDriver:
             self._call("cuCtxSynchronize")
         except RuntimeError as error:
             self._retired.extend((context, module) for module in idle)
-            warnings.warn(
-                f"Swage left {len(idle)} unused CUDA modules loaded: {error}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            _report_modules_left_loaded(len(idle), error)
             return
-        for module in idle:
-            try:
-                self._call("cuModuleUnload", ctypes.c_void_p(module))
-            except RuntimeError as error:
-                warnings.warn(
-                    f"Swage left an unused CUDA module loaded: {error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        kept = []
+        first_error = None
+        try:
+            while idle:
+                try:
+                    self._call("cuModuleUnload", ctypes.c_void_p(idle[-1]))
+                except RuntimeError as error:
+                    kept.append(idle[-1])
+                    first_error = first_error or error
+                idle.pop()
+        finally:
+            # `idle` holds modules only when the loop was interrupted, the
+            # module that was being unloaded among them.
+            self._retired.extend((context, module) for module in kept + idle)
+        if kept:
+            _report_modules_left_loaded(len(kept), first_error)
 
     def _pin_if_capturing(self, function, stream):
         """Keep a kernel loaded for good when a CUDA graph captures it.

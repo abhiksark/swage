@@ -50,7 +50,12 @@ PyTorch CUDA stream.
 
 Swage does not invoke NVRTC or a subprocess compiler. It does not copy or
 cast tensors, change devices, create a CUDA context, or select a fallback
-backend. A launch of a kernel that is already loaded does not synchronize.
+backend. A thread that has not used CUDA has no current context. A launch
+on such a thread makes the context of the validated current device current
+there, as the first PyTorch CUDA call on the thread would. That context is
+the one PyTorch already holds for the device, so none is created, and a
+context that is already current is never replaced. A launch of a kernel
+that is already loaded does not synchronize.
 A launch that loads a kernel can synchronize the context once;
 [Module lifetime](#module-lifetime) states when. Loaded functions are reused
 per specialization and CUDA context. Tensor storage remains owned by
@@ -73,7 +78,21 @@ default value or an annotation other than `sl.constexpr` raises the
 source-located `CompilationError` of the frontend before anything is
 compiled. The private qualification helpers reject lazy negation and
 conjugate views of their values, offsets, output, and task buffers in the
-same way as the public launch.
+same way as the public launch. They also require the output to share no
+memory with the values, the offsets, or caller-supplied task IDs.
+
+A prepared private launch is bound to the storage it was prepared with. The
+preparation records the data pointer, the element count, and the dtype of
+the values, offsets, and output tensors, and each launch compares them
+before anything is enqueued. In-place writes to values and output are fine
+and are the way to reuse a prepared launch. A tensor that was rebound to
+other storage, for example through `tensor.data = other`, raises a
+`RuntimeError` that names the tensor, even when the new storage has the same
+size, and the launch must be prepared again. PyTorch does not advance the
+version counter for such a rebind, so the offsets check alone does not see
+it. The comparison is host work only. It cannot see storage that was freed
+and allocated again at the prepared address with the prepared count and
+dtype.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -115,6 +134,37 @@ A launch from several threads follows these rules:
   of the binding must not use a context from another thread while a compile
   of a module in that context runs.
 
+### Interpreter exit and fork
+
+The lock that serializes compiles and loads is held for a whole compile,
+and the compiler runs without the GIL. Two process events need care:
+
+- Interpreter exit. A daemon thread can be inside the compiler when the
+  main thread ends, and a process that finalizes under a compile aborts or
+  crashes. An exit handler therefore waits for the compile or load in
+  flight and then keeps the lock, so that no other thread starts one. The
+  wait is bounded at 5 seconds. A compile takes a few milliseconds, but the
+  lock is also held while a load waits for the device, which nothing
+  bounds, and a stuck thread must not hold the process open. After the
+  bound the exit continues and the crash is possible again. A later exit
+  handler that then needs a compile or a load gets a `RuntimeError` at
+  once and does not wait again.
+- Fork. A child forked while another thread compiles would inherit the lock
+  in its taken state and wait for it forever at its first compile or load.
+  `os.fork()` therefore waits for the compile or load in flight, and the
+  parent and the child both release the lock. A fork taken on a thread
+  that is itself compiling does not wait for itself.
+
+These cases stay exposed:
+
+- A compile that calls the native binding directly, without `launch()` or
+  a private qualification helper, does not hold the lock. Exit and fork do
+  not wait for it.
+- `os._exit()`, a fatal signal, and a process that an embedding application
+  tears down without running exit handlers skip the wait.
+- A child forked from a process that has used CUDA cannot use CUDA. The
+  fork handling covers the compiler and the caches, not the driver.
+
 ### Module lifetime
 
 The process keeps compiled artifacts and loaded functions in two in-process
@@ -146,15 +196,18 @@ loaded kernel never reaches it. These rules bound it:
   current.
 - While the calling thread captures a CUDA graph, nothing is unloaded and
   the queue waits for a later load.
-- A driver error during the synchronize or an unload is reported as a
-  `RuntimeWarning` and is never raised, because the caller is loading an
-  unrelated kernel.
+- A driver error during the synchronize or an unload is reported as one
+  `RuntimeWarning` per load and is never raised, because the caller is
+  loading an unrelated kernel. Every queued module is tried, and a module
+  that was not unloaded stays queued for the next load, which synchronizes
+  and tries again. When the warning filters turn warnings into errors, the
+  report is written to standard error instead.
 
 One limitation remains. A capture that is open on another thread cannot be
 seen from the loading thread. If a load finds queued modules while another
 thread captures a graph in the same context, the synchronize invalidates
 that capture and fails, the modules stay queued, and the process warns
-`Swage left <count> unused CUDA modules loaded`. To avoid it, launch every
+that it left `<count>` unused CUDA modules loaded. To avoid it, launch every
 kernel once before any thread starts a capture, so that no kernel is loaded
 while a capture is open.
 

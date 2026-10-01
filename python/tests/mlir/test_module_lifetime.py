@@ -7,6 +7,7 @@ import functools
 import gc
 import itertools
 import threading
+import warnings
 import weakref
 from contextlib import contextmanager
 from unittest import mock
@@ -319,8 +320,8 @@ def test_failed_synchronize_warns_and_keeps_the_modules_queued(fake_cuda):
     assert fake_cuda.calls("cuModuleUnload") == [("cuModuleUnload", 0x1000)]
 
 
-def test_failed_unload_warns_and_is_not_retried(fake_cuda):
-    """Report a module the driver refuses to unload, once."""
+def test_failed_unload_warns_and_keeps_the_module_queued(fake_cuda):
+    """Report a module the driver refuses to unload and try it again."""
     driver = fake_cuda.driver
     driver.load("ptx", "kernel")
     gc.collect()
@@ -328,10 +329,92 @@ def test_failed_unload_warns_and_is_not_retried(fake_cuda):
 
     with pytest.warns(RuntimeWarning, match="cuModuleUnload failed"):
         driver.unload_retired()
+    assert list(driver._retired) == [(1, 0x1000)]
 
     del fake_cuda.failures["cuModuleUnload"]
     driver.unload_retired()
-    assert len(fake_cuda.calls("cuModuleUnload")) == 1
+    assert fake_cuda.calls("cuModuleUnload") == [("cuModuleUnload", 0x1000)] * 2
+    assert not driver._retired
+
+
+def _retire_three_modules(fake_cuda):
+    """Load three kernels, drop them, and refuse to unload the first."""
+    driver = fake_cuda.driver
+    # Held until all three are loaded, so that no load unloads an earlier one.
+    loaded = [driver.load(name, "kernel") for name in ("a", "b", "c")]
+    modules = [module for module, _ in loaded]
+    del loaded
+    gc.collect()
+    assert sorted(module for _, module in driver._retired) == modules
+    fake_cuda._cuModuleUnload = lambda module: (
+        400 if module.value == modules[0] else 0
+    )
+    return driver, modules
+
+
+def test_one_failed_unload_does_not_lose_the_modules_after_it(fake_cuda):
+    """Unload the rest, keep the refused module queued, and warn once."""
+    driver, modules = _retire_three_modules(fake_cuda)
+
+    with pytest.warns(RuntimeWarning) as caught:
+        driver.unload_retired()
+
+    assert [str(warning.message) for warning in caught] == [
+        "Swage left 1 unused CUDA module loaded: CUDA Driver "
+        "cuModuleUnload failed: CUDA_ERROR (400): driver error"
+    ]
+    assert sorted(fake_cuda.calls("cuModuleUnload")) == [
+        ("cuModuleUnload", module) for module in modules
+    ]
+    assert list(driver._retired) == [(1, modules[0])]
+
+
+def test_interrupted_unload_keeps_every_module_it_did_not_unload(fake_cuda):
+    """Requeue the module in hand and the ones not yet tried."""
+    driver, modules = _retire_three_modules(fake_cuda)
+    unloads = []
+
+    def interrupt_the_second(module):
+        unloads.append(module.value)
+        if len(unloads) == 2:
+            raise KeyboardInterrupt
+
+    fake_cuda._cuModuleUnload = interrupt_the_second
+
+    with pytest.raises(KeyboardInterrupt):
+        driver.unload_retired()
+
+    assert sorted(module for _, module in driver._retired) == sorted(
+        set(modules) - {unloads[0]}
+    )
+
+
+@pytest.mark.parametrize("failing", ["cuModuleUnload", "cuCtxSynchronize"])
+def test_unload_never_raises_into_a_load_when_warnings_are_errors(
+    fake_cuda, capsys, failing
+):
+    """Load the unrelated kernel and keep every module that stays loaded."""
+    driver, modules = _retire_three_modules(fake_cuda)
+    if failing == "cuCtxSynchronize":
+        # Nothing is unloaded without the wait, so every module stays.
+        fake_cuda.failures["cuCtxSynchronize"] = _CAPTURE_UNSUPPORTED
+        left, tried = modules, []
+    else:
+        left, tried = modules[:1], modules
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, function = driver.load("unrelated", "kernel")
+
+    assert function == 0x1031
+    assert sorted(module for _, module in driver._retired) == left
+    assert sorted(fake_cuda.calls("cuModuleUnload")) == [
+        ("cuModuleUnload", module) for module in tried
+    ]
+    # The report is not lost when it cannot be a warning.
+    report = capsys.readouterr().err
+    assert report.count("RuntimeWarning: Swage left") == 1
+    assert f"{failing} failed" in report
 
 
 def test_context_identity_is_the_driver_id_not_the_handle(fake_cuda):
@@ -968,8 +1051,7 @@ def test_cold_compile_does_not_block_a_warm_public_launch(monkeypatch):
     errors = []
 
     def launch_on_this_thread(target, block):
-        # The public launch needs a CUDA context that is already current,
-        # and a new thread has none until PyTorch makes one current.
+        # A new thread has no CUDA context until PyTorch gives it one.
         torch.cuda.set_device(x.device)
         _add(x, y, target, block)
 
