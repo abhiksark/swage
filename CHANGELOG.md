@@ -42,8 +42,9 @@ semantic versioning (`0.x`; anything may change).
   `compile_on_miss`.
 - `SWAGE_CACHE_MAX_ENTRIES` (default 1024) bounds the disk cache;
   `SWAGE_CACHE_READ_ONLY=1` reads entries without changing the cache root;
-  `SWAGE_NO_COMPILE=1` raises on a kernel that is not cached. These govern
-  the public `launch()` only.
+  `SWAGE_NO_COMPILE=1` raises on a kernel that is not cached. The two
+  cache variables govern the public `launch()`, the only path that uses the
+  disk cache.
 - Benchmarks: a driver repeats a harness in independent processes and
   reports the median and range of per-process medians; records carry native
   library and PTX hashes, CPU, driver, and GPU state; rows report effective
@@ -168,6 +169,19 @@ semantic versioning (`0.x`; anything may change).
 - `build_llvm.sh` and `build_swage.sh` build the bindings for the `python`
   on `PATH` and fall back to `python3`. The package description states that
   the wheel is pure Python.
+- Every segmented lowering diagnostic has a negative lit test and states
+  what it found. A rejected region operation is named with the accepted
+  list, where it used to say "exponentials must use math.exp2". The lowering
+  dispatches on operation classes, and its pass descriptions match what it
+  emits. `_materialize_segmented_plan` accepts offsets only as an int32
+  buffer. Two unreachable classifier checks are removed.
+- The private segmented helpers reject lazy negation and conjugate views and
+  honor `SWAGE_NO_COMPILE=1`. `launch()` errors name the kernel and where it
+  is defined, and the missing-bindings error points to the installation
+  page.
+- Documentation: the landing page, diagrams, reference, and internals pages
+  match the merged runtime, frontend, CI, and benchmark changes;
+  `installation.md` lists what the released `0.5.1` wheel lacks.
 - Kernel-body integer literals are bounded to signed 64-bit with a
   source-located error, and kernel names that PTX cannot represent are
   rejected at capture and in PTX compilation. Both changes postdate
