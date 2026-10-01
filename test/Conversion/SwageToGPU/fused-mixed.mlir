@@ -11,6 +11,11 @@
 // and reduce with a block-wide all-reduce, which contains block barriers. A
 // barrier is legal only where every thread of the block reaches it, so this
 // test pins which predicate guards each schedule.
+//
+// Every line from the schedule choice to the return is matched in order with
+// captured operands, so each task's data path is pinned end to end: task
+// word, segment offsets, bounded range, loop bounds, reduction, stored
+// output.
 module {
   func.func @segmented_sum(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
@@ -29,75 +34,144 @@ module {
 }
 
 // CHECK: gpu.module @segmented_sum_module
-// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[WARP_COUNT_I32:[^,]+]]: i32, %[[CTA_COUNT_I32:[^)]+]]: i32) kernel
+// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[WARP_COUNT_I32:[^,]+]]: i32, %[[CTA_COUNT_I32:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
 // CHECK: %[[BLOCK_ID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK-DAG: %[[ZERO:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[ONE:.*]] = arith.constant 1 : index
 // CHECK-DAG: %[[BLOCK:.*]] = arith.constant 128 : index
+// CHECK-DAG: %[[THREE:.*]] = arith.constant 3 : index
 // CHECK-DAG: %[[FOUR:.*]] = arith.constant 4 : index
 // CHECK-DAG: %[[WARP:.*]] = arith.constant 32 : index
 // CHECK: %[[WARP_COUNT:.*]] = arith.index_cast %[[WARP_COUNT_I32]] : i32 to index
-// CHECK: %[[CTA_COUNT:.*]] = arith.index_cast %[[CTA_COUNT_I32]] : i32 to index
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[WARP_COUNT]], %{{.*}} : index
-// CHECK: %[[WARP_BLOCKS:.*]] = arith.divui %[[ROUNDED]], %[[FOUR]] : index
+// CHECK-NEXT: %[[CTA_COUNT:.*]] = arith.index_cast %[[CTA_COUNT_I32]] : i32 to index
 
-// The schedule is chosen from the block index and a launch argument, so all
-// threads of one block take the same branch.
-// CHECK: %[[IS_WARP_BLOCK:.*]] = arith.cmpi ult, %[[BLOCK_ID]], %[[WARP_BLOCKS]] : index
-// CHECK: scf.if %[[IS_WARP_BLOCK]] {
+// Four warp tasks share a block, so the warp schedule takes the first
+// ceil(warp_count / 4) blocks. The choice depends only on the block index and
+// a launch argument, so all threads of one block take the same branch.
+// CHECK-NEXT: %[[ROUNDED:.*]] = arith.addi %[[WARP_COUNT]], %[[THREE]] : index
+// CHECK-NEXT: %[[WARP_BLOCKS:.*]] = arith.divui %[[ROUNDED]], %[[FOUR]] : index
+// CHECK-NEXT: %[[IS_WARP_BLOCK:.*]] = arith.cmpi ult, %[[BLOCK_ID]], %[[WARP_BLOCKS]] : index
+// CHECK-NEXT: scf.if %[[IS_WARP_BLOCK]] {
 
-// Warp schedule. The task guard depends on the physical warp, so it is
-// uniform within a warp but not within the block.
-// CHECK:   %[[PHYSICAL_WARP:.*]] = arith.divui %[[THREAD]], %[[WARP]] : index
-// CHECK:   %[[LANE:.*]] = arith.remui %[[THREAD]], %[[WARP]] : index
-// CHECK:   %[[FIRST_TASK:.*]] = arith.muli %[[BLOCK_ID]], %[[FOUR]] : index
-// CHECK:   %[[WARP_TASK:.*]] = arith.addi %[[FIRST_TASK]], %[[PHYSICAL_WARP]] : index
-// CHECK:   %[[WARP_IN_RANGE:.*]] = arith.cmpi ult, %[[WARP_TASK]], %[[WARP_COUNT]] : index
-// CHECK:   scf.if %[[WARP_IN_RANGE]] {
-// CHECK:     %[[WARP_TASK_I64:.*]] = arith.index_cast %[[WARP_TASK]] : index to i64
-// CHECK:     llvm.getelementptr %[[TASK_IDS]][%[[WARP_TASK_I64]]]
-// CHECK:     %[[WARP_LOCAL:.*]] = scf.for %{{.*}} step %[[WARP]] iter_args(
-// CHECK:       llvm.getelementptr %[[VALUES]]
-// CHECK:     }
-// Five shuffle stages fold the 32 lanes; each stage combines the running
-// total with its shuffled copy.
-// CHECK:     %[[S1:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_LOCAL]],
-// CHECK-NEXT: %[[T1:.*]] = arith.addf %[[WARP_LOCAL]], %[[S1]] : f32
-// CHECK:     %[[S2:[^,]+]], %{{.*}} = gpu.shuffle xor %[[T1]],
-// CHECK-NEXT: %[[T2:.*]] = arith.addf %[[T1]], %[[S2]] : f32
-// CHECK:     %[[S3:[^,]+]], %{{.*}} = gpu.shuffle xor %[[T2]],
-// CHECK-NEXT: %[[T3:.*]] = arith.addf %[[T2]], %[[S3]] : f32
-// CHECK:     %[[S4:[^,]+]], %{{.*}} = gpu.shuffle xor %[[T3]],
-// CHECK-NEXT: %[[T4:.*]] = arith.addf %[[T3]], %[[S4]] : f32
-// CHECK:     %[[S5:[^,]+]], %{{.*}} = gpu.shuffle xor %[[T4]],
-// CHECK-NEXT: %[[WARP_TOTAL:.*]] = arith.addf %[[T4]], %[[S5]] : f32
-// Lane zero of each warp is the only writer of that task's output.
-// CHECK-NEXT: %[[FIRST_LANE:.*]] = arith.cmpi eq, %[[LANE]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[FIRST_LANE]] {
-// CHECK-NEXT:   %[[WARP_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]]
+// Warp schedule. Warp w of block b runs task 4 * b + w. The task guard
+// depends on the physical warp, so it is uniform within a warp but not within
+// the block.
+// CHECK-NEXT: %[[PHYSICAL_WARP:.*]] = arith.divui %[[THREAD]], %[[WARP]] : index
+// CHECK-NEXT: %[[LANE:.*]] = arith.remui %[[THREAD]], %[[WARP]] : index
+// CHECK-NEXT: %[[FIRST_TASK:.*]] = arith.muli %[[BLOCK_ID]], %[[FOUR]] : index
+// CHECK-NEXT: %[[WARP_TASK:.*]] = arith.addi %[[FIRST_TASK]], %[[PHYSICAL_WARP]] : index
+// CHECK-NEXT: %[[WARP_IN_RANGE:.*]] = arith.cmpi ult, %[[WARP_TASK]], %[[WARP_COUNT]] : index
+// CHECK-NEXT: scf.if %[[WARP_IN_RANGE]] {
+// CHECK-NEXT: %[[WARP_TASK_I64:.*]] = arith.index_cast %[[WARP_TASK]] : index to i64
+
+// The task word names the segment; its two offsets are the segment's range.
+// CHECK-NEXT: %[[WARP_ID_ADDRESS:.*]] = llvm.getelementptr %[[TASK_IDS]][%[[WARP_TASK_I64]]]
+// CHECK-NEXT: %[[WARP_ID_WORD:.*]] = llvm.load %[[WARP_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[WARP_SEGMENT:.*]] = arith.index_cast %[[WARP_ID_WORD]] : i32 to index
+// CHECK-NEXT: %[[WARP_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_SEGMENT]] : index to i64
+// CHECK-NEXT: %[[WARP_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_START_WORD:.*]] = llvm.load %[[WARP_START_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[WARP_NEXT_SEGMENT:.*]] = arith.addi %[[WARP_SEGMENT]], %[[ONE]] : index
+// CHECK-NEXT: %[[WARP_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[WARP_NEXT_SEGMENT]] : index to i64
+// CHECK-NEXT: %[[WARP_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[WARP_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[WARP_END_WORD:.*]] = llvm.load %[[WARP_END_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[WARP_FLOOR:.*]] = arith.constant 0 : i32
+// CHECK-NEXT: %[[WARP_START_FLOORED:.*]] = arith.maxsi %[[WARP_START_WORD]], %[[WARP_FLOOR]] : i32
+// CHECK-NEXT: %[[WARP_START_BOUND:.*]] = arith.minsi %[[WARP_START_FLOORED]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[WARP_END_FLOORED:.*]] = arith.maxsi %[[WARP_END_WORD]], %[[WARP_START_BOUND]] : i32
+// CHECK-NEXT: %[[WARP_END_BOUND:.*]] = arith.minsi %[[WARP_END_FLOORED]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[WARP_START:.*]] = arith.index_cast %[[WARP_START_BOUND]] : i32 to index
+// CHECK-NEXT: %[[WARP_END:.*]] = arith.index_cast %[[WARP_END_BOUND]] : i32 to index
+// Each lane starts at its own offset into the range and strides by the
+// number of lanes, so the range is covered exactly once.
+// CHECK-NEXT: %[[WARP_FIRST:.*]] = arith.addi %[[WARP_START]], %[[LANE]] : index
+// CHECK-NEXT: %[[WARP_IDENTITY:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK-NEXT: %[[WARP_LOCAL:.*]] = scf.for %[[WARP_I:.*]] = %[[WARP_FIRST]] to %[[WARP_END]] step %[[WARP]] iter_args(%[[WARP_ACC:.*]] = %[[WARP_IDENTITY]]) -> (f32) {
+// CHECK-NEXT:   %[[WARP_INDEX:.*]] = arith.index_cast %[[WARP_I]] : index to i64
+// CHECK-NEXT:   %[[WARP_ADDRESS:.*]] = llvm.getelementptr %[[VALUES]][%[[WARP_INDEX]]]
+// CHECK-NEXT:   %[[WARP_VALUE:.*]] = llvm.load %[[WARP_ADDRESS]] : !llvm.ptr -> f32
+// CHECK-NEXT:   %[[WARP_SUM:.*]] = arith.addf %[[WARP_ACC]], %[[WARP_VALUE]] : f32
+// CHECK-NEXT:   scf.yield %[[WARP_SUM]] : f32
+// CHECK-NEXT: }
+// Five shuffle stages fold the 32 lanes; each stage adds the running total to
+// its copy from the lane 1, 2, 4, 8, and 16 away.
+// CHECK-NEXT: %[[WARP_W1:.*]] = arith.constant 32 : i32
+// CHECK-NEXT: %[[WARP_D1:.*]] = arith.constant 1 : i32
+// CHECK-NEXT: %[[WARP_S1:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_LOCAL]], %[[WARP_D1]], %[[WARP_W1]] : f32
+// CHECK-NEXT: %[[WARP_T1:.*]] = arith.addf %[[WARP_LOCAL]], %[[WARP_S1]] : f32
+// CHECK-NEXT: %[[WARP_W2:.*]] = arith.constant 32 : i32
+// CHECK-NEXT: %[[WARP_D2:.*]] = arith.constant 2 : i32
+// CHECK-NEXT: %[[WARP_S2:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T1]], %[[WARP_D2]], %[[WARP_W2]] : f32
+// CHECK-NEXT: %[[WARP_T2:.*]] = arith.addf %[[WARP_T1]], %[[WARP_S2]] : f32
+// CHECK-NEXT: %[[WARP_W3:.*]] = arith.constant 32 : i32
+// CHECK-NEXT: %[[WARP_D3:.*]] = arith.constant 4 : i32
+// CHECK-NEXT: %[[WARP_S3:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T2]], %[[WARP_D3]], %[[WARP_W3]] : f32
+// CHECK-NEXT: %[[WARP_T3:.*]] = arith.addf %[[WARP_T2]], %[[WARP_S3]] : f32
+// CHECK-NEXT: %[[WARP_W4:.*]] = arith.constant 32 : i32
+// CHECK-NEXT: %[[WARP_D4:.*]] = arith.constant 8 : i32
+// CHECK-NEXT: %[[WARP_S4:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T3]], %[[WARP_D4]], %[[WARP_W4]] : f32
+// CHECK-NEXT: %[[WARP_T4:.*]] = arith.addf %[[WARP_T3]], %[[WARP_S4]] : f32
+// CHECK-NEXT: %[[WARP_W5:.*]] = arith.constant 32 : i32
+// CHECK-NEXT: %[[WARP_D5:.*]] = arith.constant 16 : i32
+// CHECK-NEXT: %[[WARP_S5:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T4]], %[[WARP_D5]], %[[WARP_W5]] : f32
+// CHECK-NEXT: %[[WARP_TOTAL:.*]] = arith.addf %[[WARP_T4]], %[[WARP_S5]] : f32
+// Lane zero of the warp is the only writer, and it stores the total at the
+// segment the task word named.
+// CHECK-NEXT: %[[WARP_WRITER:.*]] = arith.cmpi eq, %[[LANE]], %[[ZERO]] : index
+// CHECK-NEXT: scf.if %[[WARP_WRITER]] {
+// CHECK-NEXT:   %[[WARP_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[WARP_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[WARP_TOTAL]], %[[WARP_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }
 // CHECK-NEXT: }
 // CHECK-NEXT: } else {
 
-// CTA schedule. The task guard depends only on the block index and launch
+// CTA schedule. The CTA tasks follow the warp tasks in the same task list,
+// one block each. The task guard depends only on the block index and launch
 // arguments, so it is block-uniform.
 // CHECK-NEXT: %[[CTA_TASK:.*]] = arith.subi %[[BLOCK_ID]], %[[WARP_BLOCKS]] : index
 // CHECK-NEXT: %[[CTA_IN_RANGE:.*]] = arith.cmpi ult, %[[CTA_TASK]], %[[CTA_COUNT]] : index
 // CHECK-NEXT: scf.if %[[CTA_IN_RANGE]] {
-// CHECK-NEXT:   %[[MIXED_TASK:.*]] = arith.addi %[[WARP_COUNT]], %[[CTA_TASK]] : index
-// CHECK-NEXT:   %[[MIXED_TASK_I64:.*]] = arith.index_cast %[[MIXED_TASK]] : index to i64
-// CHECK-NEXT:   llvm.getelementptr %[[TASK_IDS]][%[[MIXED_TASK_I64]]]
-// CHECK:     %[[CTA_LOCAL:.*]] = scf.for %{{.*}} step %[[BLOCK]] iter_args(
-// CHECK:       llvm.getelementptr %[[VALUES]]
-// CHECK:     }
+// CHECK-NEXT: %[[MIXED_TASK:.*]] = arith.addi %[[WARP_COUNT]], %[[CTA_TASK]] : index
+// CHECK-NEXT: %[[CTA_TASK_I64:.*]] = arith.index_cast %[[MIXED_TASK]] : index to i64
+
+// The task word names the segment; its two offsets are the segment's range.
+// CHECK-NEXT: %[[CTA_ID_ADDRESS:.*]] = llvm.getelementptr %[[TASK_IDS]][%[[CTA_TASK_I64]]]
+// CHECK-NEXT: %[[CTA_ID_WORD:.*]] = llvm.load %[[CTA_ID_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[CTA_SEGMENT:.*]] = arith.index_cast %[[CTA_ID_WORD]] : i32 to index
+// CHECK-NEXT: %[[CTA_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_SEGMENT]] : index to i64
+// CHECK-NEXT: %[[CTA_START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_START_WORD:.*]] = llvm.load %[[CTA_START_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[CTA_NEXT_SEGMENT:.*]] = arith.addi %[[CTA_SEGMENT]], %[[ONE]] : index
+// CHECK-NEXT: %[[CTA_NEXT_SEGMENT_I64:.*]] = arith.index_cast %[[CTA_NEXT_SEGMENT]] : index to i64
+// CHECK-NEXT: %[[CTA_END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]][%[[CTA_NEXT_SEGMENT_I64]]]
+// CHECK-NEXT: %[[CTA_END_WORD:.*]] = llvm.load %[[CTA_END_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[CTA_FLOOR:.*]] = arith.constant 0 : i32
+// CHECK-NEXT: %[[CTA_START_FLOORED:.*]] = arith.maxsi %[[CTA_START_WORD]], %[[CTA_FLOOR]] : i32
+// CHECK-NEXT: %[[CTA_START_BOUND:.*]] = arith.minsi %[[CTA_START_FLOORED]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[CTA_END_FLOORED:.*]] = arith.maxsi %[[CTA_END_WORD]], %[[CTA_START_BOUND]] : i32
+// CHECK-NEXT: %[[CTA_END_BOUND:.*]] = arith.minsi %[[CTA_END_FLOORED]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[CTA_START:.*]] = arith.index_cast %[[CTA_START_BOUND]] : i32 to index
+// CHECK-NEXT: %[[CTA_END:.*]] = arith.index_cast %[[CTA_END_BOUND]] : i32 to index
+// Each thread starts at its own offset into the range and strides by the
+// number of threads, so the range is covered exactly once.
+// CHECK-NEXT: %[[CTA_FIRST:.*]] = arith.addi %[[CTA_START]], %[[THREAD]] : index
+// CHECK-NEXT: %[[CTA_IDENTITY:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK-NEXT: %[[CTA_LOCAL:.*]] = scf.for %[[CTA_I:.*]] = %[[CTA_FIRST]] to %[[CTA_END]] step %[[BLOCK]] iter_args(%[[CTA_ACC:.*]] = %[[CTA_IDENTITY]]) -> (f32) {
+// CHECK-NEXT:   %[[CTA_INDEX:.*]] = arith.index_cast %[[CTA_I]] : index to i64
+// CHECK-NEXT:   %[[CTA_ADDRESS:.*]] = llvm.getelementptr %[[VALUES]][%[[CTA_INDEX]]]
+// CHECK-NEXT:   %[[CTA_VALUE:.*]] = llvm.load %[[CTA_ADDRESS]] : !llvm.ptr -> f32
+// CHECK-NEXT:   %[[CTA_SUM:.*]] = arith.addf %[[CTA_ACC]], %[[CTA_VALUE]] : f32
+// CHECK-NEXT:   scf.yield %[[CTA_SUM]] : f32
+// CHECK-NEXT: }
 // CHECK-NEXT: %[[CTA_TOTAL:.*]] = gpu.all_reduce add %[[CTA_LOCAL]] uniform {
 // CHECK-NEXT: } : (f32) -> f32
-// Thread zero is the only writer, after the all-reduce has broadcast.
-// CHECK-NEXT: %[[FIRST_THREAD:.*]] = arith.cmpi eq, %[[THREAD]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[FIRST_THREAD]] {
-// CHECK-NEXT:   %[[CTA_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]]
+// Thread zero of the block is the only writer, and it stores the total at the
+// segment the task word named.
+// CHECK-NEXT: %[[CTA_WRITER:.*]] = arith.cmpi eq, %[[THREAD]], %[[ZERO]] : index
+// CHECK-NEXT: scf.if %[[CTA_WRITER]] {
+// CHECK-NEXT:   %[[CTA_OUTPUT:.*]] = llvm.getelementptr %[[OUTPUT]][%[[CTA_SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[CTA_TOTAL]], %[[CTA_OUTPUT]] : f32, !llvm.ptr
 // CHECK-NEXT: }
 // CHECK-NEXT: }
