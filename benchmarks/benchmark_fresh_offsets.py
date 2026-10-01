@@ -16,10 +16,12 @@ few tiny layouts; a smoke record is labelled as not evidence.
 """
 
 import argparse
+import importlib.util
 import itertools
 import json
 import pathlib
 import platform
+import random
 import subprocess
 import sys
 import time
@@ -27,6 +29,7 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from benchmark_triton_comparison import (
+    _exact_values,
     _launch_triton_looped,
     _make_triton_looped_sum,
     _median_iqr,
@@ -154,6 +157,104 @@ def _check_output(root, output, *, smoke):
         )
 
 
+def _same_checkout(root, package, *, smoke):
+    """Return whether the imported swage package belongs to this checkout.
+
+    The revision in the record describes the checkout that holds this
+    script. A package imported from another checkout, for example through
+    ``PYTHONPATH`` or an editable install, would be measured under that
+    revision without belonging to it.
+
+    Args:
+        root: Root of the checkout that holds the benchmark script.
+        package: Directory of the imported ``swage`` package.
+        smoke: Whether this is a smoke run, which records the mismatch.
+
+    Returns:
+        True when the package is inside the checkout.
+
+    Raises:
+        RuntimeError: If a full run imported the package from elsewhere.
+    """
+    root = root.resolve()
+    package = package.resolve()
+    inside = package.is_relative_to(root)
+    if not inside and not smoke:
+        raise RuntimeError(
+            "fresh-offsets benchmark must measure its own checkout: the "
+            f"imported swage package is {package}, but the benchmark runs "
+            f"from {root}"
+        )
+    return inside
+
+
+def _native_library_paths(native, locations):
+    """Resolve the library files that the runtime's native identity names.
+
+    Args:
+        native: The ``native`` field of the runtime compiler identity, a
+            list of ``[file name, size, mtime]``, or None.
+        locations: Search locations of ``mlir_swage._mlir_libs``.
+
+    Returns:
+        One sorted path per named file that exists. The directory is
+        resolved, so a build tree reached through a symlink is reported
+        where it really is; the file name is kept as the identity lists it.
+    """
+    names = [name for name, *_ in native or ()]
+    return sorted(
+        str(path)
+        for location in locations
+        for name in names
+        if (path := pathlib.Path(location).resolve() / name).is_file()
+    )
+
+
+def _imported_code(
+    *,
+    root,
+    package,
+    same_checkout,
+    identity,
+    native_extension,
+    native_library_paths,
+    mlir_swage_locations,
+    llvm_linked,
+):
+    """Return which package and native build the run actually measured.
+
+    Args:
+        root: Resolved root of the checkout that holds this script.
+        package: Resolved directory of the imported ``swage`` package.
+        same_checkout: Whether that package is inside ``root``.
+        identity: ``swage._runtime._compiler_identity()``, stored as
+            returned. Its ``frontend`` digests the package sources and its
+            ``native`` lists the native libraries with size and mtime.
+        native_extension: File of the loaded native extension module.
+        native_library_paths: Resolved paths of the ``native`` files.
+        mlir_swage_locations: Search locations of ``mlir_swage``.
+        llvm_linked: LLVM version the native extension was linked against.
+
+    Returns:
+        The imported-code block of the record.
+    """
+    return {
+        "benchmark_checkout": str(root),
+        "swage_package": str(package),
+        "swage_package_in_checkout": same_checkout,
+        "compiler_identity": identity,
+        "native_extension": str(native_extension),
+        "native_library_paths": list(native_library_paths),
+        "native_libraries_in_checkout": bool(native_library_paths)
+        and all(
+            pathlib.Path(path).is_relative_to(root)
+            for path in native_library_paths
+        ),
+        "mlir_swage_locations": list(mlir_swage_locations),
+        "llvm_linked": llvm_linked,
+    }
+
+
 def _optional_triton():
     """Return the Triton module, or None when it is not installed."""
     try:
@@ -185,7 +286,7 @@ def _nvidia_driver():
 
 
 def _candidate_names(*, triton_available):
-    """Return the timed candidates in their base rotation order."""
+    """Return the names of the candidates this run times."""
     names = ["swage_mixed", "torch"]
     if triton_available:
         names.extend(
@@ -223,8 +324,31 @@ def _layout_pool(name, count, size, seed):
     return pool
 
 
+def _candidate_order(names, seed, distribution, iteration):
+    """Return one iteration's seeded random candidate order.
+
+    A rotation would give every candidate the same predecessor in almost
+    every iteration, so whatever one candidate leaves behind would always
+    fall on the same neighbour. A fresh permutation spreads it.
+
+    Args:
+        names: Candidate names.
+        seed: The run seed.
+        distribution: Distribution name of the row.
+        iteration: Iteration index within the row, warmups included.
+
+    Returns:
+        The seed string given to ``random.Random`` and the permuted names.
+    """
+    order_seed = f"{seed}:{distribution}:{iteration}"
+    order = list(names)
+    random.Random(order_seed).shuffle(order)
+    return order_seed, order
+
+
 def _measure(
     layouts,
+    orders,
     candidates,
     check,
     *,
@@ -236,31 +360,50 @@ def _measure(
 
     Args:
         layouts: One layout per iteration; none is used twice.
+        orders: The candidate order for each iteration.
         candidates: Callables by name, each taking a layout and returning
             its result.
         check: Callable taking the candidate name, its result, and the
             layout; it raises when the result is wrong.
-        warmups: Leading iterations that are checked but not recorded.
+        warmups: Leading iterations that are flagged as not timed.
         synchronize: Callable that waits for all device work.
         clock: Monotonic nanosecond clock.
 
     Returns:
-        Microsecond samples by candidate name, one per timed iteration.
+        One entry per iteration with its timed flag, the candidate order it
+        ran, and the microsecond sample of each candidate in that order.
     """
-    names = tuple(candidates)
-    samples = {name: [] for name in names}
-    for index, layout in enumerate(layouts):
-        shift = index % len(names)
-        for name in names[shift:] + names[:shift]:
+    iterations = []
+    for index, (layout, order) in enumerate(zip(layouts, orders, strict=True)):
+        samples = {}
+        for name in order:
             synchronize()
             start = clock()
             result = candidates[name](layout)
             synchronize()
             elapsed = (clock() - start) / 1_000.0
             check(name, result, layout)
-            if index >= warmups:
-                samples[name].append(elapsed)
-    return samples
+            samples[name] = elapsed
+        iterations.append(
+            {
+                "timed": index >= warmups,
+                "candidate_order": list(order),
+                "samples_us": samples,
+            }
+        )
+    return iterations
+
+
+def _timed_samples(iterations, names):
+    """Return the timed samples of each candidate in iteration order."""
+    return {
+        name: [
+            iteration["samples_us"][name]
+            for iteration in iterations
+            if iteration["timed"]
+        ]
+        for name in names
+    }
 
 
 def _environment(torch, *, cuda_driver, nvidia_driver, triton_version):
@@ -307,12 +450,22 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
         "segment_count": segment_count,
         "seed": _SEED,
         "layout_seeds": "seed plus the iteration index, warmups first",
+        "iterations": (
+            "every iteration in run order, warmups included and flagged as "
+            "not timed, with its layout, candidate order, and samples; "
+            "raw_samples_us repeats the timed samples by candidate"
+        ),
         "warmups": warmups,
         "samples": samples,
         "layouts_per_distribution": warmups + samples,
         "layout_reuse": "none; every iteration takes the next unused layout",
         "candidates": list(_candidate_names(triton_available=triton_available)),
-        "candidate_order": "rotated by one position every iteration",
+        "candidate_order": (
+            "a new random permutation every iteration, shuffled by "
+            "random.Random(order_seed) with order_seed "
+            "'<seed>:<distribution>:<iteration>'; the seed and the order "
+            "are recorded with each iteration"
+        ),
         "warp_max_elements": _WARP_MAX_ELEMENTS,
         "swage_policy": (
             "_prepare_planned_sum with select_schedule=False; the "
@@ -325,8 +478,8 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
             else "skipped: Triton is not installed"
         ),
         "values": (
-            "CPU seeded randint(-4, 4) / 4, float32; one buffer per "
-            "distribution, each layout reads its prefix"
+            "CPU seeded randint(1, 8) / 4, float32, never zero; one buffer "
+            "per distribution, each layout reads its prefix"
         ),
         "correctness": (
             "every candidate in every iteration, warmups included, exact "
@@ -348,7 +501,34 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
     }
 
 
-def _record(*, source, environment, configuration, results, smoke):
+def _require_identified_code(source, imported_code):
+    """Refuse a full record whose measured code is not pinned down."""
+    if not source["worktree_clean"]:
+        raise ValueError("a full record requires a clean source worktree")
+    if not imported_code["swage_package_in_checkout"]:
+        raise ValueError(
+            "a full record requires the swage package of its own checkout: "
+            f"imported {imported_code['swage_package']}, benchmark in "
+            f"{imported_code['benchmark_checkout']}"
+        )
+    identity = imported_code["compiler_identity"]
+    missing = [
+        field for field in ("frontend", "native") if identity.get(field) is None
+    ]
+    if not imported_code["native_library_paths"]:
+        missing.append("native_library_paths")
+    if imported_code["llvm_linked"] is None:
+        missing.append("llvm_linked")
+    if missing:
+        raise ValueError(
+            "a full record must identify the code it measured; missing: "
+            f"{', '.join(missing)}"
+        )
+
+
+def _record(
+    *, source, environment, configuration, results, imported_code, smoke
+):
     """Assemble the JSON record, refusing one that cannot be attributed.
 
     Args:
@@ -356,14 +536,16 @@ def _record(*, source, environment, configuration, results, smoke):
         environment: Machine identity from ``_environment``.
         configuration: Benchmark contract from ``_configuration``.
         results: One row per distribution.
+        imported_code: Measured package and build from ``_imported_code``.
         smoke: Whether this was a smoke run.
 
     Returns:
         The complete record.
 
     Raises:
-        ValueError: If provenance is missing, or the worktree is dirty
-            outside a smoke run.
+        ValueError: If provenance is missing, or if a run that is not a
+            smoke run has a dirty worktree, measured a package from another
+            checkout, or cannot identify the code it measured.
     """
     missing = [
         field
@@ -380,8 +562,8 @@ def _record(*, source, environment, configuration, results, smoke):
         raise ValueError(
             f"record is missing provenance fields: {', '.join(missing)}"
         )
-    if not smoke and not source["worktree_clean"]:
-        raise ValueError("a full record requires a clean source worktree")
+    if not smoke:
+        _require_identified_code(source, imported_code)
     return {
         "benchmark": "fresh-offsets-segmented-sum",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -392,25 +574,18 @@ def _record(*, source, environment, configuration, results, smoke):
         ),
         "smoke": smoke,
         "source": source,
+        "imported_code": imported_code,
         "environment": environment,
         "configuration": configuration,
         "results": results,
     }
 
 
-def _upload(torch, pool):
+def _upload(torch, pool, device):
     """Upload one pool and compute each layout's PyTorch reference."""
     largest_total = max(layout.offsets[-1] for layout in pool)
-    host_values = (
-        torch.randint(
-            -4,
-            4,
-            (largest_total,),
-            generator=torch.Generator().manual_seed(_SEED),
-        ).float()
-        / 4
-    )
-    values = host_values.cuda()
+    host_values = _exact_values(torch, largest_total)
+    values = host_values.to(device)
     uploaded = []
     for layout in pool:
         total = layout.offsets[-1]
@@ -420,7 +595,7 @@ def _upload(torch, pool):
         )
         uploaded.append(
             _DeviceLayout(
-                values[:total], host_offsets.cuda(), expected.cuda()
+                values[:total], host_offsets.to(device), expected.to(device)
             )
         )
     return uploaded
@@ -444,15 +619,39 @@ def _looped_candidate(kernel, output, segment_count, block, warps):
 
 
 def _run_distribution(
-    torch, prepare, looped_kernel, name, segment_count, warmups, samples
+    torch,
+    prepare,
+    looped_kernel,
+    name,
+    segment_count,
+    warmups,
+    samples,
+    *,
+    device,
+    synchronize,
 ):
-    """Measure every candidate on one distribution's fresh layouts."""
+    """Measure every candidate on one distribution's fresh layouts.
+
+    Args:
+        torch: The PyTorch module.
+        prepare: The private planned-sum preparation function.
+        looped_kernel: The looped Triton kernel, or None without Triton.
+        name: Distribution name.
+        segment_count: Segments per layout.
+        warmups: Leading iterations that are checked but not recorded.
+        samples: Timed iterations.
+        device: Device that holds the inputs and outputs.
+        synchronize: Callable that waits for all work on that device.
+
+    Returns:
+        The record row for this distribution.
+    """
     pool = _layout_pool(name, segment_count, warmups + samples, _SEED)
-    layouts = _upload(torch, pool)
+    layouts = _upload(torch, pool, device)
     names = _candidate_names(triton_available=looped_kernel is not None)
     # A result that was never written must not pass the correctness check.
     outputs = {
-        candidate: torch.full((segment_count,), float("nan"), device="cuda")
+        candidate: torch.full((segment_count,), float("nan"), device=device)
         for candidate in names
         if candidate != "torch"
     }
@@ -494,23 +693,32 @@ def _run_distribution(
         if candidate in outputs:
             outputs[candidate].fill_(float("nan"))
 
-    raw = _measure(
+    orders = [
+        _candidate_order(names, _SEED, name, index)
+        for index in range(len(pool))
+    ]
+    iterations = _measure(
         layouts,
+        [order for _, order in orders],
         candidates,
         check,
         warmups=warmups,
-        synchronize=torch.cuda.synchronize,
+        synchronize=synchronize,
     )
+    raw = _timed_samples(iterations, names)
     return {
         "distribution": name,
         "segment_count": segment_count,
-        "layouts": [
+        "iterations": [
             {
-                "seed": layout.seed,
-                "timed": index >= warmups,
-                "statistics": summarize_lengths(layout.lengths),
+                "layout_seed": layout.seed,
+                "layout_statistics": summarize_lengths(layout.lengths),
+                "order_seed": order_seed,
+                **iteration,
             }
-            for index, layout in enumerate(pool)
+            for layout, (order_seed, _), iteration in zip(
+                pool, orders, iterations, strict=True
+            )
         ],
         "raw_samples_us": raw,
         "summary_us": {
@@ -548,7 +756,19 @@ def main():
     source = _git_metadata(root, allow_dirty=arguments.smoke)
     segment_count, warmups, samples = _sizes(arguments)
 
+    import swage
+
+    package = pathlib.Path(swage.__file__).resolve().parent
+    same_checkout = _same_checkout(root, package, smoke=arguments.smoke)
+    if not same_checkout:
+        print(
+            f"smoke: the imported swage package {package} is outside the "
+            f"benchmark checkout {root}; recorded, not refused",
+            flush=True,
+        )
+
     import torch
+    from mlir_swage._mlir_libs import _swageDialectsNanobind as native_extension
     from swage import _runtime
     from swage._segmented_qualification import _prepare_planned_sum
 
@@ -557,6 +777,26 @@ def main():
             "fresh-offsets benchmark requires CUDA-enabled PyTorch"
         )
     torch.ones(1, device="cuda").sum().item()
+    identity = _runtime._compiler_identity()
+    imported_code = _imported_code(
+        root=root,
+        package=package,
+        same_checkout=same_checkout,
+        identity=identity,
+        native_extension=pathlib.Path(native_extension.__file__).resolve(),
+        native_library_paths=_native_library_paths(
+            identity.get("native"),
+            importlib.util.find_spec(
+                "mlir_swage._mlir_libs"
+            ).submodule_search_locations,
+        ),
+        mlir_swage_locations=importlib.util.find_spec(
+            "mlir_swage"
+        ).submodule_search_locations,
+        llvm_linked=getattr(native_extension.swage, "__llvm_version__", None),
+    )
+    if not arguments.smoke:
+        _require_identified_code(source, imported_code)
     triton = _optional_triton()
     environment = _environment(
         torch,
@@ -578,6 +818,8 @@ def main():
             segment_count,
             warmups,
             samples,
+            device="cuda",
+            synchronize=torch.cuda.synchronize,
         )
         results.append(row)
         print(f"{name}: median_us={_headline(row['summary_us'])}", flush=True)
@@ -592,6 +834,7 @@ def main():
             triton_available=triton is not None,
         ),
         results=results,
+        imported_code=imported_code,
         smoke=arguments.smoke,
     )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

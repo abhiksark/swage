@@ -258,6 +258,19 @@ def _offsets_from_lengths(torch, lengths: list[int]):
     return offsets, device_offsets
 
 
+def _exact_values(torch, count: int):
+    """Return seeded host values that expose any misplaced element read.
+
+    Every value is one of 0.25, 0.5, ..., 1.75. None is zero, so reading one
+    element too many or too few always changes a sum, and neighbouring
+    elements differ, so a shifted window changes it too. Sums of these
+    quarter multiples are exact in f32 in any order for segments shorter than
+    two million elements, which allows an exact comparison.
+    """
+    generator = torch.Generator().manual_seed(_SEED)
+    return torch.randint(1, 8, (count,), generator=generator).float() / 4
+
+
 def _make_triton_segmented_sum():
     """Define a one-program-per-segment Triton sum baseline lazily."""
     import triton
@@ -373,6 +386,49 @@ def _launch_triton_looped(kernel, values, offsets, output, segment_count,
         values, offsets, output, BLOCK=block, num_warps=warps
     )
     return output
+
+
+def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
+    """Require exact looped sums on position-dependent values.
+
+    The timed input is all ones, where any in-bounds window of the right
+    length gives the right sum. This check runs every looped configuration
+    on values that make a shifted, short, or long read visible. It uses its
+    own values and output and leaves the timed inputs alone.
+
+    Args:
+        torch: The PyTorch module.
+        kernel: The looped Triton kernel.
+        configs: The looped block and warp configurations.
+        offsets: Device offsets of the distribution being measured.
+        segment_count: Number of segments.
+
+    Raises:
+        AssertionError: If a configuration differs from the CPU PyTorch
+            reference in any segment.
+    """
+    host_offsets = offsets.cpu()
+    host_values = _exact_values(torch, int(host_offsets[-1]))
+    expected = torch.segment_reduce(
+        host_values, "sum", offsets=host_offsets
+    ).to(offsets.device)
+    values = host_values.to(offsets.device)
+    output = torch.empty(segment_count, device=offsets.device)
+    for block, warps in configs:
+        output.fill_(float("nan"))
+        _launch_triton_looped(
+            kernel, values, offsets, output, segment_count, block, warps
+        )
+        torch.testing.assert_close(
+            output,
+            expected,
+            rtol=0,
+            atol=0,
+            msg=lambda message, block=block, warps=warps: (
+                f"triton_looped_b{block}_w{warps} on position-dependent "
+                f"values: {message}"
+            ),
+        )
 
 
 def _run_segmented_sum(torch, warmups: int,
@@ -531,6 +587,13 @@ def _run_segmented_sum(torch, warmups: int,
                 atol=0,
                 msg=lambda message, n=output_name: f"{n}: {message}",
             )
+        _check_triton_looped(
+            torch,
+            triton_looped_kernel,
+            triton_looped_configs,
+            offsets,
+            _SEGMENT_COUNT,
+        )
         row = {
             "case": "segmented-sum",
             "distribution": name,
@@ -608,6 +671,12 @@ def main():
             "triton_looped": (
                 "one program per segment, a loop over the segment in fixed "
                 "blocks; no block is excluded for the longest segment"
+            ),
+            "triton_looped_check": (
+                "besides the all-ones check shared by every candidate, each "
+                "looped configuration is checked exactly before timing on "
+                "seeded nonzero quarter multiples against CPU "
+                "torch.segment_reduce; the timed input stays all ones"
             ),
         },
         "results": [],
