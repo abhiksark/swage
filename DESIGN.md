@@ -114,8 +114,10 @@ ownership claims.
   dependency.
 - Launch is asynchronous. Submitted tensors are recorded on the stream.
 - No path silently casts, changes devices, creates a context, or falls back
-  to another backend or policy. The public launch path also does not copy or
-  synchronize.
+  to another backend or policy. The public launch path also does not copy. A
+  launch of a loaded kernel does not synchronize; a launch that loads a
+  kernel may synchronize the context once to unload modules that nothing
+  holds.
 - Private segmented qualification validates and classifies offsets, and
   validates caller-supplied task IDs, on host copies made when a call is
   validated or a plan is prepared. For CUDA tensors each copy synchronizes

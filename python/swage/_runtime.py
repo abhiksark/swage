@@ -53,11 +53,11 @@ class _BoundedCache(dict):
 
 # The cold-path lock: every native compile and every first load of a kernel
 # in this process holds it, here and in the private segmented runner.
-# Compiles are serialized on purpose. The native compiler states no contract
-# for two compiles running at once, it holds the GIL for a whole compile, and
-# an LLVM fatal error ends the process, so a lock per key would add risk and
-# no concurrency. A warm launch never takes this lock: it reads the caches
-# below with one `get` each.
+# Compiles are serialized on purpose. The native compiler admits concurrent
+# compiles only on separate MLIR contexts, and an LLVM fatal error ends the
+# process, so a lock per key would add risk for little gain. The compiler
+# releases the GIL while it works, and a warm launch never takes this lock:
+# it reads the caches below with one `get` each.
 _compile_lock = threading.Lock()
 _ptx_cache = _BoundedCache(_CACHE_LIMIT)
 # Values are `(module, function)` as `_CudaDriver.load` returns them. A
