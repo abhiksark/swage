@@ -258,6 +258,11 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
         if transform in ("exp2", "affine32") else {"rtol": 0, "atol": 0}
     )
     torch.testing.assert_close(output[:-1], expected, **tolerance)
+    # The first launch may only queue the wait for task storage. Capture
+    # needs a launch that observes the storage ready.
+    torch.cuda.synchronize()
+    prepared.mixed()
+    torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         prepared.mixed()

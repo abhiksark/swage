@@ -791,8 +791,10 @@ def _prepare_planned_reduction(
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
-                "prepared reduction must launch once after task initialization "
-                "before CUDA graph capture"
+                "prepared reduction must launch once after task "
+                "initialization before CUDA graph capture; a launch that "
+                "only queued the wait does not count, so launch, "
+                "synchronize, and launch again"
             )
         if tasks_ready.query():
             tasks_ready_complete = True
@@ -1060,7 +1062,9 @@ def _prepare_persistent_sum(
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "prepared persistent sum must launch once after task "
-                "initialization before CUDA graph capture"
+                "initialization before CUDA graph capture; a launch that "
+                "only queued the wait does not count, so launch, "
+                "synchronize, and launch again"
             )
         if tasks_ready.query():
             tasks_ready_complete = True

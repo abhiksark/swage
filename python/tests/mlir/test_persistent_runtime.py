@@ -132,6 +132,10 @@ def test_persistent_poisoned_scratch_survives_graph_replay(resident_blocks):
     scratch = _closure_values(prepared.launch)["scratch"]
     expected = torch.tensor(lengths, dtype=torch.float32)
 
+    # The first launch may only queue the wait for task storage. Capture
+    # needs a launch that observes the storage ready.
+    prepared.launch()
+    torch.cuda.synchronize()
     prepared.launch()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()

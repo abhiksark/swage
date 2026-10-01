@@ -54,6 +54,9 @@ def test_launch_uses_non_default_current_stream():
     x = torch.randn(129, device="cuda")
     y = torch.randn(129, device="cuda")
     output = torch.empty_like(x)
+    # The inputs are produced on the default stream. Finish them before
+    # another stream reads them; launch itself adds no cross-stream order.
+    torch.cuda.synchronize()
     stream = torch.cuda.Stream()
 
     with torch.cuda.stream(stream):
