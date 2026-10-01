@@ -659,6 +659,209 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     )
 
 
+RANDOM_LENGTHS = [0, 1, 31, 32, 33, 4095, 4096, 4097, 65537]
+RANDOM_SUITES = ["randn", "cancellation", "magnitude"]
+# Planning limits (warp_max_elements, cta_chunk_elements) of the two
+# classified preparations. "split" lowers both so that every random segment
+# longer than 16 elements takes the partial and merge kernels.
+_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
+_EPS32 = torch.finfo(torch.float32).eps
+
+
+def _random_values(suite, count, generator):
+    """Draw one segment of order-sensitive f32 values."""
+    if suite == "randn":
+        return torch.randn(count, generator=generator)
+    if suite == "cancellation":
+        # Exactly opposite pairs near 1e4 around terms near 1e-3, shuffled
+        # so partners rarely share a lane. The true sum is the small terms.
+        pairs = count // 3
+        large = (1 + torch.rand(pairs, generator=generator)) * 1e4
+        small = torch.randn(count - 2 * pairs, generator=generator) * 1e-3
+        values = torch.cat([large, -large, small])
+        return values[torch.randperm(count, generator=generator)]
+    assert suite == "magnitude"
+    # Log-uniform magnitudes from 1e-6 to 1e6 with random signs.
+    exponents = torch.empty(count).uniform_(-6, 6, generator=generator)
+    signs = torch.randint(0, 2, (count,), generator=generator) * 2 - 1
+    return signs * torch.pow(10.0, exponents)
+
+
+def _random_case(suite, seed):
+    """Build seeded values and offsets for RANDOM_LENGTHS."""
+    generator = torch.Generator().manual_seed(seed)
+    values = torch.cat(
+        [_random_values(suite, length, generator) for length in RANDOM_LENGTHS]
+    )
+    assert values.dtype == torch.float32
+    return values, torch.tensor(_offsets(RANDOM_LENGTHS), dtype=torch.int32)
+
+
+def _float64_reference(values, kind):
+    """Reduce each random segment in float64, outside the compiler."""
+    return torch.segment_reduce(
+        values.double(), kind, lengths=torch.tensor(RANDOM_LENGTHS)
+    )
+
+
+def _summation_depth(policy, count):
+    """Bound the rounding additions one element of a segment passes through.
+
+    Every schedule is a summation tree. B lanes stride the segment, so a
+    lane holds at most ceil(count / B) elements and chains one addition
+    fewer than that after its first, because adding to the zero identity is
+    exact. The lanes are then combined by a balanced tree.
+
+    - sequential (CPU oracle): one chain, count - 1 additions.
+    - warp: B = 32, then five XOR-shuffle levels.
+    - cta: B = 128, then gpu.all_reduce, five levels inside each warp and
+      two across the four warp leaders.
+    - partial and merge kernels: B = 512, then gpu.all_reduce, five levels
+      inside each warp and four across the sixteen warp leaders. A split
+      segment passes through a partial over at most one chunk and then
+      through the merge over its ceil(count / chunk) partials.
+    - mixed and split: the path the planner classifies the length into
+      under _PLANNING_LIMITS, which is warp, cta, or partial plus merge.
+
+    An addition with an exact zero operand is exact and the subtrees merged
+    along one path hold distinct elements, so no element sees more than
+    count - 1 rounding additions whatever the tree.
+    """
+
+    def chain(elements, lanes):
+        return max(-(-elements // lanes) - 1, 0)
+
+    if policy == "sequential":
+        depth = count - 1
+    elif policy == "warp":
+        depth = chain(count, 32) + 5
+    elif policy == "cta":
+        depth = chain(count, 128) + 7
+    else:
+        warp_max, chunk = _PLANNING_LIMITS[policy]
+        if count <= warp_max:
+            depth = chain(count, 32) + 5
+        elif count <= chunk:
+            depth = chain(count, 128) + 7
+        else:
+            partials = -(-count // chunk)
+            depth = chain(chunk, 512) + 9 + chain(partials, 512) + 9
+    return max(min(depth, count - 1), 0)
+
+
+def _assert_matches_float64_reference(actual, values, kind, policy):
+    """Compare one policy's f32 results with the float64 reference.
+
+    Max must be exact. A sum must lie within k * eps32 * sum(|x|) of the
+    reference per segment, where k is _summation_depth. The worst-case
+    error of a summation tree is ((1 + u) ** k - 1) * sum(|x|) with unit
+    roundoff u = eps32 / 2, which is below 2 * k * u while k * u <= 1 / 2.
+    The factor of two in eps32 is that margin, and it also covers the
+    rounding of the float64 reference.
+    """
+    reference = _float64_reference(values, kind)
+    if kind == "max":
+        torch.testing.assert_close(
+            actual, reference.float(), rtol=0, atol=0, msg=policy
+        )
+        return
+    magnitude = _float64_reference(values.abs(), "sum")
+    depth = torch.tensor(
+        [_summation_depth(policy, length) for length in RANDOM_LENGTHS],
+        dtype=torch.float64,
+    )
+    error = (actual.double() - reference).abs()
+    bound = depth * _EPS32 * magnitude
+    assert (error <= bound).all(), (
+        f"{policy}: error {error.tolist()} exceeds bound {bound.tolist()} "
+        f"for lengths {RANDOM_LENGTHS}"
+    )
+
+
+@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("suite", RANDOM_SUITES)
+@pytest.mark.parametrize("kind", ["sum", "max"])
+def test_cpu_oracle_matches_float64_reference_on_random_values(
+    kind, suite, seed
+):
+    """Bound the sequential oracle against float64 on order-sensitive data.
+
+    The oracle accumulates left to right, so k is count - 1 per segment in
+    the bound k * eps32 * sum(|x|) of _assert_matches_float64_reference.
+    """
+    values, offsets = _random_case(suite, seed)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    _assert_matches_float64_reference(actual, values, kind, "sequential")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("suite", RANDOM_SUITES)
+@pytest.mark.parametrize("kind", ["sum", "max"])
+def test_gpu_policies_match_float64_reference_on_random_values(
+    kind, suite, seed
+):
+    """Bound every static policy against float64 on order-sensitive data.
+
+    Values are seeded normal draws, cancelling pairs around small terms,
+    and magnitudes spread over twelve decades. Lengths cover the empty and
+    singleton segments, both sides of the warp and chunk limits, and one
+    segment of 65537 elements.
+
+    Max is compared exactly. Each sum must lie within
+    k * eps32 * sum(|x|) of torch.segment_reduce in float64, with eps32 =
+    2**-23 and k the number of rounding additions on the longest path of
+    that policy's reduction tree for that segment length, capped at
+    count - 1 (see _summation_depth for the derivation):
+
+    - warp: k = ceil(count / 32) - 1 + 5.
+    - cta: k = ceil(count / 128) - 1 + 7.
+    - split: k = (ceil(chunk / 512) - 1 + 9)
+      + (ceil(ceil(count / chunk) / 512) - 1 + 9) with 16-element chunks,
+      so 26 for 65537 elements.
+    - mixed: the warp formula up to 32 elements, the cta formula up to
+      4096, and the split formula with 4096-element chunks beyond, so 25
+      for 65537 elements.
+
+    The private API has no separate split closure. Splitting is the path
+    the mixed closure takes for a segment longer than the chunk limit, so
+    "split" is the mixed closure of a second preparation whose limits send
+    every segment longer than 16 elements through partial and merge.
+
+    Every policy also runs twice and must reproduce its own bits.
+    """
+    host_values, host_offsets = _random_case(suite, seed)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    output = torch.empty(len(RANDOM_LENGTHS), device="cuda")
+    launches = {}
+    for policy, (warp_max, chunk) in _PLANNING_LIMITS.items():
+        prepared = _prepare_planned_reduction(
+            values,
+            offsets,
+            output,
+            module_text=reduction_module(kind, "identity"),
+            kernel_name=f"segmented_{kind}",
+            warp_max_elements=warp_max,
+            cta_chunk_elements=chunk,
+            select_schedule=False,
+        )
+        if policy == "mixed":
+            launches["warp"] = prepared.warp
+            launches["cta"] = prepared.cta
+        launches[policy] = prepared.mixed
+
+    for policy, launch in launches.items():
+        runs = []
+        for _ in range(2):
+            output.fill_(float("nan"))
+            launch()
+            runs.append(output.cpu())
+        assert _bits(runs[0]) == _bits(runs[1]), policy
+        _assert_matches_float64_reference(runs[0], host_values, kind, policy)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
 @pytest.mark.parametrize("lengths", TASK_CASES)
