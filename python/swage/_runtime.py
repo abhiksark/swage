@@ -426,22 +426,27 @@ def _process_start_ns():
     The kernel reports the start in clock ticks since boot, so the result
     is at most one tick early and never late. None when the kernel does not
     report it, which is the case off Linux.
+
+    This runs while `swage` is imported, so it never raises and never
+    warns; a missing start time is reported at the first use of the cache.
     """
     try:
         with open("/proc/self/stat", encoding="ascii") as status:
             # The command name may hold spaces; fields resume after it.
             fields = status.read().rpartition(")")[2].split()
-        since_boot = int(fields[19]) * 1_000_000_000 // os.sysconf(
-            "SC_CLK_TCK"
-        )
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+        if ticks_per_second <= 0:
+            return None
+        since_boot = int(fields[19]) * 1_000_000_000 // ticks_per_second
         age = time.clock_gettime_ns(time.CLOCK_BOOTTIME) - since_boot
-    except (OSError, ValueError, IndexError, AttributeError):
+        return time.time_ns() - age
+    except Exception:
         return None
-    return time.time_ns() - age
 
 
-# Taken at import so that a forked child inherits the start of the process
-# that loaded the code, not the later time of the fork.
+# Taken at import, and `swage/__init__.py` imports this module, so the time
+# belongs to the process that loaded the package. A forked child inherits
+# it instead of reading its own later start, the time of the fork.
 _PROCESS_START_NS = _process_start_ns()
 
 
@@ -700,9 +705,11 @@ def _read_cache_entry(key, specialization):
 
     A missing entry is a miss. An incomplete entry is also a miss: it is
     debris from a writer that died before entries were published atomically,
-    and it is removed so the key can be published again. Unsafe, unreadable,
-    mismatched, and corrupt entries raise `RuntimeError`. A cache directory
-    that cannot be inspected raises `OSError`.
+    and it is removed so the key can be published again. When the cache
+    directory cannot be written, the debris stays, publishing is given up
+    with a warning, and the miss still concerns this key only. Unsafe,
+    unreadable, mismatched, and corrupt entries raise `RuntimeError`. A
+    cache directory that cannot be inspected raises `OSError`.
     """
     root = _cache_dir()
     entry = root / key
@@ -720,7 +727,12 @@ def _read_cache_entry(key, specialization):
     except FileNotFoundError:
         return None
     if len(present) != len(paths):
-        _remove_incomplete_entry(entry)
+        try:
+            _remove_incomplete_entry(entry)
+        except OSError as error:
+            # The debris stays, so this key stays a miss and is not
+            # published. Entries of other keys are still read.
+            _warn_cache_off("write", f"cannot use {root}: {error}")
         return None
     try:
         metadata = json.loads(paths["metadata"].read_text())

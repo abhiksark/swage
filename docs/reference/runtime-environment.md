@@ -107,14 +107,18 @@ that lands during a compile is therefore not published under either key. The
 checkout state is not part of the check: the cache does not require a git
 checkout or a clean working tree.
 
+The start time is read when `swage` is imported. A forked child therefore
+inherits the start time of the process that imported the package and is not
+judged by the later time of the fork. This covers `os.fork`, the
+`multiprocessing` fork start method, and a fork server that preloaded
+`swage`: when a file changed after the parent loaded the code, the child
+neither reads nor publishes. A spawned child imports the package itself and
+uses its own start time.
+
 The check has these limits:
 
 - A file written less than one clock tick (10 ms) before the process started
   counts as changed, because the start time has that resolution.
-- A forked child inherits the start time only if its parent had already
-  imported `swage._runtime`, which happens at the first launch. A child
-  forked earlier uses its own start time and does not see a file that
-  changed between the parent's import of `swage` and the fork.
 - A file system whose clock differs from the host clock, or a step of the
   host clock while the process runs, shifts the comparison by that amount.
 
@@ -149,7 +153,9 @@ A cache that cannot be used never fails a launch. When the identity check
 does not pass, or the cache root cannot be inspected, created, or written,
 the compiled kernel is kept and reused within the process, and one
 `RuntimeWarning` per process names the file or directory and the cause. When
-only writing fails, entries that are already published are still read.
+only writing fails, entries that are already published are still read. An
+incomplete entry that cannot be removed from such a root stays a miss for its
+own key and does not affect lookups of other keys.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 

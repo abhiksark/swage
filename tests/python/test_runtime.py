@@ -847,6 +847,65 @@ def test_read_only_cache_still_serves_published_entries(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    "how",
+    [
+        pytest.param(
+            "read-only root",
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root ignores directory modes"
+            ),
+        ),
+        "read-only file system",
+    ],
+)
+def test_debris_in_a_read_only_cache_is_a_miss_for_its_key_only(
+    tmp_path, monkeypatch, how
+):
+    """Keep reading other keys when an incomplete entry cannot be removed."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._ptx_cache.clear()
+    debris = tmp_path / _runtime._cache_key({"kernel": "debris"})
+    debris.mkdir(mode=0o700)
+    (debris / "lowered.mlir").write_text("stale")
+    if how == "read-only root":
+        tmp_path.chmod(0o500)
+    else:
+
+        def read_only(*_args, **_kwargs):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(_runtime.tempfile, "mkdtemp", read_only)
+
+    try:
+        missed, messages = _compile_recording_warnings(
+            _runtime, {"kernel": "debris"}
+        )
+        again, repeated = _compile_recording_warnings(
+            _runtime, {"kernel": "debris"}
+        )
+        reread, later = _compile_recording_warnings(_runtime)
+        _, cold = _compile_recording_warnings(_runtime, {"kernel": "cold"})
+    finally:
+        tmp_path.chmod(0o700)
+
+    assert missed == again
+    assert missed.ptx == "ptx"
+    assert len(messages) == 1
+    assert str(tmp_path) in messages[0]
+    assert "published entries are still read" in messages[0]
+    assert reread == warm
+    assert repeated == later == cold == []
+    assert len(calls) == 3
+    assert _runtime._cache_off == {"write"}
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [warm.key, debris.name]
+    )
+    assert [path.name for path in debris.iterdir()] == ["lowered.mlir"]
+
+
 def test_inaccessible_cache_root_degrades_to_process_reuse(
     tmp_path, monkeypatch
 ):
@@ -1276,7 +1335,7 @@ import warnings
 
 import swage
 
-lazy = "swage._runtime" not in sys.modules
+sampled_at_import = "swage._runtime" in sys.modules
 package = pathlib.Path(swage.__file__).parent
 if sys.argv[1] == "edit after import":
     with open(package / "_frontend.py", "ab") as source:
@@ -1301,7 +1360,7 @@ with warnings.catch_warnings(record=True) as caught:
 cache = pathlib.Path(os.environ["SWAGE_CACHE_DIR"])
 on_disk = dict(data, frontend=_runtime._frontend_digest(package))
 print(json.dumps({
-    "lazy": lazy,
+    "sampled_at_import": sampled_at_import,
     "heavy": [name for name in ("torch", "mlir_swage") if name in sys.modules],
     "same": first == second,
     "compiles": len(compiles),
@@ -1314,8 +1373,8 @@ print(json.dumps({
 """
 
 
-def _run_with_copied_frontend(tmp_path, mode):
-    """Run the stale-frontend script in a process that owns its package."""
+def _copied_package(tmp_path):
+    """Return a directory to import a private copy of `swage` from."""
     site = tmp_path / "site"
     if not site.exists():
         shutil.copytree(
@@ -1323,8 +1382,15 @@ def _run_with_copied_frontend(tmp_path, mode):
             site / "swage",
             ignore=shutil.ignore_patterns("__pycache__"),
         )
-    # The process start time has a resolution of one clock tick (10 ms).
+    # The process start time has a resolution of one clock tick (10 ms),
+    # so let the files age before a process that must trust them starts.
     time.sleep(0.05)
+    return site
+
+
+def _run_with_copied_frontend(tmp_path, mode):
+    """Run the stale-frontend script in a process that owns its package."""
+    site = _copied_package(tmp_path)
     before = time.time_ns()
     completed = subprocess.run(
         [sys.executable, "-c", _STALE_FRONTEND_SCRIPT, mode],
@@ -1340,7 +1406,7 @@ def _run_with_copied_frontend(tmp_path, mode):
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
-    assert result["lazy"]
+    assert result["sampled_at_import"]
     assert result["heavy"] == []
     assert result["same"]
     assert result["compiles"] == 1
@@ -1375,6 +1441,230 @@ def test_frontend_unchanged_since_start_is_published(tmp_path):
     assert edited["key"] != result["key"]
     assert edited["entries"] == sorted([result["key"], edited["key"]])
     assert edited["warnings"] == []
+
+
+_FORKED_CHILD_SCRIPT = """
+import json
+import multiprocessing
+import os
+import pathlib
+import sys
+import time
+import traceback
+import warnings
+
+import swage
+
+package = pathlib.Path(swage.__file__).parent
+
+
+def compile_in_the_child():
+    from swage import _runtime
+
+    native = [["_swageDialectsNanobind.so", 1, 2]]
+    compiles = []
+    _runtime._native_identity = lambda: native
+    _runtime._native_libraries = lambda: []
+    _runtime._compile_native = lambda *_args: compiles.append(1) or (
+        "lowered",
+        "ptx from the frontend the parent loaded",
+    )
+    identity = _runtime._cached_identity()
+    data = {"kernel": "k", "frontend": identity["frontend"], "native": native}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = _runtime._compile_cached(data, "k", 128, object)
+        second = _runtime._compile_cached(data, "k", 128, object)
+    cache = pathlib.Path(os.environ["SWAGE_CACHE_DIR"])
+    on_disk = dict(data, frontend=_runtime._frontend_digest(package))
+    pathlib.Path(sys.argv[2]).write_text(json.dumps({
+        "same": first == second,
+        "compiles": len(compiles),
+        "warnings": [str(warning.message) for warning in caught],
+        "entries": sorted(path.name for path in cache.glob("*")),
+        "key": first.key,
+        "key_of_the_files_on_disk": _runtime._cache_key(on_disk),
+        "started": _runtime._PROCESS_START_NS,
+        "forked": _runtime._process_start_ns(),
+    }))
+
+
+with open(package / "_frontend.py", "ab") as source:
+    source.write(b"# edited after the parent imported swage")
+# Let the edit age past one clock tick: the child then starts later than
+# every file, and only the parent's start time shows the edit came after
+# the code was loaded.
+time.sleep(0.05)
+if sys.argv[1] == "os.fork":
+    child = os.fork()
+    if child == 0:
+        try:
+            compile_in_the_child()
+        except BaseException:
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    sys.exit(os.waitstatus_to_exitcode(status))
+worker = multiprocessing.get_context("fork").Process(
+    target=compile_in_the_child
+)
+worker.start()
+worker.join()
+sys.exit(worker.exitcode)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+@pytest.mark.parametrize("how", ["os.fork", "multiprocessing fork"])
+def test_forked_child_does_not_publish_code_its_parent_loaded_earlier(
+    tmp_path, how
+):
+    """Judge a forked child by the start of the process that loaded swage."""
+    site = _copied_package(tmp_path)
+    report = tmp_path / "report.json"
+    completed = subprocess.run(
+        [sys.executable, "-c", _FORKED_CHILD_SCRIPT, how, str(report)],
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(site),
+            SWAGE_CACHE_DIR=str(tmp_path / "cache"),
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(report.read_text())
+
+    assert result["entries"] == []
+    assert result["key"] == result["key_of_the_files_on_disk"]
+    assert result["started"] < result["forked"]
+    assert len(result["warnings"]) == 1
+    assert "_frontend.py is not older than this process" in (
+        result["warnings"][0]
+    )
+    assert result["same"]
+    assert result["compiles"] == 1
+
+
+_NO_START_TIME_SCRIPT = """
+import builtins
+import io
+import os
+import sys
+import time
+import warnings
+
+real_open = builtins.open
+failure = sys.argv[1]
+
+
+def open_stat(file, *arguments, **keywords):
+    if str(file) != "/proc/self/stat":
+        return real_open(file, *arguments, **keywords)
+    if failure == "no /proc":
+        raise FileNotFoundError(2, "No such file or directory", str(file))
+    return io.StringIO("1 (python) garbled")
+
+
+if failure in ("no /proc", "garbled stat"):
+    builtins.open = open_stat
+elif failure == "no boot clock":
+    del time.CLOCK_BOOTTIME
+elif failure == "zero clock tick":
+    os.sysconf = lambda _name: 0
+elif failure == "undefined clock tick":
+    os.sysconf = lambda _name: -1
+
+import swage  # Runs under -W error: a warning here is a failure.
+from swage import _runtime
+
+assert _runtime._PROCESS_START_NS is None
+assert _runtime._cache_off == set()
+
+compiles = []
+_runtime._native_identity = lambda: [["_swageDialectsNanobind.so", 1, 2]]
+_runtime._native_libraries = lambda: []
+_runtime._compile_native = lambda *_args: compiles.append(1) or ("l", "p")
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    _runtime._compile_cached({"kernel": "k"}, "k", 128, object)
+    _runtime._compile_cached({"kernel": "k"}, "k", 128, object)
+(warning,) = caught
+assert "start time is unavailable" in str(warning.message), warning.message
+assert compiles == [1]
+assert not os.path.exists(os.environ["SWAGE_CACHE_DIR"])
+"""
+
+
+def _run_cold(arguments, tmp_path):
+    """Run a fresh interpreter that turns every warning into an error."""
+    return subprocess.run(
+        [sys.executable, "-W", "error", *arguments],
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(pathlib.Path(sw.__file__).parents[1]),
+            SWAGE_CACHE_DIR=str(tmp_path / "cache"),
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "no /proc",
+        "garbled stat",
+        "no boot clock",
+        "zero clock tick",
+        "undefined clock tick",
+    ],
+)
+def test_import_is_silent_without_a_process_start_time(tmp_path, failure):
+    """Import cleanly without a start time and warn only at first use."""
+    completed = _run_cold(["-c", _NO_START_TIME_SCRIPT, failure], tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["-c", "import swage"],
+        ["-c", "import swage.language"],
+        ["-c", "import swage.env"],
+        ["-c", "import swage._runtime"],
+        ["-c", "from swage import _runtime, env, language, jit"],
+    ],
+)
+def test_package_imports_from_a_cold_interpreter(tmp_path, arguments):
+    """Import each entry point first, without cycles or heavy modules."""
+    check = (
+        "; import sys"
+        "; assert 'swage._runtime' in sys.modules"
+        "; started = sys.modules['swage._runtime']._PROCESS_START_NS"
+        "; assert started or sys.platform != 'linux'"
+        "; assert 'torch' not in sys.modules"
+        "; assert 'mlir_swage' not in sys.modules"
+    )
+    completed = _run_cold([arguments[0], arguments[1] + check], tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+
+
+def test_environment_report_runs_with_warnings_as_errors(tmp_path):
+    """Run `python -m swage.env` cleanly now that it loads the runtime."""
+    completed = _run_cold(["-m", "swage.env"], tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "swage:" in completed.stdout
 
 
 def _identified_process(tmp_path, monkeypatch):
