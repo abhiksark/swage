@@ -45,14 +45,16 @@ values*, partial_ranges*, scratch*, value_count:i32, partial_count:i32
 Merge ABI:
 
 ```text
-scratch*, output*, merge_records*, partial_count:i32, merge_count:i32
+scratch*, output*, merge_records*, partial_count:i32, merge_count:i32,
+segment_count:i32
 ```
 
 Both kernels use 512 threads, sized so one 4096-element chunk fully
 occupies a CTA at eight elements per thread. Partial ranges are absolute
 half-open input ranges, and each partial writes one unique scratch slot.
 Merge records carry a segment ID and a compact half-open scratch range;
-thread zero writes the final segment result once.
+thread zero writes the final segment result once. The merge kernel compares
+the segment ID with `segment_count` and stores nothing for an ID outside it.
 
 If no split exists, the direct one-launch path remains unchanged. Exact
 all-one and tolerant nontrivial f32 cases match PyTorch and the

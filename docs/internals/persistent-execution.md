@@ -18,7 +18,7 @@ private experiment, not a public API or completed qualification.
 
 ## Private ABI
 
-The 512-thread kernel receives ten pointers followed by five signed-i32
+The 512-thread kernel receives ten pointers followed by six signed-i32
 counts:
 
     values*, offsets*, output*,
@@ -26,12 +26,23 @@ counts:
     partial_ranges*, partial_merge_ids*, merge_records*,
     scratch*, counters*,
     value_count:i32, warp_count:i32, cta_count:i32,
-    partial_count:i32, merge_count:i32
+    partial_count:i32, merge_count:i32, segment_count:i32
 
 The flat record layouts remain those of [Split Execution](split-execution.md):
 partial ranges are `[begin, end]` pairs and merge records are
 `[segment_id, partial_begin, partial_end]` triples. `partial_merge_ids[i]`
 identifies the merge record that depends on scratch slot `i`.
+
+Each count bounds what the kernel loads from the buffers:
+
+- `value_count` bounds every range into `values`.
+- `warp_count` bounds every claim on the warp queue.
+- `cta_count` bounds every claim on the direct CTA queue.
+- `partial_count` bounds every claim on the partial queue and every merge
+  range into `scratch`.
+- `merge_count` bounds every merge ID loaded from `partial_merge_ids`.
+- `segment_count` bounds every segment ID loaded from a task queue or a
+  merge record.
 
 The counter array has this layout:
 
@@ -107,7 +118,9 @@ stream. Launching on another device after preparation is rejected. A launch
 also raises if the offsets tensor was modified in place after preparation,
 which it detects through the tensor version counter, and the kernel clamps
 every loaded range that indexes the values buffer to the value count and
-every merge range that indexes scratch to the partial count. CUDA
+every merge range that indexes scratch to the partial count. It skips a
+segment ID outside the segment count and a merge ID outside the merge count
+(ADR-0012). CUDA
 graph capture is supported after an ordinary launch that observed task
 storage ready, matching the prepared static path's task-readiness contract.
 A first launch that only queued the wait for task storage does not count, so

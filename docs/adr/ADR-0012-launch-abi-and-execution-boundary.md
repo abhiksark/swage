@@ -49,17 +49,32 @@ for a range that changed after validation the kernel produces a bounded
 access and a clamped result, not a diagnostic. The sequential CPU lowering is
 unchanged.
 
-The clamp bounds ranges only. A segment ID loaded from a task buffer, the
-merge ID of a persistent partial, and the output segment of a merge record
-are used as loaded, so the offsets read, the completion counter update, and
-the output store that they index are not bounded on the device. No ABI that
-loads task IDs carries a segment count or an output length to bound them
-with, and the persistent kernel does not read the merge count that its ABI
-carries. These indices are trusted as validated on the host. The prepared
-paths keep them in plan-owned storage, and only the private task-ID
-qualification launch takes a caller-owned task buffer. The direct ABI needs
-no such bound, because its segment ID is the block index, which the kernel
-compares with the segment count.
+Three loaded indices select a range or an output slot instead of describing
+a range, and each has a bound of its own. A segment ID loaded from a task
+buffer and the output segment of a merge record are compared with the
+segment count, which the task-ID, fused, persistent, and split merge ABIs
+carry as their last i32. The merge ID of a persistent partial is compared
+with the merge count. Each bound is one unsigned comparison of the loaded
+i32, so a negative value fails it as well. An index outside its bound is
+skipped, not clamped, because a clamped index would store a wrong result in
+a valid slot. A segment ID outside the segment count reads `offsets[0]` for
+both ends of its range, reduces that empty range, and stores nothing. An
+output segment outside the segment count suppresses the merge store. A merge
+ID outside the merge count updates no completion counter, reads no merge
+record, and publishes no merge. The first two bounds act on addresses and on
+the store predicate and add no branch around a barrier or a shuffle, so
+every thread reaches each synchronization point whatever the buffers hold.
+The merge-ID bound is a branch inside the block leader's publication, which
+contains no barrier. As with ranges, an index that changed after validation
+gives a bounded access and a missing result, not a diagnostic. The direct
+and split partial ABIs load no index: their segment and scratch slot are the
+block index, which the kernel compares with a count.
+
+The kernels still trust what the launch passes by value: the pointers, and
+the i32 counts as the lengths of the buffers behind those pointers. An index
+that is inside its bound but differs from the validated one gives a wrong
+result in a valid slot, and a buffer that another writer changes while the
+kernel runs is a data race.
 
 The exact public call surface lives in
 [Public Python API](../reference/swage.md). Current validation,
