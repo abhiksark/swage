@@ -3,9 +3,15 @@
 
 This is a research benchmark harness, not a CI gate. Triton is imported only
 when the benchmark is executed; the project does not depend on Triton.
+
+Run with PYTHONPATH=python:build/python_packages and --output result.json.
+Without other options the segmented suite runs the seven distributions,
+32,768 segments, seed 7, and all-one values of the recorded campaign. The
+device is the current CUDA device; select another with CUDA_VISIBLE_DEVICES.
 """
 
 import argparse
+import itertools
 import json
 import pathlib
 import platform
@@ -13,19 +19,46 @@ import statistics
 import subprocess
 import sys
 import time
+import types
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+
+import benchmark_provenance
+from distributions import generate_lengths, summarize_lengths, worst_case_total
 
 _WARMUPS = 25
 _SAMPLES = 100
 _BATCHED_LAUNCHES = 32
+_MAX_BATCHED_LAUNCHES = 1 << 20
+_TICK_FRACTION = 0.01
 _SEGMENT_COUNT = 32_768
 _SEED = 7
 _WARP_MAX_ELEMENTS = 32
 _LOOPED_BLOCKS = (128, 256, 512, 1024)
+_PLANNED_CTA_BLOCK = 4096
+_I32_MAX = (1 << 31) - 1
+# The seven distributions of the recorded campaign, in its run order.
+_DISTRIBUTIONS = (
+    "many-tiny",
+    "uniform",
+    "log-normal",
+    "bimodal",
+    "zipf-like",
+    "few-huge",
+    "one-outlier",
+)
+_OPTIONAL_DISTRIBUTIONS = ("alternating-empty", "power-law")
+# The grid every value of a kind lies on, or None for values off any grid.
+_QUANTUM = {"ones": 1.0, "quarters": 0.25, "normal": None}
+_F32_UNIT_ROUNDOFF = 2.0**-24
+_F32_EXACT_INTEGERS = 1 << 24
+# An upper bound of the bytes per padded element alive at once while padding
+# and reducing: an i32 index, a bool mask, the gathered f32, the padded f32,
+# and the masked f32 product.
+_PADDED_BYTES_PER_ELEMENT = 17
 
 
-def _arguments():
+def _arguments(argv=None):
     """Parse benchmark controls."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=pathlib.Path, required=True)
@@ -41,7 +74,53 @@ def _arguments():
     parser.add_argument(
         "--warmups", type=int, default=_WARMUPS, help="Warmup launches."
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--distributions",
+        nargs="+",
+        choices=(*_DISTRIBUTIONS, *_OPTIONAL_DISTRIBUTIONS),
+        default=list(_DISTRIBUTIONS),
+        metavar="NAME",
+        help=(
+            "Segmented-sum distributions. The default is the seven of the "
+            "recorded campaign; alternating-empty and power-law are run "
+            "only when named."
+        ),
+    )
+    parser.add_argument(
+        "--segment-count",
+        type=int,
+        default=_SEGMENT_COUNT,
+        help="Segments per segmented-sum row.",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[_SEED],
+        help="One segmented-sum row per distribution and seed.",
+    )
+    parser.add_argument(
+        "--values",
+        choices=tuple(_QUANTUM),
+        default="ones",
+        help=(
+            "Timed segmented-sum values: all ones, seeded nonzero quarter "
+            "multiples, or seeded standard normal values."
+        ),
+    )
+    arguments = parser.parse_args(argv)
+    if arguments.samples <= 0 or arguments.warmups < 0:
+        parser.error("samples must be positive and warmups nonnegative")
+    if arguments.segment_count <= 0:
+        parser.error("segment-count must be positive")
+    for name in arguments.distributions:
+        total = worst_case_total(name, arguments.segment_count)
+        if total > _I32_MAX:
+            parser.error(
+                f"{name} with {arguments.segment_count} segments can reach "
+                f"{total} elements, which does not fit i32 offsets"
+            )
+    return arguments
 
 
 def _git_metadata(root: pathlib.Path) -> dict[str, object]:
@@ -73,8 +152,89 @@ def _median_iqr(values: Iterable[float]) -> dict[str, float]:
     }
 
 
+def _useful_bytes(value_count: int, segment_count: int) -> int:
+    """Return the bytes any correct segmented sum has to move.
+
+    These are the f32 values and the i32 offsets it reads and the f32 sums
+    it writes. A baseline that moves more, such as a padded matrix, is
+    still rated by these bytes, which is what makes the rate effective.
+    """
+    return 4 * (value_count + (segment_count + 1) + segment_count)
+
+
+def _gb_per_s(useful_bytes: int, microseconds: float) -> float | None:
+    """Return useful bytes per second in GB/s, or None for a zero time."""
+    if microseconds <= 0:
+        return None
+    return useful_bytes / (microseconds * 1_000.0)
+
+
+def _resolution(tick_us, sample_us) -> dict[str, object]:
+    """Return a timer tick and its fraction of one timed sample."""
+    return {
+        "timer_tick_us": tick_us,
+        "tick_fraction_of_sample": (
+            None if tick_us is None or sample_us <= 0 else tick_us / sample_us
+        ),
+    }
+
+
+def _resolved_samples(elapsed_us: Callable[[int], float], samples: int,
+                      tick_us) -> tuple[list[float], int]:
+    """Take per-launch samples from batches that outgrow the timer tick.
+
+    A sample of a few timer ticks cannot resolve a difference of a few
+    percent. A sample starts as a batch of 32 launches. When one tick is
+    not below one percent of the median sample, the batch doubles and the
+    samples are taken again, so the samples that are kept satisfy the limit
+    themselves.
+
+    Args:
+        elapsed_us: Callable timing that many back-to-back launches once.
+        samples: Number of samples.
+        tick_us: Measured timer tick, or None to keep the 32 launches.
+
+    Returns:
+        The time per launch of each sample, and the launches per sample.
+
+    Raises:
+        RuntimeError: If no batch up to the limit outgrows the tick.
+    """
+    launches = _BATCHED_LAUNCHES
+    while True:
+        timings = [elapsed_us(launches) / launches for _ in range(samples)]
+        sample_us = statistics.median(timings) * launches
+        if tick_us is None or tick_us < _TICK_FRACTION * sample_us:
+            return timings, launches
+        if launches >= _MAX_BATCHED_LAUNCHES:
+            raise RuntimeError(
+                f"a batch of {launches} launches does not bring the "
+                f"{tick_us} us timer tick below one percent of a sample"
+            )
+        launches *= 2
+
+
+def _event_tick_us(torch, device, pairs: int = 256):
+    """Estimate the CUDA event timer tick on the device.
+
+    Events are recorded around a tiny operation many times, and the tick is
+    the step those readings favour; see ``benchmark_provenance.timer_tick``.
+    """
+    scratch = torch.zeros(1, device=device)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    elapsed = []
+    for _ in range(pairs):
+        start.record()
+        scratch.add_(1)
+        end.record()
+        end.synchronize()
+        elapsed.append(start.elapsed_time(end) * 1_000.0)
+    return benchmark_provenance.timer_tick(elapsed)
+
+
 def _call_us(torch, launch: Callable[[], object], warmups: int,
-             samples: int) -> dict[str, object]:
+             samples: int, tick_us=None) -> dict[str, object]:
     """Measure synchronized Python-call latency in microseconds."""
     for _ in range(warmups):
         launch()
@@ -86,71 +246,129 @@ def _call_us(torch, launch: Callable[[], object], warmups: int,
         torch.cuda.synchronize()
         end = time.perf_counter_ns()
         timings.append((end - start) / 1_000.0)
-    return {"samples_us": timings, "summary_us": _median_iqr(timings)}
+    summary = _median_iqr(timings)
+    return {
+        "samples_us": timings,
+        "summary_us": summary,
+        "launches_per_sample": 1,
+        **_resolution(tick_us, summary["median"]),
+    }
 
 
 def _batched_event_us(torch, launch: Callable[[], object], warmups: int,
-                      samples: int) -> dict[str, object]:
+                      samples: int, tick_us=None) -> dict[str, object]:
     """Measure CUDA-event time per launch in a back-to-back batch."""
     for _ in range(warmups):
         launch()
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-    timings = []
-    for _ in range(samples):
+
+    def elapsed_us(launches):
         start.record()
-        for _ in range(_BATCHED_LAUNCHES):
+        for _ in range(launches):
             launch()
         end.record()
         end.synchronize()
-        timings.append(start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES)
-    return {"samples_us": timings, "summary_us": _median_iqr(timings)}
+        return start.elapsed_time(end) * 1_000.0
+
+    timings, launches = _resolved_samples(elapsed_us, samples, tick_us)
+    summary = _median_iqr(timings)
+    return {
+        "samples_us": timings,
+        "summary_us": summary,
+        "launches_per_sample": launches,
+        **_resolution(tick_us, summary["median"] * launches),
+    }
+
+
+class _CaptureFailed(Exception):
+    """A launch could not be captured into a CUDA graph."""
 
 
 def _graph_us(torch, launch: Callable[[], object], warmups: int,
-              samples: int) -> dict[str, object]:
-    """Measure one launch through replay of a captured 32-launch graph."""
+              samples: int, tick_us=None) -> dict[str, object]:
+    """Measure one launch through replay of a captured graph of launches."""
     for _ in range(warmups):
         launch()
     torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    try:
-        with torch.cuda.graph(graph):
-            for _ in range(_BATCHED_LAUNCHES):
-                launch()
-    except RuntimeError as error:
-        torch.cuda.synchronize()
-        return {"available": False, "error": str(error)}
-    for _ in range(warmups):
-        graph.replay()
-    torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-    timings = []
-    for _ in range(samples):
+    graphs = {}
+
+    def replay_us(launches):
+        if launches not in graphs:
+            graph = torch.cuda.CUDAGraph()
+            try:
+                with torch.cuda.graph(graph):
+                    for _ in range(launches):
+                        launch()
+            except RuntimeError as error:
+                torch.cuda.synchronize()
+                raise _CaptureFailed(str(error)) from error
+            for _ in range(warmups):
+                graph.replay()
+            torch.cuda.synchronize()
+            graphs.clear()
+            graphs[launches] = graph
         start.record()
-        graph.replay()
+        graphs[launches].replay()
         end.record()
         end.synchronize()
-        timings.append(start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES)
+        return start.elapsed_time(end) * 1_000.0
+
+    try:
+        timings, launches = _resolved_samples(replay_us, samples, tick_us)
+    except _CaptureFailed as error:
+        return {"available": False, "error": str(error)}
+    summary = _median_iqr(timings)
     return {
         "available": True,
         "samples_us": timings,
-        "summary_us": _median_iqr(timings),
+        "summary_us": summary,
+        "launches_per_sample": launches,
+        **_resolution(tick_us, summary["median"] * launches),
     }
 
 
 def _timings(torch, launch: Callable[[], object], warmups: int,
-             samples: int) -> dict[str, object]:
-    """Collect host, batched-event, and graph-replay measurements."""
-    return {
-        "call": _call_us(torch, launch, warmups, samples),
-        "batched_event": _batched_event_us(
-            torch, launch, warmups, samples
+             samples: int, *, ticks=None,
+             useful_bytes=None) -> dict[str, object]:
+    """Collect host, batched-event, and graph-replay measurements.
+
+    Args:
+        torch: The PyTorch module.
+        launch: The launch to time.
+        warmups: Untimed launches before each method.
+        samples: Timed samples per method.
+        ticks: Measured ``clock`` and ``event`` timer ticks in microseconds.
+            Without them the event methods batch 32 launches and no
+            resolution is recorded.
+        useful_bytes: Bytes one launch has to move. With them every method
+            that produced samples also reports ``effective_gb_per_s``.
+
+    Returns:
+        The ``call``, ``batched_event``, and ``graph`` entries.
+    """
+    ticks = ticks or {}
+    methods = {
+        "call": _call_us(
+            torch, launch, warmups, samples, tick_us=ticks.get("clock")
         ),
-        "graph": _graph_us(torch, launch, warmups, samples),
+        "batched_event": _batched_event_us(
+            torch, launch, warmups, samples, tick_us=ticks.get("event")
+        ),
+        "graph": _graph_us(
+            torch, launch, warmups, samples, tick_us=ticks.get("event")
+        ),
     }
+    if useful_bytes is not None:
+        for method in methods.values():
+            if "summary_us" in method:
+                method["effective_gb_per_s"] = _gb_per_s(
+                    useful_bytes, method["summary_us"]["median"]
+                )
+    return methods
 
 
 def _make_swage_vadd():
@@ -187,8 +405,18 @@ def _make_triton_vadd():
     return add_kernel
 
 
-def _run_vadd(torch, warmups: int, samples: int) -> list[dict[str, object]]:
-    """Benchmark fixed vector add across problem sizes."""
+def _run_vadd(torch, measure, seed: int) -> list[dict[str, object]]:
+    """Benchmark fixed vector add across problem sizes.
+
+    Args:
+        torch: The PyTorch module.
+        measure: Callable taking a launch and the bytes it has to move and
+            returning its timings.
+        seed: Seed of the input values.
+
+    Returns:
+        One row per problem size.
+    """
     swage_kernel = _make_swage_vadd()
     triton_kernel = _make_triton_vadd()
     results = []
@@ -196,8 +424,9 @@ def _run_vadd(torch, warmups: int, samples: int) -> list[dict[str, object]]:
         n = 1 << exponent
         swage_block = 256
         grid = ((n + swage_block - 1) // swage_block,)
-        x = torch.randn(n, device="cuda", dtype=torch.float32)
-        y = torch.randn(n, device="cuda", dtype=torch.float32)
+        generator = torch.Generator().manual_seed(seed)
+        x = torch.randn(n, generator=generator).cuda()
+        y = torch.randn(n, generator=generator).cuda()
         outputs = {
             "swage": torch.empty_like(x),
             "torch": torch.empty_like(x),
@@ -237,28 +466,22 @@ def _run_vadd(torch, warmups: int, samples: int) -> list[dict[str, object]]:
         row = {
             "case": "vadd",
             "n": n,
+            "seed": seed,
+            # Two f32 inputs read and one f32 output written.
+            "useful_bytes": 12 * n,
             "swage_block": swage_block,
             "swage_grid": grid[0],
             "triton_sweep_blocks": [128, 256, 512, 1024],
         }
         row["timings"] = {
-            name: _timings(torch, launch, warmups, samples)
+            name: measure(launch, row["useful_bytes"])
             for name, launch in launches.items()
         }
         results.append(row)
     return results
 
 
-def _offsets_from_lengths(torch, lengths: list[int]):
-    """Create host and device offsets from segment lengths."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
-    return offsets, device_offsets
-
-
-def _exact_values(torch, count: int):
+def _exact_values(torch, count: int, seed: int = _SEED):
     """Return seeded host values that expose any misplaced element read.
 
     Every value is one of 0.25, 0.5, ..., 1.75. None is zero, so reading one
@@ -267,8 +490,131 @@ def _exact_values(torch, count: int):
     quarter multiples are exact in f32 in any order for segments shorter than
     two million elements, which allows an exact comparison.
     """
-    generator = torch.Generator().manual_seed(_SEED)
+    generator = torch.Generator().manual_seed(seed)
     return torch.randint(1, 8, (count,), generator=generator).float() / 4
+
+
+def _values(torch, kind: str, count: int, seed: int):
+    """Return seeded host f32 values of one kind.
+
+    Args:
+        torch: The PyTorch module.
+        kind: ``ones``; ``quarters``, the values of ``_exact_values``; or
+            ``normal``, standard normal values that no grid makes exact.
+        count: Number of values.
+        seed: Seed of the random kinds.
+
+    Returns:
+        The values on the host.
+
+    Raises:
+        ValueError: If the kind is unknown.
+    """
+    if kind == "ones":
+        return torch.ones(count)
+    if kind == "quarters":
+        return _exact_values(torch, count, seed)
+    if kind == "normal":
+        return torch.randn(count, generator=torch.Generator().manual_seed(seed))
+    raise ValueError(f"unknown values kind {kind!r}")
+
+
+def _sum_tolerance(torch, lengths, magnitude, quantum):
+    """Return how far a correct f32 segment sum may be from the exact sum.
+
+    Args:
+        torch: The PyTorch module.
+        lengths: Segment lengths as float64.
+        magnitude: Float64 sum of the absolute values of each segment.
+        quantum: Grid that every value is a multiple of, or None.
+
+    Returns:
+        One float64 tolerance per segment. It is zero where every partial
+        sum in any order is exactly representable: the values lie on the
+        grid and their magnitudes add up to at most ``2 ** 24`` grid steps.
+        Elsewhere it is ``gamma(n - 1) * magnitude`` with ``gamma(k) =
+        k * u / (1 - k * u)`` and ``u = 2 ** -24``, the bound that holds for
+        n f32 values added in any order. Past ``k * u = 1 / 2`` the bound
+        says nothing and the tolerance is infinite: the segment is not
+        checked beyond having been written.
+    """
+    steps = (lengths - 1).clamp(min=0) * _F32_UNIT_ROUNDOFF
+    tolerance = torch.where(
+        steps < 0.5,
+        steps / (1 - steps) * magnitude,
+        torch.full_like(magnitude, float("inf")),
+    )
+    if quantum is not None:
+        exact = magnitude <= _F32_EXACT_INTEGERS * quantum
+        tolerance = torch.where(exact, torch.zeros_like(tolerance), tolerance)
+    return tolerance
+
+
+def _sum_reference(torch, host_values, host_offsets, quantum):
+    """Return the float64 segment sums and the tolerance of each."""
+    values = host_values.double()
+    reference = torch.segment_reduce(values, "sum", offsets=host_offsets)
+    magnitude = torch.segment_reduce(
+        values.abs(), "sum", offsets=host_offsets
+    )
+    lengths = (host_offsets[1:] - host_offsets[:-1]).double()
+    return reference, _sum_tolerance(torch, lengths, magnitude, quantum)
+
+
+def _check_modes(tolerance) -> dict[str, int]:
+    """Count the segments checked exactly, within a bound, and not at all."""
+    unchecked = int(tolerance.isinf().sum())
+    exact = int((tolerance == 0).sum())
+    return {
+        "exact_segments": exact,
+        "bounded_segments": tolerance.numel() - exact - unchecked,
+        "unchecked_segments": unchecked,
+    }
+
+
+def _check_sums(torch, label: str, result, reference, tolerance):
+    """Require every segment sum to be within its tolerance.
+
+    Raises:
+        AssertionError: If a sum is outside its tolerance or was never
+            written, which also fails a segment with an infinite tolerance.
+    """
+    error = (result.double() - reference).abs()
+    wrong = ~(error <= tolerance)
+    if wrong.any():
+        index = int(wrong.nonzero()[0])
+        raise AssertionError(
+            f"{label}: {int(wrong.sum())} of {wrong.numel()} segment sums "
+            f"are outside their tolerance; segment {index} is "
+            f"{result[index].item()!r}, expected {reference[index].item()!r} "
+            f"within {tolerance[index].item()!r}"
+        )
+
+
+def _padded_inputs(torch, values, offsets):
+    """Pad every segment with zeros to the longest one.
+
+    Returns:
+        The f32 matrix with one row per segment and its bool mask.
+    """
+    width = int((offsets[1:] - offsets[:-1]).max())
+    index = offsets[:-1, None] + torch.arange(
+        width, dtype=torch.int32, device=offsets.device
+    )
+    mask = index < offsets[1:, None]
+    gathered = values[index.clamp_(max=max(values.numel() - 1, 0))]
+    return torch.where(mask, gathered, torch.zeros_like(gathered)), mask
+
+
+def _padded_sum(padded, mask):
+    """Reduce a padded matrix under its mask, in pure PyTorch."""
+    return (padded * mask).sum(dim=1)
+
+
+def _free_device_bytes(torch) -> int:
+    """Return the device memory a new tensor could use right now."""
+    free, _ = torch.cuda.mem_get_info()
+    return free + torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
 
 
 def _make_triton_segmented_sum():
@@ -431,215 +777,318 @@ def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
         )
 
 
-def _run_segmented_sum(torch, warmups: int,
-                       samples: int) -> list[dict[str, object]]:
+def _segmented_row(
+    torch,
+    kernels,
+    prepare,
+    measure,
+    name: str,
+    *,
+    segment_count: int,
+    seed: int,
+    values_kind: str,
+    device,
+    free_bytes: Callable[[], int],
+    synchronize,
+) -> dict[str, object]:
+    """Check and time every candidate on one distribution and seed.
+
+    Args:
+        torch: The PyTorch module.
+        kernels: The Triton kernels ``fixed``, ``looped``, ``packed``, and
+            ``cta``.
+        prepare: The private planned-sum preparation function.
+        measure: Callable taking a launch and the bytes it has to move and
+            returning its timings.
+        name: Distribution name.
+        segment_count: Segments in the row.
+        seed: Seed of the lengths and of the random value kinds.
+        values_kind: Key of ``_QUANTUM``.
+        device: Device that holds the inputs and outputs.
+        free_bytes: Callable returning the bytes the padded baseline may
+            use; it is called once the row's inputs are on the device.
+        synchronize: Callable that waits for all work on that device.
+
+    Returns:
+        The record row. A baseline that cannot produce a correct sum on the
+        row is left out of ``timings`` and listed in ``skipped`` with the
+        reason; it is never timed on a wrong result.
+
+    Raises:
+        AssertionError: If a candidate that ran is wrong in any segment.
+    """
+    lengths = generate_lengths(name, segment_count, seed)
+    statistics_summary = summarize_lengths(lengths)
+    max_length = statistics_summary["max"]
+    host_offsets = torch.tensor(
+        [0, *itertools.accumulate(lengths)], dtype=torch.int32
+    )
+    host_values = _values(
+        torch, values_kind, statistics_summary["total"], seed
+    )
+    reference, tolerance = _sum_reference(
+        torch, host_values, host_offsets, _QUANTUM[values_kind]
+    )
+    check = _check_modes(tolerance)
+    values = host_values.to(device)
+    offsets = host_offsets.to(device)
+    reference = reference.to(device)
+    tolerance = tolerance.to(device)
+    useful_bytes = _useful_bytes(statistics_summary["total"], segment_count)
+
+    skipped = {}
+    triton_configs = _triton_sum_configs(max_length)
+    if not triton_configs:
+        skipped["triton_fixed"] = (
+            "no swept block covers the longest segment of "
+            f"{max_length} elements"
+        )
+    if max_length > _PLANNED_CTA_BLOCK:
+        skipped["triton_planned"] = (
+            f"its CTA kernel reads one block of {_PLANNED_CTA_BLOCK} "
+            f"elements and the longest segment has {max_length}"
+        )
+    padded_bytes = segment_count * max_length * _PADDED_BYTES_PER_ELEMENT
+    memory_budget = free_bytes()
+    if padded_bytes > memory_budget:
+        skipped["torch_padded"] = (
+            f"padding {segment_count} segments to {max_length} elements "
+            f"needs {padded_bytes} bytes and {memory_budget} are free"
+        )
+    triton_looped_configs = _triton_looped_configs()
+    warp_ids = [
+        index
+        for index, length in enumerate(lengths)
+        if length <= _WARP_MAX_ELEMENTS
+    ]
+    cta_ids = [
+        index
+        for index, length in enumerate(lengths)
+        if length > _WARP_MAX_ELEMENTS
+    ]
+    device_warp_ids = torch.tensor(warp_ids, device=device, dtype=torch.int32)
+    device_cta_ids = torch.tensor(cta_ids, device=device, dtype=torch.int32)
+
+    def unwritten():
+        # A result that was never written must not pass the check.
+        return torch.full((segment_count,), float("nan"), device=device)
+
+    outputs = {
+        "swage_warp": unwritten(),
+        "swage_cta": unwritten(),
+        "swage_mixed": unwritten(),
+    }
+    allocated = {}
+    prepared = prepare(
+        values,
+        offsets,
+        outputs["swage_mixed"],
+        warp_max_elements=_WARP_MAX_ELEMENTS,
+    )
+    swage_warp = prepare(
+        values,
+        offsets,
+        outputs["swage_warp"],
+        warp_max_elements=_WARP_MAX_ELEMENTS,
+    ).warp
+    swage_cta = prepare(
+        values,
+        offsets,
+        outputs["swage_cta"],
+        warp_max_elements=_WARP_MAX_ELEMENTS,
+    ).cta
+
+    def launch_torch():
+        allocated["torch"] = torch.segment_reduce(
+            values, "sum", offsets=offsets
+        )
+        return allocated["torch"]
+
+    launches = {
+        "swage_warp": swage_warp,
+        "swage_cta": swage_cta,
+        "swage_mixed": prepared.mixed,
+        "torch": launch_torch,
+    }
+    for block, warps in triton_configs:
+        output = unwritten()
+        launch_name = f"triton_b{block}_w{warps}"
+        outputs[launch_name] = output
+        launches[launch_name] = (
+            lambda out=output, block=block, warps=warps:
+            kernels.fixed[(segment_count,)](
+                values,
+                offsets,
+                out,
+                segment_count,
+                BLOCK=block,
+                num_warps=warps,
+            )
+        )
+    for warps in () if "triton_planned" in skipped else (1, 2, 4, 8):
+        output = unwritten()
+        launch_name = f"triton_planned_w{warps}"
+        outputs[launch_name] = output
+
+        def launch_planned(out=output, cta_warps=warps):
+            if warp_ids:
+                kernels.packed[((len(warp_ids) + 3) // 4,)](
+                    values,
+                    offsets,
+                    out,
+                    device_warp_ids,
+                    len(warp_ids),
+                    TASKS=4,
+                    WARP=32,
+                    num_warps=4,
+                )
+            if cta_ids:
+                kernels.cta[(len(cta_ids),)](
+                    values,
+                    offsets,
+                    out,
+                    device_cta_ids,
+                    len(cta_ids),
+                    BLOCK=_PLANNED_CTA_BLOCK,
+                    num_warps=cta_warps,
+                )
+            return None
+
+        launches[launch_name] = launch_planned
+    # Registered after the recorded candidates so those keep their order.
+    for block, warps in triton_looped_configs:
+        output = unwritten()
+        launch_name = f"triton_looped_b{block}_w{warps}"
+        outputs[launch_name] = output
+        launches[launch_name] = (
+            lambda out=output, block=block, warps=warps:
+            _launch_triton_looped(
+                kernels.looped,
+                values,
+                offsets,
+                out,
+                segment_count,
+                block,
+                warps,
+            )
+        )
+    if "torch_padded" not in skipped:
+        # The padding is prepared outside the timed launch, as the Swage
+        # plan and the Triton task lists are.
+        padded, mask = _padded_inputs(torch, values, offsets)
+
+        def launch_padded():
+            allocated["torch_padded"] = _padded_sum(padded, mask)
+            return allocated["torch_padded"]
+
+        launches["torch_padded"] = launch_padded
+    for launch in launches.values():
+        launch()
+    synchronize()
+    for output_name, output in {**outputs, **allocated}.items():
+        _check_sums(torch, output_name, output, reference, tolerance)
+    _check_triton_looped(
+        torch,
+        kernels.looped,
+        triton_looped_configs,
+        offsets,
+        segment_count,
+    )
+    return {
+        "case": "segmented-sum",
+        "distribution": name,
+        "seed": seed,
+        "values": values_kind,
+        "segment_count": segment_count,
+        "statistics": statistics_summary,
+        "useful_bytes": useful_bytes,
+        "check": check,
+        "skipped": skipped,
+        "triton_sweep_configs": [
+            {"block": block, "num_warps": warps}
+            for block, warps in triton_configs
+        ],
+        "triton_looped_sweep_configs": [
+            {"block": block, "num_warps": warps}
+            for block, warps in triton_looped_configs
+        ],
+        "triton_planned": {
+            "warp_threshold": _WARP_MAX_ELEMENTS,
+            "warp_tasks": len(warp_ids),
+            "cta_tasks": len(cta_ids),
+            "warp_tasks_per_program": 4,
+            "cta_block": _PLANNED_CTA_BLOCK,
+            "cta_num_warps_sweep": [1, 2, 4, 8],
+        },
+        "timings": {
+            launch_name: measure(launch, useful_bytes)
+            for launch_name, launch in launches.items()
+        },
+    }
+
+
+def _run_segmented_sum(torch, measure, arguments) -> list[dict[str, object]]:
     """Benchmark private segmented sum against Triton and torch baselines."""
-    from distributions import generate_lengths, summarize_lengths
     from swage._segmented_qualification import _prepare_planned_sum
 
-    triton_kernel = _make_triton_segmented_sum()
-    triton_looped_kernel = _make_triton_looped_sum()
-    triton_looped_configs = _triton_looped_configs()
-    triton_packed_kernel, triton_cta_kernel = _make_triton_planned_sum()
-    distributions = (
-        "many-tiny",
-        "uniform",
-        "log-normal",
-        "bimodal",
-        "zipf-like",
-        "few-huge",
-        "one-outlier",
+    packed, cta = _make_triton_planned_sum()
+    kernels = types.SimpleNamespace(
+        fixed=_make_triton_segmented_sum(),
+        looped=_make_triton_looped_sum(),
+        packed=packed,
+        cta=cta,
     )
-    results = []
-    for name in distributions:
-        lengths = generate_lengths(name, _SEGMENT_COUNT, _SEED)
-        statistics_summary = summarize_lengths(lengths)
-        triton_configs = _triton_sum_configs(statistics_summary["max"])
-        warp_ids = [
-            index
-            for index, length in enumerate(lengths)
-            if length <= _WARP_MAX_ELEMENTS
-        ]
-        cta_ids = [
-            index
-            for index, length in enumerate(lengths)
-            if length > _WARP_MAX_ELEMENTS
-        ]
-        host_offsets, offsets = _offsets_from_lengths(torch, lengths)
-        device_warp_ids = torch.tensor(
-            warp_ids, device="cuda", dtype=torch.int32
-        )
-        device_cta_ids = torch.tensor(
-            cta_ids, device="cuda", dtype=torch.int32
-        )
-        values = torch.ones(
-            host_offsets[-1], device="cuda", dtype=torch.float32
-        )
-        expected = torch.tensor(lengths, device="cuda", dtype=torch.float32)
-        outputs = {
-            "swage_warp": torch.empty(_SEGMENT_COUNT, device="cuda"),
-            "swage_cta": torch.empty(_SEGMENT_COUNT, device="cuda"),
-            "swage_mixed": torch.empty(_SEGMENT_COUNT, device="cuda"),
-        }
-        torch_output = {"value": None}
-        prepared = _prepare_planned_sum(
-            values,
-            offsets,
-            outputs["swage_mixed"],
-            warp_max_elements=_WARP_MAX_ELEMENTS,
-        )
-        swage_warp = _prepare_planned_sum(
-            values,
-            offsets,
-            outputs["swage_warp"],
-            warp_max_elements=_WARP_MAX_ELEMENTS,
-        ).warp
-        swage_cta = _prepare_planned_sum(
-            values,
-            offsets,
-            outputs["swage_cta"],
-            warp_max_elements=_WARP_MAX_ELEMENTS,
-        ).cta
-
-        def launch_torch():
-            torch_output["value"] = torch.segment_reduce(
-                values, "sum", offsets=offsets
-            )
-            return torch_output["value"]
-
-        launches = {
-            "swage_warp": swage_warp,
-            "swage_cta": swage_cta,
-            "swage_mixed": prepared.mixed,
-            "torch": launch_torch,
-        }
-        for block, warps in triton_configs:
-            output = torch.empty(_SEGMENT_COUNT, device="cuda")
-            launch_name = f"triton_b{block}_w{warps}"
-            outputs[launch_name] = output
-            launches[launch_name] = (
-                lambda out=output, block=block, warps=warps:
-                triton_kernel[(_SEGMENT_COUNT,)](
-                    values,
-                    offsets,
-                    out,
-                    _SEGMENT_COUNT,
-                    BLOCK=block,
-                    num_warps=warps,
-                )
-            )
-        for warps in (1, 2, 4, 8):
-            output = torch.empty(_SEGMENT_COUNT, device="cuda")
-            launch_name = f"triton_planned_w{warps}"
-            outputs[launch_name] = output
-
-            def launch_planned(out=output, cta_warps=warps):
-                if warp_ids:
-                    triton_packed_kernel[((len(warp_ids) + 3) // 4,)](
-                        values,
-                        offsets,
-                        out,
-                        device_warp_ids,
-                        len(warp_ids),
-                        TASKS=4,
-                        WARP=32,
-                        num_warps=4,
-                    )
-                if cta_ids:
-                    triton_cta_kernel[(len(cta_ids),)](
-                        values,
-                        offsets,
-                        out,
-                        device_cta_ids,
-                        len(cta_ids),
-                        BLOCK=4096,
-                        num_warps=cta_warps,
-                    )
-                return None
-
-            launches[launch_name] = launch_planned
-        # Registered last so the earlier candidates keep their run order.
-        for block, warps in triton_looped_configs:
-            output = torch.empty(_SEGMENT_COUNT, device="cuda")
-            launch_name = f"triton_looped_b{block}_w{warps}"
-            outputs[launch_name] = output
-            launches[launch_name] = (
-                lambda out=output, block=block, warps=warps:
-                _launch_triton_looped(
-                    triton_looped_kernel,
-                    values,
-                    offsets,
-                    out,
-                    _SEGMENT_COUNT,
-                    block,
-                    warps,
-                )
-            )
-        for launch in launches.values():
-            launch()
-        torch.cuda.synchronize()
-        checked_outputs = {**outputs, "torch": torch_output["value"]}
-        for output_name, output in checked_outputs.items():
-            torch.testing.assert_close(
-                output,
-                expected,
-                rtol=0,
-                atol=0,
-                msg=lambda message, n=output_name: f"{n}: {message}",
-            )
-        _check_triton_looped(
+    return [
+        _segmented_row(
             torch,
-            triton_looped_kernel,
-            triton_looped_configs,
-            offsets,
-            _SEGMENT_COUNT,
+            kernels,
+            _prepare_planned_sum,
+            measure,
+            name,
+            segment_count=arguments.segment_count,
+            seed=seed,
+            values_kind=arguments.values,
+            device="cuda",
+            free_bytes=lambda: _free_device_bytes(torch),
+            synchronize=torch.cuda.synchronize,
         )
-        row = {
-            "case": "segmented-sum",
-            "distribution": name,
-            "segment_count": _SEGMENT_COUNT,
-            "statistics": statistics_summary,
-            "triton_sweep_configs": [
-                {"block": block, "num_warps": warps}
-                for block, warps in triton_configs
-            ],
-            "triton_looped_sweep_configs": [
-                {"block": block, "num_warps": warps}
-                for block, warps in triton_looped_configs
-            ],
-            "triton_planned": {
-                "warp_threshold": _WARP_MAX_ELEMENTS,
-                "warp_tasks": len(warp_ids),
-                "cta_tasks": len(cta_ids),
-                "warp_tasks_per_program": 4,
-                "cta_block": 4096,
-                "cta_num_warps_sweep": [1, 2, 4, 8],
-            },
-            "timings": {
-                launch_name: _timings(torch, launch, warmups, samples)
-                for launch_name, launch in launches.items()
-            },
-        }
-        results.append(row)
-    return results
+        for name in arguments.distributions
+        for seed in arguments.seeds
+    ]
 
 
 def main():
     """Run the selected comparison benchmark and write JSON evidence."""
     arguments = _arguments()
-    if arguments.samples <= 0 or arguments.warmups < 0:
-        raise ValueError("samples must be positive and warmups nonnegative")
 
     import torch
     import triton
-    from swage import _runtime
 
     if not torch.cuda.is_available():
         raise RuntimeError("benchmark requires CUDA-enabled PyTorch")
     root = pathlib.Path(__file__).resolve().parents[1]
     device = torch.cuda.current_device()
+    torch.ones(1, device="cuda").sum().item()
+    provenance = benchmark_provenance.start(
+        torch, benchmark_provenance.swage_build()
+    )
     properties = torch.cuda.get_device_properties(device)
     capability = torch.cuda.get_device_capability(device)
+    ticks = {
+        "clock": benchmark_provenance.clock_tick_us(),
+        "event": _event_tick_us(torch, "cuda"),
+    }
+
+    def measure(launch, useful_bytes):
+        return _timings(
+            torch,
+            launch,
+            arguments.warmups,
+            arguments.samples,
+            ticks=ticks,
+            useful_bytes=useful_bytes,
+        )
+
     result = {
         "benchmark": "swage-triton-comparison",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -650,19 +1099,62 @@ def main():
             "pytorch": torch.__version__,
             "pytorch_cuda": torch.version.cuda,
             "triton": triton.__version__,
-            "cuda_driver": _runtime.driver_version(),
+            "cuda_driver": provenance["cuda_driver"],
             "gpu": torch.cuda.get_device_name(device),
             "compute_capability": f"sm_{capability[0]}{capability[1]}",
             "multiprocessors": properties.multi_processor_count,
             "total_memory_bytes": properties.total_memory,
         },
+        "provenance": provenance,
         "methodology": {
+            "suite": arguments.suite,
             "warmups": arguments.warmups,
             "samples": arguments.samples,
+            "distributions": arguments.distributions,
+            "segment_count": arguments.segment_count,
+            "seeds": arguments.seeds,
+            "values": arguments.values,
             "batched_launches": _BATCHED_LAUNCHES,
             "graph_replay_launches": _BATCHED_LAUNCHES,
+            "batching": (
+                "event-timed samples batch at least batched_launches "
+                "launches; while one event timer tick is not below one "
+                "percent of the median sample, the batch doubles and the "
+                "samples are taken again; every timing entry records its "
+                "launches_per_sample, the tick, and the tick as a fraction "
+                "of the sample"
+            ),
+            "timer_ticks_us": ticks,
+            "timer_ticks": (
+                "measured in this process: the smallest advance of "
+                "back-to-back time.perf_counter_ns reads, and the step that "
+                "CUDA event readings around a tiny operation favour, which "
+                "can be coarser than the finest gap between two readings"
+            ),
+            "effective_gb_per_s": (
+                "useful_bytes of the row divided by the median time; for "
+                "segmented sum the f32 values and i32 offsets read and the "
+                "f32 sums written, for vector add two f32 inputs read and "
+                "one f32 output written"
+            ),
+            "candidate_order": (
+                "each candidate is timed to completion in the order of the "
+                "timings mapping; candidates are not interleaved"
+            ),
             "compilation_excluded": True,
             "correctness_checked_before_timing": True,
+            "correctness": (
+                "every timed candidate is checked on the timed values "
+                "against a float64 CPU reference: exactly where sums of the "
+                "values are exact in f32 in any order, otherwise within "
+                "gamma(n - 1) times the sum of magnitudes; each row counts "
+                "its exact, bounded, and unchecked segments"
+            ),
+            "skipped": (
+                "a baseline that cannot produce a correct sum on a row is "
+                "listed in the row's skipped mapping with the reason and "
+                "is not timed"
+            ),
             "triton_dependency": "optional runtime import; not a project dep",
             "triton_fixed": (
                 "one program per segment, one masked block; blocks smaller "
@@ -673,22 +1165,25 @@ def main():
                 "blocks; no block is excluded for the longest segment"
             ),
             "triton_looped_check": (
-                "besides the all-ones check shared by every candidate, each "
-                "looped configuration is checked exactly before timing on "
-                "seeded nonzero quarter multiples against CPU "
-                "torch.segment_reduce; the timed input stays all ones"
+                "besides the check shared by every candidate, each looped "
+                "configuration is checked exactly before timing on seeded "
+                "nonzero quarter multiples against CPU torch.segment_reduce"
+            ),
+            "torch_padded": (
+                "pure PyTorch: every segment padded with zeros to the "
+                "longest one outside the timed launch, then the masked "
+                "matrix summed per row inside it"
             ),
         },
         "results": [],
     }
     if arguments.suite in {"all", "vadd"}:
-        result["results"].extend(
-            _run_vadd(torch, arguments.warmups, arguments.samples)
-        )
+        result["results"].extend(_run_vadd(torch, measure, arguments.seeds[0]))
     if arguments.suite in {"all", "segmented-sum"}:
         result["results"].extend(
-            _run_segmented_sum(torch, arguments.warmups, arguments.samples)
+            _run_segmented_sum(torch, measure, arguments)
         )
+    benchmark_provenance.finish(provenance)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"output": str(arguments.output)}, sort_keys=True))

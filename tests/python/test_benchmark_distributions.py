@@ -5,7 +5,11 @@ import hashlib
 
 import pytest
 
-from benchmarks.distributions import generate_lengths, summarize_lengths
+from benchmarks.distributions import (
+    generate_lengths,
+    summarize_lengths,
+    worst_case_total,
+)
 
 _NAMES = (
     "uniform",
@@ -48,6 +52,8 @@ _FROZEN_DIGESTS = {
 }
 _DEFAULT_COUNT = 32_768
 _MAX_COUNT = 524_287
+_MILLION = 1_000_000
+_I32_MAX = (1 << 31) - 1
 _CTA_CHUNK_ELEMENTS = 4096
 
 
@@ -163,6 +169,63 @@ def test_rejects_counts_that_cannot_guarantee_an_i32_total(count):
     """Reject invalid counts before allocating or sampling."""
     with pytest.raises(ValueError, match="count"):
         generate_lengths("uniform", count, 1)
+
+
+@pytest.mark.parametrize(
+    ("name", "largest"),
+    [
+        ("uniform", 524_287),
+        ("log-normal", 524_287),
+        ("zipf-like", 524_287),
+        ("bimodal", 4_898_459),
+        ("few-huge", 10_294_759),
+        ("one-outlier", 67_108_736),
+        ("many-tiny", 67_108_863),
+        ("alternating-empty", 134_217_727),
+        ("power-law", 8_616_633),
+    ],
+)
+def test_count_is_admitted_exactly_while_the_worst_case_total_fits_i32(
+    name, largest
+):
+    """Bound each distribution by its own longest lengths, not by 4096."""
+    assert worst_case_total(name, largest) <= _I32_MAX
+    assert worst_case_total(name, largest + 1) > _I32_MAX
+    with pytest.raises(ValueError, match=f"count.*{name}.*fit i32"):
+        generate_lengths(name, largest + 1, 1)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "bimodal",
+        "few-huge",
+        "one-outlier",
+        "many-tiny",
+        "alternating-empty",
+        "power-law",
+    ],
+)
+def test_a_million_segments_fit_where_the_lengths_are_short_or_ranked(name):
+    """Generate 10^6 segments for every distribution that guarantees i32."""
+    lengths = generate_lengths(name, _MILLION, 7)
+
+    assert len(lengths) == _MILLION
+    assert sum(lengths) <= worst_case_total(name, _MILLION) <= _I32_MAX
+
+
+@pytest.mark.parametrize("name", ["uniform", "log-normal", "zipf-like"])
+def test_a_million_segments_are_refused_where_every_length_can_be_4096(name):
+    """Refuse 10^6 segments when the total is not guaranteed to fit i32."""
+    assert worst_case_total(name, _MILLION) == 4096 * _MILLION
+    with pytest.raises(ValueError, match="count"):
+        generate_lengths(name, _MILLION, 7)
+
+
+def test_worst_case_total_rejects_an_unknown_distribution():
+    """Name the misspelled distribution instead of returning a bound."""
+    with pytest.raises(ValueError, match="unknown distribution"):
+        worst_case_total("normal", 1)
 
 
 @pytest.mark.parametrize("seed", [True, 1.5, "1"])

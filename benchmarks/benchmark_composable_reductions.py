@@ -17,7 +17,16 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from benchmark_triton_comparison import _call_us, _git_metadata, _graph_us
+import benchmark_provenance
+from benchmark_triton_comparison import (
+    _call_us,
+    _event_tick_us,
+    _gb_per_s,
+    _git_metadata,
+    _graph_us,
+    _resolution,
+    _useful_bytes,
+)
 from distributions import generate_lengths, summarize_lengths
 
 
@@ -114,6 +123,13 @@ def main():
 
     device = torch.cuda.current_device()
     torch.ones(1, device="cuda").sum().item()
+    provenance = benchmark_provenance.start(
+        torch, benchmark_provenance.swage_build()
+    )
+    ticks = {
+        "call": benchmark_provenance.clock_tick_us(),
+        "graph": _event_tick_us(torch, "cuda"),
+    }
     native_path = pathlib.Path(_swageDialectsNanobind.__file__)
     paths = [
         pathlib.Path(__file__).resolve(),
@@ -131,6 +147,7 @@ def main():
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "status": "provisional engineering run; no performance gate",
         "source": _git_metadata(root),
+        "provenance": provenance,
         "sha256": {
             str(path.relative_to(root)): hashlib.sha256(
                 path.read_bytes()
@@ -179,6 +196,17 @@ def main():
             ),
             "call": "Synchronized Python call latency, preparation excluded.",
             "graph": "CUDA events around 32 captured calls, divided by 32.",
+            "effective_gb_per_s": (
+                "The row's useful_bytes (f32 values and i32 offsets read, "
+                "f32 results written) divided by the median time."
+            ),
+            "timer_ticks_us": ticks,
+            "tick_fraction_of_sample": (
+                "The measured host clock or CUDA event tick divided by one "
+                "sample: a call, or the 32 captured calls of a graph "
+                "replay. The batch is fixed and is not raised to meet a "
+                "resolution limit."
+            ),
             "order": "Rotate policy order across cases; sequential samples.",
             "torch": (
                 "Eager segment_reduce with transform and output allocations "
@@ -235,9 +263,11 @@ def main():
             launches["torch"] = launch_torch
             if held_out:
                 launches = {"cta": prepared.cta, "mixed": prepared.mixed}
+            useful_bytes = _useful_bytes(sum(lengths), len(lengths))
             row = {
                 "workload": workload,
                 "lengths": summarize_lengths(lengths),
+                "useful_bytes": useful_bytes,
                 "kind": kind,
                 "transform": transform,
                 "prepare_ms": prepare_ms,
@@ -266,8 +296,23 @@ def main():
                 }
                 if name != "torch":
                     torch.testing.assert_close(output, expected, **tolerance)
+                for method, timing in row["policies"][name].items():
+                    if "summary_us" in timing:
+                        median = timing["summary_us"]["median"]
+                        timing["effective_gb_per_s"] = _gb_per_s(
+                            useful_bytes, median
+                        )
+                        timing.update(
+                            _resolution(
+                                ticks[method],
+                                median * timing["launches_per_sample"],
+                            )
+                        )
             row["correctness_passed"] = True
             report["results"].append(row)
+            # Rewritten after every row, so the block always describes the
+            # rows that are in the file.
+            benchmark_provenance.finish(provenance)
             args.output.write_text(json.dumps(report, indent=2) + "\n")
             medians = {
                 name: round(timing["graph"]["summary_us"]["median"], 2)
