@@ -34,6 +34,54 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+@sw.jit
+def defaulted_kernel(  # noqa: D103
+    x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr = 128
+):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+@sw.jit
+def annotated_count_kernel(  # noqa: D103
+    x_ptr, y_ptr, output_ptr, n: int, BLOCK: sl.constexpr
+):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+@sw.jit
+def annotated_pointer_kernel(  # noqa: D103
+    x_ptr: float, y_ptr, output_ptr, n, BLOCK: sl.constexpr
+):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+@sw.jit
+def annotated_block_kernel(  # noqa: D103
+    x_ptr, y_ptr, output_ptr, n, BLOCK: int
+):
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
 _IMPORTED_NS = time.time_ns()
 _SHARED_KEY = {"kernel": "add_kernel", "target": "sm_86"}
 
@@ -556,6 +604,189 @@ def test_minimum_pytorch_matches_the_declared_dependency():
 
     assert declared is not None
     assert _runtime._MIN_TORCH == (int(declared[1]), int(declared[2]))
+
+
+def _launch_location(kernel):
+    """Return the suffix a launch error carries for `kernel`."""
+    line = kernel.source_line + kernel.function.lineno - 1
+    return (
+        f" (in launch of kernel '{kernel.__name__}', defined at "
+        f"{kernel.filename}:{line})"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kernel", "reason"),
+    [
+        (defaulted_kernel, "parameter 'BLOCK' has a default value"),
+        (
+            annotated_count_kernel,
+            "unsupported annotation 'int' on parameter 'n'",
+        ),
+        (
+            annotated_pointer_kernel,
+            "unsupported annotation 'float' on parameter 'x_ptr'",
+        ),
+        (
+            annotated_block_kernel,
+            "unsupported annotation 'int' on parameter 'BLOCK'",
+        ),
+    ],
+)
+def test_launch_rejects_defaults_and_foreign_annotations(
+    monkeypatch, kernel, reason
+):
+    """Refuse a parameter list outside the ABI before any compile."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _Driver()
+    emissions = []
+    compiles = []
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(
+        kernel, "emit_mlir", lambda **_kwargs: emissions.append(1)
+    )
+    for name in ("_compile_cached", "_compile_native"):
+        monkeypatch.setattr(
+            _runtime, name, lambda *_args, **_kwargs: compiles.append(1)
+        )
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    arguments = _arguments(torch)
+
+    with pytest.raises(sw.CompilationError) as rejection:
+        kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    message = str(rejection.value)
+    assert message.startswith(f"{__file__}:")
+    assert f": {kernel.__name__}: {reason}" in message
+    assert emissions == compiles == []
+    assert driver.loads == driver.launches == []
+    for tensor in tuple(arguments.values())[:3]:
+        assert tensor.recorded_streams == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "constexprs", "grid", "error", "reason"),
+    [
+        ("bad", {"BLOCK": 128}, (2,), TypeError, "arguments must be a mapping"),
+        (None, {"BLOCK": 0}, (2,), ValueError, "constexpr BLOCK must be"),
+        (None, {"BLOCK": 128}, (1,), ValueError, "grid must equal"),
+        (None, {"BLOCK": 2048}, (1,), ValueError, "BLOCK 2048 exceeds device"),
+        (
+            {"device_type": "cpu"},
+            {"BLOCK": 128},
+            (2,),
+            TypeError,
+            "argument 'x_ptr' must be a CUDA tensor",
+        ),
+        (
+            {"contiguous": False},
+            {"BLOCK": 128},
+            (2,),
+            ValueError,
+            "argument 'x_ptr' must be contiguous",
+        ),
+        (
+            {"negative": True},
+            {"BLOCK": 128},
+            (2,),
+            ValueError,
+            "argument 'x_ptr' must not be a lazy negation view",
+        ),
+    ],
+)
+def test_launch_errors_name_the_kernel(
+    monkeypatch, arguments, constexprs, grid, error, reason
+):
+    """Keep each message and add the kernel and where it is defined."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    if arguments is None:
+        arguments = _arguments(torch)
+    elif isinstance(arguments, dict):
+        arguments = _arguments(torch, **arguments)
+
+    with pytest.raises(error) as rejection:
+        add_kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+
+    message = str(rejection.value)
+    assert type(rejection.value) is error
+    assert message.startswith(reason)
+    assert message.endswith(_launch_location(add_kernel))
+    assert message.count("in launch of kernel") == 1
+    # The original raise stays the last frame, with no chained exception.
+    assert rejection.value.__cause__ is None
+    assert rejection.value.__suppress_context__
+    assert rejection.traceback[-1].name.startswith("_validate_")
+    assert driver.loads == driver.launches == []
+
+
+def test_launch_names_the_kernel_for_a_compiler_rejection(monkeypatch):
+    """Name the kernel when the native compiler refuses the target."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError("unsupported target 'sm_75'")
+
+    monkeypatch.setattr(_runtime, "_compile_cached", refuse)
+
+    with pytest.raises(ValueError) as rejection:
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert str(rejection.value) == (
+        "unsupported target 'sm_75'" + _launch_location(add_kernel)
+    )
+    assert driver.loads == driver.launches == []
+
+
+def test_launch_leaves_other_exception_types_unchanged(monkeypatch):
+    """Do not rebuild an error whose type takes more than a message."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    _install_launch_fakes(monkeypatch, torch)
+    original = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    def fail(*_args, **_kwargs):
+        raise original
+
+    monkeypatch.setattr(_runtime, "_compile_cached", fail)
+
+    with pytest.raises(UnicodeDecodeError) as rejection:
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert rejection.value is original
+
+
+def test_missing_bindings_error_names_the_installation_page(monkeypatch):
+    """Point a launch without the native package at the build instructions."""
+    from swage import _frontend, _runtime
+
+    monkeypatch.setitem(sys.modules, "mlir_swage", None)
+
+    with pytest.raises(RuntimeError) as failure:
+        _runtime._compile_native(object(), "add_kernel", 128, "sm_86")
+
+    message = str(failure.value)
+    assert message.startswith(
+        "Swage launch requires the build-tree mlir_swage bindings"
+    )
+    assert "which the swage-compiler wheel does not include" in message
+    assert "kernel 'add_kernel' was not compiled" in message
+    assert message.endswith(
+        f"See {_frontend._INSTALLATION} for the native build"
+    )
+    assert "docs/getting-started/installation.md" in message
 
 
 def test_launch_requires_pytorch_and_cuda(monkeypatch):

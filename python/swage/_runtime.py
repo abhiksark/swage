@@ -93,55 +93,82 @@ class _LaunchSpec(NamedTuple):
 
 
 def launch(kernel, *, arguments, constexprs, grid):
-    """Compile and asynchronously launch one fixed vector-add kernel."""
-    torch = _import_torch()
-    spec = _validate_launch(kernel, arguments, constexprs, grid, torch)
-    if spec.n == 0:
-        return None
+    """Compile and asynchronously launch one fixed vector-add kernel.
 
-    memo = kernel.__dict__.setdefault("_specialization_memo", {})
-    identity = _cached_identity()
-    entry = memo.get((spec.block, spec.target))
-    if entry is None or entry[2] is not identity:
-        specialization = _specialization_data(
-            kernel,
-            descriptors=spec.descriptors,
-            constexprs=constexprs,
-            target=spec.target,
+    A `TypeError` or `ValueError` raised on the way names the kernel and
+    where it is defined, after the message of the check that failed.
+    """
+    torch = _import_torch()
+    try:
+        spec = _validate_launch(kernel, arguments, constexprs, grid, torch)
+        if spec.n == 0:
+            return None
+
+        memo = kernel.__dict__.setdefault("_specialization_memo", {})
+        identity = _cached_identity()
+        entry = memo.get((spec.block, spec.target))
+        if entry is None or entry[2] is not identity:
+            specialization = _specialization_data(
+                kernel,
+                descriptors=spec.descriptors,
+                constexprs=constexprs,
+                target=spec.target,
+            )
+            entry = (specialization, _cache_key(specialization), identity)
+            memo[(spec.block, spec.target)] = entry
+        specialization, key, _ = entry
+        artifact = _compile_cached(
+            specialization,
+            kernel.__name__,
+            spec.block,
+            lambda: kernel.emit_mlir(
+                arguments=arguments, constexprs=constexprs
+            ),
+            key=key,
         )
-        entry = (specialization, _cache_key(specialization), identity)
-        memo[(spec.block, spec.target)] = entry
-    specialization, key, _ = entry
-    artifact = _compile_cached(
-        specialization,
-        kernel.__name__,
-        spec.block,
-        lambda: kernel.emit_mlir(arguments=arguments, constexprs=constexprs),
-        key=key,
-    )
-    _write_dumps(artifact)
-    driver = _get_driver()
-    context = driver.current_context()
-    loaded_key = (artifact.key, context)
-    loaded = _loaded_functions.get(loaded_key)
-    if loaded is None:
-        loaded = _load_cold(
-            _loaded_functions, loaded_key, driver, artifact.ptx, kernel.__name__
+        _write_dumps(artifact)
+        driver = _get_driver()
+        context = driver.current_context()
+        loaded_key = (artifact.key, context)
+        loaded = _loaded_functions.get(loaded_key)
+        if loaded is None:
+            loaded = _load_cold(
+                _loaded_functions,
+                loaded_key,
+                driver,
+                artifact.ptx,
+                kernel.__name__,
+            )
+        _, function = loaded
+        abi_arguments = tuple(
+            tensor.data_ptr() for tensor in spec.tensors
+        ) + (spec.n,)
+        driver.launch(
+            function,
+            spec.grid,
+            spec.block,
+            spec.stream.cuda_stream,
+            abi_arguments,
         )
-    _, function = loaded
-    abi_arguments = tuple(tensor.data_ptr() for tensor in spec.tensors) + (
-        spec.n,
+        for tensor in spec.tensors:
+            tensor.record_stream(spec.stream)
+        return None
+    except (TypeError, ValueError) as error:
+        # A subclass may take more than a message, so it is left as it is.
+        if type(error) not in (TypeError, ValueError):
+            raise
+        raise type(error)(
+            f"{error}{_launch_location(kernel)}"
+        ).with_traceback(error.__traceback__) from None
+
+
+def _launch_location(kernel):
+    """Return the suffix that ties a launch error to its kernel."""
+    line = kernel.source_line + kernel.function.lineno - 1
+    return (
+        f" (in launch of kernel '{kernel.__name__}', defined at "
+        f"{kernel.filename}:{line})"
     )
-    driver.launch(
-        function,
-        spec.grid,
-        spec.block,
-        spec.stream.cuda_stream,
-        abi_arguments,
-    )
-    for tensor in spec.tensors:
-        tensor.record_stream(spec.stream)
-    return None
 
 
 # The oldest PyTorch release a launch accepts, as (major, minor). It equals
@@ -947,8 +974,13 @@ def _compile_native(module, kernel_name, block_size, target):
             swage as native_swage,
         )
     except Exception as error:
+        from ._frontend import _INSTALLATION
+
         raise RuntimeError(
-            "Swage launch requires the build-tree mlir_swage bindings"
+            "Swage launch requires the build-tree mlir_swage bindings, "
+            "which the swage-compiler wheel does not include; kernel "
+            f"'{kernel_name}' was not compiled. See {_INSTALLATION} for "
+            "the native build"
         ) from error
     return native_swage._compile_ptx(
         module,
