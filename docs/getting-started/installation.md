@@ -88,7 +88,17 @@ llvm-project GitHub releases and checks its SHA-256 against
 `cmake/llvm-source-sha256.txt` before extraction, whether the tarball was
 just downloaded or was already present. On a mismatch it stops and extracts
 nothing. Set `SWAGE_LLVM_URL` to the full URL of that tarball to download it
-from a mirror; the same digest check applies.
+from a mirror; the same digest check applies. The verified tarball is
+unpacked into a temporary directory and renamed into place, so an
+interrupted run leaves no source directory, and the script stops if a
+leftover `llvm-project-<version>.src` directory is present.
+
+The script records the verified digest in a `.swage-source-sha256` file
+inside the source directory. When the source directory already exists, a
+matching record is accepted without a download, a record with another digest
+or an empty directory is an error, and a directory without the record is
+used with a notice that the script did not verify it. Remove the source
+directory and run the script again to replace it with a verified tree.
 
 An existing install of the exact pinned LLVM/MLIR release can be selected
 instead:

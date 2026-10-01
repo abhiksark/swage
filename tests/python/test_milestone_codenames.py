@@ -40,15 +40,50 @@ _CODENAME = re.compile(
 )
 # Assembled at run time so this tracked file never spells a codename.
 _SAMPLE_CODENAME = "M" + "7"
+# Variables that point git at a repository, index, object store, or work
+# tree. Git sets them while it runs a hook, and they take precedence over
+# the directory given with -C, so they are never passed on.
+_GIT_LOCATION_VARIABLES = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
 
 
 def _git(root, *arguments):
-    """Run git in a tree, or return None when git cannot answer."""
+    """Run git in a tree, or return None when git cannot answer.
+
+    Args:
+        root: Directory git runs in. Only the repository found from this
+            directory is read or written, whatever the caller's environment
+            says about another one.
+        *arguments: The git command and its arguments.
+
+    Returns:
+        The standard output bytes, or None when git is unavailable or
+        reports an error.
+    """
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCATION_VARIABLES
+    }
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *arguments],
             capture_output=True,
             check=False,
+            env=environment,
         )
     except OSError:
         return None
@@ -177,6 +212,33 @@ def test_git_checkout_scans_tracked_files_only(tmp_path):
         Path("maintainers/plan.md"),
     ]
     assert _violations(tmp_path) == [
+        f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
+    ]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_git_location_variables_do_not_redirect_the_scan(tmp_path, monkeypatch):
+    """Variables git sets for hooks never reach another repository."""
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _git(other, "init", "--quiet") is not None
+    _write(other, "kept.txt", "staged before the scan\n")
+    assert _git(other, "add", "kept.txt") is not None
+    index = other / ".git" / "index"
+    staged = index.read_bytes()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(index))
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    assert _git(checkout, "init", "--quiet") is not None
+    _write(checkout, "docs/guide.md", f"shipped in {_SAMPLE_CODENAME}\n")
+    assert _git(checkout, "add", "docs") is not None
+
+    assert index.read_bytes() == staged
+    assert (checkout / ".git").is_dir()
+    assert _tracked_files(checkout) == [Path("docs/guide.md")]
+    assert _violations(checkout) == [
         f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
     ]
 
