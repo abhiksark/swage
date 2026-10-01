@@ -12,6 +12,7 @@ disagree, the reference is normative.
 | [swage.language](swage-language.md) | The symbolic kernel-language exports |
 | [Kernel Language](kernel-language.md) | The accepted Python source grammar |
 | [Runtime and Environment](runtime-environment.md) | Launch validation, targets, cache, streams, and diagnostics |
+| [Support Matrix](support-matrix.md) | Tested, admitted, and unknown Python, PyTorch, driver, and GPU environments |
 
 Compiler-facing references, including the MLIR dialects and registered
 passes, live under [Internals](../internals/index.md); they are not public
