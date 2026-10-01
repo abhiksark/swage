@@ -72,11 +72,13 @@ descriptors, sorted compile-time values, exact compute capability, code
 generation options, frontend identity, native compiler identity, dialect
 version, and LLVM version.
 
-The two compiler identities describe the code the process loads, not the
-checkout it came from:
+The two compiler identities are read from the files on disk, not from the
+checkout they came from:
 
 - Frontend identity is the SHA-256 digest of every Python source file in the
-  installed `swage` package, taken in sorted name order.
+  installed `swage` package, taken in sorted name order. Only regular files
+  count; names that start with a dot, dangling symlinks, and directories are
+  skipped.
 - Native compiler identity is the file name, size, and modification time of
   the nanobind extension and the `libSwagePythonCAPI` library in
   `mlir_swage/_mlir_libs`.
@@ -87,10 +89,36 @@ The native identity reads file metadata, not file contents: a library
 replaced by one with the same name, size, and modification time is not
 detected.
 
-The persistent cache is used whenever both identities are available. It does
-not require a git checkout or a clean working tree. A process that cannot
-find the native bindings or the package sources uses process-local reuse
-only. The cache root is selected in this order:
+A process runs the code it loaded, and nothing records which bytes that was.
+The persistent cache is therefore used only when the files on disk are known
+to be the loaded code, which requires all of the following:
+
+- The native bindings are found and at least one frontend source is found.
+- Every frontend source file can be read.
+- Every frontend source file and native library was last changed before the
+  process started.
+- The process start time is available from `/proc/self/stat`.
+
+A file changed after the process started may differ from the code that was
+loaded earlier, so the process neither reads nor publishes entries. The check
+runs before the lookup and again before an entry is published, where the
+files are also compared with the identity in the key. An edit or a rebuild
+that lands during a compile is therefore not published under either key. The
+checkout state is not part of the check: the cache does not require a git
+checkout or a clean working tree.
+
+The check has these limits:
+
+- A file written less than one clock tick (10 ms) before the process started
+  counts as changed, because the start time has that resolution.
+- A forked child inherits the start time only if its parent had already
+  imported `swage._runtime`, which happens at the first launch. A child
+  forked earlier uses its own start time and does not see a file that
+  changed between the parent's import of `swage` and the fork.
+- A file system whose clock differs from the host clock, or a step of the
+  host clock while the process runs, shifts the comparison by that amount.
+
+The cache root is selected in this order:
 
 1. `SWAGE_CACHE_DIR`;
 2. `$XDG_CACHE_HOME/swage`;
@@ -109,10 +137,19 @@ writer that is killed leaves only its staging directory, which lookups never
 read. Staging directories and old entries are not removed automatically.
 
 Metadata and content digests are verified before module load. An entry
-directory that lacks any of the three files is treated as a miss: it is
-removed and the key is compiled and published again. Symlinked,
+directory that lacks any of the three files is treated as a miss. It is
+renamed aside and removed, unless another process completed it in the
+meantime, and the key is compiled and published again. Symlinked,
 world-writable, unreadable, corrupt, or specialization-mismatched entries,
-and entries not owned by the current user, are rejected with an error.
+entries not owned by the current user, and a regular file in place of an
+entry directory are rejected with an error. These are treated as evidence of
+tampering and always fail the launch.
+
+A cache that cannot be used never fails a launch. When the identity check
+does not pass, or the cache root cannot be inspected, created, or written,
+the compiled kernel is kept and reused within the process, and one
+`RuntimeWarning` per process names the file or directory and the cause. When
+only writing fails, entries that are already published are still read.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
