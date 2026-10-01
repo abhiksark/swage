@@ -9,9 +9,18 @@ or CUDA execution boundaries. Start by recording the environment:
 python -m swage.env
 ```
 
-Include that output and the failing command in bug reports.
+Include that output and the failing command in bug reports. The `revision`,
+`llvm_linked`, and `backends` lines identify the checkout and the native build
+that the command saw.
 
 ## `mlir_swage` cannot be imported
+
+The environment report shows this state as:
+
+```text
+llvm_linked: None
+backends: {'mlir': 'unavailable (build-tree mlir_swage bindings not importable)'}
+```
 
 `mlir_swage` is not included in the `swage-compiler` wheel. Build Swage
 against the pinned LLVM/MLIR install, then use the build-tree package:
@@ -19,6 +28,13 @@ against the pinned LLVM/MLIR install, then use the build-tree package:
 ```bash
 ninja -C build check-swage-python
 PYTHONPATH=build/python_packages python your_script.py
+```
+
+Run the report with the same `PYTHONPATH` to confirm the bindings import:
+
+```text
+llvm_linked: 22.1.8
+backends: {'mlir': 'available (linked LLVM 22.1.8)'}
 ```
 
 If configuration reports that MLIR Python bindings are missing, rebuild the
@@ -58,6 +74,11 @@ PYTHONPATH="$PWD/python" python -c \
 PYTHONPATH="$PWD/python" python -m pytest tests/python -q
 ```
 
+The `revision` line of `python -m swage.env` names the checkout that was
+imported. Compare it with `git rev-parse --short=12 HEAD` in the intended
+worktree; a `-dirty` suffix means tracked files differ from that commit, and
+`None` means `swage` was imported from outside a git checkout.
+
 Native tests need both the source package and build-tree bindings in their
 configured path. Prefer `ninja -C build check-swage-python` because CMake
 provides that environment.
@@ -74,9 +95,12 @@ for persistent reuse, cache location, and entry validation.
 
 ## The build uses the wrong LLVM/MLIR
 
-Compare `cmake/llvm-version.txt` with the selected install. Delete or
-reconfigure only the affected Swage build directory, then pass matching
-`MLIR_DIR` and `LLVM_DIR` paths. Do not update the project pin to fit a local
+Compare `cmake/llvm-version.txt` with the selected install. `python -m
+swage.env` prints both sides: `llvm_pin` is the repository tag and
+`llvm_linked` is the release the imported bindings were built against, so a
+matching build shows `llvmorg-22.1.8` and `22.1.8`. Delete or reconfigure only
+the affected Swage build directory, then pass matching `MLIR_DIR` and
+`LLVM_DIR` paths. Do not update the project pin to fit a local
 toolchain.
 
 Once setup works, the [Quickstart](quickstart.md) exercises the supported
