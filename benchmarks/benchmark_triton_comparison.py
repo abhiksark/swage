@@ -213,21 +213,20 @@ def _launches_per_sample(elapsed_us: Callable[[int], float], tick_us) -> int:
 def _event_tick_us(torch, device, pairs: int = 256):
     """Estimate the CUDA event timer tick on the device.
 
-    Events are recorded around a tiny operation many times. The event timer
-    returns multiples of its tick, so the smallest gap between two different
-    readings bounds the tick from above.
+    Events are recorded around a tiny operation many times, and the tick is
+    the step those readings favour; see ``benchmark_provenance.timer_tick``.
     """
     scratch = torch.zeros(1, device=device)
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-    elapsed = [0.0]
+    elapsed = []
     for _ in range(pairs):
         start.record()
         scratch.add_(1)
         end.record()
         end.synchronize()
         elapsed.append(start.elapsed_time(end) * 1_000.0)
-    return benchmark_provenance.smallest_step(elapsed)
+    return benchmark_provenance.timer_tick(elapsed)
 
 
 def _call_us(torch, launch: Callable[[], object], warmups: int,
@@ -1125,8 +1124,9 @@ def main():
             "timer_ticks_us": ticks,
             "timer_ticks": (
                 "measured in this process: the smallest advance of "
-                "back-to-back time.perf_counter_ns reads, and the smallest "
-                "gap between CUDA event readings around a tiny operation"
+                "back-to-back time.perf_counter_ns reads, and the step that "
+                "CUDA event readings around a tiny operation favour, which "
+                "can be coarser than the finest gap between two readings"
             ),
             "effective_gb_per_s": (
                 "useful_bytes of the row divided by the median time; for "

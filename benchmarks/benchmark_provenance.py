@@ -35,6 +35,13 @@ _GPU_FIELDS = (
 )
 _PROCESS_FIELDS = ("gpu_uuid", "pid", "process_name", "used_memory")
 _SAME_READING = 1e-6
+# A reading is on a grid when it is within this fraction of the finest step
+# of a grid point.
+_ON_GRID = 0.25
+# A coarser step is the timer tick when its share of the readings exceeds
+# an even spread by this much.
+_FAVOURED_SHARE = 0.25
+_LARGEST_MULTIPLE = 256
 
 
 def cpu_model(cpuinfo=pathlib.Path("/proc/cpuinfo")):
@@ -293,6 +300,47 @@ def smallest_step(values):
         if later - earlier > _SAME_READING * abs(later)
     ]
     return min(gaps, default=None)
+
+
+def timer_tick(readings):
+    """Return the step that a timer's readings favour, or None.
+
+    The finest gap between two readings is not always the step that limits
+    a measurement: CUDA event readings are multiples of 32 ns, yet most
+    intervals around a kernel come out as multiples of 1.024 us. This
+    returns the coarsest multiple of the finest step that holds far more of
+    the readings than an even spread over the finest step would put there,
+    and the finest step itself when no multiple does.
+
+    Args:
+        readings: Intervals returned by one timer, in one unit.
+
+    Returns:
+        The step in that unit. A single distinct reading bounds the step by
+        itself. None when no reading is positive.
+    """
+    readings = [reading for reading in readings if reading > 0]
+    fine = smallest_step([0.0, *readings])
+    if fine is None:
+        return None
+    # One long reading divided by its step count pins the finest step far
+    # better than the gap between two neighbouring readings does.
+    longest = max(readings)
+    fine = longest / round(longest / fine)
+
+    def share(step):
+        on_grid = sum(
+            abs(reading - round(reading / step) * step) < _ON_GRID * fine
+            for reading in readings
+        )
+        return on_grid / len(readings)
+
+    tick, excess = fine, _FAVOURED_SHARE
+    for multiple in range(2, _LARGEST_MULTIPLE + 1):
+        above_chance = share(fine * multiple) - 1 / multiple
+        if above_chance >= excess:
+            tick, excess = fine * multiple, above_chance
+    return tick
 
 
 def clock_tick_us(clock=time.perf_counter_ns, reads=10_000):

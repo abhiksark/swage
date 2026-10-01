@@ -414,7 +414,7 @@ def test_batched_event_timing_records_its_batch_and_resolution(comparison):
 
 def test_event_tick_is_measured_from_back_to_back_events(comparison):
     """Estimate the event timer tick on the device, not from a constant."""
-    elapsed = itertools.cycle([3.072, 3.104, 3.2, 3.104])
+    elapsed = itertools.cycle([3.072, 4.096, 3.072, 3.104, 5.12, 4.096])
 
     class Tensor:
         def add_(self, value):
@@ -423,8 +423,10 @@ def test_event_tick_is_measured_from_back_to_back_events(comparison):
     torch = _event_torch()
     torch.zeros = lambda count, device: Tensor()
 
-    assert comparison._event_tick_us(torch, "cuda", pairs=8) == (
-        pytest.approx(0.032)
+    # The finest gap is 0.032 us, but five readings in six are multiples
+    # of 1.024 us, and that is the step a sample is resolved to.
+    assert comparison._event_tick_us(torch, "cuda", pairs=12) == (
+        pytest.approx(1.024)
     )
 
 

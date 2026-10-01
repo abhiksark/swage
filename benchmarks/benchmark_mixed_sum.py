@@ -204,10 +204,10 @@ def _timer(samples, medians, numerator, denominator):
         denominator: Policy under it.
 
     Returns:
-        The smallest gap between two different samples as the tick, each
-        median in ticks, and the tick-limited range of the gate ratio.
+        The step the samples favour as the tick, each median in ticks, and
+        the tick-limited range of the gate ratio.
     """
-    tick = benchmark_provenance.smallest_step(
+    tick = benchmark_provenance.timer_tick(
         [value for policy in samples.values() for value in policy]
     )
     return {

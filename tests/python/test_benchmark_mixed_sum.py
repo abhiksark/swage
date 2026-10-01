@@ -191,17 +191,17 @@ def test_timer_block_reports_the_tick_and_the_ratio_range(
     """Record the observed tick beside the medians it limits."""
     tick = 0.001024
     samples = {
-        "warp": [66 * tick, 67 * tick, 66 * tick],
-        "cta": [70 * tick, 70 * tick, 72 * tick],
-        "mixed": [62 * tick, 62 * tick, 63 * tick],
+        "warp": [66 * tick, 67 * tick, 65 * tick],
+        "cta": [70 * tick, 71 * tick, 73 * tick],
+        "mixed": [62 * tick, 61 * tick, 63 * tick],
     }
-    medians = {"warp": 66 * tick, "cta": 70 * tick, "mixed": 62 * tick}
+    medians = {"warp": 66 * tick, "cta": 71 * tick, "mixed": 62 * tick}
 
     timer = mixed_sum_benchmark._timer(samples, medians, "mixed", "warp")
 
     assert timer["tick_ms"] == pytest.approx(tick)
     assert timer["ticks_per_median"] == pytest.approx(
-        {"warp": 66, "cta": 70, "mixed": 62}
+        {"warp": 66, "cta": 71, "mixed": 62}
     )
     assert timer["ratio_tick_interval"] == pytest.approx(
         [61.5 / 66.5, 62.5 / 65.5]

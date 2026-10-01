@@ -4,6 +4,8 @@
 import hashlib
 import importlib
 import pathlib
+import random
+import struct
 import subprocess
 import types
 
@@ -275,6 +277,51 @@ def test_smallest_step_is_the_finest_gap_between_distinct_values(provenance):
     assert provenance.smallest_step(
         [0.1 + 0.2, 0.3, 0.332]
     ) == pytest.approx(0.032)
+
+
+def test_timer_tick_is_the_coarse_step_most_readings_sit_on(provenance):
+    """Report the grid a timer favours, not its finest possible reading.
+
+    CUDA event readings are multiples of 32 ns, yet most of them are also
+    multiples of 1.024 us. A ratio of two medians is then only as fine as
+    the coarse step, whatever the finest gap between two readings is.
+    """
+    rng = random.Random(7)
+    coarse = [1.024 * rng.randint(60, 70) for _ in range(90)]
+    fine = [0.032 * rng.randint(1900, 2200) for _ in range(10)]
+    as_float32 = struct.Struct("f")
+
+    def reading(value):
+        # Readings arrive as float32 milliseconds, as the event timer
+        # returns them, and are scaled to microseconds afterwards.
+        (milliseconds,) = as_float32.unpack(as_float32.pack(value / 1000))
+        return milliseconds * 1000
+
+    readings = [reading(value) for value in coarse + fine]
+
+    assert provenance.smallest_step(readings) == pytest.approx(0.032, rel=1e-3)
+    assert provenance.timer_tick(readings) == pytest.approx(1.024, rel=1e-4)
+    # Half of the readings on the coarse grid is still far above chance.
+    half = [reading(value) for value in coarse[:10] + fine]
+    assert provenance.timer_tick(half) == pytest.approx(1.024, rel=1e-4)
+
+
+def test_timer_tick_stays_fine_without_a_coarse_grid(provenance):
+    """Keep the finest step when readings spread evenly over it."""
+    rng = random.Random(11)
+    readings = [0.032 * rng.randint(1900, 2200) for _ in range(200)]
+
+    assert provenance.timer_tick(readings) == pytest.approx(0.032, rel=1e-4)
+    assert provenance.timer_tick([1.024 * n for n in range(60, 70)]) == (
+        pytest.approx(1.024)
+    )
+
+
+def test_timer_tick_of_too_few_readings(provenance):
+    """Bound the tick by a lone reading; report None without any."""
+    assert provenance.timer_tick([5.0, 5.0]) == 5.0
+    assert provenance.timer_tick([0.0, 0.0]) is None
+    assert provenance.timer_tick([]) is None
 
 
 def test_clock_tick_is_the_smallest_advance_of_back_to_back_reads(provenance):
