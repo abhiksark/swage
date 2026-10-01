@@ -187,11 +187,11 @@ python -m swage.env
 
 Print the environment report as flat key and value lines. The report
 never fails: unavailable components are reported as absent instead of
-raising. Its keys are `swage`, `python`, `platform`, `torch`,
-`torch_cuda_build`, `cuda_driver`, `cuda`, `gpu`, `llvm_pin`, and
-`backends`. The `backends` field describes what is built into the
-installed package; it does not detect a separate build-tree
-`mlir_swage` package.
+raising. Its keys are `swage`, `revision`, `python`, `platform`, `torch`,
+`torch_cuda_build`, `cuda_driver`, `cuda`, `gpu`, `llvm_pin`,
+`llvm_linked`, and `backends`. The `backends` field records whether the
+build-tree `mlir_swage` bindings import in the reporting process and,
+when they do, the LLVM version they were linked against.
 
 Continue with [swage.language](swage-language.md) for the kernel-language
 exports, or [Kernel Language](kernel-language.md) for the accepted source
