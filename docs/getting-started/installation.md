@@ -41,8 +41,9 @@ kernel language. It cannot emit MLIR or launch a kernel.
 These pages describe the current source tree. The released `0.5.1` wheel
 predates part of them:
 
-- It imports the native package before it checks a kernel, so a wheel-only
-  install reports the missing bindings for every kernel.
+- It checks the inputs of `emit_mlir()` and then imports the native package
+  before it checks the parameter list and the body, so a wheel-only install
+  reports the missing bindings instead of a kernel-language error.
 - It rejects a kernel that has a docstring.
 - Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
 - Its environment report has fewer fields.

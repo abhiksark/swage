@@ -121,7 +121,9 @@ softmax.
 Queue reset, resident execution, and tensor retention use the current PyTorch
 stream. Launching on another device after preparation is rejected, and so is
 launching in a CUDA context other than the one the object was prepared in,
-because the kernel is loaded in one context. A launch
+because the kernel is loaded in one context. A thread that has no current
+CUDA context is given the context of the prepared device before that
+comparison. A launch
 also raises if the offsets tensor was modified in place after preparation,
 which it detects through the tensor version counter, and the kernel clamps
 every loaded range that indexes the values buffer to the value count and

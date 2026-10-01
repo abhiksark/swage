@@ -19,9 +19,9 @@ Runnable snippets in this guide state one of three requirement tiers:
 - **wheel-only**: the pure Python `swage` package with no native build, as
   the `swage-compiler` wheel installs it. Enough to import `swage`, capture
   kernels, check a kernel against the kernel language, and run
-  `python -m swage.env`. The released `0.5.1` wheel predates the kernel
-  check; [Installation](../getting-started/installation.md) lists what it
-  lacks.
+  `python -m swage.env`. The released `0.5.1` wheel predates the check of
+  the kernel body; [Installation](../getting-started/installation.md) lists
+  what it lacks.
 - **native build**: the build-tree `mlir_swage` package from
   [Installation](../getting-started/installation.md). Enough to emit and
   inspect MLIR without a GPU.
