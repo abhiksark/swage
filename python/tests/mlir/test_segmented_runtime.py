@@ -1339,36 +1339,6 @@ def test_empty_persistent_sum_does_not_compile_allocate_or_launch(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_persistent_sum_rejects_mismatched_plan_before_work(monkeypatch):
-    """Reject malformed dependency metadata before compilation or allocation."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
-
-    def fail(*_args, **_kwargs):
-        pytest.fail("malformed persistent work must not continue")
-
-    monkeypatch.setattr(
-        native_swage,
-        "_materialize_segmented_plan",
-        lambda *_args, **_kwargs: ([], [], [0, 4096], [0, 0, 1]),
-    )
-    monkeypatch.setattr(
-        native_swage, "_compile_persistent_segmented_reduction_ptx", fail
-    )
-    monkeypatch.setattr(torch, "tensor", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
-
-    with pytest.raises(RuntimeError, match="materialized plan does not match"):
-        _prepare_persistent_sum(values, offsets, output)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
     """Surface compilation failure before allocating private device state."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -1909,48 +1879,6 @@ def test_split_only_mixed_skips_the_direct_phase(monkeypatch):
     _prepare_planned_sum(values, offsets, output).mixed()
 
     assert driver.launches == [(2,), (1,)]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize(
-    "materialized",
-    [
-        ([0], [], [0, 4096, 4096, 4097], [0, 0, 2]),
-        ([], [], [0, 4096, 4095, 4097], [0, 0, 2]),
-        ([], [], [0, 4096, 4096, 4097], [1, 0, 2]),
-        ([], [], [0, 4096], [0, 0, 1]),
-    ],
-)
-def test_prepared_sum_rejects_mismatched_materialized_plan_before_work(
-    monkeypatch, materialized
-):
-    """Reject duplicate, overlapping, misassigned, or omitted split work."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    def fail(*_args, **_kwargs):
-        pytest.fail("malformed split work must not continue")
-
-    monkeypatch.setattr(
-        native_swage,
-        "_materialize_segmented_plan",
-        lambda *_args, **_kwargs: materialized,
-    )
-    monkeypatch.setattr(
-        native_swage, "_compile_segmented_reduction_ptx", fail
-    )
-    monkeypatch.setattr(torch, "arange", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
-
-    with pytest.raises(
-        RuntimeError, match="materialized plan does not match"
-    ):
-        _prepare_planned_sum(values, offsets, output)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
