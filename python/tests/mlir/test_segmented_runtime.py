@@ -4,6 +4,7 @@
 import gc
 import threading
 import weakref
+from itertools import pairwise
 
 import pytest
 import torch
@@ -25,16 +26,46 @@ from swage._segmented_qualification import (
 )
 
 
-def _case(lengths):
-    """Build deterministic values and offsets for segment lengths."""
+def _offsets(lengths):
+    """Return the host offset list for consecutive segment lengths."""
     offsets = [0]
     for length in lengths:
         offsets.append(offsets[-1] + length)
-    values = torch.tensor(
-        [((index % 17) - 8) / 4 for index in range(offsets[-1])],
-        dtype=torch.float32,
+    return offsets
+
+
+def _exact_values(first, last):
+    """Return the exactly summable test pattern on an index range.
+
+    Element ``index`` is ``(2 * (index % 67) - 65) / 4``, an odd number of
+    quarters that climbs by one half from -16.25 to 16.75 and then wraps.
+
+    - Every value is a multiple of 0.25 and the magnitudes of a segment
+      sum to less than 2**20, so a sum is the same f32 under any
+      association and tests can compare with no tolerance.
+    - No value is zero, so dropping or repeating one element changes a sum.
+    - The 67 values of a period are distinct and 67 exceeds the largest
+      shift the tests guard, so a window moved by 1 to 64 elements reads
+      different values. One period sums to 16.75 rather than zero, so
+      whole periods do not cancel.
+    - Squares are multiples of 1/16 and their sum over the longest exactly
+      compared segment (8193 elements) stays below 2**20.
+
+    A segment whose length is a multiple of 67 would still read the same
+    multiset after any shift. No pattern with bounded values avoids every
+    such coincidence, so test_exact_inputs_are_informative_for_every_case
+    checks the properties for the shapes the suite uses.
+    """
+    index = torch.arange(first, last)
+    return (2 * (index % 67) - 65).to(torch.float32) / 4
+
+
+def _case(lengths):
+    """Build deterministic values and offsets for segment lengths."""
+    offsets = _offsets(lengths)
+    return _exact_values(0, offsets[-1]), torch.tensor(
+        offsets, dtype=torch.int32
     )
-    return values, torch.tensor(offsets, dtype=torch.int32)
 
 
 CASES = [
@@ -65,8 +96,77 @@ TASK_CASES = [
 ]
 
 
+_SHIFT_LIMIT = 64
+
+
+@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
+def test_exact_inputs_are_informative_for_every_case(lengths):
+    """Each non-empty segment has a nonzero sum that depends on its window.
+
+    A kernel that reads the right number of elements from the wrong place,
+    or drops or repeats one, must change the expected value. For every
+    segment this checks that the sum is nonzero, that moving both window
+    ends by any 1 to 64 elements in either direction changes it, and that
+    no element is zero, so dropping or duplicating any one changes it too.
+
+    It also checks what makes an exact comparison valid: every value is a
+    multiple of 0.25, and the per-segment sums of magnitudes and of squares
+    stay below 2**20, so the identity and squared sums are exact in f32
+    under any association.
+    """
+    values, offsets = _case(lengths)
+    count = values.numel()
+    quarters = values.double() * 4
+    assert torch.equal(quarters, quarters.round())
+    assert (quarters != 0).all()
+
+    extended = _exact_values(-_SHIFT_LIMIT, count + _SHIFT_LIMIT)
+    assert torch.equal(extended[_SHIFT_LIMIT : _SHIFT_LIMIT + count], values)
+    prefix = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int64),
+            (extended.double() * 4).to(torch.int64).cumsum(0),
+        ]
+    )
+    shifts = torch.tensor(
+        [shift for shift in range(-_SHIFT_LIMIT, _SHIFT_LIMIT + 1) if shift]
+    )
+    for begin, end in pairwise(offsets.tolist()):
+        if begin == end:
+            continue
+        total = prefix[end + _SHIFT_LIMIT] - prefix[begin + _SHIFT_LIMIT]
+        assert total != 0
+        shifted = (
+            prefix[end + _SHIFT_LIMIT + shifts]
+            - prefix[begin + _SHIFT_LIMIT + shifts]
+        )
+        assert (shifted != total).all()
+        segment = values[begin:end].double()
+        assert segment.abs().sum() < 2**20
+        assert segment.square().sum() < 2**20
+
+
+def test_exact_values_stay_exact_for_the_longest_compared_segments():
+    """Bound the two largest exact comparisons at every pattern phase.
+
+    Squared values are multiples of 1/16, exact in f32 while every partial
+    sum stays below 2**20. The longest segment compared exactly after
+    squaring has 8193 elements. Identity values are multiples of 1/4, exact
+    below 2**22, and the longest identity segment has 65537 elements.
+    """
+    values = _exact_values(0, 65537 + 67).double()
+    squares = torch.cat([torch.zeros(1), values.square().cumsum(0)])
+    magnitudes = torch.cat([torch.zeros(1), values.abs().cumsum(0)])
+    starts = torch.arange(67)
+
+    assert (squares[starts + 8193] - squares[starts]).max() < 2**20
+    assert (magnitudes[starts + 65537] - magnitudes[starts]).max() < 2**22
+
+
 def _pytorch_reference(values, offsets, kind):
     """Compute the PyTorch reference while preserving empty identities."""
+    if len(offsets) < 2:
+        return torch.empty(0, dtype=torch.float32)
     results = []
     for index in range(len(offsets) - 1):
         segment = values[offsets[index] : offsets[index + 1]]
@@ -119,8 +219,8 @@ def test_composable_reduction_cpu_oracle(kind, transform):
     torch.testing.assert_close(
         torch.tensor(printed, dtype=torch.float32),
         expected,
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
@@ -168,8 +268,8 @@ def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
         torch.testing.assert_close(
             torch.tensor(printed, dtype=torch.float32),
             expected,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=0,
+            atol=0,
         )
     for launch in prepared:
         for _ in range(2):
@@ -530,7 +630,7 @@ def test_cpu_reduction_matches_pytorch(lengths, kind):
     actual = cpu_oracle(values, offsets, kind)
     expected = _pytorch_reference(values, offsets, kind)
 
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -548,59 +648,65 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     torch.testing.assert_close(
         output.cpu(),
         _pytorch_reference(host_values, host_offsets, kind),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, kind),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
 @pytest.mark.parametrize("lengths", TASK_CASES)
-def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
+def test_gpu_task_sum_matches_exact_position_dependent_sums(
+    lengths, block_size
+):
     """Execute every segment through each private direct task policy."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
     task_ids = torch.arange(len(lengths), device="cuda", dtype=torch.int32)
 
     _launch_segmented_sum_tasks(
-        values, device_offsets, output, task_ids, block_size=block_size
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
+        task_ids,
+        block_size=block_size,
     )
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("lengths", TASK_CASES)
-def test_prepared_mixed_sum_matches_exact_segment_lengths(lengths):
+def test_prepared_mixed_sum_matches_exact_position_dependent_sums(lengths):
     """Execute one fused launch with stable warp IDs before stable CTA IDs."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
 
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
     prepared.mixed()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -628,24 +734,23 @@ def test_persistent_sum_rejects_invalid_residency_before_tensor_work(
         pytest.param([0, 33, 4097, 1, 8193], id="mixed-split"),
     ],
 )
-def test_persistent_sum_matches_exact_segment_lengths(lengths):
+def test_persistent_sum_matches_exact_position_dependent_sums(lengths):
     """Drain direct warp and CTA queues without dropped or duplicate work."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
 
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=4
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=4
     )
     prepared.launch()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -653,19 +758,15 @@ def test_persistent_sum_matches_exact_segment_lengths(lengths):
 def test_persistent_sum_resets_queues_for_repeated_and_graph_launches():
     """Reset claims on every submission and preserve capture replay."""
     lengths = [1, 32, 33, 4096, 4097, 2, 8193]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=3
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=3
     )
-    expected = torch.tensor(lengths, dtype=torch.float32)
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
 
     prepared.launch()
-    torch.cuda.synchronize()
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     output.fill_(float("nan"))
     prepared.launch()
     torch.cuda.synchronize()
@@ -683,13 +784,11 @@ def test_persistent_sum_resets_queues_for_repeated_and_graph_launches():
 def test_persistent_sum_uses_current_non_default_stream():
     """Submit queue reset and resident workers on the current stream."""
     lengths = [1, 33, 2, 4096]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_persistent_sum(values, device_offsets, output)
+    prepared = _prepare_persistent_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
     stream = torch.cuda.Stream()
 
     with torch.cuda.stream(stream):
@@ -697,7 +796,10 @@ def test_persistent_sum_uses_current_non_default_stream():
     stream.synchronize()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -716,12 +818,12 @@ def test_persistent_split_sum_matches_nontrivial_oracles():
     prepared.launch()
 
     expected = _pytorch_reference(host_values, host_offsets, "sum")
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "sum"),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
@@ -729,16 +831,12 @@ def test_persistent_split_sum_matches_nontrivial_oracles():
 def test_persistent_extreme_skew_completes_without_starvation():
     """Drain many claims and dependency groups repeatedly with seven CTAs."""
     lengths = [1] * 2048 + [65_537] * 8 + [32] * 2048
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=7
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=7
     )
-    expected = torch.tensor(lengths, dtype=torch.float32)
+    expected = _pytorch_reference(host_values, host_offsets, "sum").cuda()
 
     assert prepared.resident_blocks == 7
     assert prepared.warp_tasks == 4096
@@ -748,9 +846,7 @@ def test_persistent_extreme_skew_completes_without_starvation():
     for _ in range(10):
         output.fill_(float("nan"))
         prepared.launch()
-    torch.cuda.synchronize()
-
-    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1032,10 +1128,10 @@ def test_prepared_split_sum_matches_nontrivial_oracles(lengths):
     _prepare_planned_sum(values, offsets, output).mixed()
 
     expected = _pytorch_reference(host_values, host_offsets, "sum")
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(
         output.cpu(), cpu_oracle(host_values, host_offsets, "sum"),
-        rtol=1e-5, atol=1e-5,
+        rtol=0, atol=0,
     )
 
 
@@ -1065,13 +1161,11 @@ def test_prepared_sum_rejects_output_aliases_before_driver_work(monkeypatch):
 def test_prepared_sum_uses_current_non_default_stream(policy):
     """Launch every prepared policy on PyTorch's current stream."""
     lengths = [0, 32, 33, 4097]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
     stream = torch.cuda.Stream()
 
     with torch.cuda.stream(stream):
@@ -1079,7 +1173,10 @@ def test_prepared_sum_uses_current_non_default_stream(policy):
     stream.synchronize()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -1088,18 +1185,17 @@ def test_prepared_sum_uses_current_non_default_stream(policy):
 def test_prepared_sum_supports_cuda_graph_replay(policy):
     """Capture prepared work after its immutable task IDs are ready."""
     lengths = [0, 32, 33, 4096]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
     launch = getattr(prepared, policy)
-    launch()
-    torch.cuda.synchronize()
-    launch()
-    torch.cuda.synchronize()
+    for _ in range(2):
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -1107,9 +1203,7 @@ def test_prepared_sum_supports_cuda_graph_replay(policy):
     output.fill_(float("nan"))
     graph.replay()
 
-    torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
-    )
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1698,20 +1792,17 @@ def test_prepared_sum_rejects_a_different_current_device(monkeypatch):
 def test_prepared_mixed_sum_is_repeatable():
     """Run the same fused launch twice without stale warp or CTA state."""
     lengths = [0, 32, 33, 0, 1, 4097]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.empty(len(lengths), device="cuda", dtype=torch.float32)
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
 
-    prepared.mixed()
-    first = output.clone()
-    output.fill_(float("nan"))
-    prepared.mixed()
-
-    torch.testing.assert_close(output, first, rtol=0, atol=0)
+    for _ in range(2):
+        output.fill_(float("nan"))
+        prepared.mixed()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1728,7 +1819,7 @@ def test_gpu_reduction_is_repeatable(kind):
     output.fill_(float("nan"))
     launch_gpu(values, offsets, output, kind)
 
-    torch.testing.assert_close(output, first)
+    torch.testing.assert_close(output, first, rtol=0, atol=0)
 
 
 def test_cpu_max_propagates_nan_and_uses_negative_infinity_identity():
@@ -1741,6 +1832,8 @@ def test_cpu_max_propagates_nan_and_uses_negative_infinity_identity():
     torch.testing.assert_close(
         actual,
         torch.tensor([float("nan"), float("-inf"), 5.0]),
+        rtol=0,
+        atol=0,
         equal_nan=True,
     )
 
@@ -1757,10 +1850,14 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
     launch_gpu(values, offsets, output, "max")
 
     expected = torch.tensor([float("nan"), float("-inf"), 5.0])
-    torch.testing.assert_close(output.cpu(), expected, equal_nan=True)
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "max"),
+        rtol=0,
+        atol=0,
         equal_nan=True,
     )
 
@@ -1782,12 +1879,19 @@ _ORACLE_RTOL, _ORACLE_ATOL = 1e-5, 1e-6
 
 
 def _softmax_case(lengths, outlier=None):
-    """Build a softmax case, optionally planting one dominant value."""
-    values, offsets = _case(lengths)
+    """Build a softmax case, optionally planting one dominant value.
+
+    Softmax keeps its own logits, quarter steps from -2 to 2 with period
+    17, instead of the reduction pattern. The tolerances below are sized
+    by intra-segment spread, and every output element is compared, so the
+    position of each value is already observable here.
+    """
+    offsets = _offsets(lengths)
+    index = torch.arange(offsets[-1])
+    values = ((index % 17) - 8).to(torch.float32) / 4
     if outlier is not None:
-        values = values.clone()
-        values[int(offsets[1])] = outlier
-    return values, offsets
+        values[offsets[1]] = outlier
+    return values, torch.tensor(offsets, dtype=torch.int32)
 
 
 SOFTMAX_CASES = [
@@ -1874,7 +1978,7 @@ def test_gpu_softmax_is_repeatable():
     output.fill_(float("nan"))
     launch_softmax_gpu(values, offsets, output)
 
-    torch.testing.assert_close(output, first)
+    torch.testing.assert_close(output, first, rtol=0, atol=0)
 
 
 def test_cpu_softmax_of_singleton_is_exactly_one():
