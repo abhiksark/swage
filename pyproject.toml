@@ -1,13 +1,13 @@
 # pyproject.toml
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "swage-compiler"
 dynamic = ["version"]
-description = "Python-embedded MLIR/LLVM GPU compiler for variable-sized dense segments"
+description = "Pure Python package of Swage, an experimental MLIR/LLVM GPU compiler; emitting MLIR and launching kernels require a native build from source"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -25,10 +25,37 @@ classifiers = [
 Repository = "https://github.com/abhiksark/swage"
 
 [project.optional-dependencies]
-dev = ["build", "hatchling", "lit", "pytest", "ruff"]
+dev = ["build", "hatchling==1.32.0", "lit", "pytest", "ruff"]
 docs = ["mkdocs", "mkdocs-material"]
 figures = ["pymupdf"]
 pytorch = ["torch>=2.6"]
+
+# Tools that only the hosted workflows install, on top of the dev and docs
+# extras. hatchling needs editables for an editable install without build
+# isolation. The MLIR binding entries repeat the ranges in
+# mlir/python/requirements.txt of the pinned LLVM release. PyYAML is left to
+# that file: it caps PyYAML at a version that has no Python 3.13 wheel.
+#
+# requirements-ci.txt pins every tool named in the dev extra, the docs extra,
+# and this group, and everything they depend on, with hashes. Regenerate it
+# from the repository root, then restore its first line:
+#
+#   uv pip compile pyproject.toml --extra dev --extra docs --group ci \
+#     --universal --python-version 3.10 --generate-hashes \
+#     --output-file requirements-ci.txt
+#
+# Existing pins are kept. Add --upgrade-package <name> to move one.
+[dependency-groups]
+ci = [
+  "clang-format",
+  "editables",
+  "ml_dtypes>=0.5.0,<=0.6.0",
+  "nanobind>=2.9,<3.0",
+  "ninja",
+  "numpy>=1.19.5,<=2.1.2",
+  "twine",
+  "typing_extensions>=4.12.2",
+]
 
 [tool.hatch.version]
 path = "python/swage/__init__.py"
