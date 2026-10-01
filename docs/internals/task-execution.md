@@ -55,8 +55,19 @@ only on valid input elements. See
 
 The private preparation helpers memoize compiled kernels per program, code
 generation options, and target, and loaded modules per CUDA context, so a
-preparation compiles and loads only the kernels that the process has not
-already compiled and loaded. A prepared launch raises if the offsets tensor
+preparation compiles and loads only the kernels that the two memos do not
+hold. Each memo keeps 128 entries, and a module is unloaded once no prepared
+launch holds it;
+[Runtime and Environment](../reference/runtime-environment.md#module-lifetime)
+states the rules. A prepared object keeps its kernels loaded for as long as
+it is referenced, and it must outlive a CUDA graph that captured one of its
+launches.
+
+A prepared launch raises on another device, and in a CUDA context other
+than the one it was prepared in, because its kernels are loaded in one
+context. A thread that has no current CUDA context is given the context of
+the prepared device before that comparison. A prepared launch also raises
+if the offsets tensor
 was modified in place after preparation, which it detects through the tensor
 version counter; the kernels additionally clamp every loaded range that
 indexes the values buffer to the value count, and every merge range that

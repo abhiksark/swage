@@ -57,5 +57,5 @@ Native classification, descriptors, and public APIs are unchanged.
 *SwagePlan classification buckets, including the split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
 
 Continue with [Task Execution](task-execution.md) for the qualified
-warp, CTA, and fused paths, or the
-[SwagePlan Dialect](swage-plan-dialect.md) for the planning IR.
+warp, CTA, and fused paths. The planning IR itself is on the previous page,
+[SwagePlan Dialect](swage-plan-dialect.md).

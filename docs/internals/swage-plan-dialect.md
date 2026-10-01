@@ -33,6 +33,7 @@ The detailed dialect and operation reference is generated from TableGen in
 
 --8<-- "docs/reference/_generated/swage-plan-ops.inc"
 
-Continue with [Task Execution](task-execution.md) for
-the qualified execution boundary or [Compiler Tools and Passes](compiler-tools.md)
-for the registered planning pass.
+Continue with [Task Planning](planning.md) for the pass that adds the
+classification operation and for the host classifier, or
+[Compiler Tools and Passes](compiler-tools.md) for the registered planning
+pass.

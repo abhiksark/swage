@@ -51,7 +51,12 @@ The counter array has this layout:
 Preparation validates and materializes all metadata, allocates scratch and
 counters, compiles and loads the kernel, and records a task-readiness event.
 The compiled kernel is memoized per target and the loaded module per CUDA
-context, so only the first preparation in a process compiles and loads.
+context, so a later preparation compiles and loads nothing while the two
+memos still hold the kernel. Each memo keeps 128 entries, and a module is
+unloaded once no prepared launch holds it;
+[Runtime and Environment](../reference/runtime-environment.md#module-lifetime)
+states the rules. The prepared object keeps its kernel loaded for as long as
+it is referenced.
 Every launch resets its private counters on the current PyTorch stream before
 submitting the resident kernel. The reset is part of timed execution rather
 than hidden preparation.
@@ -60,7 +65,7 @@ than hidden preparation.
 
 The default launch requests two 512-thread blocks per SM and caps that count
 at the number of available work groups. On the qualification RTX A6000 this
-is at most 168 resident blocks. “Resident” describes a bounded physical grid
+is at most 168 resident blocks. "Resident" describes a bounded physical grid
 whose blocks claim multiple tasks; it does not promise that CUDA can
 simultaneously place every requested block.
 
@@ -114,7 +119,9 @@ softmax.
 ## Stream and graph behavior
 
 Queue reset, resident execution, and tensor retention use the current PyTorch
-stream. Launching on another device after preparation is rejected. A launch
+stream. Launching on another device after preparation is rejected, and so is
+launching in a CUDA context other than the one the object was prepared in,
+because the kernel is loaded in one context. A launch
 also raises if the offsets tensor was modified in place after preparation,
 which it detects through the tensor version counter, and the kernel clamps
 every loaded range that indexes the values buffer to the value count and
@@ -124,14 +131,30 @@ segment ID outside the segment count and a merge ID outside the merge count
 graph capture is supported after an ordinary launch that observed task
 storage ready, matching the prepared static path's task-readiness contract.
 A first launch that only queued the wait for task storage does not count, so
-the protocol is launch, synchronize, launch again, then capture. One prepared
-object owns one counter array and must not have launches in flight
-concurrently on different streams; callers must serialize such reuse.
+the protocol is launch, synchronize, launch again, then capture.
+
+One prepared object owns one counter array and one scratch buffer, so it
+admits one launch at a time. The launch enforces that itself:
+
+- It raises `RuntimeError` when another thread is inside a launch of the
+  same object.
+- It raises `RuntimeError` when an earlier launch of the object is still in
+  flight on another stream. Synchronize that stream first.
+- It admits a launch on the stream of the earlier one, because the stream
+  orders the two.
+
+Two cases are not checked. A launch recorded during a CUDA graph capture
+skips the in-flight check, because CUDA forbids the event query during a
+capture. A replay of a captured graph runs no host code, so nothing checks
+it. A caller that replays a graph must keep replays of one prepared object
+from overlapping.
 
 Failures do not fall back to static mixed execution. Unsupported semantics,
 invalid metadata, invalid residency, compilation errors, allocation errors,
 and CUDA launch errors propagate to the caller.
 
-Continue with [Split Execution](split-execution.md) for static stage ordering,
-[Task Execution](task-execution.md) for direct fixed tiles, or
-[Verification](verification.md) for the current evidence boundary.
+Continue with [Compiler Tools and Passes](compiler-tools.md) for the driver
+options that select each lowering mode, or [Verification](verification.md)
+for the current evidence boundary. The static paths this kernel is compared
+with are on [Task Execution](task-execution.md) and
+[Split Execution](split-execution.md).

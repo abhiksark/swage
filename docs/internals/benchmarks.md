@@ -264,7 +264,8 @@ With publication fences and the phase barrier, the clean persistent median was
 117.520 microseconds and static mixed measured 118.784 microseconds.
 Persistent was 1.06% faster, but the 0.9894 ratio failed the predeclared
 `persistent <= 0.95 * static_mixed` gate. Persistent qualification therefore
-remains incomplete; this is an honest near miss, not a performance success.
+remains incomplete: the gate failed by a small margin, and the run is not a
+performance success.
 The canonical
 [raw record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json)
 and all earlier clean runs preserve every sample and source revision. Runs
@@ -315,7 +316,7 @@ Triton's autotuning stack.
 
 *The warm dispatch ladder and the cold-start comparison. [Open the full-size figure](../assets/figures/dispatch-ladder.svg).*
 
-## Honest losses
+## Where Swage loses
 
 - Pure warm dispatch stays with Triton (20.4 versus 24.7 microseconds)
   and torch (about 14).

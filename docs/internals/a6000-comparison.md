@@ -4,7 +4,7 @@
 
 This study asks a narrow question: **when segment lengths vary at runtime, is
 it useful to derive different fixed GPU tasks from one segment-local
-program?** On an NVIDIA RTX A6000, the answer is yes—but a matched Triton
+program?** On an NVIDIA RTX A6000, the answer is yes, but a matched Triton
 scheduler shows that task derivation, rather than an inherent code-generation
 advantage, explains most of the result. Swage remains competitive while
 making that scheduling model part of its compiler architecture.
@@ -236,9 +236,9 @@ It does **not** establish that Swage is generally faster than Triton, that
 Triton cannot express a comparable scheduler, or that public Swage users can
 run segmented kernels today.
 
-## Suggested show-and-tell
+## Presenting the result
 
-A concise technical walkthrough can follow five beats:
+A technical walkthrough can follow five steps:
 
 1. **Problem:** draw packed values and offsets with thousands of unequal
    segment lengths. Ask what one fixed block should be sized for.
@@ -246,14 +246,14 @@ A concise technical walkthrough can follow five beats:
    thread or block IDs in semantic Swage IR.
 3. **Task derivation:** classify the same offsets into warp, CTA, and split
    descriptors; then show the four-warp-slot fused block.
-4. **Evidence:** first show the fixed Triton gaps, then reveal how matched
+4. **Evidence:** first show the fixed Triton gaps, then show how matched
    planned Triton closes them. Use `log-normal` as Swage's remaining win,
-   `many-tiny` as Triton's packed-task win, and `uniform` as the guardrail.
+   `many-tiny` as Triton's packed-task win, and `uniform` as the control.
 5. **Open question:** test whether Swage's compiler representation makes this
    scheduling strategy easier to generalize to new operations and device-side
    planning than equivalent hand-written Triton orchestration.
 
-Good discussion questions include:
+Open questions for discussion:
 
 - Should classification remain on the host, or move into a device queue?
 - Can task-list construction be amortized when offsets repeat?
@@ -265,22 +265,43 @@ Good discussion questions include:
 ## Reproduce the campaign
 
 Triton is an optional benchmark-time import and is not a Swage dependency.
-With the native build, CUDA-enabled PyTorch, and Triton available:
+The committed record is the output of one process of
+`benchmarks/benchmark_triton_comparison.py`. It records 25 warmups and 100
+samples and holds both the segmented-sum and the vector-add results. A rerun
+must not write into `benchmarks/results/`: the committed records are
+evidence and are not replaced by a rerun.
+
+With the native build, CUDA-enabled PyTorch, and Triton available, rerun the
+same configuration in independent processes through the process driver,
+with an output directory outside the checkout:
 
 ```bash
+OUT="$(mktemp -d)"
 PYTHONPATH="$PWD/python:$PWD/build/python_packages" \
-python benchmarks/benchmark_triton_comparison.py \
+python benchmarks/benchmark_processes.py \
+  --processes 5 \
+  --output-dir "$OUT/swage-triton" \
+  -- benchmarks/benchmark_triton_comparison.py \
   --suite all \
   --warmups 25 \
-  --samples 100 \
-  --output benchmarks/results/swage-triton-a6000-sm86.json
+  --samples 100
 ```
 
-For publishable evidence, run from a clean revision on an idle or exclusively
-allocated GPU, retain the complete raw JSON, repeat the process in independent
-processes, and report clock/power policy. A future qualification should add
-independent-process aggregation and a matched one-launch fused Triton variant;
-the current planned Triton path uses separate packed-warp and CTA launches.
+The driver passes `--output` to each process itself, writes one record per
+process, and summarizes the per-process medians.
+[Benchmarks](benchmarks.md#independent-processes) describes the summary, and
+the rest of its harness section describes the options, the correctness
+check, and the provenance that the harness records today. The harness has
+changed since the committed record, so a rerun is a new measurement and not
+a reproduction of that record bit for bit.
 
-Continue with [Benchmarks](benchmarks.md) for the earlier RTX 5090 recorded
-snapshot or [Verification](verification.md) for the exact status boundaries.
+For publishable evidence, run from a clean revision on an idle or exclusively
+allocated GPU, retain the complete raw JSON of every process, and report the
+clock and power policy. A matched one-launch fused Triton variant remains
+future work; the current planned Triton path uses separate packed-warp and
+CTA launches.
+
+This is the last page of the internals section. Continue with the
+[ADR Index](../decisions/index.md) for the decisions behind each boundary.
+[Benchmarks](benchmarks.md) holds the earlier RTX 5090 recorded snapshot, and
+[Verification](verification.md) holds the exact status boundaries.

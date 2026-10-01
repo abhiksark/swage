@@ -82,11 +82,11 @@ nav:
       - Textual Swage IR: language/swage-ir.md
       - Segmented Reductions: internals/segmented-reductions.md
       - Ragged Softmax: internals/ragged-softmax.md
+      - SwagePlan Dialect: internals/swage-plan-dialect.md
       - Task Planning: internals/planning.md
       - Task Execution: internals/task-execution.md
       - Split Execution: internals/split-execution.md
       - Persistent Execution: internals/persistent-execution.md
-      - SwagePlan Dialect: internals/swage-plan-dialect.md
       - Compiler Tools and Passes: internals/compiler-tools.md
       - Verification: internals/verification.md
       - Benchmarks: internals/benchmarks.md

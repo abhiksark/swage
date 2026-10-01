@@ -34,7 +34,7 @@ without reapplying that program. It does not support split softmax.
 
 </div>
 
-*Private ownership and launch order for one split identity sum. [Open the full-size figure](../assets/diagrams/split-lifecycle.svg).*
+*Private ownership and launch order for one split segment. [Open the full-size figure](../assets/diagrams/split-lifecycle.svg).*
 
 Partial ABI:
 
@@ -56,14 +56,17 @@ Merge records carry a segment ID and a compact half-open scratch range;
 thread zero writes the final segment result once. The merge kernel compares
 the segment ID with `segment_count` and stores nothing for an ID outside it.
 
-If no split exists, the direct one-launch path remains unchanged. Exact
-all-one and tolerant nontrivial f32 cases match PyTorch and the
-sequential CPU oracle on NVIDIA RTX A6000 `sm_86`.
+If no split exists, the direct one-launch path remains unchanged. On NVIDIA
+RTX A6000 `sm_86`, split sums of position-dependent values that are exact in
+f32 match PyTorch and the sequential CPU oracle bit for bit, and split sums
+of random f32 values stay within the bound stated in
+[Sum rounding](segmented-reductions.md#sum-rounding).
 
 Split execution does not implement packed warps, split softmax, captured
 stages, device queues, persistent scheduling, public segment syntax,
 or public segmented launch.
 
-Continue with [Verification](verification.md) for the executable
-proof behind these claims, or [Benchmarks](benchmarks.md) for the
-recorded campaign.
+Continue with [Persistent Execution](persistent-execution.md) for the
+experimental kernel that consumes the same partial and merge records in one
+launch, or [Verification](verification.md) for the executable evidence
+behind these claims.

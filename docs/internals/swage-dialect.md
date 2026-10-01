@@ -39,6 +39,8 @@ definitions in `include/swage/Dialect/Swage/IR`.
 
 --8<-- "docs/reference/_generated/swage-ops.inc"
 
-Continue with [Execution Model](../user-guide/execution-model.md)
-for the semantic model, or [Compiler Tools and Passes](compiler-tools.md) for
-the registered lowering surface.
+Continue with [Textual Swage IR](../language/swage-ir.md) for the syntax,
+the verifier contracts, and one complete module. For the semantic model go
+back to [Execution Model](../user-guide/execution-model.md), and for the
+registered lowering surface use
+[Compiler Tools and Passes](compiler-tools.md).
