@@ -2522,6 +2522,46 @@ def test_gpu_softmax_of_singleton_is_exactly_one():
     torch.testing.assert_close(output.cpu(), torch.ones(3), rtol=0, atol=0)
 
 
+def _uniform_softmax_case():
+    """Segments of identical logits whose softmax is exactly 1 / n.
+
+    Within a segment every shifted logit is exactly zero, exp2 of zero is
+    exactly one on both backends, n ones sum to n in any order, and one
+    divided by a power of two is exact. A normalizer that misses or repeats
+    one element gives 1 / (n - 1) or 1 / (n + 1) instead, which the derived
+    tolerance admits on a long segment. Neighbouring segments hold
+    different logits, so a window that reaches into a neighbour changes the
+    maximum or a term. This checks how many elements the normalizer
+    counted, not which positions were read inside one segment.
+    """
+    lengths = [2, 4096, 1, 65536, 64]
+    levels = torch.tensor([0.5, -1.25, 3.0, 1.75, -0.25])
+    counts = torch.tensor(lengths)
+    values = torch.repeat_interleave(levels, counts)
+    expected = torch.repeat_interleave(1 / counts.float(), counts)
+    return values, torch.tensor(_offsets(lengths), dtype=torch.int32), expected
+
+
+def test_cpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The sequential normalizer counts every element of a long segment."""
+    values, offsets, expected = _uniform_softmax_case()
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    assert _bits(actual) == _bits(expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The one-CTA normalizer counts every element of a long segment."""
+    host_values, host_offsets, expected = _uniform_softmax_case()
+    output = torch.full((expected.numel(),), float("nan"), device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    assert _bits(output.cpu()) == _bits(expected)
+
+
 def _semantic_edge_case():
     """Three segments: a NaN, all negative infinity, and a finite maximum."""
     values = torch.tensor(
