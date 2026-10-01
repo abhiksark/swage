@@ -47,10 +47,14 @@ Semantic contract:
 - **Floating max NaNs**: a non-empty f32 `max` reduction propagates NaN. The
   private segmented lowering uses `maximumf`, not
   `maxnumf`, and tests the behavior against the CPU oracle and PyTorch.
-- **Effects**: `map` and `reduce` expose only their region's effects, so
-  unused instances with pure `arith`/`math` bodies fold away.
-  `swage.map_store` declares a write on its output operand and is never
-  dead-code-eliminated.
+- **Effects**: `map`, `reduce`, and `map_store` read the values and
+  offsets buffers behind the segment handle and declare that read on
+  their segment operand, as `swage.extent` does, so common subexpression
+  elimination does not merge two instances across a write. `map` and
+  `reduce` expose their region's effects in addition to that read. A read
+  alone does not keep an operation alive, so unused instances with pure
+  `arith`/`math` bodies still fold away. `swage.map_store` also declares
+  a write on its output operand and is never dead-code-eliminated.
 - **Aliasing**: `map_store`'s output must not alias the segment's
   values buffer. A runtime obligation, documented, not statically
   checked.

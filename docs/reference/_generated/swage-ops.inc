@@ -13,17 +13,15 @@ operation ::= `swage.extent` $segment attr-dict `:` qualified(type($segment))
 Returns the runtime element count of a segment,
 `offsets[segment_id + 1] - offsets[segment_id]`. May be zero.
 
+The operation reads the offsets buffer behind the segment handle and
+declares that read on its operand. Two instances are not merged across
+a write, and an unused instance is still removable.
+
 Example:
 
 ```mlir
 %n = swage.extent %seg : !swage.segment<f32>
 ```
-
-Traits: `AlwaysSpeculatableImplTrait`
-
-Interfaces: `ConditionallySpeculatable`, `NoMemoryEffect (MemoryEffectOpInterface)`
-
-Effects: `MemoryEffects::Effect{}`
 
 ##### Operands:
 
@@ -105,6 +103,10 @@ block arguments after the element argument, in order. The yield type
 defines the result segment's element type. Over an empty segment the
 result is an empty segment (ADR-0008).
 
+The operation reads the values and offsets buffers behind the segment
+handle. It declares that read on its segment operand in addition to the
+effects of its region, so two instances are not merged across a write.
+
 Example:
 
 ```mlir
@@ -150,6 +152,9 @@ inexpressible. The declared write effect on `output` keeps the
 operation alive under dead-code elimination. The output buffer must not
 alias the segment's values buffer (a runtime obligation). Over an empty
 segment nothing is written.
+
+The operation also reads the values and offsets buffers behind the
+segment handle and declares that read on its segment operand.
 
 Example:
 
@@ -230,6 +235,10 @@ is the identity of `kind`: `sum` -> 0, `max` -> negative infinity or the
 minimum integer, `min` -> positive infinity or the maximum integer.
 Every admitted kind is associative and commutative with a known
 identity; that gate is what licenses split reductions later.
+
+The operation reads the values and offsets buffers behind the segment
+handle. It declares that read on its segment operand in addition to the
+effects of its region, so two instances are not merged across a write.
 
 Example:
 

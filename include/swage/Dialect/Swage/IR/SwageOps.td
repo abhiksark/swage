@@ -1,3 +1,4 @@
+// include/swage/Dialect/Swage/IR/SwageOps.td
 //===- SwageOps.td - Swage dialect operations --------------*- tablegen -*-===//
 //
 // Part of the Swage project, under the MIT License.
@@ -81,11 +82,15 @@ def Swage_MakeSegmentOp : Swage_Op<"make_segment", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Swage_ExtentOp : Swage_Op<"extent", [Pure]> {
+def Swage_ExtentOp : Swage_Op<"extent"> {
   let summary = "Number of elements in a segment";
   let description = [{
     Returns the runtime element count of a segment,
     `offsets[segment_id + 1] - offsets[segment_id]`. May be zero.
+
+    The operation reads the offsets buffer behind the segment handle and
+    declares that read on its operand. Two instances are not merged across
+    a write, and an unused instance is still removable.
 
     Example:
 
@@ -93,7 +98,8 @@ def Swage_ExtentOp : Swage_Op<"extent", [Pure]> {
     %n = swage.extent %seg : !swage.segment<f32>
     ```
   }];
-  let arguments = (ins Swage_SegmentType:$segment);
+  let arguments = (ins
+    Arg<Swage_SegmentType, "segment handle", [MemRead]>:$segment);
   let results = (outs Index:$result);
   let assemblyFormat = "$segment attr-dict `:` qualified(type($segment))";
 }
@@ -129,6 +135,10 @@ def Swage_MapOp : Swage_Op<"map", [IsolatedFromAbove,
     defines the result segment's element type. Over an empty segment the
     result is an empty segment (ADR-0008).
 
+    The operation reads the values and offsets buffers behind the segment
+    handle. It declares that read on its segment operand in addition to the
+    effects of its region, so two instances are not merged across a write.
+
     Example:
 
     ```mlir
@@ -139,7 +149,8 @@ def Swage_MapOp : Swage_Op<"map", [IsolatedFromAbove,
     }
     ```
   }];
-  let arguments = (ins Swage_SegmentType:$segment,
+  let arguments = (ins Arg<Swage_SegmentType, "segment handle",
+                           [MemRead]>:$segment,
                        Variadic<Swage_ScalarType>:$captures);
   let results = (outs Swage_SegmentType:$result);
   let regions = (region SizedRegion<1>:$body);
@@ -163,6 +174,10 @@ def Swage_ReduceOp : Swage_Op<"reduce", [IsolatedFromAbove,
     Every admitted kind is associative and commutative with a known
     identity; that gate is what licenses split reductions later.
 
+    The operation reads the values and offsets buffers behind the segment
+    handle. It declares that read on its segment operand in addition to the
+    effects of its region, so two instances are not merged across a write.
+
     Example:
 
     ```mlir
@@ -172,7 +187,8 @@ def Swage_ReduceOp : Swage_Op<"reduce", [IsolatedFromAbove,
     }
     ```
   }];
-  let arguments = (ins Swage_SegmentType:$segment,
+  let arguments = (ins Arg<Swage_SegmentType, "segment handle",
+                           [MemRead]>:$segment,
                        Variadic<Swage_ScalarType>:$captures,
                        Swage_ReductionKindAttr:$kind);
   let results = (outs Swage_ScalarType:$result);
@@ -197,6 +213,9 @@ def Swage_MapStoreOp : Swage_Op<"map_store", [IsolatedFromAbove]> {
     alias the segment's values buffer (a runtime obligation). Over an empty
     segment nothing is written.
 
+    The operation also reads the values and offsets buffers behind the
+    segment handle and declares that read on its segment operand.
+
     Example:
 
     ```mlir
@@ -206,7 +225,8 @@ def Swage_MapStoreOp : Swage_Op<"map_store", [IsolatedFromAbove]> {
     }
     ```
   }];
-  let arguments = (ins Swage_SegmentType:$segment,
+  let arguments = (ins Arg<Swage_SegmentType, "segment handle",
+                           [MemRead]>:$segment,
                        Arg<MemRefRankOf<[AnyInteger, AnyFloat], [1]>,
                            "output buffer", [MemWrite]>:$output,
                        Variadic<Swage_ScalarType>:$captures);
