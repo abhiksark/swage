@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -107,7 +108,17 @@ def launch(kernel, *, arguments, constexprs, grid):
     return None
 
 
+# The oldest PyTorch release a launch accepts, as (major, minor). It equals
+# the `pytorch` extra in pyproject.toml; no newer release is refused.
+_MIN_TORCH = (2, 6)
+# The module that last passed `_require_supported_torch`. Tests inject fresh
+# fake modules, so the verdict belongs to the module object.
+_supported_torch = None
+
+
 def _import_torch():
+    """Return PyTorch, or raise when it is missing or unsupported."""
+    global _supported_torch
     try:
         import torch
     except Exception as error:
@@ -115,7 +126,33 @@ def _import_torch():
             "Swage launch requires PyTorch; install "
             "'swage-compiler[pytorch]'"
         ) from error
+    if torch is not _supported_torch:
+        _require_supported_torch(torch)
+        _supported_torch = torch
     return torch
+
+
+def _require_supported_torch(torch):
+    """Reject a PyTorch that a launch cannot use, before any work starts.
+
+    A launch enqueues the kernel and then retains each tensor on the stream
+    through `Tensor.record_stream`. Finding that method missing after the
+    enqueue would leave a kernel running on storage PyTorch may reuse, so
+    the release and the method are both checked here.
+    """
+    found = getattr(torch, "__version__", None)
+    release = re.match(r"(\d+)\.(\d+)", str(found))
+    required = ".".join(str(part) for part in _MIN_TORCH)
+    if release is None or (int(release[1]), int(release[2])) < _MIN_TORCH:
+        raise RuntimeError(
+            f"Swage launch requires PyTorch {required} or newer; "
+            f"found PyTorch {found}"
+        )
+    if not callable(getattr(torch.Tensor, "record_stream", None)):
+        raise RuntimeError(
+            "Swage launch requires torch.Tensor.record_stream to retain "
+            f"submitted tensors; found PyTorch {found} without it"
+        )
 
 
 def _validate_launch_call(kernel, arguments, constexprs, grid):
@@ -159,10 +196,47 @@ def _validate_launch_tensor(name, tensor, torch):
         raise TypeError(f"argument '{name}' must have rank one")
     if not tensor.is_contiguous():
         raise ValueError(f"argument '{name}' must be contiguous")
+    # A lazy view shares the storage of its base but shows other values.
+    # The kernel reads and writes the storage, so it would see the base.
+    if tensor.is_neg():
+        raise ValueError(
+            f"argument '{name}' must not be a lazy negation view; pass "
+            "tensor.resolve_neg()"
+        )
+    if tensor.is_conj():
+        raise ValueError(
+            f"argument '{name}' must not be a lazy conjugate view; pass "
+            "tensor.resolve_conj()"
+        )
+
+
+def _validate_output_disjoint(names, tensors):
+    """Reject an output that shares memory with a buffer the kernel reads.
+
+    One thread would store through the output while another loads the same
+    bytes through the input. Every tensor is known contiguous and rank one
+    by this point, so each byte extent is exact and the half-open
+    intersection is exact. It cannot see two virtual mappings of one
+    physical allocation, nor aliasing created after this returns.
+
+    Args:
+        names: Argument names, the inputs first and the output last.
+        tensors: The tensors in the same order.
+    """
+    *inputs, output = tensors
+    output_start = output.data_ptr()
+    output_end = output_start + output.numel() * output.element_size()
+    for name, buffer in zip(names, inputs):
+        start = buffer.data_ptr()
+        end = start + buffer.numel() * buffer.element_size()
+        if start < output_end and output_start < end:
+            raise ValueError(
+                f"argument '{names[-1]}' must not overlap argument '{name}'"
+            )
 
 
 def _validate_runtime_arguments(arguments, runtime_names, torch):
-    """Validate tensor metadata, scalar bounds, and buffer lengths."""
+    """Validate tensor metadata, scalar bounds, lengths, and disjointness."""
     tensors = tuple(arguments[name] for name in runtime_names[:3])
     for name, tensor in zip(runtime_names, tensors):
         _validate_launch_tensor(name, tensor, torch)
@@ -173,6 +247,8 @@ def _validate_runtime_arguments(arguments, runtime_names, torch):
     for name, tensor in zip(runtime_names, tensors):
         if n > tensor.numel():
             raise ValueError(f"n exceeds tensor length for argument '{name}'")
+    # The two inputs may share memory; only the output is written.
+    _validate_output_disjoint(runtime_names[:3], tensors)
     return tensors, n
 
 

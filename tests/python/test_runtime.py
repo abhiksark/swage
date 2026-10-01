@@ -141,6 +141,8 @@ class _Tensor:
         rank=1,
         contiguous=True,
         pointer=0x1000,
+        negative=False,
+        conjugate=False,
     ):
         self.layout = torch.strided
         self.dtype = torch.float32 if dtype is None else dtype
@@ -149,6 +151,8 @@ class _Tensor:
         self._rank = rank
         self._contiguous = contiguous
         self._pointer = pointer
+        self._negative = negative
+        self._conjugate = conjugate
         self.recorded_streams = []
 
     def dim(self):
@@ -157,8 +161,17 @@ class _Tensor:
     def is_contiguous(self):
         return self._contiguous
 
+    def is_neg(self):
+        return self._negative
+
+    def is_conj(self):
+        return self._conjugate
+
     def numel(self):
         return self._size
+
+    def element_size(self):
+        return 4
 
     def data_ptr(self):
         return self._pointer
@@ -183,8 +196,11 @@ class _Driver:
         self.launches.append((function, grid, block, stream, arguments))
 
 
-def _fake_torch(*, available=True, current_device=0, max_threads=1024):
+def _fake_torch(
+    *, available=True, current_device=0, max_threads=1024, version="2.6.0"
+):
     torch = types.ModuleType("torch")
+    torch.__version__ = version
     torch.float32 = object()
     torch.strided = object()
     stream = types.SimpleNamespace(cuda_stream=0xABCD)
@@ -342,6 +358,174 @@ def test_launch_rejects_invalid_tensor_metadata(
             constexprs={"BLOCK": 128},
             grid=(1,),
         )
+
+
+@pytest.mark.parametrize(
+    ("view", "reason"),
+    [
+        ({"negative": True}, "lazy negation view"),
+        ({"conjugate": True}, "lazy conjugate view"),
+    ],
+)
+@pytest.mark.parametrize("name", ["x_ptr", "y_ptr", "output_ptr"])
+def test_launch_rejects_lazy_views(monkeypatch, name, view, reason):
+    """Reject a view whose storage does not hold the values it shows."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    arguments[name] = _Tensor(
+        torch, pointer=arguments[name].data_ptr(), **view
+    )
+
+    with pytest.raises(ValueError, match=f"'{name}' must not be a {reason}"):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+# Each fake tensor holds 129 four-byte elements: 0x204 bytes.
+@pytest.mark.parametrize(
+    ("pointers", "overlapped"),
+    [
+        ({"output_ptr": 0x1000}, "x_ptr"),
+        ({"output_ptr": 0x1004}, "x_ptr"),
+        ({"output_ptr": 0x1000 - 0x200}, "x_ptr"),
+        ({"output_ptr": 0x1000 + 0x200}, "x_ptr"),
+        ({"output_ptr": 0x2000}, "y_ptr"),
+        ({"output_ptr": 0x2000 - 4}, "y_ptr"),
+        ({"x_ptr": 0x3000 + 0x100}, "x_ptr"),
+    ],
+)
+def test_launch_rejects_an_output_that_overlaps_an_input(
+    monkeypatch, pointers, overlapped
+):
+    """Reject an output sharing any byte with a buffer the kernel reads."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    for name, pointer in pointers.items():
+        arguments[name] = _Tensor(torch, pointer=pointer)
+
+    with pytest.raises(
+        ValueError,
+        match=f"'output_ptr' must not overlap argument '{overlapped}'",
+    ):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+@pytest.mark.parametrize(
+    "pointers",
+    [
+        {"output_ptr": 0x1000 + 0x204},
+        {"output_ptr": 0x1000 - 0x204},
+        {"y_ptr": 0x1000},
+        {"y_ptr": 0x1004},
+    ],
+)
+def test_launch_accepts_adjacent_buffers_and_overlapping_inputs(
+    monkeypatch, pointers
+):
+    """Allow buffers that only touch, and two inputs that share memory."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    for name, pointer in pointers.items():
+        arguments[name] = _Tensor(torch, pointer=pointer)
+
+    add_kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
+
+    assert len(driver.launches) == 1
+
+
+def test_empty_launch_still_rejects_an_overlapping_output(monkeypatch):
+    """Validate the whole boundary before the zero-work return."""
+    torch, _ = _fake_torch()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    arguments = _arguments(torch, n=0)
+    arguments["output_ptr"] = arguments["x_ptr"]
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(0,)
+        )
+
+
+@pytest.mark.parametrize(
+    "version", ["2.5.1", "2.5.1+cu124", "1.13.1", "2", "nightly", None]
+)
+def test_launch_rejects_a_pytorch_below_the_floor(monkeypatch, version):
+    """Fail before compiling or enqueueing on an unsupported PyTorch."""
+    torch, _ = _fake_torch(version=version)
+    driver = _install_launch_fakes(monkeypatch, torch)
+    reason = (
+        "requires PyTorch 2.6 or newer; found PyTorch "
+        f"{re.escape(str(version))}$"
+    )
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match=reason):
+            add_kernel.launch(
+                arguments=_arguments(torch),
+                constexprs={"BLOCK": 128},
+                grid=(2,),
+            )
+
+    assert driver.loads == driver.launches == []
+
+
+def test_launch_rejects_a_pytorch_without_record_stream(monkeypatch):
+    """Fail before the enqueue when submitted tensors cannot be retained."""
+
+    class TensorWithoutRecordStream:
+        """The tensor type of a PyTorch that lacks `record_stream`."""
+
+    torch, _ = _fake_torch(version="2.6.0")
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    torch.Tensor = TensorWithoutRecordStream
+
+    with pytest.raises(
+        RuntimeError,
+        match="requires torch.Tensor.record_stream.*found PyTorch 2.6.0",
+    ):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["2.6.0", "2.6.0a0+git0123abc", "2.12.0+cu130", "2.13.0+cpu", "3.0.0.dev1"],
+)
+def test_launch_accepts_a_supported_pytorch(monkeypatch, version):
+    """Admit the declared floor and every later release, with no ceiling."""
+    torch, _ = _fake_torch(version=version)
+    driver = _install_launch_fakes(monkeypatch, torch)
+
+    add_kernel.launch(
+        arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
+    )
+
+    assert len(driver.launches) == 1
+
+
+def test_minimum_pytorch_matches_the_declared_dependency():
+    """Keep the launch-time floor equal to the one `pyproject.toml` states."""
+    from swage import _runtime
+
+    project = pathlib.Path(__file__).parents[2] / "pyproject.toml"
+    declared = re.search(r'"torch>=(\d+)\.(\d+)"', project.read_text())
+
+    assert declared is not None
+    assert _runtime._MIN_TORCH == (int(declared[1]), int(declared[2]))
 
 
 def test_launch_requires_pytorch_and_cuda(monkeypatch):
