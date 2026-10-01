@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import re
 import shutil
 import signal
 import stat
@@ -85,6 +86,27 @@ def _cold_start(cache_dir, results_dir, barrier, rounds):
     except BaseException:
         barrier.abort()  # Release the other processes instead of timing out.
         raise
+
+
+def _stop(workers):
+    """Terminate and reap every worker that is still running.
+
+    A worker that outlives its test would otherwise block interpreter exit.
+    """
+    for worker in workers:
+        if worker.is_alive():
+            worker.terminate()
+    for worker in workers:
+        if worker.pid is not None:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                worker.kill()
+                worker.join()
+
+
+def _hang(_seconds):
+    """Sleep long enough to outlive any test that forgets to stop it."""
+    time.sleep(_seconds)
 
 
 def _killed_writer(cache_dir):
@@ -418,8 +440,13 @@ def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
         _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
 
+def _rejects(reason, path):
+    """Match a rejection that gives `reason` and names exactly `path`."""
+    return rf"{reason}.*: {re.escape(str(path))}$"
+
+
 def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
-    """Reject symlinked, world-writable, and foreign-owned cache content."""
+    """Reject symlinked and world-writable files and a foreign-owned root."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
     key_data = {"kernel": "add_kernel"}
@@ -441,24 +468,21 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
 
     (entry / "metadata.json").chmod(0o600)
     other_user = os.geteuid() + 1
+    # Every path is foreign to another user, and the root is checked first.
     with monkeypatch.context() as patch:
         patch.setattr(_runtime.os, "geteuid", lambda: other_user)
-        with pytest.raises(RuntimeError, match="not owned by the current"):
+        with pytest.raises(RuntimeError, match=_rejects("not owned", tmp_path)):
             _runtime._compile_cached(key_data, "add_kernel", 128, object)
 
     assert calls == []
     assert (entry / "metadata.json").read_text() == "{}"
 
 
-def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
-    """Check ownership of every file, not only of the cache root."""
-    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    _runtime, _ = _stub_compiler(monkeypatch)
-    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    foreign = tmp_path / artifact.key / "kernel.ptx"
+def _make_foreign(monkeypatch, foreign):
+    """Report one path, and no other, as owned by another user."""
     lstat = pathlib.Path.lstat
 
-    def lstat_with_foreign_ptx(path):
+    def lstat_with_one_foreign_path(path):
         details = lstat(path)
         if path != foreign:
             return details
@@ -466,10 +490,112 @@ def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
         fields[stat.ST_UID] = details.st_uid + 1
         return os.stat_result(fields)
 
-    monkeypatch.setattr(pathlib.Path, "lstat", lstat_with_foreign_ptx)
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat_with_one_foreign_path)
+
+
+def _published_entry(tmp_path, monkeypatch):
+    """Publish one valid entry and forget it in the process."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
     _runtime._ptx_cache.clear()
-    with pytest.raises(RuntimeError, match="not owned.*kernel.ptx"):
+    calls.clear()
+    return _runtime, calls, tmp_path / artifact.key
+
+
+def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
+    """Check ownership of every file, not only of the cache root."""
+    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    _make_foreign(monkeypatch, entry / "kernel.ptx")
+
+    with pytest.raises(
+        RuntimeError, match=_rejects("not owned", entry / "kernel.ptx")
+    ):
         _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("unsafe", "reason"),
+    [
+        ("symlink", "is a symlink"),
+        ("world-writable", "is world-writable"),
+        ("foreign owner", "not owned"),
+    ],
+)
+def test_cache_rejects_an_unsafe_entry_directory(
+    tmp_path, monkeypatch, unsafe, reason
+):
+    """Check the entry directory itself, even when its files are safe."""
+    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    if unsafe == "symlink":
+        moved = tmp_path / "moved-entry"
+        entry.rename(moved)
+        entry.symlink_to(moved)
+    elif unsafe == "world-writable":
+        entry.chmod(0o707)
+    else:
+        _make_foreign(monkeypatch, entry)
+
+    with pytest.raises(RuntimeError, match=_rejects(reason, entry)):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    assert calls == []
+
+
+def test_cache_rejects_a_corrupt_lowered_module(tmp_path, monkeypatch):
+    """Verify the lowered MLIR digest, not only the PTX digest."""
+    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    (entry / "lowered.mlir").write_text("corrupt")
+
+    with pytest.raises(
+        RuntimeError, match=_rejects("lowered MLIR digest mismatch", entry)
+    ):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    assert calls == []
+
+
+def test_cache_rejects_an_entry_for_another_specialization(
+    tmp_path, monkeypatch
+):
+    """Never serve an entry whose recorded specialization differs."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    key = _runtime._cache_key(_SHARED_KEY)
+    other = dict(_SHARED_KEY, target="sm_80")
+    artifact = _runtime._Artifact(key, "lowered", "ptx")
+    _runtime._write_cache_entry(artifact, other)
+    assert _runtime._read_cache_entry(key, other).ptx == "ptx"
+
+    with pytest.raises(
+        RuntimeError, match=_rejects("specialization mismatch", tmp_path / key)
+    ):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    assert calls == []
+
+
+@pytest.mark.parametrize("field", ["version", "key"])
+def test_cache_rejects_metadata_of_another_format_or_key(
+    tmp_path, monkeypatch, field
+):
+    """Verify the metadata version and that the entry belongs to its key."""
+    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    key = entry.name
+    if field == "version":
+        metadata = json.loads((entry / "metadata.json").read_text())
+        metadata["version"] = 2
+        (entry / "metadata.json").write_text(json.dumps(metadata))
+    else:
+        # A valid entry found under a name that is not its own key.
+        key = _runtime._cache_key({"kernel": "another"})
+        entry = entry.rename(tmp_path / key)
+
+    with pytest.raises(
+        RuntimeError, match=_rejects("metadata mismatch", entry)
+    ):
+        _runtime._compile_cached(
+            _SHARED_KEY, "add_kernel", 128, object, key=key
+        )
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -742,7 +868,13 @@ def test_inaccessible_cache_root_degrades_to_process_reuse(
     assert repeated == other_key == []
 
 
-def test_tampering_found_while_publishing_still_raises(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("unsafe", "reason"),
+    [("symlink", "is a symlink"), ("world-writable", "is world-writable")],
+)
+def test_tampering_found_while_publishing_still_raises(
+    tmp_path, monkeypatch, unsafe, reason
+):
     """Raise on an unsafe root at publish, but keep the compiled artifact."""
     root = tmp_path / "cache"
     elsewhere = tmp_path / "elsewhere"
@@ -750,21 +882,27 @@ def test_tampering_found_while_publishing_still_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
     _runtime, calls = _stub_compiler(monkeypatch)
 
-    def compile_while_the_root_is_replaced(*_args):
+    def compile_while_the_root_appears(*_args):
+        # The lookup found no root, so only the publish can notice this one.
         calls.append(True)
-        root.symlink_to(elsewhere)
+        if unsafe == "symlink":
+            root.symlink_to(elsewhere)
+        else:
+            root.mkdir()
+            root.chmod(0o707)
         return "lowered", "ptx"
 
     monkeypatch.setattr(
-        _runtime, "_compile_native", compile_while_the_root_is_replaced
+        _runtime, "_compile_native", compile_while_the_root_appears
     )
-    with pytest.raises(RuntimeError, match="symlink"):
+    with pytest.raises(RuntimeError, match=_rejects(reason, root)):
         _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
     retained = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
 
     assert retained.ptx == "ptx"
     assert len(calls) == 1
     assert list(elsewhere.iterdir()) == []
+    assert list(root.iterdir()) == []
 
 
 def test_removing_an_incomplete_entry_keeps_a_concurrent_publish(
@@ -825,12 +963,16 @@ def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
         )
         for _ in range(processes)
     ]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=120)
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=120)
+        exit_codes = [worker.exitcode for worker in workers]
+    finally:
+        _stop(workers)
 
-    assert [worker.exitcode for worker in workers] == [0] * processes
+    assert exit_codes == [0] * processes
     keys = {
         _runtime._cache_key(dict(_SHARED_KEY, round=round_id)): round_id
         for round_id in range(rounds)
@@ -846,6 +988,20 @@ def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
         assert used == [published.ptx] * processes
 
 
+def test_hung_workers_are_terminated_and_reaped():
+    """Stop workers that are still running, started or not."""
+    context = multiprocessing.get_context("spawn")
+    hung = context.Process(target=_hang, args=(600,))
+    never_started = context.Process(target=_hang, args=(600,))
+    hung.start()
+
+    _stop([hung, never_started])
+
+    assert not hung.is_alive()
+    assert hung.exitcode == -signal.SIGTERM
+    assert never_started.exitcode is None
+
+
 def test_writer_killed_mid_entry_does_not_poison_the_key(
     tmp_path, monkeypatch
 ):
@@ -856,10 +1012,14 @@ def test_writer_killed_mid_entry_does_not_poison_the_key(
     writer = multiprocessing.get_context("spawn").Process(
         target=_killed_writer, args=(str(tmp_path),)
     )
-    writer.start()
-    writer.join(timeout=120)
+    try:
+        writer.start()
+        writer.join(timeout=120)
+        exit_code = writer.exitcode
+    finally:
+        _stop([writer])
 
-    assert writer.exitcode == -signal.SIGKILL
+    assert exit_code == -signal.SIGKILL
     assert key not in [path.name for path in tmp_path.iterdir()]
 
     first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
