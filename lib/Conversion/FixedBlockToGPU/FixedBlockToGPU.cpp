@@ -40,9 +40,12 @@ LogicalResult verifyVectorWidth(Operation *op, int64_t blockSize) {
     auto vector = dyn_cast<VectorType>(type);
     if (!vector)
       continue;
-    if (vector.getRank() != 1)
+    // A scalable vector of N has N lanes times a runtime factor, so it
+    // cannot name the fixed number of threads in a block.
+    if (vector.getRank() != 1 || vector.isScalable())
       return op->emitError()
-             << "only rank-one vectors are supported, got " << vector;
+             << "only fixed-length rank-one vectors are supported, got "
+             << vector;
     if (vector.getShape().front() != blockSize)
       return op->emitError()
              << "vector width " << vector.getShape().front()

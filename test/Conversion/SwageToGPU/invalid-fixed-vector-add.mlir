@@ -72,8 +72,21 @@ module {
 module {
   func.func @rank_two_vector(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
-    // expected-error@+1 {{only rank-one vectors are supported, got 'vector<2x64xf32>'}}
+    // expected-error@+1 {{only fixed-length rank-one vectors are supported, got 'vector<2x64xf32>'}}
     %zero = arith.constant dense<0.0> : vector<2x64xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // A scalable vector of 128 has 128 lanes times a runtime factor, so it is
+  // not the 128 threads of the block.
+  func.func @scalable_vector(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    // expected-error@+1 {{only fixed-length rank-one vectors are supported, got 'vector<[128]xindex>'}}
+    %lane = vector.step : vector<[128]xindex>
     return
   }
 }
