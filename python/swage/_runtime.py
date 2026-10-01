@@ -570,9 +570,17 @@ def _warn_cache_off(use, reason):
     if use in _cache_off:
         return
     _cache_off.add(use)
+    if use == "write":
+        effect = "is not written by this process"
+        reuse = (
+            "New kernels are reused in this process only; published "
+            "entries are still read."
+        )
+    else:
+        effect = "is off for this process"
+        reuse = "Compiled kernels are reused in this process only."
     warnings.warn(
-        f"Swage persistent cache is off for this process: {reason}. "
-        "Compiled kernels are reused in this process only.",
+        f"Swage persistent cache {effect}: {reason}. {reuse}",
         RuntimeWarning,
         stacklevel=3,
     )

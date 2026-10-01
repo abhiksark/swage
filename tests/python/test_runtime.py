@@ -693,7 +693,7 @@ def test_unwritable_cache_never_fails_a_launch(tmp_path, monkeypatch, how):
     assert len(calls) == 2
     assert len(first) == 1
     assert str(root) in first[0]
-    assert "persistent cache is off" in first[0]
+    assert "persistent cache is not written by this process" in first[0]
     assert second == other_specialization == []
     assert leftovers == []
 
@@ -715,6 +715,7 @@ def test_read_only_cache_still_serves_published_entries(
     reread, later = _compile_recording_warnings(_runtime)
 
     assert len(messages) == 1
+    assert "published entries are still read" in messages[0]
     assert reread == warm
     assert later == []
     assert len(calls) == 2
@@ -737,6 +738,7 @@ def test_inaccessible_cache_root_degrades_to_process_reuse(
     assert len(calls) == 2
     assert len(messages) == 1
     assert str(root) in messages[0]
+    assert "persistent cache is off for this process" in messages[0]
     assert repeated == other_key == []
 
 
