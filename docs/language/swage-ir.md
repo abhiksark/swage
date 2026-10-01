@@ -257,8 +257,16 @@ element, respectively.
   and backend work belong to upstream MLIR dialects, not duplicate Swage
   operations.
 - **The terminal store owns the write.** `swage.map_store` is the only
-  Swage operation with its own memory effect. `map` and `reduce` track
+  Swage operation that declares a write. `map` and `reduce` track
   nested operations' memory effects recursively.
+- **Segment consumers declare their read.** `swage.extent`, `swage.map`,
+  `swage.reduce`, and `swage.map_store` read the values and offsets
+  buffers behind the segment handle and declare a read on their segment
+  operand. Common subexpression elimination therefore does not merge two
+  of them across a write. A read does not keep an operation alive: an
+  unused `extent`, and an unused `map` or `reduce` with a pure region,
+  is still removable. `swage.make_segment` and `swage.segment_id` read
+  no memory and stay effect-free.
 
 For exhaustive operand and trait tables, use the generated
 [Swage Dialect reference](../internals/swage-dialect.md). For `swage-opt`
