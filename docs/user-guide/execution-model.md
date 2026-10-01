@@ -105,7 +105,9 @@ model.
 
 The qualification tests bound the error of each schedule against a float64
 reference, relative to the sum of absolute values, and compare maxima
-exactly. They do not require two schedules to agree bit for bit. See
+exactly. They require each schedule to reproduce its own bits across two
+launches of one prepared program on the qualification GPU. They do not
+require two schedules to agree bit for bit. See
 [Textual Swage IR](../language/swage-ir.md#swagereduce) for the operation
 contract and [Task Planning](../internals/planning.md) for the selection
 rule and how to switch it off.
