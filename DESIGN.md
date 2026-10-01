@@ -26,8 +26,8 @@ Three levels remain distinct:
 - A **tile** is a fixed physical warp or CTA step used to execute a task.
 
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
-tile type. Current qualified warp and CTA paths use 32-thread and 128-thread
-steps respectively.
+tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
+steps, and 512-thread split partial and merge steps.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -72,6 +72,11 @@ surface. The canonical pipeline and links to exact references live in
 - GPU thread and block IDs do not appear in semantic Swage IR.
 - Ordinary scalar arithmetic uses upstream `arith` and `math` operations.
 - Region captures are explicit and ordered.
+- A reduction combines every element of its segment exactly once and fixes
+  no combining order. A maximum is the same in every order. An f32 sum is
+  not: its rounding depends on the order that a lowering and a schedule
+  choose, so changing the task derivation can change the result within
+  rounding error. No lowering adds fast-math flags.
 - Cross-segment effects must be explicit. A map-store writes only the
   corresponding segment range.
 - Unsupported syntax, module shapes, types, policies, and ABIs fail before

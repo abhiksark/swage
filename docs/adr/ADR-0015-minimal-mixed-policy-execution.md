@@ -1,7 +1,10 @@
 <!-- docs/adr/ADR-0015-minimal-mixed-policy-execution.md -->
 # ADR-0015: Minimal mixed-policy execution
 
-- Status: accepted
+- Status: accepted; the two-launch mixed rule is superseded by
+  [ADR-0016](ADR-0016-fused-mixed-policy-schedule.md), and identity-sum
+  admission is extended by
+  [ADR-0019](ADR-0019-composable-private-reductions.md)
 - Date: 2026-08-24
 
 ## Context

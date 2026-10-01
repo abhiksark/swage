@@ -8,7 +8,10 @@ require the native `mlir_swage` package from a build tree.
 
 ## Install the Python package
 
-Python 3.10 or newer is required. Install the base package from PyPI:
+Python 3.10 or newer is required. The
+[Support Matrix](../reference/support-matrix.md) lists which Python,
+PyTorch, driver, and GPU combinations are tested and which are only
+admitted. Install the base package from PyPI:
 
 ```bash
 python -m pip install swage-compiler

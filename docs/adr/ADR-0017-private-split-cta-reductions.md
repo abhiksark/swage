@@ -1,7 +1,8 @@
 <!-- docs/adr/ADR-0017-private-split-cta-reductions.md -->
 # ADR-0017: Private split-CTA reductions
 
-- Status: accepted
+- Status: accepted; identity-sum admission is extended by
+  [ADR-0019](ADR-0019-composable-private-reductions.md)
 - Date: 2026-08-24
 
 ## Context

@@ -40,10 +40,10 @@ drawn on the runtime page.
 
 Admitted launches enqueue through the CUDA Driver API on the current
 PyTorch stream and return immediately. Submitted tensors are retained
-through `record_stream()`, storage stays owned by PyTorch, and nothing
-synchronizes, copies, casts, or falls back behind your back. Emitted
-kernels pin their launch width with `.reqntid`, so a geometry mismatch
-fails at the driver instead of running wrong.
+through `record_stream()`, storage stays owned by PyTorch, and the launch
+does not synchronize, copy, cast, or fall back. Emitted kernels pin their
+launch width with `.reqntid`, so a geometry mismatch fails at the driver
+instead of running with the wrong geometry.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 

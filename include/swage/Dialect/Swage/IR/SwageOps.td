@@ -171,8 +171,29 @@ def Swage_ReduceOp : Swage_Op<"reduce", [IsolatedFromAbove,
     The result type equals the yield type. Over an empty segment the result
     is the identity of `kind`: `sum` -> 0, `max` -> negative infinity or the
     minimum integer, `min` -> positive infinity or the maximum integer.
-    Every admitted kind is associative and commutative with a known
-    identity; that gate is what licenses split reductions later.
+
+    Every element contributes exactly once. The order in which the yielded
+    values are combined is not part of the operation: a lowering may fold
+    them left to right, reduce them as a tree, or reduce parts of the
+    segment separately and merge the partial results. What stays guaranteed
+    depends on the kind and the element type:
+
+    - `max` and `min` are associative and commutative, so the result does
+      not depend on the order. A floating-point `max` is NaN when any
+      element is NaN.
+    - Floating-point `sum` is commutative but not associative. The result
+      equals the exact sum of the elements only up to rounding, and the
+      rounding depends on the order that the lowering and the schedule
+      choose. Two lowerings, or two schedules of one program, may return
+      different sums, and bitwise equality between them is not guaranteed.
+      The difference is rounding error: it is bounded relative to the sum of
+      the absolute values of the elements, and it can be large relative to
+      the result when the elements cancel.
+    - Integer element types pass the verifier, and no lowering admits them.
+      The overflow behavior of an integer `sum` is not defined.
+
+    Swage lowerings add no fast-math flags, so a later pass has no license
+    to reorder a sum once a lowering has fixed its order.
 
     The operation reads the values and offsets buffers behind the segment
     handle. It declares that read on its segment operand in addition to the

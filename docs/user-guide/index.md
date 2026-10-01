@@ -2,9 +2,17 @@
 
 # User Guide
 
-The user guide explains how Swage thinks about ragged data and how to use
-the supported public surface. It reads in order; each page builds on the
-one before it.
+The user guide explains how Swage models ragged data and how to use the
+public surface. Those two do not meet yet: segments are not usable from
+Python. The first page describes the segment storage model, which only
+private qualification executes today. The next two pages write and launch
+the one public kernel, a fixed-block vector add that uses no segment. The
+last page returns to the model and states which parts of it are public.
+
+Status labels are load-bearing everywhere in this documentation. Public
+today is supported application surface. Private qualification is tested
+contributor machinery, not public API. Planned work has not passed a
+public gate.
 
 Runnable snippets in this guide state one of three requirement tiers:
 
@@ -17,20 +25,22 @@ Runnable snippets in this guide state one of three requirement tiers:
 - **CUDA GPU**: a CUDA-enabled PyTorch build, an admitted NVIDIA GPU, and
   the installed driver. Required to launch.
 
-Status labels are load-bearing everywhere in this documentation. Public
-today is supported application surface. Private qualification is tested
-contributor machinery, not public API. Planned work has not passed a
-public gate.
+Two committed examples use the native build:
+`examples/emit_fixed_vector_add.py` runs at the native-build tier, and
+`examples/fixed_vector_add.py` runs at the CUDA GPU tier. The
+[Support Matrix](../reference/support-matrix.md) lists the versions each
+tier is tested with.
 
 Read the guide in this order:
 
-1. [Ragged Data](ragged-data.md): the storage model behind everything.
+1. [Ragged Data](ragged-data.md): the segment storage model and its
+   offsets contract. Private qualification.
 2. [Writing Kernels](writing-kernels.md): capture, the kernel language,
-   and compile-only emission.
+   and compile-only emission of the fixed-block kernel. Public today.
 3. [Launching Kernels](launching.md): what happens between `launch()`
-   and the GPU.
+   and the GPU for that kernel. Public today.
 4. [Execution Model](execution-model.md): segments, tasks, and tiles,
-   and how execution machinery grows from them.
+   and which of them each status covers.
 
 Continue with [Ragged Data](ragged-data.md), or jump to the
 [API reference](../reference/index.md) for exact contracts.

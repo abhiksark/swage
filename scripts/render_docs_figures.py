@@ -201,7 +201,7 @@ def _segsum_include() -> str:
         ("torch", "ybar, fill=swpurplefill, draw=swpurple"),
     )
     lines = [_series_line(rows, impl, style) for impl, style in styles]
-    lines.append("\\legend{swage, triton (tuned), torch (CUB)}\n")
+    lines.append("\\legend{swage, triton (per-segment), torch (CUB)}\n")
     return "".join(lines)
 
 

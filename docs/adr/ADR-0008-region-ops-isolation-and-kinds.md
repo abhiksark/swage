@@ -1,7 +1,9 @@
+<!-- docs/adr/ADR-0008-region-ops-isolation-and-kinds.md -->
 # ADR-0008: Region ops with explicit captures and kind-based reduction
 
 - Status: accepted
 - Date: 2026-08-18
+- Amended: 2026-10-02, the statement about associativity
 
 ## Context
 
@@ -31,12 +33,23 @@ arguments after the element argument, in order:
 }
 ```
 
-`swage.reduce` combines with a `kind` enum — initially `sum`, `max`,
-`min` — while its region is the per-element transform. Every admitted
-kind must be associative and commutative with a known identity; that
-gate is what later licenses split reductions. Identities per
+`swage.reduce` combines with a `kind` enum, initially `sum`, `max`, and
+`min`, while its region is the per-element transform. Every admitted
+kind has a known identity and no fixed combining order. That freedom is
+what lets a lowering split a reduction into partial results and a merge
+([ADR-0017](ADR-0017-private-split-cta-reductions.md)). Identities per
 element type: `sum` → 0, `max` → −∞ / minimum integer, `min` → +∞ /
 maximum integer.
+
+This record first said that every admitted kind must be associative and
+commutative. That holds for `max` and `min`, whose result does not depend
+on the order. It does not hold for floating-point `sum`, which is
+commutative but not associative: the result depends on the order a
+lowering and a schedule choose, within rounding, and two schedules need
+not agree bit for bit
+([ADR-0019](ADR-0019-composable-private-reductions.md)). Integer `sum`
+has no lowering, and its overflow behavior is not defined. The operation
+description in `SwageOps.td` states the current contract.
 
 Semantic contract:
 

@@ -202,6 +202,26 @@ For an empty segment, the result is the kind's identity:
 - `min`: positive infinity for floating-point values, or the maximum
   integer for the integer type.
 
+Every element contributes exactly once, and the kind does not fix the order
+in which the yielded values are combined. A lowering may fold them left to
+right, reduce them as a tree, or reduce parts of the segment separately and
+merge the partial results. What stays guaranteed depends on the kind and the
+element type:
+
+- `max` and `min`: the result does not depend on the order. A
+  floating-point `max` is NaN when any element is NaN.
+- Floating-point `sum`: the result equals the exact sum only up to rounding,
+  and the rounding depends on the order that the lowering and the schedule
+  choose. Bitwise equality between two lowerings, or between two schedules
+  of one program, is not guaranteed. The difference is rounding error: it
+  is bounded relative to the sum of the absolute values of the elements, and
+  it can be large relative to the result when the elements cancel.
+- Integer `sum`: the overflow behavior is not defined, and no lowering
+  admits an integer element type.
+
+Lowerings add no fast-math flags. The current lowerings admit `sum` and
+`max` over `f32` and reject `min`.
+
 ### `swage.map_store`
 
 ```mlir
@@ -268,7 +288,9 @@ element, respectively.
   is still removable. `swage.make_segment` and `swage.segment_id` read
   no memory and stay effect-free.
 
-For exhaustive operand and trait tables, use the generated
+Continue with [Segmented Reductions](../internals/segmented-reductions.md)
+for the subset of these shapes that a lowering admits today. For exhaustive
+operand and trait tables, go back to the generated
 [Swage Dialect reference](../internals/swage-dialect.md). For `swage-opt`
-and the registered pass surface, continue with
+and the registered pass surface, use
 [Compiler Tools and Passes](../internals/compiler-tools.md).
