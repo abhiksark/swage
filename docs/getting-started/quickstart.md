@@ -5,10 +5,12 @@
 This tutorial takes the canonical fixed vector-add kernel from source
 capture to a verified CUDA result. Capture works on a wheel-only install,
 emitting MLIR requires the native build, and the launch at the end
-requires a CUDA GPU. The committed
+requires a CUDA GPU. Two committed scripts follow the same steps.
+`examples/emit_fixed_vector_add.py` stops after emission, so it runs with
+the native build alone and needs no GPU and no PyTorch.
 [`examples/fixed_vector_add.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_add.py)
-contains this walkthrough as one runnable script, using metadata
-inference in place of the explicit signature.
+runs the whole walkthrough, using metadata inference in place of the
+explicit signature, and needs a CUDA GPU.
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
@@ -97,6 +99,13 @@ The printed module is verified semantic MLIR: one function carrying the
 logical `swage.program_id` operation surrounded by ordinary `arith` and
 `vector` operations, with source locations preserved. Nothing has touched
 a GPU yet.
+
+The emit-only example runs this step as a script, which is a way to check
+a native build on a machine without a GPU:
+
+```bash
+PYTHONPATH=build/python_packages python examples/emit_fixed_vector_add.py
+```
 
 ## Launch on CUDA
 

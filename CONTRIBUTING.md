@@ -14,6 +14,8 @@ work.
 - Keep internal milestone codenames in the roadmap, maintainer planning, and
   compatibility redirects; use capability names in project surfaces.
 - Add tests with behavior changes and run the applicable tier.
+- Record every change to what the public frontend accepts or rejects, and
+  every removal or rename of a public name, in `CHANGELOG.md`.
 - Keep the LLVM pin unchanged outside a dedicated compatibility change.
 - Do not add Triton, a second production IR, or silent backend fallback.
 - A GPU is not required for Python, documentation, dialect, and CPU-lowering
