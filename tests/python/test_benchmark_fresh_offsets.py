@@ -55,6 +55,38 @@ def _environment(fresh_offsets, triton_version="3.7.0"):
     )
 
 
+_IDENTITY = {
+    "revision": "abc123",
+    "clean": True,
+    "llvm": "llvmorg-22.1.8",
+    "frontend": "f" * 64,
+    "native": [
+        ["_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so", 10, 20],
+        ["libSwagePythonCAPI.so.22.1", 30, 40],
+    ],
+}
+
+
+def _imported_code(fresh_offsets, **changes):
+    """Build the imported-code block of a run from one consistent checkout."""
+    root = pathlib.Path("/work/swage")
+    libraries = root / "build/python_packages/mlir_swage/_mlir_libs"
+    fields = {
+        "root": root,
+        "package": root / "python/swage",
+        "same_checkout": True,
+        "identity": dict(_IDENTITY),
+        "native_extension": libraries / _IDENTITY["native"][0][0],
+        "native_library_paths": [
+            str(libraries / name) for name, *_ in _IDENTITY["native"]
+        ],
+        "mlir_swage_locations": [str(libraries.parent)],
+        "llvm_linked": "22.1.8",
+    }
+    fields.update(changes)
+    return fresh_offsets._imported_code(**fields)
+
+
 def _git_results(status, calls):
     """Return a fake git that logs each command and answers in order."""
     results = iter(
@@ -622,6 +654,7 @@ def test_record_carries_provenance_and_the_smoke_label(fresh_offsets):
         environment=_environment(fresh_offsets),
         configuration=configuration,
         results=[],
+        imported_code=_imported_code(fresh_offsets),
         smoke=True,
     )
 
@@ -650,6 +683,7 @@ def test_full_record_is_not_labelled_smoke(fresh_offsets):
         environment=_environment(fresh_offsets, triton_version=None),
         configuration={},
         results=[],
+        imported_code=_imported_code(fresh_offsets),
         smoke=False,
     )
 
@@ -672,8 +706,151 @@ def test_record_rejects_missing_environment_provenance(fresh_offsets, field):
             environment=environment,
             configuration={},
             results=[],
+            imported_code=_imported_code(fresh_offsets),
             smoke=False,
         )
+
+
+def test_package_from_this_checkout_is_accepted(fresh_offsets, tmp_path):
+    """Measure the swage package that sits beside the benchmark script."""
+    package = tmp_path / "python" / "swage"
+    package.mkdir(parents=True)
+    linked = tmp_path.parent / f"{tmp_path.name}-link"
+    linked.symlink_to(tmp_path)
+
+    assert fresh_offsets._same_checkout(tmp_path, package, smoke=False)
+    assert fresh_offsets._same_checkout(
+        tmp_path, linked / "python" / "swage", smoke=False
+    )
+
+
+def test_full_run_refuses_a_package_from_another_checkout(
+    fresh_offsets, tmp_path
+):
+    """Do not attribute another checkout's code to this revision."""
+    root = tmp_path / "swage-review"
+    package = tmp_path / "swage" / "python" / "swage"
+    root.mkdir()
+    package.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError) as refusal:
+        fresh_offsets._same_checkout(root, package, smoke=False)
+    assert str(package) in str(refusal.value)
+    assert str(root) in str(refusal.value)
+    # A sibling whose name only extends the checkout name is still outside.
+    assert not fresh_offsets._same_checkout(root, package, smoke=True)
+    assert not fresh_offsets._same_checkout(
+        tmp_path / "swage", tmp_path / "swage-review", smoke=True
+    )
+
+
+def test_native_library_paths_follow_the_runtime_identity(
+    fresh_offsets, tmp_path
+):
+    """Resolve exactly the files the runtime's native identity names."""
+    build = tmp_path / "build" / "_mlir_libs"
+    other = tmp_path / "source" / "_mlir_libs"
+    build.mkdir(parents=True)
+    other.mkdir(parents=True)
+    for name, *_ in _IDENTITY["native"]:
+        (build / name).write_bytes(b"")
+    (build / "unrelated.so").write_bytes(b"")
+    (build / "libSwagePythonCAPI.so").symlink_to("libSwagePythonCAPI.so.22.1")
+    native = [*_IDENTITY["native"], ["libSwagePythonCAPI.so", 30, 40]]
+    linked = tmp_path / "linked-build"
+    linked.symlink_to(tmp_path / "build")
+
+    # One path per identity entry, with the directory resolved so a build
+    # reached through a symlink is reported where it really lives.
+    assert fresh_offsets._native_library_paths(
+        native, [str(other), str(linked / "_mlir_libs")]
+    ) == sorted(str(build / name) for name, *_ in native)
+    assert fresh_offsets._native_library_paths(None, [str(build)]) == []
+
+
+def test_imported_code_identifies_the_package_and_the_native_build(
+    fresh_offsets,
+):
+    """Record which package and which native build produced the numbers."""
+    libraries = "/work/swage/build/python_packages/mlir_swage/_mlir_libs"
+
+    assert _imported_code(fresh_offsets) == {
+        "benchmark_checkout": "/work/swage",
+        "swage_package": "/work/swage/python/swage",
+        "swage_package_in_checkout": True,
+        "compiler_identity": _IDENTITY,
+        "native_extension": f"{libraries}/{_IDENTITY['native'][0][0]}",
+        "native_library_paths": [
+            f"{libraries}/{name}" for name, *_ in _IDENTITY["native"]
+        ],
+        "native_libraries_in_checkout": True,
+        "mlir_swage_locations": [
+            "/work/swage/build/python_packages/mlir_swage"
+        ],
+        "llvm_linked": "22.1.8",
+    }
+    outside = _imported_code(
+        fresh_offsets,
+        native_library_paths=["/work/other/build/libSwagePythonCAPI.so"],
+    )
+    assert outside["native_libraries_in_checkout"] is False
+
+
+def test_imported_code_reads_the_runtime_compiler_identity(fresh_offsets):
+    """Store the identity the runtime itself uses for its cache key."""
+    from swage import _runtime
+
+    identity = _runtime._compiler_identity()
+    block = _imported_code(fresh_offsets, identity=identity)
+
+    assert set(identity) >= {"frontend", "native"}
+    assert block["compiler_identity"] == identity
+    assert block["compiler_identity"]["frontend"] == identity["frontend"]
+
+
+def test_record_carries_the_imported_code(fresh_offsets):
+    """Keep the package path, compiler identity, and LLVM in every record."""
+    record = fresh_offsets._record(
+        source={"revision": "abc123", "worktree_clean": True, "dirty": []},
+        environment=_environment(fresh_offsets),
+        configuration={},
+        results=[],
+        imported_code=_imported_code(fresh_offsets),
+        smoke=False,
+    )
+
+    assert record["imported_code"] == _imported_code(fresh_offsets)
+    assert record["imported_code"]["compiler_identity"]["frontend"] == "f" * 64
+    assert record["imported_code"]["llvm_linked"] == "22.1.8"
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"same_checkout": False}, "/work/swage/python/swage"),
+        ({"identity": {**_IDENTITY, "frontend": None}}, "frontend"),
+        ({"identity": {**_IDENTITY, "native": None}}, "native"),
+        ({"native_library_paths": []}, "native_library_paths"),
+        ({"llvm_linked": None}, "llvm_linked"),
+    ],
+)
+def test_full_record_requires_identified_code(
+    fresh_offsets, changes, message
+):
+    """Refuse a full record whose measured code cannot be identified."""
+    imported_code = _imported_code(fresh_offsets, **changes)
+    arguments = {
+        "source": {"revision": "abc123", "worktree_clean": True, "dirty": []},
+        "environment": _environment(fresh_offsets),
+        "configuration": {},
+        "results": [],
+        "imported_code": imported_code,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        fresh_offsets._record(**arguments, smoke=False)
+    record = fresh_offsets._record(**arguments, smoke=True)
+    assert record["imported_code"] == imported_code
 
 
 def test_record_rejects_a_dirty_tree_outside_smoke(fresh_offsets):
@@ -684,5 +861,6 @@ def test_record_rejects_a_dirty_tree_outside_smoke(fresh_offsets):
             environment=_environment(fresh_offsets),
             configuration={},
             results=[],
+            imported_code=_imported_code(fresh_offsets),
             smoke=False,
         )

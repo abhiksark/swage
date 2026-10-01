@@ -16,6 +16,7 @@ few tiny layouts; a smoke record is labelled as not evidence.
 """
 
 import argparse
+import importlib.util
 import itertools
 import json
 import pathlib
@@ -154,6 +155,104 @@ def _check_output(root, output, *, smoke):
         raise ValueError(
             "smoke records must not be written under benchmarks/results"
         )
+
+
+def _same_checkout(root, package, *, smoke):
+    """Return whether the imported swage package belongs to this checkout.
+
+    The revision in the record describes the checkout that holds this
+    script. A package imported from another checkout, for example through
+    ``PYTHONPATH`` or an editable install, would be measured under that
+    revision without belonging to it.
+
+    Args:
+        root: Root of the checkout that holds the benchmark script.
+        package: Directory of the imported ``swage`` package.
+        smoke: Whether this is a smoke run, which records the mismatch.
+
+    Returns:
+        True when the package is inside the checkout.
+
+    Raises:
+        RuntimeError: If a full run imported the package from elsewhere.
+    """
+    root = root.resolve()
+    package = package.resolve()
+    inside = package.is_relative_to(root)
+    if not inside and not smoke:
+        raise RuntimeError(
+            "fresh-offsets benchmark must measure its own checkout: the "
+            f"imported swage package is {package}, but the benchmark runs "
+            f"from {root}"
+        )
+    return inside
+
+
+def _native_library_paths(native, locations):
+    """Resolve the library files that the runtime's native identity names.
+
+    Args:
+        native: The ``native`` field of the runtime compiler identity, a
+            list of ``[file name, size, mtime]``, or None.
+        locations: Search locations of ``mlir_swage._mlir_libs``.
+
+    Returns:
+        One sorted path per named file that exists. The directory is
+        resolved, so a build tree reached through a symlink is reported
+        where it really is; the file name is kept as the identity lists it.
+    """
+    names = [name for name, *_ in native or ()]
+    return sorted(
+        str(path)
+        for location in locations
+        for name in names
+        if (path := pathlib.Path(location).resolve() / name).is_file()
+    )
+
+
+def _imported_code(
+    *,
+    root,
+    package,
+    same_checkout,
+    identity,
+    native_extension,
+    native_library_paths,
+    mlir_swage_locations,
+    llvm_linked,
+):
+    """Return which package and native build the run actually measured.
+
+    Args:
+        root: Resolved root of the checkout that holds this script.
+        package: Resolved directory of the imported ``swage`` package.
+        same_checkout: Whether that package is inside ``root``.
+        identity: ``swage._runtime._compiler_identity()``, stored as
+            returned. Its ``frontend`` digests the package sources and its
+            ``native`` lists the native libraries with size and mtime.
+        native_extension: File of the loaded native extension module.
+        native_library_paths: Resolved paths of the ``native`` files.
+        mlir_swage_locations: Search locations of ``mlir_swage``.
+        llvm_linked: LLVM version the native extension was linked against.
+
+    Returns:
+        The imported-code block of the record.
+    """
+    return {
+        "benchmark_checkout": str(root),
+        "swage_package": str(package),
+        "swage_package_in_checkout": same_checkout,
+        "compiler_identity": identity,
+        "native_extension": str(native_extension),
+        "native_library_paths": list(native_library_paths),
+        "native_libraries_in_checkout": bool(native_library_paths)
+        and all(
+            pathlib.Path(path).is_relative_to(root)
+            for path in native_library_paths
+        ),
+        "mlir_swage_locations": list(mlir_swage_locations),
+        "llvm_linked": llvm_linked,
+    }
 
 
 def _optional_triton():
@@ -402,7 +501,34 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
     }
 
 
-def _record(*, source, environment, configuration, results, smoke):
+def _require_identified_code(source, imported_code):
+    """Refuse a full record whose measured code is not pinned down."""
+    if not source["worktree_clean"]:
+        raise ValueError("a full record requires a clean source worktree")
+    if not imported_code["swage_package_in_checkout"]:
+        raise ValueError(
+            "a full record requires the swage package of its own checkout: "
+            f"imported {imported_code['swage_package']}, benchmark in "
+            f"{imported_code['benchmark_checkout']}"
+        )
+    identity = imported_code["compiler_identity"]
+    missing = [
+        field for field in ("frontend", "native") if identity.get(field) is None
+    ]
+    if not imported_code["native_library_paths"]:
+        missing.append("native_library_paths")
+    if imported_code["llvm_linked"] is None:
+        missing.append("llvm_linked")
+    if missing:
+        raise ValueError(
+            "a full record must identify the code it measured; missing: "
+            f"{', '.join(missing)}"
+        )
+
+
+def _record(
+    *, source, environment, configuration, results, imported_code, smoke
+):
     """Assemble the JSON record, refusing one that cannot be attributed.
 
     Args:
@@ -410,14 +536,16 @@ def _record(*, source, environment, configuration, results, smoke):
         environment: Machine identity from ``_environment``.
         configuration: Benchmark contract from ``_configuration``.
         results: One row per distribution.
+        imported_code: Measured package and build from ``_imported_code``.
         smoke: Whether this was a smoke run.
 
     Returns:
         The complete record.
 
     Raises:
-        ValueError: If provenance is missing, or the worktree is dirty
-            outside a smoke run.
+        ValueError: If provenance is missing, or if a run that is not a
+            smoke run has a dirty worktree, measured a package from another
+            checkout, or cannot identify the code it measured.
     """
     missing = [
         field
@@ -434,8 +562,8 @@ def _record(*, source, environment, configuration, results, smoke):
         raise ValueError(
             f"record is missing provenance fields: {', '.join(missing)}"
         )
-    if not smoke and not source["worktree_clean"]:
-        raise ValueError("a full record requires a clean source worktree")
+    if not smoke:
+        _require_identified_code(source, imported_code)
     return {
         "benchmark": "fresh-offsets-segmented-sum",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -446,6 +574,7 @@ def _record(*, source, environment, configuration, results, smoke):
         ),
         "smoke": smoke,
         "source": source,
+        "imported_code": imported_code,
         "environment": environment,
         "configuration": configuration,
         "results": results,
@@ -627,7 +756,19 @@ def main():
     source = _git_metadata(root, allow_dirty=arguments.smoke)
     segment_count, warmups, samples = _sizes(arguments)
 
+    import swage
+
+    package = pathlib.Path(swage.__file__).resolve().parent
+    same_checkout = _same_checkout(root, package, smoke=arguments.smoke)
+    if not same_checkout:
+        print(
+            f"smoke: the imported swage package {package} is outside the "
+            f"benchmark checkout {root}; recorded, not refused",
+            flush=True,
+        )
+
     import torch
+    from mlir_swage._mlir_libs import _swageDialectsNanobind as native_extension
     from swage import _runtime
     from swage._segmented_qualification import _prepare_planned_sum
 
@@ -636,6 +777,26 @@ def main():
             "fresh-offsets benchmark requires CUDA-enabled PyTorch"
         )
     torch.ones(1, device="cuda").sum().item()
+    identity = _runtime._compiler_identity()
+    imported_code = _imported_code(
+        root=root,
+        package=package,
+        same_checkout=same_checkout,
+        identity=identity,
+        native_extension=pathlib.Path(native_extension.__file__).resolve(),
+        native_library_paths=_native_library_paths(
+            identity["native"],
+            importlib.util.find_spec(
+                "mlir_swage._mlir_libs"
+            ).submodule_search_locations,
+        ),
+        mlir_swage_locations=importlib.util.find_spec(
+            "mlir_swage"
+        ).submodule_search_locations,
+        llvm_linked=getattr(native_extension.swage, "__llvm_version__", None),
+    )
+    if not arguments.smoke:
+        _require_identified_code(source, imported_code)
     triton = _optional_triton()
     environment = _environment(
         torch,
@@ -673,6 +834,7 @@ def main():
             triton_available=triton is not None,
         ),
         results=results,
+        imported_code=imported_code,
         smoke=arguments.smoke,
     )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
