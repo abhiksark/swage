@@ -6,10 +6,22 @@ add_custom_target(check-swage-unit
 set_target_properties(check-swage-unit PROPERTIES FOLDER "Tests")
 
 add_unittest(check-swage-unit SwageUnitTests
+  CodegenCAPITest.cpp
+  DialectsCAPITest.cpp
   TaskClassifierTest.cpp
 )
 
+# The C API tests reach Swage only through SwageCAPI and the MLIR C API, as a
+# C embedder would. MLIRCAPIGPU is for one test that parses a gpu.module.
 target_link_libraries(SwageUnitTests
   PRIVATE
+  MLIRCAPIArith
+  MLIRCAPIFunc
+  MLIRCAPIGPU
+  MLIRCAPIIR
+  MLIRCAPIMath
+  MLIRCAPIMemRef
+  MLIRCAPIVector
   MLIRSwagePlan
+  SwageCAPI
 )

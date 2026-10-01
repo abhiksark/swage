@@ -349,13 +349,50 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   return emitPTX(source, gpuModule, target, ptx);
 }
 
+/// A null module has no context to report on, so it is the one failure
+/// without a diagnostic. Every other rejected argument is reported on the
+/// module, which keeps the header's promise that a failed call always leaves
+/// a diagnostic behind.
+LogicalResult verifyStringCallbacks(MlirModule module,
+                                    SwageStringCallback loweredCallback,
+                                    SwageStringCallback ptxCallback) {
+  if (mlirModuleIsNull(module))
+    return failure();
+  if (!loweredCallback)
+    return unwrap(module).emitError("loweredCallback must not be null");
+  if (!ptxCallback)
+    return unwrap(module).emitError("ptxCallback must not be null");
+  return success();
+}
+
+/// Reports why swageMaterializeSegmentedPlan refused its buffer or callback
+/// arguments. The offsets pointer is only tested, so its element type is not
+/// part of this signature.
+MlirLogicalResult reportInvalidPlanArguments(MlirModule module,
+                                             const void *offsets,
+                                             intptr_t offsetCount) {
+  if (mlirModuleIsNull(module))
+    return mlirLogicalResultFailure();
+  ModuleOp source = unwrap(module);
+  if (offsetCount < 0)
+    source.emitError() << "offsetCount must not be negative, got "
+                       << offsetCount;
+  else if (offsetCount && !offsets)
+    source.emitError() << "offsets must not be null when offsetCount is "
+                       << offsetCount;
+  else
+    source.emitError("warpCallback, ctaCallback, partialCallback, and "
+                     "mergeCallback must not be null");
+  return mlirLogicalResultFailure();
+}
+
 } // namespace
 
 MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -372,7 +409,7 @@ MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -389,7 +426,7 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -406,7 +443,7 @@ MlirLogicalResult swageCompilePersistentSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -423,7 +460,7 @@ MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -440,7 +477,7 @@ MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (!loweredCallback || !ptxCallback)
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
@@ -460,9 +497,10 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
     void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData) {
-  if (offsetCount < 0 || (offsetCount && !offsets) || !warpCallback ||
-      !ctaCallback || !partialCallback || !mergeCallback)
-    return mlirLogicalResultFailure();
+  if (mlirModuleIsNull(module) || offsetCount < 0 ||
+      (offsetCount && !offsets) || !warpCallback || !ctaCallback ||
+      !partialCallback || !mergeCallback)
+    return reportInvalidPlanArguments(module, offsets, offsetCount);
 
   ModuleOp source = unwrap(module);
   if (failed(verify(source)))

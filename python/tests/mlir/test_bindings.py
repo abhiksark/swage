@@ -23,7 +23,7 @@ def test_builds_and_round_trips_every_swage_operation():
         swage.register_dialects(context)
         f32 = ir.F32Type.get()
         index = ir.IndexType.get()
-        segment = ir.Type.parse("!swage.segment<f32>")
+        segment = swage.SegmentType.get(f32)
         dynamic = ir.ShapedType.get_dynamic_size()
         values = ir.MemRefType.get([dynamic], f32)
         offsets = ir.MemRefType.get(
@@ -137,3 +137,48 @@ def test_rejects_make_segment_element_type_mismatch():
                 }
                 """
             )
+
+
+def test_segment_type_constructor_builds_the_parsed_type():
+    """Build `!swage.segment<T>` without going through the parser."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        f32 = ir.F32Type.get()
+        parsed = ir.Type.parse("!swage.segment<f32>")
+
+        built = swage.SegmentType.get(f32)
+
+        assert built == parsed
+        assert str(built) == "!swage.segment<f32>"
+        assert built.element_type == f32
+        assert isinstance(built, swage.SegmentType)
+        # A parsed type arrives as the same class, through its type ID.
+        assert isinstance(parsed, swage.SegmentType)
+        assert swage.SegmentType.isinstance(parsed)
+        assert not swage.SegmentType.isinstance(f32)
+        with pytest.raises(ValueError, match="Cannot cast type to SegmentType"):
+            swage.SegmentType(f32)
+
+
+def test_segment_type_constructor_rejects_a_non_scalar_element():
+    """Report the dialect's own diagnostic instead of asserting."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        buffer = ir.Type.parse("memref<2xf32>")
+
+        with pytest.raises(
+            ValueError,
+            match="segment element type must be an integer or float type, "
+            "got 'memref<2xf32>'",
+        ):
+            swage.SegmentType.get(buffer)
+
+
+def test_segment_type_constructor_needs_the_dialect_loaded():
+    """Fail with a message where MLIR itself would abort the process."""
+    with ir.Context():
+        with pytest.raises(
+            ValueError,
+            match="the swage dialect is not loaded in this context",
+        ):
+            swage.SegmentType.get(ir.F32Type.get())

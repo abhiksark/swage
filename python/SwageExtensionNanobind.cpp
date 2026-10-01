@@ -121,9 +121,12 @@ MlirModule unwrapModule(nb::object moduleObject) {
   return module;
 }
 
+/// `blockSize` and `useTaskIds` reach only the kinds whose C entry point
+/// takes them, the fixed and the segmented one. The other kinds compile at a
+/// width the C API fixes, so their callers pass neither.
 std::pair<std::string, std::string>
-compilePTX(nb::object moduleObject, std::string kernelName, int64_t blockSize,
-           std::string target, PTXKind kind, bool useTaskIds = false) {
+compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
+           PTXKind kind, int64_t blockSize = 0, bool useTaskIds = false) {
   MlirModule module = unwrapModule(moduleObject);
 
   std::string lowered;
@@ -234,12 +237,31 @@ NB_MODULE(_swageDialectsNanobind, m) {
       },
       nb::arg("context"), nb::arg("load") = true);
 
+  // `!swage.segment<T>`. A type that reaches Python from the parser or from
+  // an operation arrives as this class through its registered type ID.
+  auto segmentType = mlir::python::nanobind_adaptors::mlir_type_subclass(
+      swageM, "SegmentType", swageTypeIsASegment, swageSegmentTypeGetTypeID);
+  segmentType.def_classmethod(
+      "get",
+      [](const nb::object &cls, MlirType elementType) {
+        mlir::python::CollectDiagnosticsToStringScope diagnostics(
+            mlirTypeGetContext(elementType));
+        MlirType segment = swageSegmentTypeGet(elementType);
+        if (mlirTypeIsNull(segment))
+          throw nb::value_error(diagnostics.takeMessage().c_str());
+        return cls(segment);
+      },
+      nb::arg("cls"), nb::arg("element_type"));
+  segmentType.def_property_readonly("element_type", [](MlirType self) {
+    return swageSegmentTypeGetElementType(self);
+  });
+
   swageM.def(
       "_compile_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target) {
-        return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), PTXKind::Fixed);
+        return compilePTX(module, std::move(kernelName), std::move(target),
+                          PTXKind::Fixed, blockSize);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"));
@@ -247,36 +269,36 @@ NB_MODULE(_swageDialectsNanobind, m) {
       "_compile_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,
          std::string target, bool useTaskIds) {
-        return compilePTX(module, std::move(kernelName), blockSize,
-                          std::move(target), PTXKind::Segmented, useTaskIds);
+        return compilePTX(module, std::move(kernelName), std::move(target),
+                          PTXKind::Segmented, blockSize, useTaskIds);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("block_size"),
       nb::arg("target"), nb::arg("use_task_ids") = false);
   swageM.def(
       "_compile_fused_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::Fused);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_persistent_segmented_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 512, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::Persistent);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_split_partial_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::SplitPartial);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
   swageM.def(
       "_compile_split_merge_reduction_ptx",
       [](nb::object module, std::string kernelName, std::string target) {
-        return compilePTX(module, std::move(kernelName), 128, std::move(target),
+        return compilePTX(module, std::move(kernelName), std::move(target),
                           PTXKind::SplitMerge);
       },
       nb::arg("module"), nb::arg("kernel_name"), nb::arg("target"));
