@@ -1,5 +1,18 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20.0)
+
+# Checked before project(), which would otherwise write compiler detection
+# files into the source tree.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR
+    "Swage does not support in-source builds: the build directory is the "
+    "source directory ${CMAKE_SOURCE_DIR}.\n"
+    "Configure into a separate directory:\n"
+    "  cmake -S . -B build\n"
+    "Then delete the CMakeCache.txt and CMakeFiles/ that this attempt left "
+    "in the source directory.")
+endif()
+
 project(swage LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")

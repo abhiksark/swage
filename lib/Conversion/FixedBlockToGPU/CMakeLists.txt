@@ -1,3 +1,4 @@
+# lib/Conversion/FixedBlockToGPU/CMakeLists.txt
 add_mlir_conversion_library(MLIRSwageFixedBlockToGPU
   FixedBlockToGPU.cpp
 
@@ -10,6 +11,7 @@ add_mlir_conversion_library(MLIRSwageFixedBlockToGPU
   MLIRGPUDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIRNVVMDialect
   MLIRPass
   MLIRSCFDialect
   MLIRSwage
