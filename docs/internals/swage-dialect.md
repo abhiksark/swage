@@ -21,8 +21,9 @@ The dialect currently defines:
 
 Region operations are isolated from above. Outer scalar values enter through
 explicit `captures(...)` operands, in order. Ordinary scalar arithmetic uses
-upstream `arith` and `math` operations inside regions. `map_store` is the only
-effectful Swage operation and writes only the segment's corresponding output
+upstream `arith` and `math` operations inside regions. `extent`, `map`, `reduce`,
+and `map_store` declare a read of their segment. `map_store` is the only Swage
+operation that writes, and it writes only the segment's corresponding output
 range.
 
 The type and operations parse, print, and verify independently of whether a
