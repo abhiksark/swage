@@ -245,6 +245,9 @@ materializeSegmentedPlan(nb::object moduleObject,
                          int64_t valueCount, int64_t segmentCount,
                          int64_t warpMaxElements, int64_t ctaChunkElements) {
   MlirModule module = unwrapModule(moduleObject);
+  // The plan pass runs on the caller's context, which the runtime shares
+  // between threads; keep it apart from a compile that released the GIL.
+  ContextUse use(mlirModuleGetContext(module));
   mlir::python::CollectDiagnosticsToStringScope diagnostics(
       mlirModuleGetContext(module));
   std::vector<int32_t> warp;
