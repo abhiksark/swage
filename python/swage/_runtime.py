@@ -14,6 +14,8 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
+import warnings
 import weakref
 from collections.abc import Mapping
 from typing import NamedTuple
@@ -296,28 +298,77 @@ def _package_dir():
     return pathlib.Path(__file__).resolve().parent
 
 
-def _frontend_digest(package):
+def _frontend_sources(package):
+    """Return `(relative name, path)` for each frontend source, sorted.
+
+    Only regular files that Python can import count: a dangling symlink such
+    as an editor lock file, a directory named like a module, and anything
+    under a name that starts with a dot are skipped.
+    """
+    sources = []
+    for path in package.rglob("*.py"):
+        relative = path.relative_to(package)
+        hidden = any(part.startswith(".") for part in relative.parts)
+        if not hidden and path.is_file():
+            sources.append((relative.as_posix(), path))
+    return sorted(sources)
+
+
+def _changed_ns(path):
+    """Return when `path` last changed, in nanoseconds since the epoch.
+
+    Both the content time and the inode time count, for the file and for a
+    symlink leading to it, so a rewritten, replaced, or retargeted file is
+    seen whatever its modification time was set to.
+    """
+    return max(
+        changed
+        for details in (path.stat(), path.lstat())
+        for changed in (details.st_mtime_ns, details.st_ctime_ns)
+    )
+
+
+def _too_new(path):
+    """Describe a file that cannot be told apart from the loaded code."""
+    return (
+        f"{path} is not older than this process, so it may differ from the "
+        "code that was loaded"
+    )
+
+
+def _hash_frontend(package, started=None):
     """Hash every Python source file of the package in sorted name order.
 
     Args:
         package: Directory of the `swage` package.
+        started: The process start time in nanoseconds, or None to hash the
+            files whatever their age. A source changed at or after `started`
+            may differ from the code the process already loaded.
 
     Returns:
-        The SHA-256 hex digest over each file's relative name, length, and
-        bytes, or None when the package holds no Python source to identify.
+        `(digest, None)`, where the SHA-256 hex digest covers each file's
+        relative name, length, and bytes, or `(None, problem)` when a file
+        cannot be read, is too new, or the package holds no source.
     """
-    sources = sorted(
-        (path.relative_to(package).as_posix(), path)
-        for path in package.rglob("*.py")
-    )
+    try:
+        sources = _frontend_sources(package)
+        digest = hashlib.sha256()
+        for name, path in sources:
+            contents = path.read_bytes()
+            if started is not None and _changed_ns(path) >= started:
+                return None, _too_new(path)
+            digest.update(f"{name}\0{len(contents)}\0".encode())
+            digest.update(contents)
+    except OSError as error:
+        return None, f"cannot read the frontend sources: {error}"
     if not sources:
-        return None
-    digest = hashlib.sha256()
-    for name, path in sources:
-        contents = path.read_bytes()
-        digest.update(f"{name}\0{len(contents)}\0".encode())
-        digest.update(contents)
-    return digest.hexdigest()
+        return None, f"{package} holds no Python source files"
+    return digest.hexdigest(), None
+
+
+def _frontend_digest(package):
+    """Return the frontend digest of the package, or None without one."""
+    return _hash_frontend(package)[0]
 
 
 _NATIVE_EXTENSION = "_swageDialectsNanobind"
@@ -327,38 +378,107 @@ _NATIVE_LIBRARY_PATTERNS = (
 )
 
 
-def _native_identity():
-    """Describe the native compiler libraries without importing them.
+def _native_libraries():
+    """Return the paths of the native compiler libraries.
 
-    Importing the bindings loads all of LLVM, so the libraries are located
-    through the import system and identified by their file metadata.
-
-    Returns:
-        A sorted list of `[file name, size, st_mtime_ns]`, one per file of
-        the nanobind extension and the C API library in
-        `mlir_swage/_mlir_libs`, or None when the bindings are not
-        importable.
+    Importing the bindings loads all of LLVM, so the nanobind extension and
+    the C API library in `mlir_swage/_mlir_libs` are located through the
+    import system instead. The list is empty when the bindings are not
+    importable.
     """
     try:
         spec = importlib.util.find_spec("mlir_swage._mlir_libs")
     except (ImportError, ValueError):
-        return None
+        return []
     if spec is None:
-        return None
+        return []
+    return [
+        path
+        for location in spec.submodule_search_locations or ()
+        for pattern in _NATIVE_LIBRARY_PATTERNS
+        for path in pathlib.Path(location).glob(pattern)
+    ]
+
+
+def _native_identity():
+    """Describe the native compiler libraries by their file metadata.
+
+    Returns:
+        A sorted list of `[file name, size, st_mtime_ns]`, one per file of
+        the nanobind extension and the C API library, or None when the
+        bindings are not importable.
+    """
     libraries = []
-    for location in spec.submodule_search_locations or ():
-        for pattern in _NATIVE_LIBRARY_PATTERNS:
-            for path in pathlib.Path(location).glob(pattern):
-                try:
-                    details = path.stat()
-                except OSError:
-                    continue
-                libraries.append(
-                    [path.name, details.st_size, details.st_mtime_ns]
-                )
+    for path in _native_libraries():
+        try:
+            details = path.stat()
+        except OSError:
+            continue
+        libraries.append([path.name, details.st_size, details.st_mtime_ns])
     if not any(name.startswith(_NATIVE_EXTENSION) for name, *_ in libraries):
         return None
     return sorted(libraries)
+
+
+def _process_start_ns():
+    """Return when this process started, in nanoseconds since the epoch.
+
+    The kernel reports the start in clock ticks since boot, so the result
+    is at most one tick early and never late. None when the kernel does not
+    report it, which is the case off Linux.
+    """
+    try:
+        with open("/proc/self/stat", encoding="ascii") as status:
+            # The command name may hold spaces; fields resume after it.
+            fields = status.read().rpartition(")")[2].split()
+        since_boot = int(fields[19]) * 1_000_000_000 // os.sysconf(
+            "SC_CLK_TCK"
+        )
+        age = time.clock_gettime_ns(time.CLOCK_BOOTTIME) - since_boot
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+    return time.time_ns() - age
+
+
+# Taken at import so that a forked child inherits the start of the process
+# that loaded the code, not the later time of the fork.
+_PROCESS_START_NS = _process_start_ns()
+
+
+def _stale_identity(identity):
+    """Return why `identity` may not describe the code this process runs.
+
+    The identity is read from files on disk, but a process runs the code it
+    loaded, and nothing records which bytes that was. The two are known to
+    agree only when no frontend source and no native library has changed
+    since the process started. A file as new as the process may have been
+    loaded before or after it changed, so it is not trusted.
+
+    Returns:
+        None when every identified file is older than the process and still
+        matches `identity`, otherwise a description of the first mismatch.
+    """
+    started = _PROCESS_START_NS
+    if started is None:
+        return (
+            "the process start time is unavailable, so the loaded code "
+            "cannot be compared with the files on disk"
+        )
+    frontend, problem = _hash_frontend(_package_dir(), started)
+    if problem is not None:
+        return problem
+    if frontend != identity["frontend"]:
+        return "the frontend sources changed after the cache key was derived"
+    for path in _native_libraries():
+        try:
+            changed = _changed_ns(path)
+        except OSError:
+            continue
+        if changed >= started:
+            return _too_new(path)
+    if _native_identity() != identity["native"]:
+        return "the native libraries changed after the cache key was derived"
+    return None
 
 
 def _git_identity(root):
@@ -394,11 +514,13 @@ def _git_identity(root):
 
 
 def _compiler_identity():
-    """Identify the compiler this process loads.
+    """Identify the compiler files this process finds on disk.
 
     `frontend` and `native` identify the code that produces PTX and are the
-    compiler fields of the cache key. `revision` and `clean` describe the
-    surrounding git checkout for diagnostics; they do not gate the cache.
+    compiler fields of the cache key. They describe the files as they are
+    now; `_stale_identity` decides whether that is the code this process
+    loaded. `revision` and `clean` describe the surrounding git checkout
+    for diagnostics; they do not gate the cache.
 
     Returns:
         A dict with the keys `revision`, `clean`, `llvm`, `frontend`, and
@@ -438,12 +560,64 @@ def _cache_key(specialization):
     return hashlib.sha256(encoded).hexdigest()
 
 
+# The uses of the disk cache this process has given up, each warned once:
+# "identity" and "read" end reading and publishing, "write" ends publishing.
+_cache_off = set()
+
+
+def _warn_cache_off(use, reason):
+    """Give up one use of the disk cache, warning the first time."""
+    if use in _cache_off:
+        return
+    _cache_off.add(use)
+    if use == "write":
+        effect = "is not written by this process"
+        reuse = (
+            "New kernels are reused in this process only; published "
+            "entries are still read."
+        )
+    else:
+        effect = "is off for this process"
+        reuse = "Compiled kernels are reused in this process only."
+    warnings.warn(
+        f"Swage persistent cache {effect}: {reason}. {reuse}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def _cache_usable(identity):
+    """Decide whether this process may read and publish disk entries.
+
+    That needs a native compiler, an identified frontend, and an identity
+    known to describe the loaded code. A process that can compile but fails
+    the other two is warned once and keeps to process-local reuse.
+    """
+    if identity["native"] is None or _cache_off & {"identity", "read"}:
+        return False
+    if identity["frontend"] is None:
+        problem = (
+            _hash_frontend(_package_dir())[1]
+            or "the frontend sources are not identified"
+        )
+    else:
+        problem = _stale_identity(identity)
+    if problem is None:
+        return True
+    _warn_cache_off("identity", problem)
+    return False
+
+
 def _compile_cached(specialization, kernel_name, block_size, emit, *,
                     key=None):
     """Return the artifact for one specialization, emitting only on a miss.
 
     `emit` is a zero-argument callable producing the semantic module; it is
     deferred so a warm launch never pays for AST-to-MLIR emission.
+
+    A cache directory that cannot be read or written never fails the call:
+    the artifact is kept for the process and one warning names the cause.
+    An unsafe or corrupt entry is tamper evidence and still raises.
     """
     if key is None:
         key = _cache_key(specialization)
@@ -452,11 +626,13 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         if cached is not None:
             return cached
         identity = _cached_identity()
-        persistent = (
-            identity["frontend"] is not None and identity["native"] is not None
-        )
+        persistent = _cache_usable(identity)
         if persistent:
-            cached = _read_cache_entry(key, specialization)
+            try:
+                cached = _read_cache_entry(key, specialization)
+            except OSError as error:
+                _warn_cache_off("read", f"cannot use {_cache_dir()}: {error}")
+                persistent = False
             if cached is not None:
                 _ptx_cache[key] = cached
                 return cached
@@ -467,9 +643,16 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
             emit(), kernel_name, block_size, target
         )
         artifact = _Artifact(key, lowered, ptx)
-        if persistent:
-            artifact = _write_cache_entry(artifact, specialization)
+        # Retained before any disk write, so no failure below costs it.
         _ptx_cache[key] = artifact
+        # The identity is checked again: the compile may have loaded code
+        # that changed on disk since the lookup above.
+        if persistent and "write" not in _cache_off and _cache_usable(identity):
+            try:
+                artifact = _write_cache_entry(artifact, specialization)
+            except OSError as error:
+                _warn_cache_off("write", f"cannot use {_cache_dir()}: {error}")
+            _ptx_cache[key] = artifact
         return artifact
 
 
@@ -518,7 +701,8 @@ def _read_cache_entry(key, specialization):
     A missing entry is a miss. An incomplete entry is also a miss: it is
     debris from a writer that died before entries were published atomically,
     and it is removed so the key can be published again. Unsafe, unreadable,
-    mismatched, and corrupt entries raise.
+    mismatched, and corrupt entries raise `RuntimeError`. A cache directory
+    that cannot be inspected raises `OSError`.
     """
     root = _cache_dir()
     entry = root / key
@@ -559,22 +743,39 @@ def _read_cache_entry(key, specialization):
     return _Artifact(key, lowered, ptx)
 
 
-def _remove_incomplete_entry(entry):
-    """Delete an entry directory that a dead writer left incomplete."""
-    try:
-        shutil.rmtree(entry)
-    except FileNotFoundError:
-        return  # Another process removed it first.
-    except OSError as error:
-        if error.errno == errno.ENOTEMPTY:
-            return  # A writer published into the emptied directory.
-        raise RuntimeError(
-            f"cache entry is incomplete and cannot be removed: {entry}"
-        ) from error
-
-
+_ENTRY_FILES = ("metadata.json", "lowered.mlir", "kernel.ptx")
 # Entry names are SHA-256 hex digests, so a staging name never collides.
 _STAGING_PREFIX = ".staging-"
+
+
+def _remove_incomplete_entry(entry):
+    """Remove the debris of a dead writer without losing a publish.
+
+    The entry is renamed to a private name before it is judged, so the check
+    and the removal act on the same directory. An entry that another process
+    completed or published since the caller looked is renamed back.
+    """
+    aside = pathlib.Path(
+        tempfile.mkdtemp(dir=entry.parent, prefix=_STAGING_PREFIX)
+    )
+    try:
+        try:
+            os.rename(entry, aside)
+        except FileNotFoundError:
+            return  # Another process removed it first.
+        except (IsADirectoryError, NotADirectoryError) as error:
+            raise RuntimeError(
+                f"cache entry is not a directory: {entry}"
+            ) from error
+        if all(os.path.lexists(aside / name) for name in _ENTRY_FILES):
+            try:
+                os.rename(aside, entry)
+            except OSError as error:
+                # Another writer published the key in the meantime.
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+    finally:
+        shutil.rmtree(aside, ignore_errors=True)
 
 
 def _write_cache_entry(artifact, specialization):

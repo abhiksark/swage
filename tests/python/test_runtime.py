@@ -7,10 +7,14 @@ import json
 import multiprocessing
 import os
 import pathlib
+import shutil
 import signal
 import stat
+import subprocess
 import sys
+import time
 import types
+import warnings
 import weakref
 from unittest import mock
 
@@ -29,6 +33,7 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     sl.store(output_ptr + offsets, x + y, mask=mask)
 
 
+_IMPORTED_NS = time.time_ns()
 _SHARED_KEY = {"kernel": "add_kernel", "target": "sm_86"}
 
 
@@ -47,8 +52,11 @@ def _identity(**overrides):
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path, monkeypatch):
-    """Keep every test away from the user's persistent cache."""
+    """Keep every test away from the user's cache and from earlier tests."""
+    from swage import _runtime
+
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path / "isolated-cache"))
+    monkeypatch.setattr(_runtime, "_cache_off", set(), raising=False)
 
 
 def _use_shared_cache(cache_dir):
@@ -57,6 +65,7 @@ def _use_shared_cache(cache_dir):
 
     os.environ["SWAGE_CACHE_DIR"] = cache_dir
     _runtime._compiler_identity = _identity
+    _runtime._stale_identity = lambda _identity: None
     return _runtime
 
 
@@ -339,11 +348,21 @@ def test_launch_requires_pytorch_and_cuda(monkeypatch):
 
 
 def _stub_compiler(monkeypatch, identity=_identity):
-    """Stub the compiler identity and count native compiles."""
+    """Count native compiles, with a stubbed identity unless it is None.
+
+    A stubbed identity describes no files, so the check that ties the
+    identity to the loaded code is stubbed with it. `identity=None` keeps
+    the real identity and the real check.
+    """
     from swage import _runtime
 
     calls = []
-    monkeypatch.setattr(_runtime, "_compiler_identity", identity)
+    if identity is not None:
+        monkeypatch.setattr(_runtime, "_compiler_identity", identity)
+        monkeypatch.setattr(
+            _runtime, "_stale_identity", lambda _identity: None, raising=False
+        )
+    _runtime._identity_cache = None
     monkeypatch.setattr(
         _runtime,
         "_compile_native",
@@ -351,6 +370,19 @@ def _stub_compiler(monkeypatch, identity=_identity):
     )
     _runtime._ptx_cache.clear()
     return _runtime, calls
+
+
+def _compile_recording_warnings(_runtime, key_data=None):
+    """Compile one key and return the artifact with the warnings it raised."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        artifact = _runtime._compile_cached(
+            _SHARED_KEY if key_data is None else key_data,
+            "add_kernel",
+            128,
+            object,
+        )
+    return artifact, [str(warning.message) for warning in caught]
 
 
 def _assert_complete_entry(entry):
@@ -441,26 +473,33 @@ def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "identity",
+    ("identity", "warned"),
     [
-        _identity(native=None),
-        _identity(frontend=None),
-        _identity(revision=None, clean=False, frontend=None, native=None),
+        (_identity(native=None), False),
+        (_identity(frontend=None), True),
+        (
+            _identity(revision=None, clean=False, frontend=None, native=None),
+            False,
+        ),
     ],
 )
 def test_unidentified_compiler_uses_only_process_cache(
-    tmp_path, monkeypatch, identity
+    tmp_path, monkeypatch, identity, warned
 ):
     """Do not persist artifacts when the loaded compiler is unidentified."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
 
-    first = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
-    second = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
+    first, messages = _compile_recording_warnings(_runtime, {"kernel": "add"})
+    second, later = _compile_recording_warnings(_runtime, {"kernel": "add"})
+    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "sub"})
 
     assert first == second
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert list(tmp_path.iterdir()) == []
+    assert len(messages) == int(warned)
+    assert all("persistent cache is off" in message for message in messages)
+    assert later == other_key == []
 
 
 @pytest.mark.parametrize(
@@ -548,19 +587,225 @@ def test_losing_writer_uses_the_published_entry(tmp_path, monkeypatch):
     assert (tmp_path / winner.key / "kernel.ptx").read_text() == "ptx"
 
 
-def test_failed_publish_leaves_no_staging_directory(tmp_path, monkeypatch):
-    """Report a publish failure and clean the staged copy up."""
+def test_failed_publish_degrades_to_process_reuse(tmp_path, monkeypatch):
+    """Keep the artifact, warn once, and clean up when publishing fails."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    _runtime, _ = _stub_compiler(monkeypatch)
+    _runtime, calls = _stub_compiler(monkeypatch)
+    renames = []
 
-    def refuse(_source, _destination):
+    def refuse(source, _destination):
+        renames.append(source)
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(_runtime.os, "rename", refuse)
-    with pytest.raises(PermissionError):
+    first, messages = _compile_recording_warnings(_runtime)
+    second, repeated = _compile_recording_warnings(_runtime)
+    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+
+    assert first == second == _runtime._Artifact(first.key, "lowered", "ptx")
+    assert len(calls) == 2
+    assert len(renames) == 1
+    assert len(messages) == 1
+    assert str(tmp_path) in messages[0]
+    assert "Permission denied" in messages[0]
+    assert repeated == other_key == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def _unwritable_root(tmp_path, monkeypatch, how):
+    """Return a cache root that cannot be written, and undo the damage."""
+    from swage import _runtime
+
+    root = tmp_path / "cache"
+    if how == "read-only root":
+        root.mkdir(mode=0o500)
+    elif how == "read-only parent":
+        root = tmp_path / "locked" / "cache"
+        root.parent.mkdir(mode=0o500)
+    else:
+        root.mkdir(mode=0o700)
+
+        def no_space(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(_runtime.tempfile, "mkdtemp", no_space)
+    return root
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        pytest.param(
+            "read-only root",
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root ignores directory modes"
+            ),
+        ),
+        pytest.param(
+            "read-only parent",
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root ignores directory modes"
+            ),
+        ),
+        "no space left",
+    ],
+)
+def test_unwritable_cache_never_fails_a_launch(tmp_path, monkeypatch, how):
+    """Launch from the retained artifact when the cache cannot be written."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _Driver()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _runtime, calls = _stub_compiler(monkeypatch)
+    _runtime._identity_cache = None
+    _runtime._loaded_functions.clear()
+    monkeypatch.delitem(
+        add_kernel.__dict__, "_specialization_memo", raising=False
+    )
+    root = _unwritable_root(tmp_path, monkeypatch, how)
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+
+    def launch(n, block):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            add_kernel.launch(
+                arguments=_arguments(torch, n=n),
+                constexprs={"BLOCK": block},
+                grid=((n + block - 1) // block,),
+            )
+        return [str(warning.message) for warning in caught]
+
+    try:
+        first = launch(129, 128)
+        second = launch(129, 128)
+        other_specialization = launch(129, 64)
+        leftovers = list(root.iterdir()) if root.exists() else []
+    finally:
+        root.parent.chmod(0o700)
+        if root.exists():
+            root.chmod(0o700)
+        _runtime._identity_cache = None
+
+    assert len(driver.launches) == 3
+    assert len(calls) == 2
+    assert len(first) == 1
+    assert str(root) in first[0]
+    assert "persistent cache is not written by this process" in first[0]
+    assert second == other_specialization == []
+    assert leftovers == []
+
+
+def test_read_only_cache_still_serves_published_entries(
+    tmp_path, monkeypatch
+):
+    """Keep reading a warm cache after a write to it has failed."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _runtime._ptx_cache.clear()
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_runtime.tempfile, "mkdtemp", no_space)
+    _, messages = _compile_recording_warnings(_runtime, {"kernel": "cold"})
+    reread, later = _compile_recording_warnings(_runtime)
+
+    assert len(messages) == 1
+    assert "published entries are still read" in messages[0]
+    assert reread == warm
+    assert later == []
+    assert len(calls) == 2
+
+
+def test_inaccessible_cache_root_degrades_to_process_reuse(
+    tmp_path, monkeypatch
+):
+    """Treat a cache root that cannot be inspected as no cache at all."""
+    root = tmp_path / "file" / "cache"
+    root.parent.write_text("a file where a directory is expected")
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    first, messages = _compile_recording_warnings(_runtime)
+    second, repeated = _compile_recording_warnings(_runtime)
+    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+
+    assert first == second
+    assert len(calls) == 2
+    assert len(messages) == 1
+    assert str(root) in messages[0]
+    assert "persistent cache is off for this process" in messages[0]
+    assert repeated == other_key == []
+
+
+def test_tampering_found_while_publishing_still_raises(tmp_path, monkeypatch):
+    """Raise on an unsafe root at publish, but keep the compiled artifact."""
+    root = tmp_path / "cache"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
+    _runtime, calls = _stub_compiler(monkeypatch)
+
+    def compile_while_the_root_is_replaced(*_args):
+        calls.append(True)
+        root.symlink_to(elsewhere)
+        return "lowered", "ptx"
+
+    monkeypatch.setattr(
+        _runtime, "_compile_native", compile_while_the_root_is_replaced
+    )
+    with pytest.raises(RuntimeError, match="symlink"):
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    retained = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+
+    assert retained.ptx == "ptx"
+    assert len(calls) == 1
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_removing_an_incomplete_entry_keeps_a_concurrent_publish(
+    tmp_path, monkeypatch
+):
+    """Do not delete an entry that was published after the reader looked."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    published = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    entry = tmp_path / published.key
+
+    # A reader that saw debris reaches removal after the publish above.
+    _runtime._remove_incomplete_entry(entry)
+
+    _runtime._ptx_cache.clear()
+    assert [path.name for path in tmp_path.iterdir()] == [published.key]
+    _assert_complete_entry(entry)
+    assert (
+        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        == published
+    )
+    assert len(calls) == 1
+
+    (entry / "metadata.json").unlink()
+    _runtime._remove_incomplete_entry(entry)
+    _runtime._remove_incomplete_entry(entry)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_file_in_place_of_an_entry_is_rejected(tmp_path, monkeypatch):
+    """Refuse to treat a regular file at an entry name as debris."""
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _runtime, calls = _stub_compiler(monkeypatch)
+    entry = tmp_path / _runtime._cache_key(_SHARED_KEY)
+    entry.write_text("not an entry")
+
+    with pytest.raises(RuntimeError, match="not a directory"):
         _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
 
-    assert list(tmp_path.iterdir()) == []
+    assert calls == []
+    assert [path.name for path in tmp_path.iterdir()] == [entry.name]
 
 
 def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
@@ -684,6 +929,27 @@ def _fake_package(tmp_path, monkeypatch):
     return package
 
 
+_LONG_AFTER_NOW_NS = 10**15
+
+
+def _start_process_after_every_file(monkeypatch):
+    """Pretend the process started after the files the test just wrote."""
+    from swage import _runtime
+
+    monkeypatch.setattr(
+        _runtime,
+        "_PROCESS_START_NS",
+        time.time_ns() + _LONG_AFTER_NOW_NS,
+        raising=False,
+    )
+
+
+def _changed_ns(path):
+    """Return when `path` last changed, as the runtime measures it."""
+    details = path.stat()
+    return max(details.st_mtime_ns, details.st_ctime_ns)
+
+
 def _fresh_key(_runtime):
     """Recompute the launch cache key from a newly derived identity."""
     _runtime._identity_cache = None
@@ -743,8 +1009,12 @@ def test_persistence_does_not_need_a_git_checkout(tmp_path, monkeypatch):
     from swage import _runtime
 
     _fake_package(tmp_path, monkeypatch)
+    _start_process_after_every_file(monkeypatch)
     native = [["_swageDialectsNanobind.so", 10, 20]]
     monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
+    monkeypatch.setattr(
+        _runtime, "_native_libraries", lambda: [], raising=False
+    )
 
     def no_git(*_args, **_kwargs):
         raise AssertionError("git must not run outside a checkout")
@@ -773,6 +1043,302 @@ def test_persistence_does_not_need_a_git_checkout(tmp_path, monkeypatch):
     }
     assert len(identity["frontend"]) == 64
     _assert_complete_entry(cache / artifact.key)
+
+
+def test_frontend_digest_skips_what_python_cannot_import(
+    tmp_path, monkeypatch
+):
+    """Ignore lock files, dangling links, hidden names, and directories."""
+    from swage import _runtime
+
+    package = _fake_package(tmp_path, monkeypatch)
+    clean = _runtime._frontend_digest(package)
+    assert len(clean) == 64
+
+    (package / ".#_frontend.py").symlink_to("user@host.1234:5678")
+    (package / "dangling.py").symlink_to("missing.py")
+    (package / "weird.py").mkdir()
+    (package / ".backup.py").write_text("LOWERING = 0\n")
+    (package / ".checkpoints").mkdir()
+    (package / ".checkpoints" / "_frontend.py").write_text("LOWERING = 0\n")
+
+    assert _runtime._frontend_digest(package) == clean
+    _runtime._identity_cache = None
+    assert _runtime._cached_identity()["frontend"] == clean
+    _runtime._identity_cache = None
+
+    (package / "linked.py").symlink_to("_frontend.py")
+    assert _runtime._frontend_digest(package) not in (clean, None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_unreadable_frontend_file_turns_persistence_off(
+    tmp_path, monkeypatch
+):
+    """Lose the frontend identity, not the launch, to an unreadable file."""
+    package = _fake_package(tmp_path, monkeypatch)
+    _start_process_after_every_file(monkeypatch)
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    _runtime, calls = _stub_compiler(monkeypatch, identity=None)
+    native = [["_swageDialectsNanobind.so", 10, 20]]
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
+    monkeypatch.setattr(_runtime, "_native_libraries", lambda: [])
+    (package / "_frontend.py").chmod(0)
+
+    try:
+        digest = _runtime._frontend_digest(package)
+        identity = _runtime._cached_identity()
+        first, messages = _compile_recording_warnings(_runtime)
+        second, repeated = _compile_recording_warnings(_runtime)
+    finally:
+        (package / "_frontend.py").chmod(0o600)
+        _runtime._identity_cache = None
+
+    assert digest is None
+    assert identity["frontend"] is None
+    assert identity["native"] == native
+    assert first == second
+    assert len(calls) == 1
+    assert len(messages) == 1
+    assert "_frontend.py" in messages[0]
+    assert "Permission denied" in messages[0]
+    assert repeated == []
+    assert not cache.exists()
+
+
+_STALE_FRONTEND_SCRIPT = """
+import json
+import os
+import pathlib
+import sys
+import warnings
+
+import swage
+
+lazy = "swage._runtime" not in sys.modules
+package = pathlib.Path(swage.__file__).parent
+if sys.argv[1] == "edit after import":
+    with open(package / "_frontend.py", "ab") as source:
+        source.write(b"# edited after this process imported swage")
+
+from swage import _runtime
+
+native = [["_swageDialectsNanobind.so", 1, 2]]
+compiles = []
+_runtime._native_identity = lambda: native
+_runtime._native_libraries = lambda: []
+_runtime._compile_native = lambda *_args: compiles.append(1) or (
+    "lowered",
+    "ptx from the frontend this process loaded",
+)
+identity = _runtime._cached_identity()
+data = {"kernel": "k", "frontend": identity["frontend"], "native": native}
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    first = _runtime._compile_cached(data, "k", 128, object)
+    second = _runtime._compile_cached(data, "k", 128, object)
+cache = pathlib.Path(os.environ["SWAGE_CACHE_DIR"])
+on_disk = dict(data, frontend=_runtime._frontend_digest(package))
+print(json.dumps({
+    "lazy": lazy,
+    "heavy": [name for name in ("torch", "mlir_swage") if name in sys.modules],
+    "same": first == second,
+    "compiles": len(compiles),
+    "warnings": [str(warning.message) for warning in caught],
+    "entries": sorted(path.name for path in cache.glob("*")),
+    "key": first.key,
+    "key_of_the_files_on_disk": _runtime._cache_key(on_disk),
+    "started": getattr(_runtime, "_PROCESS_START_NS", None),
+}))
+"""
+
+
+def _run_with_copied_frontend(tmp_path, mode):
+    """Run the stale-frontend script in a process that owns its package."""
+    site = tmp_path / "site"
+    if not site.exists():
+        shutil.copytree(
+            pathlib.Path(sw.__file__).parent,
+            site / "swage",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+    # The process start time has a resolution of one clock tick (10 ms).
+    time.sleep(0.05)
+    before = time.time_ns()
+    completed = subprocess.run(
+        [sys.executable, "-c", _STALE_FRONTEND_SCRIPT, mode],
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(site),
+            SWAGE_CACHE_DIR=str(tmp_path / "cache"),
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["lazy"]
+    assert result["heavy"] == []
+    assert result["same"]
+    assert result["compiles"] == 1
+    tick_ns = 20_000_000
+    assert before - tick_ns <= result["started"] <= time.time_ns()
+    return result
+
+
+def test_frontend_edited_after_import_publishes_nothing(tmp_path):
+    """Never publish old code's PTX under the key of the edited files."""
+    result = _run_with_copied_frontend(tmp_path, "edit after import")
+
+    assert result["entries"] == []
+    assert len(result["warnings"]) == 1
+    assert "_frontend.py" in result["warnings"][0]
+    assert "is not older than this process" in result["warnings"][0]
+
+
+def test_frontend_unchanged_since_start_is_published(tmp_path):
+    """Publish, and reuse from a second process, when nothing changed."""
+    result = _run_with_copied_frontend(tmp_path, "no edit")
+
+    assert result["entries"] == [result["key"]]
+    assert result["key"] == result["key_of_the_files_on_disk"]
+    assert result["warnings"] == []
+
+    with open(tmp_path / "site" / "swage" / "_frontend.py", "ab") as source:
+        source.write(b"# edited before the next process starts")
+    edited = _run_with_copied_frontend(tmp_path, "no edit")
+
+    assert edited["key"] == edited["key_of_the_files_on_disk"]
+    assert edited["key"] != result["key"]
+    assert edited["entries"] == sorted([result["key"], edited["key"]])
+    assert edited["warnings"] == []
+
+
+def _identified_process(tmp_path, monkeypatch):
+    """Derive a real identity from a fake package and fake bindings."""
+    package = _fake_package(tmp_path, monkeypatch)
+    extension, versioned, _ = _fake_bindings(tmp_path, monkeypatch)
+    _start_process_after_every_file(monkeypatch)
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    _runtime, calls = _stub_compiler(monkeypatch, identity=None)
+    identity = _runtime._cached_identity()
+    assert identity["frontend"] is not None
+    assert identity["native"] is not None
+    return _runtime, calls, identity, package, versioned, cache
+
+
+def test_identity_of_files_older_than_the_process_is_current(
+    tmp_path, monkeypatch
+):
+    """Accept an identity when nothing changed since the process started."""
+    _runtime, calls, identity, _, _, cache = _identified_process(
+        tmp_path, monkeypatch
+    )
+
+    assert _runtime._stale_identity(identity) is None
+    artifact, messages = _compile_recording_warnings(_runtime)
+    _runtime._identity_cache = None
+
+    assert messages == []
+    assert len(calls) == 1
+    _assert_complete_entry(cache / artifact.key)
+
+
+def test_identity_is_stale_without_a_process_start_time(
+    tmp_path, monkeypatch
+):
+    """Do not trust files on disk when the start time is unknown."""
+    _runtime, calls, identity, _, _, cache = _identified_process(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(_runtime, "_PROCESS_START_NS", None)
+
+    assert "start time" in _runtime._stale_identity(identity)
+    _, messages = _compile_recording_warnings(_runtime)
+    _runtime._identity_cache = None
+
+    assert len(messages) == 1
+    assert len(calls) == 1
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("changed", ["frontend", "native"])
+def test_identity_is_stale_when_a_file_changed_after_start(
+    tmp_path, monkeypatch, changed
+):
+    """Distrust a file as new as the process, even with unchanged bytes."""
+    _runtime, calls, identity, package, versioned, cache = (
+        _identified_process(tmp_path, monkeypatch)
+    )
+    path = package / "_frontend.py" if changed == "frontend" else versioned
+    if changed == "native":
+        # File times are coarse: make the library newer than the frontend
+        # by more than a timer tick, without changing its identity.
+        time.sleep(0.05)
+        os.utime(versioned, ns=(1_000, 2_000))
+    monkeypatch.setattr(_runtime, "_PROCESS_START_NS", _changed_ns(path))
+
+    problem = _runtime._stale_identity(identity)
+    _, messages = _compile_recording_warnings(_runtime)
+    _runtime._identity_cache = None
+
+    assert str(path.parent) in problem
+    assert "is not older than this process" in problem
+    assert len(messages) == 1
+    assert problem in messages[0]
+    assert len(calls) == 1
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("changed", ["frontend", "native"])
+def test_identity_changed_during_a_compile_is_not_published(
+    tmp_path, monkeypatch, changed
+):
+    """Keep the artifact in the process when the disk moved under it."""
+    _runtime, calls, identity, package, versioned, cache = (
+        _identified_process(tmp_path, monkeypatch)
+    )
+
+    def compile_while_the_disk_changes(*_args):
+        calls.append(True)
+        if changed == "frontend":
+            (package / "_frontend.py").write_text("LOWERING = 2\n")
+        else:
+            os.utime(versioned, ns=(1_000, 3_000))
+        return "lowered", "ptx from the compiler that was loaded"
+
+    monkeypatch.setattr(
+        _runtime, "_compile_native", compile_while_the_disk_changes
+    )
+    first, messages = _compile_recording_warnings(_runtime)
+    second, repeated = _compile_recording_warnings(_runtime)
+    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+    problem = _runtime._stale_identity(identity)
+    _runtime._identity_cache = None
+
+    assert first == second
+    assert first.ptx == "ptx from the compiler that was loaded"
+    assert len(calls) == 2
+    assert len(messages) == 1
+    assert changed in problem
+    assert "after the cache key was derived" in problem
+    assert problem in messages[0]
+    assert repeated == other_key == []
+    assert list(cache.glob("*")) == []
+
+
+def test_process_start_time_precedes_this_test():
+    """Read a start time that is earlier than anything the process did."""
+    from swage import _runtime
+
+    started = _runtime._process_start_ns()
+
+    assert started == pytest.approx(_runtime._PROCESS_START_NS, abs=10**7)
+    assert started < _IMPORTED_NS < time.time_ns()
 
 
 def _fake_bindings(tmp_path, monkeypatch):
