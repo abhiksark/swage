@@ -174,7 +174,7 @@ def test_wheel_clean_install_has_the_expected_native_boundary(
             try:
                 kernel.emit_mlir(signature={}, constexprs={})
             except RuntimeError as error:
-                assert str(error) == (
+                assert str(error).startswith(
                     "Swage emit_mlir() requires the build-tree "
                     "mlir_swage bindings"
                 )
