@@ -19,24 +19,31 @@ does not turn private qualification into public API.
 | Pure `swage` wheel contents and native-package exclusion | Public today | `tests/python/test_packaging.py` | `python -m pytest tests/python/test_packaging.py -q` |
 | Environment report | Public today | `tests/python/test_env.py` | `python -m pytest tests/python/test_env.py -q` |
 | Restricted AST to verified native module | Public today, compile-only | `tests/python/test_frontend.py`, `python/tests/mlir/test_frontend.py` | `python -m pytest tests/python -q`; `ninja -C build check-swage-python` |
+| Native `swage` dialect parsing, verification, and declared segment-read effects | Public today, compile-only | `test/Dialect/Swage`, including `effects.mlir` | `ninja -C build check-swage` |
 | Fixed vector-add lowering and CUDA launch | Public today | `test/Conversion/SwageToGPU`, `python/tests/mlir/test_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
-| Segmented sum and max CPU/GPU parity | Private qualification | `test/Conversion/SwageToCPU`, `test/Conversion/SwageToGPU`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
+| Segmented sum and max CPU/GPU parity, device-side segment bounds, and block-size admission | Private qualification | `test/Conversion/SwageToCPU`, `test/Conversion/SwageToGPU`, including `segment-bounds.mlir` and `invalid-block-size.mlir`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_segmented_bounds.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Stable ragged-softmax parity and edge cases | Private qualification | ragged-softmax lit files and `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Planning admission, limits, and descriptors | Private qualification | `test/Conversion/SwageToPlan`, `unittests/TaskClassifierTest.cpp` | `ninja -C build check-swage`; `ninja -C build check-swage-unit` |
-| Pure and fused mixed capture-free sum/max correctness | Private qualification | `python/tests/mlir/test_segmented_runtime.py` | trusted GPU workflow |
+| Pure and fused mixed capture-free sum/max correctness | Private qualification | `test/Conversion/SwageToGPU/fused-mixed.mlir`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; trusted GPU workflow |
+| Prepared-launch kernel memoization, stale-offsets guard, and graph-capture protocol | Private qualification | `python/tests/mlir/test_segmented_cache.py`, `python/tests/mlir/test_prepared_capture.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | Frozen mixed-policy performance gate | Private qualification | `benchmarks/results/mixed-sum-a6000-sm86.json`, `tests/python/test_benchmark_mixed_sum.py` | `python -m pytest tests/python/test_benchmark_mixed_sum.py -q` |
-| Composable split sum/max, ordering, failures, and f32 parity | Private qualification | `unittests/TaskClassifierTest.cpp`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage-unit`; trusted GPU workflow |
-| Persistent claims, fenced split completion, poisoned scratch, graph replay, randomized plans, and failure paths | Experimental; predeclared performance gate failed | `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_persistent_runtime.py`, `benchmarks/results/persistent-sum-a6000-sm86.json` | `ninja -C build check-swage-python`; trusted GPU workflow after merge |
+| Composable split sum/max, ordering, failures, and f32 parity | Private qualification | `unittests/TaskClassifierTest.cpp`, `test/Conversion/SwageToGPU/split-partial.mlir`, `split-merge.mlir`, and `invalid-split.mlir`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; `ninja -C build check-swage-unit`; trusted GPU workflow |
+| Persistent claims, fenced split completion, poisoned scratch, graph replay, randomized plans, and failure paths | Experimental; predeclared performance gate failed | `test/Conversion/SwageToGPU/persistent.mlir` and `invalid-persistent.mlir`, `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_persistent_runtime.py`, `benchmarks/results/persistent-sum-a6000-sm86.json` | `ninja -C build check-swage`; `ninja -C build check-swage-python`; trusted GPU workflow after merge |
 | Recorded RTX 5090 performance snapshot | Recorded evidence | `benchmarks/results/perf-5090-sm120.json` | Not re-executable in CI |
 | Public segmented syntax and execution | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |
 
+The sequential CPU oracle transports each f32 result as its exact bit
+pattern, so oracle comparisons involve no decimal rounding.
+
 The trusted GPU workflow runs only on `main` through the self-hosted
-`swage-gpu` runner. Documentation in a branch can cite committed evidence but
-cannot establish a new GPU result without executing that workflow or an
-equivalent recorded qualification. Recorded evidence is a citation status,
-not a boundary status: the snapshot row upgrades nothing, and its numbers
-are presented on [Benchmarks](benchmarks.md).
+`swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every
+CUDA-gated test file runs there, including one added later; hosted CI has no
+GPU and skips those tests. Documentation in a branch can cite committed
+evidence but cannot establish a new GPU result without executing that
+workflow or an equivalent recorded qualification. Recorded evidence is a
+citation status, not a boundary status: the snapshot row upgrades nothing,
+and its numbers are presented on [Benchmarks](benchmarks.md).
 
 For historical planning and release mapping, continue with
 [`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md). For
