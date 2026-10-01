@@ -596,22 +596,23 @@ constexpr bool hasPowerOfTwoWarpCount(int64_t blockSize) {
 }
 
 /// Clamp one half-open range loaded from device memory, as signed i32, so
-/// that `0 <= start <= end <= valueCount`, and return it as index values.
+/// that `0 <= start <= end <= length`, and return it as index values.
+/// `length` is the i32 element count of the buffer the range indexes: the
+/// value count for a range into values, the partial count for a range into
+/// scratch.
 ///
 /// Host validation sees a snapshot of the range, but the kernel reloads it at
 /// every launch, so a range that changed after validation would otherwise
-/// index outside the values buffer. A decreasing pair becomes an empty range.
-/// For validated ranges both clamps are the identity.
+/// index outside that buffer. A decreasing pair becomes an empty range. For
+/// validated ranges both clamps are the identity.
 std::pair<Value, Value> clampRange(OpBuilder &builder, Location loc,
-                                   Value startI32, Value endI32,
-                                   Value valueCount) {
+                                   Value startI32, Value endI32, Value length) {
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
   Value startFloored = arith::MaxSIOp::create(builder, loc, startI32, zero);
   Value startClamped =
-      arith::MinSIOp::create(builder, loc, startFloored, valueCount);
+      arith::MinSIOp::create(builder, loc, startFloored, length);
   Value endFloored = arith::MaxSIOp::create(builder, loc, endI32, startClamped);
-  Value endClamped =
-      arith::MinSIOp::create(builder, loc, endFloored, valueCount);
+  Value endClamped = arith::MinSIOp::create(builder, loc, endFloored, length);
   Value start = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
                                            startClamped);
   Value end = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
@@ -899,8 +900,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value partialEndI32 =
         loadTaskWord(builder, loc, entry->getArgument(5), partialEndIndex);
     // Partial ranges index the values buffer, so they take the same bound as
-    // the direct ranges. Merge ranges below index scratch, whose length this
-    // ABI carries as the partial count, not the value count.
+    // the direct ranges.
     Value partialBegin;
     Value partialEnd;
     std::tie(partialBegin, partialEnd) =
@@ -1022,10 +1022,19 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               arith::AddIOp::create(merge, mergeLoc, mergeBeginIndex, one);
           Value outputSegment =
               loadSegmentId(merge, mergeLoc, entry->getArgument(7), mergeBase);
-          Value mergeBegin = loadSegmentId(
+          Value mergeBeginI32 = loadTaskWord(
               merge, mergeLoc, entry->getArgument(7), mergeBeginIndex);
-          Value mergeEnd = loadSegmentId(merge, mergeLoc, entry->getArgument(7),
-                                         mergeEndIndex);
+          Value mergeEndI32 = loadTaskWord(
+              merge, mergeLoc, entry->getArgument(7), mergeEndIndex);
+          // Merge ranges index scratch, which holds one slot per partial, so
+          // the partial count bounds them. The output segment stays as
+          // loaded, because this ABI carries no output or segment count. The
+          // merge ID above also stays as loaded, although the merge count
+          // could bound it. The host builds both in plan-owned storage.
+          Value mergeBegin;
+          Value mergeEnd;
+          std::tie(mergeBegin, mergeEnd) = clampRange(
+              merge, mergeLoc, mergeBeginI32, mergeEndI32, partialTaskCount);
           Value mergeFirst =
               arith::AddIOp::create(merge, mergeLoc, mergeBegin, threadId);
           Value mergeIdentity =
@@ -1262,23 +1271,17 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
               body, bodyLoc, body.getIndexType(), loadRecord(0));
           rangeField = 1;
         }
+        // Both split ABIs pass the buffer the range indexes as their first
+        // pointer and its length as their first i32: values and the value
+        // count for a partial, scratch and the partial count for a merge.
+        // The merge output segment has no such length in this ABI and stays
+        // as loaded.
+        Value beginI32 = loadRecord(rangeField);
+        Value endI32 = loadRecord(rangeField + 1);
         Value begin;
         Value end;
-        if (merge) {
-          // Merge ranges index scratch. This ABI carries the partial count,
-          // not the value count, so they are used as loaded.
-          begin = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
-                                             loadRecord(rangeField));
-          end = arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
-                                           loadRecord(rangeField + 1));
-        } else {
-          // Partial ranges index the values buffer; bound them by the value
-          // count this ABI passes as its first i32.
-          Value beginI32 = loadRecord(rangeField);
-          Value endI32 = loadRecord(rangeField + 1);
-          std::tie(begin, end) = clampRange(body, bodyLoc, beginI32, endI32,
-                                            entry->getArgument(3));
-        }
+        std::tie(begin, end) =
+            clampRange(body, bodyLoc, beginI32, endI32, entry->getArgument(3));
         Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
         Value identity = identityFor(body, bodyLoc, stage.kind);
         auto local = scf::ForOp::create(
