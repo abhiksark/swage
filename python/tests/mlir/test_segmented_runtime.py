@@ -300,6 +300,26 @@ def _transformed_values(values, transform):
     return values
 
 
+_TRANSFORM_RTOL = _TRANSFORM_ATOL = 1e-5
+
+
+def _assert_tolerance_sees_every_element(values, offsets, kind):
+    """Require a toleranced sum comparison to reject any single drop.
+
+    A tolerance relative to a segment sum admits the loss of every element
+    smaller than it. Each compared element must therefore exceed the
+    tolerance of its own segment. Max has no such requirement: it is exact
+    apart from element rounding and never depends on a non-maximal value.
+    """
+    if kind != "sum":
+        return
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        if segment.numel():
+            allowed = _TRANSFORM_ATOL + _TRANSFORM_RTOL * segment.sum().abs()
+            assert segment.abs().min() > allowed
+
+
 @pytest.mark.parametrize("kind", ["sum", "max"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 def test_composable_reduction_cpu_oracle(kind, transform):
@@ -401,9 +421,9 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
     offsets = torch.tensor(
         [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
     )
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_planned_reduction(
         values.cuda(),
@@ -417,8 +437,8 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
         torch.testing.assert_close(
             output.cpu(),
             expected,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=_TRANSFORM_RTOL,
+            atol=_TRANSFORM_ATOL,
         )
 
 
@@ -435,9 +455,18 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 
     count = torch.cuda.get_device_properties(0).multi_processor_count
     host_values, host_offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(host_values, transform), host_offsets, kind
-    ).cuda()
+    if transform == "exp2":
+        # exp2 of the full pattern spans 33 binades, so a tolerance relative
+        # to the sum would admit dropping most elements. One eighth of the
+        # pattern is still exact in f32 and position dependent, and keeps
+        # exp2 within [0.24, 4.3], above the tolerance of an 8192-element
+        # sum.
+        host_values = host_values / 8
+    toleranced = transform in ("exp2", "affine32")
+    transformed = _transformed_values(host_values, transform)
+    if toleranced:
+        _assert_tolerance_sees_every_element(transformed, host_offsets, kind)
+    expected = _pytorch_reference(transformed, host_offsets, kind).cuda()
     output = torch.full((count + 1,), -123.0, device="cuda")
 
     def unexpected_split(*args, **kwargs):
@@ -455,8 +484,8 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
     assert prepared.mixed is prepared.cta
     prepared.mixed()
     tolerance = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if transform in ("exp2", "affine32") else {"rtol": 0, "atol": 0}
+        {"rtol": _TRANSFORM_RTOL, "atol": _TRANSFORM_ATOL}
+        if toleranced else {"rtol": 0, "atol": 0}
     )
     torch.testing.assert_close(output[:-1], expected, **tolerance)
     # The first launch may only queue the wait for task storage. Capture
@@ -482,9 +511,9 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     """A shape eligible for CTA still splits an expensive element program."""
     count = torch.cuda.get_device_properties(0).multi_processor_count
     values, offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(count, device="cuda")
     prepared = _prepare_planned_reduction(
         values.cuda(), offsets.cuda(), output,
@@ -493,7 +522,9 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     )
     assert prepared.mixed is not prepared.cta
     prepared.mixed()
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=_TRANSFORM_RTOL, atol=_TRANSFORM_ATOL
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
