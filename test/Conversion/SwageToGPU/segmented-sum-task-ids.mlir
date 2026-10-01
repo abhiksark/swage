@@ -21,19 +21,22 @@ module {
 
 // CHECK-NOT: swage.
 // CHECK: gpu.module @segmented_sum_module
-// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[TASK_COUNT:[^)]+]]: i32) kernel
+// CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[TASK_IDS:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[TASK_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK: %[[TASK_INDEX:.*]] = gpu.block_id x
 // CHECK: %[[TASKS:.*]] = arith.index_cast %[[TASK_COUNT]] : i32 to index
 // CHECK: %[[IN_RANGE:.*]] = arith.cmpi slt, %[[TASK_INDEX]], %[[TASKS]] : index
 // CHECK: scf.if %[[IN_RANGE]] {
 // CHECK:   %[[TASK_ADDRESS:.*]] = llvm.getelementptr %[[TASK_IDS]]
 // CHECK:   %[[SID_I32:.*]] = llvm.load %[[TASK_ADDRESS]] : !llvm.ptr -> i32
+// CHECK:   %[[SID_IN_RANGE:.*]] = arith.cmpi ult, %[[SID_I32]], %[[SEGMENT_COUNT]] : i32
 // CHECK:   %[[SID:.*]] = arith.index_cast %[[SID_I32]] : i32 to index
 // CHECK:   %[[START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK:   %[[START_I32:.*]] = llvm.load %[[START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK:   %[[END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK:   %[[END_I32:.*]] = llvm.load %[[END_ADDRESS]] : !llvm.ptr -> i32
 // CHECK-COUNT-5: gpu.shuffle xor
+// CHECK:   %[[MAY_STORE:.*]] = arith.andi %{{.*}}, %[[SID_IN_RANGE]] : i1
+// CHECK:   scf.if %[[MAY_STORE]] {
 // CHECK:   %[[OUTPUT_ADDRESS:.*]] = llvm.getelementptr %[[OUTPUT]]
 // CHECK:   llvm.store %{{.*}}, %[[OUTPUT_ADDRESS]] : f32, !llvm.ptr
 // CHECK: }

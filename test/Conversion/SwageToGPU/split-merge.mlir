@@ -47,7 +47,7 @@ module {
 }
 
 // CHECK: gpu.module @segmented_max__merge_module
-// CHECK: gpu.func @segmented_max__merge(%[[SCRATCH:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[MERGE_COUNT:[^)]+]]: i32) kernel
+// CHECK: gpu.func @segmented_max__merge(%[[SCRATCH:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[MERGE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 512, 1, 1>
 // CHECK: %[[TASK:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
@@ -60,12 +60,15 @@ module {
 // all-reduce, whose barriers every thread of the block must reach.
 // CHECK: %[[IN_RANGE:.*]] = arith.cmpi slt, %[[TASK]], %[[TASKS]] : index
 // CHECK-NEXT: scf.if %[[IN_RANGE]] {
-// The first field of the block's merge record names the output segment.
+// The first field of the block's merge record names the output segment. It
+// is compared with the segment count as loaded; the comparison yields a
+// value for the store predicate and opens no branch here.
 // CHECK-NEXT: %[[FIELDS:.*]] = arith.constant 3 : index
 // CHECK-NEXT: %[[RECORD:.*]] = arith.muli %[[TASK]], %[[FIELDS]] : index
 // CHECK-NEXT: %[[SEGMENT_FIELD:.*]] = arith.index_cast %[[RECORD]] : index to i64
 // CHECK-NEXT: %[[SEGMENT_ADDRESS:.*]] = llvm.getelementptr %[[RECORDS]][%[[SEGMENT_FIELD]]]
 // CHECK-NEXT: %[[SEGMENT_WORD:.*]] = llvm.load %[[SEGMENT_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[SEGMENT_IN_RANGE:.*]] = arith.cmpi ult, %[[SEGMENT_WORD]], %[[SEGMENT_COUNT]] : i32
 // CHECK-NEXT: %[[SEGMENT:.*]] = arith.index_cast %[[SEGMENT_WORD]] : i32 to index
 // The next two casts to index are the scratch range; RANGE pins what they
 // cast. Thread t reduces begin + t, begin + t + 512, ... up to the end.
@@ -86,9 +89,10 @@ module {
 // CHECK-NEXT: %[[TOTAL:.*]] = gpu.all_reduce maximumf %[[LOCAL]] uniform {
 // CHECK-NEXT: } : (f32) -> f32
 // Thread zero is the only writer, and it stores the block total at the
-// segment the record names.
+// segment the record names, unless that segment is out of range.
 // CHECK-NEXT: %[[FIRST_THREAD:.*]] = arith.cmpi eq, %[[THREAD]], %[[ZERO]] : index
-// CHECK-NEXT: scf.if %[[FIRST_THREAD]] {
+// CHECK-NEXT: %[[MAY_STORE:.*]] = arith.andi %[[FIRST_THREAD]], %[[SEGMENT_IN_RANGE]] : i1
+// CHECK-NEXT: scf.if %[[MAY_STORE]] {
 // CHECK-NEXT:   %[[SEGMENT_I64:.*]] = arith.index_cast %[[SEGMENT]] : index to i64
 // CHECK-NEXT:   %[[OUTPUT_ADDRESS:.*]] = llvm.getelementptr %[[OUTPUT]][%[[SEGMENT_I64]]]
 // CHECK-NEXT:   llvm.store %[[TOTAL]], %[[OUTPUT_ADDRESS]] : f32, !llvm.ptr

@@ -1521,7 +1521,11 @@ class _CudaDriver:
         self._launch(function, grid, block, stream, values)
 
     def launch_segmented(self, function, grid, block, stream, arguments):
-        """Launch the private three-pointer, two-count segmented ABI."""
+        """Launch a private three-pointer segmented ABI.
+
+        The pointers are followed by two i32 counts, or by three for the
+        split merge kernel, whose last count is the segment count.
+        """
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,
@@ -1535,7 +1539,7 @@ class _CudaDriver:
     def launch_segmented_tasks(
         self, function, grid, block, stream, arguments
     ):
-        """Launch the private four-pointer, two-count task-ID ABI."""
+        """Launch the private four-pointer, three-count task-ID ABI."""
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,
@@ -1549,11 +1553,11 @@ class _CudaDriver:
     def launch_segmented_mixed(
         self, function, grid, block, stream, arguments
     ):
-        """Launch the private four-pointer, three-count fused ABI."""
+        """Launch the private four-pointer, four-count fused ABI."""
         self.launch_segmented_tasks(function, grid, block, stream, arguments)
 
     def launch_persistent(self, function, grid, block, stream, arguments):
-        """Launch the private ten-pointer, five-count persistent ABI."""
+        """Launch the private ten-pointer, six-count persistent ABI."""
         if self._native_launch is not None:
             self._native_launch(
                 function, grid[0], block, stream,

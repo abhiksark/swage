@@ -217,7 +217,7 @@ def test_compiles_identity_sum_with_task_id_indirection():
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
-        assert signature.group(1).count("i32") == 2
+        assert signature.group(1).count("i32") == 3
         assert "ld.global.b32" in ptx
         assert ".entry segmented_sum" in ptx
         assert "shfl.sync.bfly" in ptx
@@ -249,7 +249,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
-        assert signature.group(1).count("i32") == 3
+        assert signature.group(1).count("i32") == 4
         assert "llvm.udiv" in lowered
         assert "llvm.urem" in lowered
         assert "llvm.mlir.constant(128 : index)" in lowered
@@ -258,7 +258,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         assert "nvvm.barrier0" in lowered
         assert "addr_space = 3" in lowered
         assert ptx.count(".param .u64") == 4
-        assert ptx.count(".param .u32") == 3
+        assert ptx.count(".param .u32") == 4
         assert "shfl.sync.bfly" in ptx
         assert "bar.sync" in ptx
         assert ".entry segmented_sum" in ptx
@@ -362,7 +362,7 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 10
-        assert signature.group(1).count("i32") == 5
+        assert signature.group(1).count("i32") == 6
         assert lowered.count("llvm.atomicrmw add") == 4
         assert lowered.count("nvvm.memory.barrier <gpu>") == 2
         assert "nvvm.shfl.sync  idx" in lowered
@@ -371,7 +371,7 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         # the shared queue-claim broadcast slot.
         assert lowered.count("nvvm.barrier0") == 12
         assert ptx.count(".param .u64") == 10
-        assert ptx.count(".param .u32") == 5
+        assert ptx.count(".param .u32") == 6
         assert ptx.count("atom") >= 4
         assert ptx.count("membar.gl") == 2
         assert "shfl.sync.idx" in ptx
@@ -413,14 +413,18 @@ def test_fused_mixed_lowering_accepts_element_program():
 
 
 @pytest.mark.parametrize(
-    ("compiler", "entry"),
+    ("compiler", "entry", "counts"),
     [
-        ("_compile_split_partial_reduction_ptx", "segmented_sum__partial"),
-        ("_compile_split_merge_reduction_ptx", "segmented_sum__merge"),
+        ("_compile_split_partial_reduction_ptx", "segmented_sum__partial", 2),
+        ("_compile_split_merge_reduction_ptx", "segmented_sum__merge", 3),
     ],
 )
-def test_compiles_deterministic_split_cta_kernels(compiler, entry):
-    """Emit each private three-pointer, two-i32 split ABI at 512 threads."""
+def test_compiles_deterministic_split_cta_kernels(compiler, entry, counts):
+    """Emit each private three-pointer split ABI at 512 threads.
+
+    The partial ABI ends with two i32 counts. The merge ABI adds the segment
+    count that bounds the output segment its records name.
+    """
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
@@ -443,11 +447,11 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
         signature = re.search(rf"llvm.func @{entry}\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 3
-        assert signature.group(1).count("i32") == 2
+        assert signature.group(1).count("i32") == counts
         assert "llvm.mlir.constant(512 : index)" in lowered
         assert "nvvm.barrier0" in lowered
         assert ptx.count(".param .u64") == 3
-        assert ptx.count(".param .u32") == 2
+        assert ptx.count(".param .u32") == counts
         assert f".entry {entry}" in ptx
         assert "bar.sync" in ptx
         assert module.operation.get_asm(enable_debug_info=False) == original

@@ -8,6 +8,12 @@ through the driver, below the Python validation, with ranges that validation
 would reject. Plan-owned ranges take the same bound against the buffer they
 index: partial ranges against the value count, merge ranges against the
 partial count.
+
+Three loaded indices take a bound of their own: a segment ID read from a task
+buffer and the output segment of a merge record against the segment count,
+and the merge ID of a persistent partial against the merge count. An index
+outside its bound is skipped. The tests for them place every buffer such an
+index could reach between guards and require the guards to be unchanged.
 """
 
 import re
@@ -21,6 +27,7 @@ from mlir_swage.dialects import swage
 from swage import _runtime
 from swage._segmented_qualification import (
     _SOFTMAX_MODULE,
+    _launch_segmented_sum_tasks,
     _semantic_module,
     _validate_offsets,
     _validate_softmax_tensors,
@@ -50,6 +57,48 @@ INVALID_OFFSETS = [
 # indirection: a negative start, an end and a start past the value count, and
 # a decreasing pair.
 _MIXED_OFFSETS = (-300, 250, 1500, 700, 300, 1900)
+
+# Elements in each guard that `_canaried` allocates around a buffer.
+_GUARD = 64
+# No reduction of the test values produces this, so a store shows.
+_CANARY = -1.0
+
+# Indices that name nothing in a batch of `count` segments or merges. The
+# near ones reach a few elements outside a buffer, well inside the guards:
+# without a device bound they would change a guard element. The extremes
+# would leave the allocation. The last two of each set also miss the three
+# claim counters when they are used as a persistent merge ID.
+STRAY_IDS = [
+    pytest.param(lambda count: (count, -1, count + 2, -5), id="near"),
+    pytest.param(lambda _: (_INT32_MAX, _INT32_MIN), id="i32-extremes"),
+]
+
+# Each kernel maps the parameter index of a count to the number of loaded
+# indices it compares with that count. The segment count is the last i32 of
+# every ABI that loads a segment ID or an output segment. The merge count is
+# the fifth i32 of the persistent ABI.
+BOUNDED_ID_KERNELS = [
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True}, {6: 1},
+        id="task-ids-warp",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True}, {6: 1},
+        id="task-ids-cta",
+    ),
+    pytest.param(
+        "_compile_fused_segmented_reduction_ptx", {}, {7: 2}, id="fused"
+    ),
+    pytest.param(
+        "_compile_persistent_segmented_reduction_ptx", {}, {14: 1, 15: 3},
+        id="persistent",
+    ),
+    pytest.param(
+        "_compile_split_merge_reduction_ptx", {}, {5: 1}, id="split-merge"
+    ),
+]
 
 # Each kernel maps the parameter index of a buffer length to the number of
 # ranges it clamps against that length. The value count is the first i32 of
@@ -142,6 +191,55 @@ def _guarded_values():
     return _guarded(host_values), host_values
 
 
+def _canaried(host, fill):
+    """Place a buffer between two guards that hold ``fill``.
+
+    Returns:
+        The device view a kernel receives, and the whole allocation. An
+        index up to ``_GUARD`` elements outside the view stays inside the
+        allocation and addresses a guard element.
+    """
+    count = host.numel()
+    buffer = torch.full(
+        (count + 2 * _GUARD,), fill, dtype=host.dtype, device="cuda"
+    )
+    view = buffer[_GUARD : _GUARD + count]
+    view.copy_(host)
+    return view, buffer
+
+
+def _canaried_output(count):
+    """Build an output whose slots and guards all hold the canary."""
+    return _canaried(torch.full((count,), _CANARY), _CANARY)
+
+
+def _canaried_i32(values):
+    """Build an i32 buffer between zero guards.
+
+    A zero guard read as an offset or as a merge record names an empty
+    range, so a stray read that reaches it still ends in a store.
+    """
+    return _canaried(torch.tensor(values, dtype=torch.int32), 0)
+
+
+def _assert_only_stored(buffer, stored):
+    """Require the canary everywhere except the slots named in ``stored``."""
+    torch.cuda.synchronize()
+    expected = torch.full((buffer.numel(),), _CANARY)
+    for slot, value in stored.items():
+        expected[_GUARD + slot] = value
+    assert torch.equal(buffer.cpu(), expected)
+
+
+def _assert_guards_hold(buffer, fill):
+    """Require both guards of a canaried buffer to hold their fill."""
+    torch.cuda.synchronize()
+    host = buffer.cpu()
+    guard = torch.full((_GUARD,), fill, dtype=host.dtype)
+    assert torch.equal(host[:_GUARD], guard)
+    assert torch.equal(host[-_GUARD:], guard)
+
+
 def _clamped_sums(host_values, ranges):
     """Sum each range after the clamp the kernels apply."""
     count = host_values.numel()
@@ -214,6 +312,32 @@ def test_loaded_ranges_are_clamped_against_the_abi_buffer_length(
     total = 2 * sum(bounds.values())
     assert lowered.count("llvm.intr.smin") == total
     assert lowered.count("llvm.intr.smax") == total
+
+
+@pytest.mark.parametrize(
+    ("compiler", "arguments", "bounds"), BOUNDED_ID_KERNELS
+)
+def test_loaded_ids_are_compared_with_the_abi_count(
+    compiler, arguments, bounds
+):
+    """Bound every loaded index by the count its own ABI carries."""
+    lowered, _ = _compile(compiler, "sm_86", **arguments)
+
+    signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
+    assert signature is not None
+    parameters = [
+        parameter.split(":")[0].strip()
+        for parameter in signature.group(1).split(",")
+    ]
+    assert len(parameters) == max(bounds) + 1
+    # One unsigned comparison of the loaded i32 word bounds it on both
+    # sides: a negative word is a large unsigned one.
+    for count_index, sites in bounds.items():
+        count = re.escape(parameters[count_index])
+        comparisons = re.findall(
+            rf'llvm\.icmp "ult" %\w+, {count} : i32', lowered
+        )
+        assert len(comparisons) == sites
 
 
 @pytest.mark.parametrize(
@@ -293,6 +417,7 @@ def test_task_id_kernels_clamp_offsets(block_size):
             task_ids.data_ptr(),
             _VALUE_COUNT,
             segment_count,
+            segment_count,
         ),
     )
 
@@ -324,6 +449,7 @@ def test_fused_kernel_clamps_offsets_in_both_branches():
             _VALUE_COUNT,
             len(warp_ids),
             len(cta_ids),
+            segment_count,
         ),
     )
 
@@ -381,6 +507,7 @@ def test_persistent_kernel_clamps_offsets_partial_and_merge_ranges():
             cta_tasks.numel(),
             len(partial_ranges),
             merge_count,
+            output.numel(),
         ),
     )
 
@@ -526,6 +653,7 @@ def test_split_merge_kernel_clamps_plan_ranges():
             records.data_ptr(),
             partial_count,
             len(ranges),
+            output.numel(),
         ),
     )
 
@@ -587,3 +715,211 @@ def test_softmax_store_stays_inside_the_validated_output(block_size):
         ]
     ).float()
     torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=0)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_task_id_kernels_skip_ids_outside_the_segment_count(
+    stray_ids, block_size
+):
+    """Store nothing for a task whose segment ID names no segment.
+
+    The task buffer is the caller's, so it can change after the host
+    validated it. Segment 1 has no task: a stray ID must not be redirected
+    to a valid segment either.
+    """
+    offsets = (0, 250, 600, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    task_ids = _device_i32([0, *stray_ids(segment_count), 2])
+    with pytest.raises(ValueError, match="valid segment IDs"):
+        _launch_segmented_sum_tasks(
+            values, device_offsets, output, task_ids, block_size=block_size
+        )
+    function = _load(
+        "_compile_segmented_reduction_ptx",
+        block_size=block_size,
+        use_task_ids=True,
+    )
+
+    _runtime._get_driver().launch_segmented_tasks(
+        function,
+        (task_ids.numel(),),
+        block_size,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            device_offsets.data_ptr(),
+            output.data_ptr(),
+            task_ids.data_ptr(),
+            _VALUE_COUNT,
+            task_ids.numel(),
+            segment_count,
+        ),
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[2]})
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_fused_kernel_skips_ids_outside_the_segment_count(stray_ids):
+    """Skip stray IDs in the four-per-block warp slots and the CTA tasks."""
+    offsets = (0, 20, 300, 330, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    stray = stray_ids(segment_count)
+    # Both schedules see every stray ID, and in the warp schedule a stray
+    # ID shares a block with a valid one.
+    warp_ids = [0, *stray, 2]
+    cta_ids = [*stray, 3]
+    task_ids = _device_i32([*warp_ids, *cta_ids])
+    function = _load("_compile_fused_segmented_reduction_ptx")
+
+    _runtime._get_driver().launch_segmented_mixed(
+        function,
+        ((len(warp_ids) + 3) // 4 + len(cta_ids),),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            device_offsets.data_ptr(),
+            output.data_ptr(),
+            task_ids.data_ptr(),
+            _VALUE_COUNT,
+            len(warp_ids),
+            len(cta_ids),
+            segment_count,
+        ),
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(
+        output_buffer, {0: sums[0], 2: sums[2], 3: sums[3]}
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_persistent_kernel_skips_ids_outside_their_counts(stray_ids):
+    """Skip stray segment IDs, merge IDs, and merge output segments.
+
+    Segments 0 to 3 are direct work and segments 4 and 5 are split in two
+    partials each. Four more partials carry the stray indices: two belong to
+    merges whose record names a stray output segment, and two name a stray
+    merge ID. Every partial still writes its own scratch slot. A stray merge
+    ID must leave the completion counters alone, and a stray output segment
+    must leave the output alone.
+    """
+    offsets = (0, 20, 300, 330, 400, 700, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    stray = stray_ids(segment_count)
+    warp_tasks = _device_i32([0, *stray, 2])
+    cta_tasks = _device_i32([1, *stray, 3])
+    partial_ranges = [
+        (400, 550), (550, 700),  # merge 0, segment 4
+        (700, 850), (850, 1000),  # merge 1, segment 5
+        (100, 200),  # merge 2, stray output segment
+        (200, 300),  # merge 3, stray output segment
+        (0, 50), (50, 100),  # stray merge IDs
+    ]
+    merge_records = [(4, 0, 2), (5, 2, 4), (stray[0], 4, 5), (stray[1], 5, 6)]
+    merge_count = len(merge_records)
+    # Completion counter 3 + ID follows three claim counters. The last two
+    # stray IDs miss those, so a counter update without a bound would land
+    # in a guard and not corrupt the queues.
+    stray_merges = stray_ids(merge_count)[-2:]
+    partial_merges = _device_i32([0, 0, 1, 1, 2, 3, *stray_merges])
+    device_partials = _device_ranges(partial_ranges)
+    device_merges, _ = _canaried_i32(
+        [field for record in merge_records for field in record]
+    )
+    scratch, scratch_buffer = _canaried_output(len(partial_ranges))
+    counters, counters_buffer = _canaried_i32([0] * (3 + merge_count))
+    function = _load("_compile_persistent_segmented_reduction_ptx")
+
+    _runtime._get_driver().launch_persistent(
+        function,
+        (2,),
+        512,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            device_offsets.data_ptr(),
+            output.data_ptr(),
+            warp_tasks.data_ptr(),
+            cta_tasks.data_ptr(),
+            device_partials.data_ptr(),
+            partial_merges.data_ptr(),
+            device_merges.data_ptr(),
+            scratch.data_ptr(),
+            counters.data_ptr(),
+            _VALUE_COUNT,
+            warp_tasks.numel(),
+            cta_tasks.numel(),
+            len(partial_ranges),
+            merge_count,
+            segment_count,
+        ),
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(output_buffer, dict(enumerate(sums)))
+    partial_sums = _clamped_sums(host_values, partial_ranges)
+    _assert_only_stored(scratch_buffer, dict(enumerate(partial_sums)))
+    _assert_guards_hold(counters_buffer, 0)
+    # Each merge counted its own partials and nothing else.
+    assert counters[3:].tolist() == [2, 2, 1, 1]
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_split_merge_kernel_skips_output_segments_outside_the_segment_count(
+    stray_ids,
+):
+    """Store nothing for a merge record whose segment names no segment."""
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    segment_count = 3
+    scratch = _guarded(host_scratch)
+    output, output_buffer = _canaried_output(segment_count)
+    ranges = [(0, 3), (3, 5), (0, 6), (5, 6)]
+    stray = stray_ids(segment_count)
+    segments = [0, stray[0], stray[1], 2]
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, ranges, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    function = _load(
+        "_compile_split_merge_reduction_ptx", entry=f"{_KERNEL}__merge"
+    )
+
+    _runtime._get_driver().launch_segmented(
+        function,
+        (len(ranges),),
+        512,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            scratch.data_ptr(),
+            output.data_ptr(),
+            records.data_ptr(),
+            partial_count,
+            len(ranges),
+            segment_count,
+        ),
+    )
+
+    sums = _clamped_sums(host_scratch, ranges)
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[3]})

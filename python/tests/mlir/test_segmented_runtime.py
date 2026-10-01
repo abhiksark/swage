@@ -1800,7 +1800,7 @@ def test_prepared_mixed_uses_one_ordered_fused_launch(
     assert block == 128
     assert mixed_ids == expected_ids
     assert arguments[3] == mixed_tasks.data_ptr()
-    assert arguments[5:] == expected_counts
+    assert arguments[5:7] == expected_counts
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1861,11 +1861,11 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     ]
     direct, partial, merge = driver.launches
     assert direct[2:4] == ((2,), 128)
-    assert direct[5][5:] == (2, 1)
+    assert direct[5][5:7] == (2, 1)
     assert partial[2:4] == ((4,), 512)
     assert partial[5][3:] == (offsets[-1], 4)
     assert merge[2:4] == ((2,), 512)
-    assert merge[5][3:] == (4, 2)
+    assert merge[5][3:5] == (4, 2)
     assert [data for data, _ in descriptor_tensors] == [
         [0, 4, 1],
         [34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],

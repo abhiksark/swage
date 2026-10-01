@@ -620,6 +620,23 @@ std::pair<Value, Value> clampRange(OpBuilder &builder, Location loc,
   return {start, end};
 }
 
+/// Whether `word`, an i32 index loaded from device memory, names one of
+/// `count` elements, where `count` is an i32 count that the ABI carries. The
+/// comparison is unsigned, so a negative word fails it too.
+///
+/// Host validation sees a snapshot of the buffer the index came from, but the
+/// kernel reloads it at every launch. This applies to a segment ID from a task
+/// buffer, the merge ID of a persistent partial, and the output segment of a
+/// merge record. The caller skips an index that fails this test: no store or
+/// counter update takes it. It is not clamped, because a clamped index would
+/// store a wrong result in a valid slot. For validated indices the test is
+/// always true.
+Value isLoadedIndexInRange(OpBuilder &builder, Location loc, Value word,
+                           Value count) {
+  return arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult, word,
+                               count);
+}
+
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program, int64_t blockSize,
                      bool useTaskIds, bool fusedMixed, bool persistent) {
@@ -633,6 +650,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
+  // The task-ID, fused, and persistent ABIs load segment IDs from a task
+  // buffer. The direct ABI uses the block index as the segment ID.
+  bool loadsSegmentIds = useTaskIds || fusedMixed || persistent;
   SmallVector<Type> inputs{pointer, pointer, pointer};
   if (persistent) {
     // Stable direct IDs, split metadata, scratch, queue/dependency counters,
@@ -640,12 +660,15 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     inputs.append({pointer, pointer, pointer, pointer, pointer, pointer,
                    pointer, i32, i32, i32, i32, i32});
   } else {
-    if (useTaskIds || fusedMixed)
+    if (loadsSegmentIds)
       inputs.push_back(pointer);
     inputs.append({i32, i32});
     if (fusedMixed)
       inputs.push_back(i32);
   }
+  // The segment count that bounds the loaded segment IDs.
+  if (loadsSegmentIds)
+    inputs.push_back(i32);
   auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel =
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
@@ -674,9 +697,14 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   unsigned valueCountIndex = 3;
   if (persistent)
     valueCountIndex = 10;
-  else if (useTaskIds || fusedMixed)
+  else if (loadsSegmentIds)
     valueCountIndex = 4;
   Value valueCount = entry->getArgument(valueCountIndex);
+  // Every ABI built here passes the segment count as its last i32. The
+  // direct ABI compares it with the block index. The others bound each
+  // loaded segment ID with it. The entry block may carry workgroup
+  // attributions after the ABI arguments, so the index comes from the type.
+  Value segmentCount = entry->getArgument(inputs.size() - 1);
   auto loadTaskWord = [&](OpBuilder &body, Location bodyLoc, Value words,
                           Value wordIndex) {
     Value wordIndex64 =
@@ -685,25 +713,43 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
         LLVM::GEPOp::create(body, bodyLoc, pointer, i32, words, wordIndex64);
     return Value(LLVM::LoadOp::create(body, bodyLoc, i32, wordAddress));
   };
-  auto loadSegmentId = [&](OpBuilder &body, Location bodyLoc, Value taskIds,
-                           Value taskId) {
-    Value segmentIdI32 = loadTaskWord(body, bodyLoc, taskIds, taskId);
-    return Value(arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(),
-                                            segmentIdI32));
+  auto loadTaskIndex = [&](OpBuilder &body, Location bodyLoc, Value words,
+                           Value wordIndex) {
+    Value word = loadTaskWord(body, bodyLoc, words, wordIndex);
+    return Value(
+        arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(), word));
   };
+  // Reduce one segment. `segmentInRange` is null when the segment ID is the
+  // block index, which the caller already compared with the segment count.
+  // For a segment ID loaded from a task buffer it is the result of
+  // `isLoadedIndexInRange`. The bound is applied to the addresses and not to
+  // the control flow: an out-of-range ID reads offsets[0] for both ends of
+  // its range, which makes the range empty, and takes no output store. Every
+  // thread therefore still reaches each barrier and shuffle below, whatever
+  // the task buffer holds.
   auto emitSegment = [&](OpBuilder &body, Location bodyLoc, Value segmentId,
-                         Value logicalThreadId, Value stride,
-                         bool useWarpShuffle) {
+                         Value segmentInRange, Value logicalThreadId,
+                         Value stride, bool useWarpShuffle) {
     Value segmentId64 =
         arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), segmentId);
+    Value startIndex64 = segmentId64;
+    if (segmentInRange) {
+      Value startIndex = arith::SelectOp::create(body, bodyLoc, segmentInRange,
+                                                 segmentId, zero);
+      startIndex64 = arith::IndexCastOp::create(body, bodyLoc,
+                                                body.getI64Type(), startIndex);
+    }
     Value startAddress = LLVM::GEPOp::create(
-        body, bodyLoc, pointer, i32, entry->getArgument(1), segmentId64);
+        body, bodyLoc, pointer, i32, entry->getArgument(1), startIndex64);
     Value startI32 = LLVM::LoadOp::create(body, bodyLoc, i32, startAddress);
-    Value nextSegment = arith::AddIOp::create(body, bodyLoc, segmentId, one);
-    Value nextSegment64 = arith::IndexCastOp::create(
-        body, bodyLoc, body.getI64Type(), nextSegment);
-    Value endAddress = LLVM::GEPOp::create(
-        body, bodyLoc, pointer, i32, entry->getArgument(1), nextSegment64);
+    Value endIndex = arith::AddIOp::create(body, bodyLoc, segmentId, one);
+    if (segmentInRange)
+      endIndex = arith::SelectOp::create(body, bodyLoc, segmentInRange,
+                                         endIndex, zero);
+    Value endIndex64 =
+        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), endIndex);
+    Value endAddress = LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
+                                           entry->getArgument(1), endIndex64);
     Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
     // The offsets come from the caller's buffer at launch time; bound them
     // here because host validation only saw an earlier snapshot.
@@ -753,10 +799,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
     if (program.terminal == TerminalKind::ScalarStore) {
       Value total = results[program.storedReduction];
-      Value firstThread = arith::CmpIOp::create(
+      Value mayStore = arith::CmpIOp::create(
           body, bodyLoc, arith::CmpIPredicate::eq, logicalThreadId, zero);
+      if (segmentInRange)
+        mayStore =
+            arith::AndIOp::create(body, bodyLoc, mayStore, segmentInRange);
       scf::IfOp::create(
-          body, bodyLoc, firstThread, [&](OpBuilder &store, Location storeLoc) {
+          body, bodyLoc, mayStore, [&](OpBuilder &store, Location storeLoc) {
             Value outputAddress =
                 LLVM::GEPOp::create(store, storeLoc, pointer, f32,
                                     entry->getArgument(2), segmentId64);
@@ -769,7 +818,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // Guard-free on purpose: every thread runs the same block-stride loop it
     // ran for each reduction stage, and an empty segment makes it zero-trip.
     // A thread-dependent guard here would put a predicate around code the
-    // barriers above already made CTA-uniform.
+    // barriers above already made CTA-uniform. An out-of-range segment ID
+    // needs no guard either, because its range is empty.
     scf::ForOp::create(
         body, bodyLoc, first, end, stride, ValueRange(),
         [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
@@ -784,6 +834,18 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
           scf::YieldOp::create(loop, loopLoc);
         });
+  };
+
+  auto emitTaskSegment = [&](OpBuilder &body, Location bodyLoc, Value taskIds,
+                             Value taskId, Value logicalThreadId, Value stride,
+                             bool useWarpShuffle) {
+    Value segmentIdI32 = loadTaskWord(body, bodyLoc, taskIds, taskId);
+    Value segmentInRange =
+        isLoadedIndexInRange(body, bodyLoc, segmentIdI32, segmentCount);
+    Value segmentId = arith::IndexCastOp::create(
+        body, bodyLoc, body.getIndexType(), segmentIdI32);
+    emitSegment(body, bodyLoc, segmentId, segmentInRange, logicalThreadId,
+                stride, useWarpShuffle);
   };
 
   if (persistent) {
@@ -847,9 +909,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value ctaTask = ctaAfter->getArgument(0);
     Value ctaTaskIndex = arith::IndexCastOp::create(
         builder, loc, builder.getIndexType(), ctaTask);
-    Value ctaSegment =
-        loadSegmentId(builder, loc, entry->getArgument(4), ctaTaskIndex);
-    emitSegment(builder, loc, ctaSegment, threadId, block, false);
+    emitTaskSegment(builder, loc, entry->getArgument(4), ctaTaskIndex, threadId,
+                    block, false);
     gpu::BarrierOp::create(builder, loc);
     Value nextCTA = claim(builder, loc, 1, firstThread, false, oneI32);
     scf::YieldOp::create(builder, loc, nextCTA);
@@ -942,12 +1003,26 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // It writes either the ready merge ID or -1 into a separate shared slot;
     // the CTA barrier makes that decision uniform without rereading merge
     // descriptors in every lane for every non-final partial.
+    //
+    // The merge ID addresses the completion counter and the merge record, so
+    // the merge count bounds it first. A partial whose merge ID is out of
+    // range updates no counter, reads no record, and publishes -1. This
+    // branch runs in the leader alone and holds no barrier.
     Value completionSlot = one;
+    Value mergeCount = entry->getArgument(14);
     scf::IfOp::create(
         builder, loc, firstThread,
         [&](OpBuilder &publish, Location publishLoc) {
-          Value mergeId = loadSegmentId(publish, publishLoc,
-                                        entry->getArgument(6), partialIndex);
+          Value mergeIdI32 = loadTaskWord(publish, publishLoc,
+                                          entry->getArgument(6), partialIndex);
+          Value mergeInRange =
+              isLoadedIndexInRange(publish, publishLoc, mergeIdI32, mergeCount);
+          auto published = scf::IfOp::create(publish, publishLoc,
+                                             TypeRange{i32}, mergeInRange,
+                                             /*withElseRegion=*/true);
+          publish.setInsertionPointToStart(&published.getThenRegion().front());
+          Value mergeId = arith::IndexCastOp::create(
+              publish, publishLoc, publish.getIndexType(), mergeIdI32);
           Value completionBase =
               arith::ConstantIndexOp::create(publish, publishLoc, 3);
           Value completionIndex = arith::AddIOp::create(
@@ -965,9 +1040,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               arith::AddIOp::create(publish, publishLoc, mergeBase, one);
           Value mergeEndIndex =
               arith::AddIOp::create(publish, publishLoc, mergeBeginIndex, one);
-          Value mergeBegin = loadSegmentId(
+          Value mergeBegin = loadTaskIndex(
               publish, publishLoc, entry->getArgument(7), mergeBeginIndex);
-          Value mergeEnd = loadSegmentId(publish, publishLoc,
+          Value mergeEnd = loadTaskIndex(publish, publishLoc,
                                          entry->getArgument(7), mergeEndIndex);
           Value expectedPartials =
               arith::SubIOp::create(publish, publishLoc, mergeEnd, mergeBegin);
@@ -989,15 +1064,19 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                               TypeRange{i32}, isLastPartial,
                                               /*withElseRegion=*/true);
           publish.setInsertionPointToStart(&readyMerge.getThenRegion().front());
-          Value mergeIdI32 = arith::IndexCastOp::create(
-              publish, publishLoc, publish.getI32Type(), mergeId);
           scf::YieldOp::create(publish, publishLoc, mergeIdI32);
           publish.setInsertionPointToStart(&readyMerge.getElseRegion().front());
           Value noMerge =
               arith::ConstantIntOp::create(publish, publishLoc, -1, 32);
           scf::YieldOp::create(publish, publishLoc, noMerge);
           publish.setInsertionPointAfter(readyMerge);
-          memref::StoreOp::create(publish, publishLoc, readyMerge.getResult(0),
+          scf::YieldOp::create(publish, publishLoc, readyMerge.getResult(0));
+          publish.setInsertionPointToStart(&published.getElseRegion().front());
+          Value skippedMerge =
+              arith::ConstantIntOp::create(publish, publishLoc, -1, 32);
+          scf::YieldOp::create(publish, publishLoc, skippedMerge);
+          publish.setInsertionPointAfter(published);
+          memref::StoreOp::create(publish, publishLoc, published.getResult(0),
                                   claimBroadcast, completionSlot);
           scf::YieldOp::create(publish, publishLoc);
         });
@@ -1020,17 +1099,23 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               arith::AddIOp::create(merge, mergeLoc, mergeBase, one);
           Value mergeEndIndex =
               arith::AddIOp::create(merge, mergeLoc, mergeBeginIndex, one);
-          Value outputSegment =
-              loadSegmentId(merge, mergeLoc, entry->getArgument(7), mergeBase);
+          // The merge ID is in range here: the leader published it only
+          // after the bound above. The output segment it names is loaded
+          // from the record, so the segment count bounds it before the
+          // store. The merge itself stays unconditional, which keeps its
+          // all-reduce under the block-uniform guard alone.
+          Value outputSegmentI32 =
+              loadTaskWord(merge, mergeLoc, entry->getArgument(7), mergeBase);
+          Value outputInRange = isLoadedIndexInRange(
+              merge, mergeLoc, outputSegmentI32, segmentCount);
+          Value outputSegment = arith::IndexCastOp::create(
+              merge, mergeLoc, merge.getIndexType(), outputSegmentI32);
           Value mergeBeginI32 = loadTaskWord(
               merge, mergeLoc, entry->getArgument(7), mergeBeginIndex);
           Value mergeEndI32 = loadTaskWord(
               merge, mergeLoc, entry->getArgument(7), mergeEndIndex);
           // Merge ranges index scratch, which holds one slot per partial, so
-          // the partial count bounds them. The output segment stays as
-          // loaded, because this ABI carries no output or segment count. The
-          // merge ID above also stays as loaded, although the merge count
-          // could bound it. The host builds both in plan-owned storage.
+          // the partial count bounds them.
           Value mergeBegin;
           Value mergeEnd;
           std::tie(mergeBegin, mergeEnd) = clampRange(
@@ -1056,8 +1141,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               });
           Value mergeTotal = gpu::AllReduceOp::create(
               merge, mergeLoc, mergeReduction.getResult(0), add, true);
+          Value mayStore = arith::AndIOp::create(merge, mergeLoc, firstThread,
+                                                 outputInRange);
           scf::IfOp::create(
-              merge, mergeLoc, firstThread,
+              merge, mergeLoc, mayStore,
               [&](OpBuilder &store, Location storeLoc) {
                 Value outputIndex64 = arith::IndexCastOp::create(
                     store, storeLoc, store.getI64Type(), outputSegment);
@@ -1109,9 +1196,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                             warpBatchEndIndex, one);
     builder.setInsertionPointToStart(warpBatchLoop.getBody());
     Value warpTaskIndex = warpBatchLoop.getInductionVar();
-    Value warpSegment =
-        loadSegmentId(builder, loc, entry->getArgument(3), warpTaskIndex);
-    emitSegment(builder, loc, warpSegment, lane, warp, true);
+    emitTaskSegment(builder, loc, entry->getArgument(3), warpTaskIndex, lane,
+                    warp, true);
     builder.setInsertionPointAfter(warpBatchLoop);
     Value nextWarp = claim(builder, loc, 0, firstLane, true, eightI32);
     scf::YieldOp::create(builder, loc, nextWarp);
@@ -1150,14 +1236,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           Value inRange = arith::CmpIOp::create(warpBlock, warpLoc,
                                                 arith::CmpIPredicate::ult,
                                                 warpTaskId, warpTaskCount);
-          scf::IfOp::create(
-              warpBlock, warpLoc, inRange,
-              [&](OpBuilder &task, Location taskLoc) {
-                Value segmentId = loadSegmentId(
-                    task, taskLoc, entry->getArgument(3), warpTaskId);
-                emitSegment(task, taskLoc, segmentId, lane, warp, true);
-                scf::YieldOp::create(task, taskLoc);
-              });
+          scf::IfOp::create(warpBlock, warpLoc, inRange,
+                            [&](OpBuilder &task, Location taskLoc) {
+                              emitTaskSegment(task, taskLoc,
+                                              entry->getArgument(3), warpTaskId,
+                                              lane, warp, true);
+                              scf::YieldOp::create(task, taskLoc);
+                            });
           scf::YieldOp::create(warpBlock, warpLoc);
         },
         [&](OpBuilder &ctaBlock, Location ctaLoc) {
@@ -1166,16 +1251,15 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           Value inRange =
               arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
                                     ctaTaskId, ctaTaskCount);
-          scf::IfOp::create(
-              ctaBlock, ctaLoc, inRange,
-              [&](OpBuilder &task, Location taskLoc) {
-                Value mixedTaskId = arith::AddIOp::create(
-                    task, taskLoc, warpTaskCount, ctaTaskId);
-                Value segmentId = loadSegmentId(
-                    task, taskLoc, entry->getArgument(3), mixedTaskId);
-                emitSegment(task, taskLoc, segmentId, threadId, block, false);
-                scf::YieldOp::create(task, taskLoc);
-              });
+          scf::IfOp::create(ctaBlock, ctaLoc, inRange,
+                            [&](OpBuilder &task, Location taskLoc) {
+                              Value mixedTaskId = arith::AddIOp::create(
+                                  task, taskLoc, warpTaskCount, ctaTaskId);
+                              emitTaskSegment(
+                                  task, taskLoc, entry->getArgument(3),
+                                  mixedTaskId, threadId, block, false);
+                              scf::YieldOp::create(task, taskLoc);
+                            });
           scf::YieldOp::create(ctaBlock, ctaLoc);
         });
     gpu::ReturnOp::create(builder, loc);
@@ -1191,12 +1275,12 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
   scf::IfOp::create(
       builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-        Value segmentId = taskIndex;
         if (useTaskIds)
-          segmentId =
-              loadSegmentId(body, bodyLoc, entry->getArgument(3), taskIndex);
-        emitSegment(body, bodyLoc, segmentId, threadId, block,
-                    useTaskIds && blockSize == 32);
+          emitTaskSegment(body, bodyLoc, entry->getArgument(3), taskIndex,
+                          threadId, block, blockSize == 32);
+        else
+          emitSegment(body, bodyLoc, taskIndex, Value(), threadId, block,
+                      false);
 
         scf::YieldOp::create(body, bodyLoc);
       });
@@ -1223,8 +1307,13 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  auto kernelType = FunctionType::get(
-      module.getContext(), {pointer, pointer, pointer, i32, i32}, {});
+  SmallVector<Type> inputs{pointer, pointer, pointer, i32, i32};
+  // A merge loads its output segment from a record, so its ABI ends with the
+  // segment count that bounds it. A partial writes the scratch slot of its
+  // own block index.
+  if (merge)
+    inputs.push_back(i32);
+  auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel = gpu::GPUFuncOp::create(
       builder, loc, source.getName().str() + suffix, kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
@@ -1264,18 +1353,24 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
           return Value(LLVM::LoadOp::create(body, bodyLoc, i32, address));
         };
 
+        // A merge loads its output segment from the record, so the segment
+        // count bounds it before the store below. The merge itself stays
+        // unconditional, which keeps its all-reduce under the block-uniform
+        // guard alone.
         Value outputIndex = taskIndex;
+        Value outputInRange;
         int64_t rangeField = 0;
         if (merge) {
+          Value outputSegmentI32 = loadRecord(0);
+          outputInRange = isLoadedIndexInRange(body, bodyLoc, outputSegmentI32,
+                                               entry->getArgument(5));
           outputIndex = arith::IndexCastOp::create(
-              body, bodyLoc, body.getIndexType(), loadRecord(0));
+              body, bodyLoc, body.getIndexType(), outputSegmentI32);
           rangeField = 1;
         }
         // Both split ABIs pass the buffer the range indexes as their first
         // pointer and its length as their first i32: values and the value
         // count for a partial, scratch and the partial count for a merge.
-        // The merge output segment has no such length in this ABI and stays
-        // as loaded.
         Value beginI32 = loadRecord(rangeField);
         Value endI32 = loadRecord(rangeField + 1);
         Value begin;
@@ -1307,11 +1402,13 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
                                      : gpu::AllReduceOperation::MAXIMUMF);
         Value total = gpu::AllReduceOp::create(
             body, bodyLoc, local.getResult(0), operation, true);
-        Value firstThread = arith::CmpIOp::create(
+        Value mayStore = arith::CmpIOp::create(
             body, bodyLoc, arith::CmpIPredicate::eq, threadId, zero);
+        if (outputInRange)
+          mayStore =
+              arith::AndIOp::create(body, bodyLoc, mayStore, outputInRange);
         scf::IfOp::create(
-            body, bodyLoc, firstThread,
-            [&](OpBuilder &store, Location storeLoc) {
+            body, bodyLoc, mayStore, [&](OpBuilder &store, Location storeLoc) {
               Value outputIndex64 = arith::IndexCastOp::create(
                   store, storeLoc, store.getI64Type(), outputIndex);
               Value outputAddress = LLVM::GEPOp::create(
@@ -1409,14 +1506,19 @@ public:
       getOperation().emitError("persistent lowering requires block-size 512");
       return signalPassFailure();
     }
-    // The persistent kernel has its own ten-pointer ABI and always loads
-    // segment IDs from its task queues, so the task-ID ABI cannot be honored.
-    // Fused mixed lowering is not checked the same way: the C API compiles it
-    // with both flags set.
+    // The persistent and fused kernels have ABIs of their own and always
+    // load segment IDs from their task buffers, so neither can honor the
+    // task-ID ABI option.
     if (persistent && useTaskIds) {
       getOperation().emitError(
           "persistent lowering does not accept use-task-ids; the persistent "
           "kernel always loads segment IDs from its own task queues");
+      return signalPassFailure();
+    }
+    if (fusedMixed && useTaskIds) {
+      getOperation().emitError(
+          "fused mixed lowering does not accept use-task-ids; the fused "
+          "kernel always loads segment IDs from its own task buffer");
       return signalPassFailure();
     }
     if (!hasPowerOfTwoWarpCount(blockSize)) {

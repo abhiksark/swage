@@ -14,7 +14,8 @@ exact internal contracts; none of them is a public API.
 Pure warp and pure CTA qualification use this task-ID ABI:
 
 ```text
-values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32
+values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
+segment_count:i32
 ```
 
 <div class="doc-figure" tabindex="0" markdown="1">
@@ -30,8 +31,12 @@ execution uses one 128-thread kernel and this ABI:
 
 ```text
 values*, offsets*, output*, task_ids*, value_count:i32,
-warp_task_count:i32, cta_task_count:i32
+warp_task_count:i32, cta_task_count:i32, segment_count:i32
 ```
+
+In both ABIs `segment_count` is the number of segments that `offsets` and
+`output` describe. Each kernel compares every segment ID that it loads from
+`task_ids` with it.
 
 Each initial block contains four independent one-segment warp slots. CTA
 tasks follow at one segment per block. An empty task set enqueues no kernel.
@@ -55,10 +60,11 @@ already compiled and loaded. A prepared launch raises if the offsets tensor
 was modified in place after preparation, which it detects through the tensor
 version counter; the kernels additionally clamp every loaded range that
 indexes the values buffer to the value count, and every merge range that
-indexes scratch to the partial count. Segment IDs read from a task buffer
-are not bounded on the device (ADR-0012). CUDA graph capture needs an
-earlier launch that observed task storage ready, so the protocol is launch,
-synchronize, launch again, then capture.
+indexes scratch to the partial count. A segment ID read from a task buffer
+is compared with the segment count, and an ID outside it is skipped: the
+kernel reads no value for it and stores nothing (ADR-0012). CUDA graph
+capture needs an earlier launch that observed task storage ready, so the
+protocol is launch, synchronize, launch again, then capture.
 
 For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`

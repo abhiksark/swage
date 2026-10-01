@@ -26,6 +26,10 @@
 // Plan-owned ranges take the same clamp against the length of the buffer they
 // index. Partial ranges index values and are bounded by the value count.
 // Merge ranges index scratch and are bounded by the partial count.
+//
+// The indices that select a range or an output slot, which are a segment ID
+// from a task buffer, a persistent merge ID, and the output segment of a
+// merge record, are pinned in segment-id-bounds.mlir.
 module {
   func.func @segmented_sum(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
@@ -44,14 +48,14 @@ module {
 }
 
 // DIRECT: gpu.func @segmented_sum(%{{[^,]+}}: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32) kernel
-// TASKS: gpu.func @segmented_sum(%{{[^,]+}}: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32) kernel
-// FUSED: gpu.func @segmented_sum(%{{[^,]+}}: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32, %{{[^,)]+}}: i32) kernel
+// TASKS: gpu.func @segmented_sum(%{{[^,]+}}: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32, %{{[^,)]+}}: i32) kernel
+// FUSED: gpu.func @segmented_sum(%{{[^,]+}}: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32, %{{[^,)]+}}: i32, %{{[^,)]+}}: i32) kernel
 // PERSISTENT: gpu.func @segmented_sum(
 // PERSISTENT-SAME: %[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr,
 // PERSISTENT-SAME: %{{[^,]+}}: !llvm.ptr, %{{[^,]+}}: !llvm.ptr,
 // PERSISTENT-SAME: %[[RANGES:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[MERGES:[^,]+]]: !llvm.ptr,
 // PERSISTENT-SAME: %[[SCRATCH:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr,
-// PERSISTENT-SAME: %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,]+}}: i32, %{{[^,]+}}: i32, %[[PARTIAL_COUNT:[^,]+]]: i32, %{{[^,)]+}}: i32)
+// PERSISTENT-SAME: %[[VALUE_COUNT:[^,]+]]: i32, %{{[^,]+}}: i32, %{{[^,]+}}: i32, %[[PARTIAL_COUNT:[^,]+]]: i32, %{{[^,]+}}: i32, %{{[^,)]+}}: i32)
 
 // CHECK: %[[START_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK: %[[START_RAW:.*]] = llvm.load %[[START_ADDRESS]] : !llvm.ptr -> i32
@@ -155,7 +159,7 @@ module {
 // scratch and the partial count for a merge. A merge record starts with the
 // output segment, so its range is the second and third field.
 // PARTIAL: gpu.func @segmented_sum__partial(%[[BUFFER:[^,]+]]: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[LENGTH:[^,]+]]: i32, %{{[^,)]+}}: i32) kernel
-// MERGE: gpu.func @segmented_sum__merge(%[[BUFFER:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %[[LENGTH:[^,]+]]: i32, %{{[^,)]+}}: i32) kernel
+// MERGE: gpu.func @segmented_sum__merge(%[[BUFFER:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %[[LENGTH:[^,]+]]: i32, %{{[^,)]+}}: i32, %{{[^,)]+}}: i32) kernel
 // MERGE: llvm.getelementptr %[[RECORDS]]
 // SPLIT: %[[SPLIT_START_ADDRESS:.*]] = llvm.getelementptr %[[RECORDS]]
 // SPLIT: %[[SPLIT_START_RAW:.*]] = llvm.load %[[SPLIT_START_ADDRESS]] : !llvm.ptr -> i32
