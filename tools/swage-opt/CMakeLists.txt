@@ -14,6 +14,7 @@ set(LIBS
   MLIRVectorDialect
   MLIRGPUDialect
   MLIRLLVMDialect
+  MLIRNVVMDialect
 )
 add_llvm_executable(swage-opt swage-opt.cpp)
 

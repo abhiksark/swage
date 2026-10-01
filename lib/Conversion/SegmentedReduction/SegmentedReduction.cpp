@@ -1366,7 +1366,7 @@ public:
     blockSize = other.blockSize.getValue();
     useTaskIds = other.useTaskIds.getValue();
     fusedMixed = other.fusedMixed.getValue();
-    persistent = other.persistent;
+    persistent = other.persistent.getValue();
   }
   SegmentedReductionToGPUPass(int64_t requestedBlockSize, bool requestedTaskIds,
                               bool requestedFusedMixed,
@@ -1445,8 +1445,11 @@ private:
       *this, "fused-mixed",
       llvm::cl::desc("Fuse warp and CTA task schedules into one kernel"),
       llvm::cl::init(false)};
-  // Persistent lowering is reachable only through its private factory.
-  bool persistent = false;
+  Option<bool> persistent{
+      *this, "persistent",
+      llvm::cl::desc("Emit the experimental private persistent queue kernel; "
+                     "requires block-size 512"),
+      llvm::cl::init(false)};
 };
 
 class SplitSegmentedReductionToGPUPass
@@ -1458,9 +1461,12 @@ public:
   SplitSegmentedReductionToGPUPass() = default;
   SplitSegmentedReductionToGPUPass(
       const SplitSegmentedReductionToGPUPass &other)
-      : PassWrapper(other), merge(other.merge) {}
-  explicit SplitSegmentedReductionToGPUPass(bool requestedMerge)
-      : merge(requestedMerge) {}
+      : PassWrapper(other) {
+    merge = other.merge.getValue();
+  }
+  explicit SplitSegmentedReductionToGPUPass(bool requestedMerge) {
+    merge = requestedMerge;
+  }
 
   StringRef getArgument() const final {
     return "swage-split-segmented-reduction-to-gpu";
@@ -1490,7 +1496,11 @@ public:
   }
 
 private:
-  bool merge = false;
+  Option<bool> merge{
+      *this, "merge",
+      llvm::cl::desc("Emit the merge stage over scratch partials instead of "
+                     "the partial stage over input ranges"),
+      llvm::cl::init(false)};
 };
 
 class SwageToPlanPass
@@ -1595,6 +1605,7 @@ std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements,
 void registerSegmentedReductionPasses() {
   PassRegistration<SegmentedReductionToSCFPass>();
   PassRegistration<SegmentedReductionToGPUPass>();
+  PassRegistration<SplitSegmentedReductionToGPUPass>();
   PassRegistration<SwageToPlanPass>();
 }
 
