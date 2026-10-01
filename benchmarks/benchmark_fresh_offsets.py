@@ -175,19 +175,14 @@ def _arguments(argv=None):
 
 def _sizes(arguments):
     """Return the segment count, warmups, and samples for this run."""
+    segment_count = arguments.segment_count
     if arguments.smoke:
-        return (
-            arguments.segment_count or _SMOKE_SEGMENT_COUNT,
-            _SMOKE_WARMUPS,
-            _SMOKE_SAMPLES,
-        )
-    return (
-        _SEGMENT_COUNT
-        if arguments.segment_count is None
-        else arguments.segment_count,
-        arguments.warmups,
-        arguments.samples,
-    )
+        if segment_count is None:
+            segment_count = _SMOKE_SEGMENT_COUNT
+        return segment_count, _SMOKE_WARMUPS, _SMOKE_SAMPLES
+    if segment_count is None:
+        segment_count = _SEGMENT_COUNT
+    return segment_count, arguments.warmups, arguments.samples
 
 
 def _git_metadata(root, *, allow_dirty):

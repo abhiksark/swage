@@ -848,6 +848,7 @@ def test_arguments_select_scale_seed_values_and_distributions(fresh_offsets):
         ["--distributions", "normal"],
         ["--distributions", "uniform", "--segment-count", "1000000"],
         ["--segment-count", "0"],
+        ["--smoke", "--segment-count", "0"],
         ["--values", "ones"],
     ],
 )
