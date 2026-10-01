@@ -1217,17 +1217,22 @@ def _write_cache_entry(artifact, specialization):
 def _atomic_write(path, contents):
     descriptor, temporary = tempfile.mkstemp(dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w") as output:
+        try:
+            output = os.fdopen(descriptor, "w")
+        except BaseException:
+            # No file object owns the descriptor, so it is closed here.
+            os.close(descriptor)
+            raise
+        # From here the file object closes the descriptor, exactly once. A
+        # second close could hit a file that another thread opened under
+        # the same number in the meantime.
+        with output:
+            os.fchmod(output.fileno(), 0o600)
             output.write(contents)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
     except BaseException:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
         if os.path.exists(temporary):
             os.unlink(temporary)
         raise

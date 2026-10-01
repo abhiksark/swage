@@ -3236,3 +3236,58 @@ def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
     assert driver._native_launch is None
     driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
     assert driver.library.cuLaunchKernel.called
+
+
+def test_atomic_write_closes_its_descriptor_only_once(tmp_path, monkeypatch):
+    """Leave a descriptor that reuses the number alone when a publish fails."""
+    from swage import _runtime
+
+    unrelated = {}
+
+    def fail_after_another_open(_source, _target):
+        # Another thread opens a file now. It receives the lowest free
+        # number, which is the descriptor the write has just closed.
+        unrelated["descriptor"] = os.open(
+            tmp_path / "unrelated", os.O_CREAT | os.O_WRONLY, 0o600
+        )
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_runtime.os, "replace", fail_after_another_open)
+    with pytest.raises(OSError, match="No space left on device"):
+        _runtime._atomic_write(tmp_path / "kernel.ptx", "payload")
+
+    try:
+        assert os.write(unrelated["descriptor"], b"still open") == 10
+    finally:
+        try:
+            os.close(unrelated["descriptor"])
+        except OSError:
+            pass  # The defect closed it; the assertion above reports that.
+    assert [path.name for path in tmp_path.iterdir()] == ["unrelated"]
+
+
+def test_atomic_write_closes_a_descriptor_it_could_not_wrap(
+    tmp_path, monkeypatch
+):
+    """Close the raw descriptor when no file object took ownership of it."""
+    from swage import _runtime
+
+    opened = []
+    mkstemp = _runtime.tempfile.mkstemp
+
+    def recording_mkstemp(**options):
+        descriptor, name = mkstemp(**options)
+        opened.append(descriptor)
+        return descriptor, name
+
+    def refuse(_descriptor, _mode):
+        raise MemoryError("no file object")
+
+    monkeypatch.setattr(_runtime.tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(_runtime.os, "fdopen", refuse)
+    with pytest.raises(MemoryError, match="no file object"):
+        _runtime._atomic_write(tmp_path / "kernel.ptx", "payload")
+
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(opened[0])
+    assert list(tmp_path.iterdir()) == []
