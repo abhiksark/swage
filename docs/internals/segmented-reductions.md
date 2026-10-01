@@ -86,8 +86,8 @@ The schedule of a segment changes in these cases:
   number of lanes.
 - The caller uses the experimental persistent kernel. It returns the bits
   of `mixed` up to the warp limit and above the chunk limit. Between them it
-  strides the segment with its 512-thread block, which no static schedule
-  does.
+  strides the segment with its 512-thread block, which none of the prepared
+  schedules does.
 
 There is no selectable deterministic mode. These are the ways to pin the
 schedule with the private helpers today:

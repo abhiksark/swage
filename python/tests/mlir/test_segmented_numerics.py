@@ -202,7 +202,7 @@ def test_sum_bits_depend_on_the_schedule():
       split trees with different chunk limits.
     - The persistent kernel uses the mixed split tree above the chunk
       limit. From 33 elements to the chunk limit it uses 512 lanes, which
-      the static schedules do not.
+      none of the prepared static schedules does.
 
     A disagreement is asserted on at least one segment, not on each: two
     trees can round one segment to the same f32 by chance. If a later
