@@ -411,6 +411,87 @@ def test_cpu_oracle_rejects_empty_offsets_with_the_validator_message():
         cpu_oracle(values, offsets, "sum")
 
 
+def _sequential_f32_sum(values):
+    """Accumulate left to right in float32, the order of the CPU oracle."""
+    total = torch.zeros((), dtype=torch.float32)
+    for value in values:
+        total += value
+    return total
+
+
+def _bits(tensor):
+    """Return the IEEE-754 bit patterns of a float32 tensor."""
+    return tensor.contiguous().view(torch.int32).tolist()
+
+
+def test_cpu_sum_oracle_is_bit_exact_for_seeded_randn():
+    """The oracle transports result bits, not six-digit decimal text.
+
+    A 65537-element zero-mean segment has a float32 sum that six significant
+    digits cannot hold, so this fails on any decimal transport. The expected
+    value is a scalar float32 loop in the oracle's own left-to-right order,
+    which makes bit equality the correct assertion.
+    """
+    generator = torch.Generator().manual_seed(0)
+    values = torch.randn(65537, generator=generator)
+    offsets = torch.tensor([0, 65537], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    expected = _sequential_f32_sum(values).reshape(1)
+    assert _bits(actual) == _bits(expected)
+
+
+def test_cpu_oracle_round_trips_every_float32_class():
+    """Singleton maxima return their input bits through the transport."""
+    values = torch.tensor(
+        [
+            1 / 3,
+            -0.0,
+            0.0,
+            float("inf"),
+            float("-inf"),
+            torch.finfo(torch.float32).max,
+            torch.finfo(torch.float32).tiny,
+            1e-45,
+            -16777215.0,
+        ],
+        dtype=torch.float32,
+    )
+    offsets = torch.arange(values.numel() + 1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "max")
+
+    assert _bits(actual) == _bits(values)
+
+
+def test_cpu_softmax_oracle_is_bit_exact_for_equal_logits():
+    """Three equal logits normalize to the float32 nearest one third.
+
+    exp2 of zero is exactly one and the sum is exactly three, so the only
+    rounding is the final division, which six decimal digits cannot carry.
+    """
+    values = torch.full((3,), 5.0)
+    offsets = torch.tensor([0, 3], dtype=torch.int32)
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    expected = (torch.ones(3) / 3).to(torch.float32)
+    assert _bits(actual) == _bits(expected)
+
+
+@pytest.mark.parametrize("kind", ["sum", "max"])
+def test_cpu_oracle_returns_nothing_for_zero_segments(kind):
+    """A segment-free call yields an empty result, not an unwritten slot."""
+    values = torch.empty(0, dtype=torch.float32)
+    offsets = torch.zeros(1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    assert actual.shape == (0,)
+    assert actual.dtype == torch.float32
+
+
 @pytest.mark.parametrize("count", [-1, 1 << 31])
 def test_rejects_counts_outside_i32(count):
     """Keep explicit value and segment counts inside the CUDA ABI."""

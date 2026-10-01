@@ -1038,69 +1038,79 @@ def _float_literal(value):
     return f"0x{bits:08X}"
 
 
+def _dense_literal(code, numbers):
+    """Emit the raw little-endian bytes of a dense MLIR initializer."""
+    payload = struct.pack(f"<{len(numbers)}{code}", *numbers)
+    return f'dense<"0x{payload.hex()}">'
+
+
 def _runner_module(values, offsets, semantic, kernel_name, output_length):
-    """Add a no-argument executable wrapper around the semantic kernel."""
+    """Add a no-argument executable wrapper around the semantic kernel.
+
+    The inputs become constant globals initialized from their exact bytes,
+    one operation per buffer instead of three per element. The result
+    leaves as bit patterns: each f32 output is bitcast to i32 and printed by
+    the integer memref printer, because the float printer keeps only six
+    significant digits.
+    """
     value_count = values.numel()
     segment_count = offsets.numel() - 1
     values_type = f"memref<{value_count}xf32>"
     offsets_type = f"memref<{segment_count + 1}xi32>"
     output_type = f"memref<{output_length}xf32>"
+    bits_type = f"memref<{output_length}xi32>"
     lines = [
         semantic.rstrip()[:-1],
         "",
-        "  func.func @main() {",
-        f"    %values_storage = memref.alloc() : {values_type}",
-        f"    %offsets_storage = memref.alloc() : {offsets_type}",
-        f"    %output_storage = memref.alloc() : {output_type}",
         (
-            f"    %values = memref.cast %values_storage : {values_type} "
-            "to memref<?xf32>"
+            f'  memref.global "private" constant @runner_offsets : '
+            f"{offsets_type} = {_dense_literal('i', offsets.tolist())}"
         ),
-        (
-            f"    %offsets = memref.cast %offsets_storage : {offsets_type} "
-            "to memref<?xi32>"
-        ),
-        (
-            f"    %output = memref.cast %output_storage : {output_type} "
-            "to memref<?xf32>"
-        ),
-        # Prefill so that a store past the live range, or a zero-length
-        # print, is visible in the parsed result instead of being garbage.
-        (f"    %sentinel = arith.constant {_float_literal(_SENTINEL)} : f32"),
-        "    %prefill_from = arith.constant 0 : index",
-        "    %prefill_step = arith.constant 1 : index",
-        f"    %prefill_to = arith.constant {output_length} : index",
-        ("    scf.for %pi = %prefill_from to %prefill_to step %prefill_step {"),
-        "      memref.store %sentinel, %output[%pi] : memref<?xf32>",
-        "    }",
     ]
-    for index, value in enumerate(values.tolist()):
-        lines.extend(
-            [
-                f"    %vi{index} = arith.constant {index} : index",
-                (
-                    f"    %vv{index} = arith.constant "
-                    f"{_float_literal(value)} : f32"
-                ),
-                (
-                    f"    memref.store %vv{index}, %values[%vi{index}] "
-                    ": memref<?xf32>"
-                ),
-            ]
+    # A zero-element dense initializer has no bytes to parse, so an empty
+    # values buffer stays a plain allocation that nothing reads.
+    values_storage = f"memref.alloc() : {values_type}"
+    if value_count:
+        lines.append(
+            f'  memref.global "private" constant @runner_values : '
+            f"{values_type} = {_dense_literal('f', values.tolist())}"
         )
-    for index, offset in enumerate(offsets.tolist()):
-        lines.extend(
-            [
-                f"    %oi{index} = arith.constant {index} : index",
-                f"    %ov{index} = arith.constant {offset} : i32",
-                (
-                    f"    memref.store %ov{index}, %offsets[%oi{index}] "
-                    ": memref<?xi32>"
-                ),
-            ]
-        )
+        values_storage = f"memref.get_global @runner_values : {values_type}"
     lines.extend(
         [
+            "",
+            "  func.func @main() {",
+            f"    %values_storage = {values_storage}",
+            (
+                f"    %offsets_storage = memref.get_global @runner_offsets : "
+                f"{offsets_type}"
+            ),
+            f"    %output_storage = memref.alloc() : {output_type}",
+            f"    %bits = memref.alloc() : {bits_type}",
+            (
+                f"    %values = memref.cast %values_storage : {values_type} "
+                "to memref<?xf32>"
+            ),
+            (
+                f"    %offsets = memref.cast %offsets_storage : "
+                f"{offsets_type} to memref<?xi32>"
+            ),
+            (
+                f"    %output = memref.cast %output_storage : {output_type} "
+                "to memref<?xf32>"
+            ),
+            # Prefill so that a store past the live range is visible in the
+            # parsed result instead of being garbage.
+            (
+                f"    %sentinel = arith.constant "
+                f"{_float_literal(_SENTINEL)} : f32"
+            ),
+            "    %from = arith.constant 0 : index",
+            "    %step = arith.constant 1 : index",
+            f"    %to = arith.constant {output_length} : index",
+            "    scf.for %pi = %from to %to step %step {",
+            "      memref.store %sentinel, %output[%pi] : memref<?xf32>",
+            "    }",
             f"    %value_count = arith.constant {value_count} : i32",
             f"    %segment_count = arith.constant {segment_count} : i32",
             (
@@ -1108,19 +1118,29 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
                 "%value_count, %segment_count) : (memref<?xf32>, "
                 "memref<?xi32>, memref<?xf32>, i32, i32) -> ()"
             ),
+            "    scf.for %bi = %from to %to step %step {",
+            "      %result = memref.load %output[%bi] : memref<?xf32>",
+            "      %pattern = arith.bitcast %result : f32 to i32",
+            f"      memref.store %pattern, %bits[%bi] : {bits_type}",
+            "    }",
             (
-                "    %unranked = memref.cast %output : memref<?xf32> "
-                "to memref<*xf32>"
+                f"    %unranked = memref.cast %bits : {bits_type} "
+                "to memref<*xi32>"
             ),
-            "    call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()",
-            f"    memref.dealloc %values_storage : {values_type}",
-            f"    memref.dealloc %offsets_storage : {offsets_type}",
+            "    call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()",
+        ]
+    )
+    if not value_count:
+        lines.append(f"    memref.dealloc %values_storage : {values_type}")
+    lines.extend(
+        [
             f"    memref.dealloc %output_storage : {output_type}",
+            f"    memref.dealloc %bits : {bits_type}",
             "    return",
             "  }",
             "",
             (
-                "  func.func private @printMemrefF32(memref<*xf32>) "
+                "  func.func private @printMemrefI32(memref<*xi32>) "
                 "attributes {llvm.emit_c_interface}"
             ),
             "}",
@@ -1155,7 +1175,12 @@ def _run(command, source):
 
 
 def _execute(module_text):
-    """Lower and run one executable module, returning its printed values."""
+    """Lower and run one executable module, returning its exact f32 results.
+
+    The module prints one signed i32 bit pattern per output element. Each
+    is reinterpreted as the f32 it encodes, so the returned Python floats
+    hold the computed values with no decimal rounding in between.
+    """
     root = pathlib.Path(__file__).resolve().parents[2]
     llvm_root = _llvm_root(root)
     swage_opt = root / "build" / "bin" / "swage-opt"
@@ -1185,48 +1210,65 @@ def _execute(module_text):
         raise RuntimeError(
             f"mlir-runner returned an unreadable result:\n{printed}"
         )
-    tokens = [token.strip() for token in match.group(1).split(",")]
-    return [float(token) for token in tokens if token]
+    patterns = [
+        int(token) & 0xFFFFFFFF
+        for token in match.group(1).split(",")
+        if token.strip()
+    ]
+    payload = struct.pack(f"<{len(patterns)}I", *patterns)
+    return list(struct.unpack(f"<{len(patterns)}f", payload))
+
+
+def _execute_guarded(values, offsets, semantic, kernel_name, live):
+    """Run a kernel with one guard slot after its live output range.
+
+    The extra slot keeps the prefilled sentinel. That makes a zero-length
+    result printable and turns "the kernel never writes past its live
+    range" into a checked invariant of every oracle call.
+    """
+    results = _execute(
+        _runner_module(values, offsets, semantic, kernel_name, live + 1)
+    )
+    if len(results) != live + 1:
+        raise RuntimeError(
+            f"oracle printed {len(results)} values for {live + 1} slots"
+        )
+    if results[-1] != _SENTINEL:
+        raise RuntimeError(
+            f"{kernel_name} wrote past its live output range: {results[-1]}"
+        )
+    return results[:-1]
 
 
 def cpu_oracle(values, offsets, kind):
-    """Execute the sequential reduction lowering with the MLIR runner."""
+    """Execute the sequential reduction lowering with the MLIR runner.
+
+    Returns the exact f32 result of each segment, accumulated left to right.
+    """
     torch = _runtime._import_torch()
     segment_count = max(offsets.numel() - 1, 0)
     output = torch.empty(segment_count, dtype=torch.float32)
     _validate_tensors(values, offsets, output, require_cuda=False)
-    printed = _execute(
-        _runner_module(
-            values,
-            offsets,
-            _semantic_module(kind),
-            f"segmented_{kind}",
-            segment_count,
-        )
+    results = _execute_guarded(
+        values,
+        offsets,
+        _semantic_module(kind),
+        f"segmented_{kind}",
+        segment_count,
     )
-    return torch.tensor(printed, dtype=torch.float32)
+    return torch.tensor(results, dtype=torch.float32)
 
 
 def cpu_softmax_oracle(values, offsets):
-    """Execute the sequential softmax lowering with the MLIR runner."""
+    """Execute the sequential softmax lowering with the MLIR runner.
+
+    Returns the exact f32 value the lowering stored for each covered element.
+    """
     torch = _runtime._import_torch()
     covered = int(offsets[-1]) if offsets.numel() else 0
     output = torch.empty(covered, dtype=torch.float32)
     _validate_softmax_tensors(values, offsets, output, require_cuda=False)
-    # One slot beyond the covered range keeps the sentinel, which both makes
-    # a zero-length result printable and turns "map_store never writes past
-    # the final offset" into a checked invariant of every oracle call.
-    printed = _execute(
-        _runner_module(
-            values, offsets, _SOFTMAX_MODULE, "ragged_softmax", covered + 1
-        )
+    results = _execute_guarded(
+        values, offsets, _SOFTMAX_MODULE, "ragged_softmax", covered
     )
-    if len(printed) != covered + 1:
-        raise RuntimeError(
-            f"oracle printed {len(printed)} values for {covered + 1} slots"
-        )
-    if printed[-1] != _SENTINEL:
-        raise RuntimeError(
-            f"map_store wrote past the final offset: {printed[-1]}"
-        )
-    return torch.tensor(printed[:-1], dtype=torch.float32)
+    return torch.tensor(results, dtype=torch.float32)
