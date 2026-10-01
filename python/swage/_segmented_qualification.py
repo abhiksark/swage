@@ -1,11 +1,14 @@
 # python/swage/_segmented_qualification.py
 """Private qualification runner for native segmented programs."""
 
+import hashlib
 import pathlib
 import re
 import shutil
 import struct
 import subprocess
+import threading
+import weakref
 from collections.abc import Callable
 from itertools import pairwise
 from typing import NamedTuple
@@ -24,6 +27,17 @@ _LOWERING_PIPELINE = (
     "finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,"
     "reconcile-unrealized-casts)"
 )
+# One memo for every kernel this module compiles and loads. PTX is keyed by
+# the native compile function, the semantic module text, and every code
+# generation option (kernel name, block size, target). Loaded handles are
+# keyed per driver by CUDA context, PTX digest, and kernel name, so a hit
+# never crosses a context or a target.
+# ponytail: nothing is evicted or unloaded. Loaded modules are bounded by the
+# distinct (program, policy, target, context) a process uses; move to an LRU
+# that calls cuModuleUnload if a process generates programs without bound.
+_memo_lock = threading.Lock()
+_ptx_memo = {}
+_load_memo = weakref.WeakKeyDictionary()
 
 
 def _validate_counts(value_count, segment_count):
@@ -133,6 +147,12 @@ def _validate_shapes(
             raise TypeError(f"{name} must have rank one")
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous")
+    for name, tensor in (("values", values), ("output", output)):
+        if tensor.requires_grad:
+            raise ValueError(
+                f"{name} must not require grad; segmented kernels write "
+                "through raw pointers"
+            )
 
     value_count = values.numel()
     host_offsets = offsets.detach().cpu().tolist()
@@ -174,6 +194,109 @@ def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
         require_cuda=require_cuda,
     )
     return value_count, segment_count
+
+
+def _validate_warp_count(block_size):
+    """Require a block size whose warp count is a power of two.
+
+    The block-wide reduction combines one partial result per warp, and that
+    combination is complete in every participating lane only for a
+    power-of-two number of warps. A partly filled last warp is admitted.
+    """
+    warp_count = (block_size + _WARP_BLOCK - 1) // _WARP_BLOCK
+    if warp_count & (warp_count - 1):
+        raise ValueError(
+            f"block size must give a power-of-two warp count, got {block_size}"
+        )
+
+
+def _offsets_version(offsets):
+    """Return the version counter a prepared launch compares at launch.
+
+    PyTorch advances the counter on every in-place write through the tensor
+    or one of its views, so the comparison is one host attribute read and
+    never waits for the device. It cannot see a write through `.data`, a raw
+    pointer, memory shared with another library, or another kernel, and a
+    replayed CUDA graph does not run it.
+    """
+    if offsets.is_inference():
+        raise ValueError(
+            "offsets must not be an inference tensor; a prepared launch "
+            "compares its version counter"
+        )
+    return offsets._version
+
+
+def _require_unchanged_offsets(offsets, version):
+    """Refuse to launch a plan whose offsets changed in place."""
+    if offsets._version != version:
+        raise RuntimeError("offsets changed after preparation; prepare again")
+
+
+def _compile_once(compile_ptx, module_text, *, module=None, **options):
+    """Compile one kernel at most once per process and return its PTX.
+
+    Args:
+        compile_ptx: Native compile function, looked up by the caller at call
+            time. It is part of the key, so a replaced function is called
+            instead of being served an earlier result.
+        module_text: Semantic module text that identifies the program.
+        module: The same program already parsed in an active MLIR context.
+            When omitted, the text is parsed only on a miss.
+        **options: Keyword arguments of the compile function: the kernel
+            name, the target, the block size, and any other code generation
+            option. Each one is part of the key.
+
+    Returns:
+        The PTX text of the compiled kernel. A failed compile is not kept.
+    """
+    key = (compile_ptx, module_text, tuple(sorted(options.items())))
+    with _memo_lock:
+        ptx = _ptx_memo.get(key)
+        if ptx is None:
+            if module is None:
+                from mlir_swage import ir
+                from mlir_swage.dialects import swage
+
+                with ir.Context() as context:
+                    swage.register_dialects(context)
+                    _, ptx = compile_ptx(
+                        ir.Module.parse(module_text), **options
+                    )
+            else:
+                _, ptx = compile_ptx(module, **options)
+            _ptx_memo[key] = ptx
+    return ptx
+
+
+def _load_once(driver, ptx, kernel_name):
+    """Load one kernel at most once per CUDA context.
+
+    Args:
+        driver: CUDA driver wrapper that owns the returned handles.
+        ptx: PTX text of the compiled kernel.
+        kernel_name: Name of the function to resolve in the loaded module.
+
+    Returns:
+        The module and function handles, as returned by `driver.load`. A
+        driver that cannot name its current context is never memoized,
+        because a handle is valid only in the context that loaded it.
+    """
+    current_context = getattr(driver, "current_context", None)
+    if current_context is None:
+        return driver.load(ptx, kernel_name)
+    key = (
+        current_context(),
+        hashlib.sha256(ptx.encode()).hexdigest(),
+        kernel_name,
+    )
+    with _memo_lock:
+        loaded = _load_memo.setdefault(driver, {})
+        handles = loaded.get(key)
+        if handles is None:
+            handles = driver.load(ptx, kernel_name)
+            loaded[key] = handles
+    return handles
 
 
 def _semantic_module(kind):
@@ -263,11 +386,16 @@ class _PreparedPersistentSum(NamedTuple):
 
 
 def launch_gpu(values, offsets, output, kind, block_size=128):
-    """Compile and launch one internally qualified segmented reduction."""
+    """Launch one internally qualified segmented reduction.
+
+    The kernel is compiled once per kind, block size, and target, and loaded
+    once per CUDA context.
+    """
     torch = _runtime._import_torch()
     value_count, segment_count = _validate_tensors(values, offsets, output)
     if type(block_size) is not int or block_size <= 0:
         raise ValueError("block size must be a positive integer")
+    _validate_warp_count(block_size)
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if block_size > properties.max_threads_per_block:
         raise ValueError(
@@ -277,27 +405,23 @@ def launch_gpu(values, offsets, output, kind, block_size=128):
     if segment_count == 0:
         return None
 
-    from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
     kernel_name = f"segmented_{kind}"
-    with ir.Context() as context:
-        swage.register_dialects(context)
-        module = ir.Module.parse(_semantic_module(kind))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
-            module,
-            kernel_name=kernel_name,
-            block_size=block_size,
-            target=target,
-        )
+    ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        _semantic_module(kind),
+        kernel_name=kernel_name,
+        block_size=block_size,
+        target=target,
+    )
 
     driver = _runtime._get_driver()
-    _, function = driver.load(ptx, kernel_name)
+    _, function = _load_once(driver, ptx, kernel_name)
     stream = torch.cuda.current_stream()
     driver.launch_segmented(
         function,
@@ -354,28 +478,24 @@ def _launch_segmented_sum_tasks(
     if task_count == 0:
         return None
 
-    from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
     kernel_name = "segmented_sum"
-    with ir.Context() as context:
-        swage.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
-            module,
-            kernel_name=kernel_name,
-            block_size=block_size,
-            target=target,
-            use_task_ids=True,
-        )
+    ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        _semantic_module("sum"),
+        kernel_name=kernel_name,
+        block_size=block_size,
+        target=target,
+        use_task_ids=True,
+    )
 
     driver = _runtime._get_driver()
-    _, function = driver.load(ptx, kernel_name)
+    _, function = _load_once(driver, ptx, kernel_name)
     stream = torch.cuda.current_stream()
     driver.launch_segmented_tasks(
         function,
@@ -471,7 +591,8 @@ def _prepare_planned_reduction(
 
     Args:
         values: Contiguous rank-one CUDA f32 input tensor.
-        offsets: Contiguous rank-one CUDA i32 segment offsets.
+        offsets: Contiguous rank-one CUDA i32 segment offsets. They must not
+            change in place after preparation; values may.
         output: Disjoint contiguous CUDA f32 output, one value per segment.
         module_text: Native qualification MLIR with the semantic program.
         kernel_name: Name of its single semantic function.
@@ -485,6 +606,10 @@ def _prepare_planned_reduction(
         Prepared warp, CTA, and classified mixed launch callables. Mixed
         execution includes ordered partial and merge launches for split work,
         or aliases CTA when the preparation-time selection avoids splitting.
+        Each callable raises RuntimeError instead of launching when offsets
+        changed in place after preparation. Kernels are compiled once per
+        program and target and loaded once per CUDA context, so preparing
+        the same program for new offsets compiles and loads nothing.
     """
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
@@ -492,6 +617,7 @@ def _prepare_planned_reduction(
     value_count, segment_count, host_offsets = _validate_shapes(
         values, offsets, output, _validate_offsets
     )
+    offsets_version = _offsets_version(offsets)
 
     from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -569,18 +695,23 @@ def _prepare_planned_reduction(
         if segment_count == 0:
 
             def no_launch():
+                _require_unchanged_offsets(offsets, offsets_version)
                 return None
 
             return _PreparedReduction(no_launch, no_launch, no_launch)
-        _, warp_ptx = native_swage._compile_segmented_reduction_ptx(
-            module,
+        warp_ptx = _compile_once(
+            native_swage._compile_segmented_reduction_ptx,
+            module_text,
+            module=module,
             kernel_name=kernel_name,
             block_size=_WARP_BLOCK,
             target=target,
             use_task_ids=True,
         )
-        _, cta_ptx = native_swage._compile_segmented_reduction_ptx(
-            module,
+        cta_ptx = _compile_once(
+            native_swage._compile_segmented_reduction_ptx,
+            module_text,
+            module=module,
             kernel_name=kernel_name,
             block_size=_CTA_BLOCK,
             target=target,
@@ -588,45 +719,45 @@ def _prepare_planned_reduction(
         )
         mixed_ptx = None
         if direct_count:
-            _, mixed_ptx = (
-                native_swage._compile_fused_segmented_reduction_ptx(
-                    module,
-                    kernel_name=kernel_name,
-                    target=target,
-                )
+            mixed_ptx = _compile_once(
+                native_swage._compile_fused_segmented_reduction_ptx,
+                module_text,
+                module=module,
+                kernel_name=kernel_name,
+                target=target,
             )
         partial_ptx = None
         merge_ptx = None
         if partial_count and not use_direct_cta:
-            _, partial_ptx = (
-                native_swage._compile_split_partial_reduction_ptx(
-                    module,
-                    kernel_name=kernel_name,
-                    target=target,
-                )
+            partial_ptx = _compile_once(
+                native_swage._compile_split_partial_reduction_ptx,
+                module_text,
+                module=module,
+                kernel_name=kernel_name,
+                target=target,
             )
-            _, merge_ptx = (
-                native_swage._compile_split_merge_reduction_ptx(
-                    module,
-                    kernel_name=kernel_name,
-                    target=target,
-                )
+            merge_ptx = _compile_once(
+                native_swage._compile_split_merge_reduction_ptx,
+                module_text,
+                module=module,
+                kernel_name=kernel_name,
+                target=target,
             )
 
     driver = _runtime._get_driver()
-    _, warp_function = driver.load(warp_ptx, kernel_name)
-    _, cta_function = driver.load(cta_ptx, kernel_name)
+    _, warp_function = _load_once(driver, warp_ptx, kernel_name)
+    _, cta_function = _load_once(driver, cta_ptx, kernel_name)
     mixed_function = None
     if mixed_ptx is not None:
-        _, mixed_function = driver.load(mixed_ptx, kernel_name)
+        _, mixed_function = _load_once(driver, mixed_ptx, kernel_name)
     partial_function = None
     merge_function = None
     if partial_ptx is not None:
-        _, partial_function = driver.load(
-            partial_ptx, f"{kernel_name}__partial"
+        _, partial_function = _load_once(
+            driver, partial_ptx, f"{kernel_name}__partial"
         )
-        _, merge_function = driver.load(
-            merge_ptx, f"{kernel_name}__merge"
+        _, merge_function = _load_once(
+            driver, merge_ptx, f"{kernel_name}__merge"
         )
     device = offsets.device
     device_index = device.index
@@ -699,6 +830,7 @@ def _prepare_planned_reduction(
         return torch.cuda.current_stream()
 
     def warp():
+        _require_unchanged_offsets(offsets, offsets_version)
         return submit(
             warp_function,
             _WARP_BLOCK,
@@ -707,6 +839,7 @@ def _prepare_planned_reduction(
         )
 
     def cta():
+        _require_unchanged_offsets(offsets, offsets_version)
         return submit(
             cta_function,
             _CTA_BLOCK,
@@ -715,6 +848,7 @@ def _prepare_planned_reduction(
         )
 
     def mixed():
+        _require_unchanged_offsets(offsets, offsets_version)
         stream = current_stream()
         wait_for_tasks(stream)
         if direct_count:
@@ -780,7 +914,12 @@ def _prepare_persistent_sum(
     cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
     resident_blocks=None,
 ):
-    """Prepare a private resident kernel with split completion handling."""
+    """Prepare a private resident kernel with split completion handling.
+
+    The offsets must not change in place after preparation; the prepared
+    launch raises RuntimeError instead of launching when they did. The
+    kernel is compiled once per target and loaded once per CUDA context.
+    """
     if resident_blocks is not None and (
         type(resident_blocks) is not int
         or resident_blocks <= 0
@@ -791,6 +930,7 @@ def _prepare_persistent_sum(
     value_count, segment_count, host_offsets = _validate_shapes(
         values, offsets, output, _validate_offsets
     )
+    offsets_version = _offsets_version(offsets)
 
     from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -801,9 +941,10 @@ def _prepare_persistent_sum(
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
     kernel_name = "segmented_sum"
+    module_text = _semantic_module("sum")
     with ir.Context() as context:
         swage.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
+        module = ir.Module.parse(module_text)
         warp_ids, cta_ids, partial_records, merge_records = (
             native_swage._materialize_segmented_plan(
                 module,
@@ -844,11 +985,14 @@ def _prepare_persistent_sum(
         if segment_count == 0:
 
             def no_launch():
+                _require_unchanged_offsets(offsets, offsets_version)
                 return None
 
             return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
-        _, ptx = native_swage._compile_persistent_segmented_reduction_ptx(
-            module,
+        ptx = _compile_once(
+            native_swage._compile_persistent_segmented_reduction_ptx,
+            module_text,
+            module=module,
             kernel_name=kernel_name,
             target=target,
         )
@@ -882,7 +1026,7 @@ def _prepare_persistent_sum(
         raise RuntimeError("partial task has no merge dependency")
 
     driver = _runtime._get_driver()
-    _, function = driver.load(ptx, kernel_name)
+    _, function = _load_once(driver, ptx, kernel_name)
     device = offsets.device
     device_index = device.index
     warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
@@ -924,6 +1068,7 @@ def _prepare_persistent_sum(
             stream.wait_event(tasks_ready)
 
     def launch():
+        _require_unchanged_offsets(offsets, offsets_version)
         stream = current_stream()
         wait_for_tasks(stream)
         counters.zero_()
@@ -976,13 +1121,18 @@ def _prepare_persistent_sum(
 
 
 def launch_softmax_gpu(values, offsets, output, block_size=128):
-    """Compile and launch the internally qualified ragged softmax."""
+    """Launch the internally qualified ragged softmax.
+
+    The kernel is compiled once per block size and target, and loaded once
+    per CUDA context.
+    """
     torch = _runtime._import_torch()
     value_count, segment_count = _validate_softmax_tensors(
         values, offsets, output
     )
     if type(block_size) is not int or block_size <= 0:
         raise ValueError("block size must be a positive integer")
+    _validate_warp_count(block_size)
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if block_size > properties.max_threads_per_block:
         raise ValueError(
@@ -992,27 +1142,23 @@ def launch_softmax_gpu(values, offsets, output, block_size=128):
     if segment_count == 0:
         return None
 
-    from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
     kernel_name = "ragged_softmax"
-    with ir.Context() as context:
-        swage.register_dialects(context)
-        module = ir.Module.parse(_SOFTMAX_MODULE)
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
-            module,
-            kernel_name=kernel_name,
-            block_size=block_size,
-            target=target,
-        )
+    ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        _SOFTMAX_MODULE,
+        kernel_name=kernel_name,
+        block_size=block_size,
+        target=target,
+    )
 
     driver = _runtime._get_driver()
-    _, function = driver.load(ptx, kernel_name)
+    _, function = _load_once(driver, ptx, kernel_name)
     stream = torch.cuda.current_stream()
     driver.launch_segmented(
         function,
