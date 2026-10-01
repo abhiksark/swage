@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -33,7 +34,8 @@ int main(int argc, char **argv) {
                   mlir::func::FuncDialect, mlir::arith::ArithDialect,
                   mlir::math::MathDialect, mlir::scf::SCFDialect,
                   mlir::memref::MemRefDialect, mlir::vector::VectorDialect,
-                  mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect>();
+                  mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect,
+                  mlir::NVVM::NVVMDialect>();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Swage optimizer driver\n", registry));

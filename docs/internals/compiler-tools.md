@@ -2,9 +2,10 @@
 
 # Compiler Tools and Passes
 
-Swage provides one optimizer driver and a small registered pass surface. The
-split partial and merge conversions used by private split qualification are
-compiler factories, not command-line passes. As a first roundtrip,
+Swage provides one optimizer driver and a small registered pass surface. Every
+segmented lowering mode can be run from the driver, including the private
+split stages and the experimental persistent mode, so that each lowering can
+be inspected and tested as text. As a first roundtrip,
 `swage-opt` can parse, verify, and print a test module from the native
 MLIR surface, which is broader than the public Python kernel language:
 
@@ -34,6 +35,7 @@ passes.
 | `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required positive `block-size`; optional `use-task-ids`; optional `fused-mixed` | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for a capture-free, single-stage f32 sum or max |
+| `--swage-split-segmented-reduction-to-gpu` | optional `merge` | Lower an admitted private capture-free, single-stage f32 sum or max to the split partial kernel, or to the split merge kernel when `merge` is set |
 
 Planning limits must satisfy:
 
@@ -45,13 +47,27 @@ The planning pass preserves the admitted semantic function and adds one
 private companion with `swage_plan.classify`. It does not lower a general
 task graph or inspect runtime offset contents.
 
-## Private compiler factories
+## Private segmented modes
 
-Native runtime code also constructs split partial and split merge lowering
-passes directly. These factories admit private capture-free, single-stage
-f32 sum/max programs with optional map chains and emit 512-thread partial or
-merge kernels. They are intentionally
-not registered as `swage-opt` arguments.
+The split pass emits one stage per run: the partial kernel by default and the
+merge kernel with `merge`. Both stages admit private capture-free,
+single-stage f32 sum/max programs with optional map chains and emit
+512-thread kernels whose names carry a `__partial` or `__merge` suffix. Only
+the partial stage evaluates the element program.
+
+The GPU pass also accepts `persistent`, which requires `block-size=512` and
+emits the experimental persistent queue kernel for the identity f32 sum
+described in [Persistent Execution](persistent-execution.md). It cannot be
+combined with `fused-mixed`, which requires block size 128.
+
+These modes are registered so that their lowerings can be inspected and
+tested from the driver. Registration does not change their status. Split
+execution remains private qualification. Persistent execution remains a
+private experiment whose predeclared performance gate failed:
+[ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains proposed
+and no current release status depends on that path. Native runtime code
+constructs the same passes through compiler factories instead of pass
+arguments.
 
 The driver and passes expose the tested compiler surface, not a general
 optimizer pipeline. Continue with [Compiler Pipeline](compiler-pipeline.md)
