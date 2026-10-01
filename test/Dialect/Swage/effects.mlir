@@ -148,8 +148,10 @@ func.func @extent_in_loop_with_offsets_write(
   return
 }
 
-// The declared read does not hide a region's own effects. Two reductions
-// whose regions write memory stay two, and an unused one stays alive.
+// The declared read does not hide a region's own effects. Two reductions or
+// two maps whose regions write memory stay two, and an unused one stays alive.
+// Each pair is adjacent and identical, which is the case a pass that looked
+// only at the declared read would merge.
 
 memref.global "private" @scratch : memref<1xf32> = dense<[0.0]>
 
@@ -181,6 +183,44 @@ func.func @reduce_with_writing_region(%seg: !swage.segment<f32>) -> (f32, f32) {
 // CHECK: return
 func.func @unused_reduce_with_writing_region(%seg: !swage.segment<f32>) {
   %unused = swage.reduce %seg kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%e: f32):
+    %scratch = memref.get_global @scratch : memref<1xf32>
+    %c0 = arith.constant 0 : index
+    memref.store %e, %scratch[%c0] : memref<1xf32>
+    swage.yield %e : f32
+  }
+  return
+}
+
+// CHECK-LABEL: func.func @map_with_writing_region(
+// CHECK: %[[FIRST:.*]] = swage.map
+// CHECK: %[[SECOND:.*]] = swage.map
+// CHECK: return %[[FIRST]], %[[SECOND]]
+func.func @map_with_writing_region(%seg: !swage.segment<f32>)
+    -> (!swage.segment<f32>, !swage.segment<f32>) {
+  %first = swage.map %seg : !swage.segment<f32> -> !swage.segment<f32> {
+  ^bb0(%e: f32):
+    %scratch = memref.get_global @scratch : memref<1xf32>
+    %c0 = arith.constant 0 : index
+    memref.store %e, %scratch[%c0] : memref<1xf32>
+    swage.yield %e : f32
+  }
+  %second = swage.map %seg : !swage.segment<f32> -> !swage.segment<f32> {
+  ^bb0(%e: f32):
+    %scratch = memref.get_global @scratch : memref<1xf32>
+    %c0 = arith.constant 0 : index
+    memref.store %e, %scratch[%c0] : memref<1xf32>
+    swage.yield %e : f32
+  }
+  return %first, %second : !swage.segment<f32>, !swage.segment<f32>
+}
+
+// CHECK-LABEL: func.func @unused_map_with_writing_region(
+// CHECK: swage.map
+// CHECK: memref.store
+// CHECK: return
+func.func @unused_map_with_writing_region(%seg: !swage.segment<f32>) {
+  %unused = swage.map %seg : !swage.segment<f32> -> !swage.segment<f32> {
   ^bb0(%e: f32):
     %scratch = memref.get_global @scratch : memref<1xf32>
     %c0 = arith.constant 0 : index

@@ -7,6 +7,11 @@
 // followed by the reduction region) runs here, on input values, and nowhere
 // else in the split schedule; split-merge.mlir lowers the same module and
 // checks that the merge stage does not run it again.
+//
+// Every line from the range guard to the return is matched in order with
+// captured operands, so the data path is pinned end to end: record address,
+// loaded range, bounded range, loop bounds, combine, block total, stored
+// slot.
 module {
   func.func @segmented_max(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
@@ -33,7 +38,7 @@ module {
 }
 
 // CHECK: gpu.module @segmented_max__partial_module
-// CHECK: gpu.func @segmented_max__partial(%[[VALUES:[^,]+]]: !llvm.ptr, %[[RANGES:[^,]+]]: !llvm.ptr, %[[SCRATCH:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[PARTIAL_COUNT:[^)]+]]: i32) kernel
+// CHECK: gpu.func @segmented_max__partial(%[[VALUES:[^,]+]]: !llvm.ptr, %[[RANGES:[^,]+]]: !llvm.ptr, %[[SCRATCH:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[PARTIAL_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 512, 1, 1>
 // CHECK: %[[TASK:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
@@ -42,15 +47,39 @@ module {
 // CHECK: %[[TASKS:.*]] = arith.index_cast %[[PARTIAL_COUNT]] : i32 to index
 
 // The range guard depends only on the block index and a launch argument, so
-// it is block-uniform. No other conditional may sit between it and the
-// all-reduce, whose barriers every thread of the block must reach.
+// it is block-uniform. Everything up to the all-reduce, whose barriers every
+// thread of the block must reach, sits directly under it.
 // CHECK: %[[IN_RANGE:.*]] = arith.cmpi slt, %[[TASK]], %[[TASKS]] : index
 // CHECK-NEXT: scf.if %[[IN_RANGE]] {
-// CHECK-NOT: scf.if
-// CHECK:   llvm.getelementptr %[[RANGES]]
-// CHECK-NOT: scf.if
-// CHECK:   %[[IDENTITY:.*]] = arith.constant 0xFF800000 : f32
-// CHECK-NEXT: %[[LOCAL:.*]] = scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step %[[BLOCK]] iter_args(%[[ACC:.*]] = %[[IDENTITY]]) -> (f32) {
+
+// The block's record is the [begin, end) pair at twice its task index in the
+// planned ranges.
+// CHECK-NEXT: %[[FIELDS:.*]] = arith.constant 2 : index
+// CHECK-NEXT: %[[RECORD:.*]] = arith.muli %[[TASK]], %[[FIELDS]] : index
+// CHECK-NEXT: %[[BEGIN_FIELD:.*]] = arith.index_cast %[[RECORD]] : index to i64
+// CHECK-NEXT: %[[BEGIN_ADDRESS:.*]] = llvm.getelementptr %[[RANGES]][%[[BEGIN_FIELD]]]
+// CHECK-NEXT: %[[BEGIN_WORD:.*]] = llvm.load %[[BEGIN_ADDRESS]] : !llvm.ptr -> i32
+// CHECK-NEXT: %[[ONE:.*]] = arith.constant 1 : index
+// CHECK-NEXT: %[[END_INDEX:.*]] = arith.addi %[[RECORD]], %[[ONE]] : index
+// CHECK-NEXT: %[[END_FIELD:.*]] = arith.index_cast %[[END_INDEX]] : index to i64
+// CHECK-NEXT: %[[END_ADDRESS:.*]] = llvm.getelementptr %[[RANGES]][%[[END_FIELD]]]
+// CHECK-NEXT: %[[END_WORD:.*]] = llvm.load %[[END_ADDRESS]] : !llvm.ptr -> i32
+
+// The range indexes values, so both words are bounded by the value count,
+// and the end is floored by the bounded begin.
+// CHECK-NEXT: %[[ZERO_I32:.*]] = arith.constant 0 : i32
+// CHECK-NEXT: %[[BEGIN_FLOOR:.*]] = arith.maxsi %[[BEGIN_WORD]], %[[ZERO_I32]] : i32
+// CHECK-NEXT: %[[BEGIN_BOUND:.*]] = arith.minsi %[[BEGIN_FLOOR]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[END_FLOOR:.*]] = arith.maxsi %[[END_WORD]], %[[BEGIN_BOUND]] : i32
+// CHECK-NEXT: %[[END_BOUND:.*]] = arith.minsi %[[END_FLOOR]], %[[VALUE_COUNT]] : i32
+// CHECK-NEXT: %[[BEGIN:.*]] = arith.index_cast %[[BEGIN_BOUND]] : i32 to index
+// CHECK-NEXT: %[[END:.*]] = arith.index_cast %[[END_BOUND]] : i32 to index
+
+// Thread t reduces begin + t, begin + t + 512, ... up to the end, so the 512
+// threads cover the range exactly once.
+// CHECK-NEXT: %[[FIRST:.*]] = arith.addi %[[BEGIN]], %[[THREAD]] : index
+// CHECK-NEXT: %[[IDENTITY:.*]] = arith.constant 0xFF800000 : f32
+// CHECK-NEXT: %[[LOCAL:.*]] = scf.for %[[I:.*]] = %[[FIRST]] to %[[END]] step %[[BLOCK]] iter_args(%[[ACC:.*]] = %[[IDENTITY]]) -> (f32) {
 // CHECK-NEXT:   %[[INDEX:.*]] = arith.index_cast %[[I]] : index to i64
 // CHECK-NEXT:   %[[ADDRESS:.*]] = llvm.getelementptr %[[VALUES]][%[[INDEX]]]
 // CHECK-NEXT:   %[[VALUE:.*]] = llvm.load %[[ADDRESS]] : !llvm.ptr -> f32
