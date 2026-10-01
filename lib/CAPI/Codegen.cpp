@@ -151,7 +151,8 @@ LogicalResult verifyPTXFunctionNames(ModuleOp source) {
   WalkResult invalidName = source.walk([](func::FuncOp function) {
     if (isPTXIdentifier(function.getName()))
       return WalkResult::advance();
-    function.emitError("function name is not a valid PTX identifier");
+    function.emitError() << "function name '" << function.getName()
+                         << "' is not a valid PTX identifier";
     return WalkResult::interrupt();
   });
   return failure(invalidName.wasInterrupted());
@@ -163,22 +164,26 @@ LogicalResult validateCompileRequest(ModuleOp source,
                                      llvm::StringRef target) {
   unsigned smValue = 0;
   if (!isSupportedTarget(target, smValue))
-    return source.emitError(
-        "target must match sm_<major><minor> and be sm_80 or newer");
+    return source.emitError()
+           << "target must match sm_<major><minor> and be sm_80 or newer, got '"
+           << target << "'";
   if (!isPinnedProcessor(smValue))
     return source.emitError("target ")
            << target << " is not a processor supported by the pinned LLVM";
   if (blockSize <= 0)
-    return source.emitError("block_size must be a positive integer");
+    return source.emitError()
+           << "block_size must be a positive integer, got " << blockSize;
   if (blockSize > 1024)
-    return source.emitError("block_size must be at most 1024");
+    return source.emitError()
+           << "block_size must be at most 1024, got " << blockSize;
   // The pass manager verifies only after each pass, never before the first
   // one, so an unverified module would reach pass code that dereferences
   // region internals.
   if (failed(verify(source)))
     return failure();
   if (!source.lookupSymbol<func::FuncOp>(kernelName))
-    return source.emitError("kernel_name does not name the module function");
+    return source.emitError() << "kernel_name '" << kernelName
+                              << "' does not name a function of the module";
   return verifyPTXFunctionNames(source);
 }
 
@@ -244,8 +249,10 @@ FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
     return failure();
 
   auto gpuModules = module.getOps<gpu::GPUModuleOp>();
-  if (std::distance(gpuModules.begin(), gpuModules.end()) != 1) {
-    source.emitError("lowering did not produce exactly one GPU module");
+  auto gpuModuleCount = std::distance(gpuModules.begin(), gpuModules.end());
+  if (gpuModuleCount != 1) {
+    source.emitError() << "lowering did not produce exactly one GPU module, "
+                       << "found " << gpuModuleCount;
     return failure();
   }
   return *gpuModules.begin();

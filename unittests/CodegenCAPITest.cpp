@@ -31,6 +31,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -398,28 +399,29 @@ TEST(CodegenCAPITest, ANullModuleFailsWithoutACrash) {
 }
 
 TEST(CodegenCAPITest, RejectsTargetsOutsideTheAdmittedProcessors) {
-  struct Case {
-    const char *target;
-    const char *message;
-  };
-  const char *const malformed =
-      "target must match sm_<major><minor> and be sm_80 or newer";
-  const char *const unpinned =
-      "is not a processor supported by the pinned LLVM";
-  const Case cases[] = {
-      {"", malformed},       {"sm_8", malformed},       {"sm_79", malformed},
-      {"sm_130", malformed}, {"compute_86", malformed}, {"sm_8x", malformed},
-      {"sm_85", unpinned},   {"sm_99", unpinned},       {"sm_129", unpinned},
-  };
+  // Targets the syntax refuses, then processors the pinned LLVM lacks.
+  const char *const malformed[] = {"",       "sm_8",       "sm_79",
+                                   "sm_130", "compute_86", "sm_8x"};
+  const char *const unpinned[] = {"sm_85", "sm_99", "sm_129"};
+  std::vector<std::pair<std::string, std::string>> cases;
+  for (const char *target : malformed)
+    cases.emplace_back(target,
+                       std::string("target must match sm_<major><minor> and be "
+                                   "sm_80 or newer, got '") +
+                           target + "'");
+  for (const char *target : unpinned)
+    cases.emplace_back(target,
+                       std::string("target ") + target +
+                           " is not a processor supported by the pinned LLVM");
+
   for (const EntryPoint &entryPoint : entryPoints()) {
-    for (const Case &testCase : cases) {
-      SCOPED_TRACE(std::string(entryPoint.name) + " for '" + testCase.target +
-                   "'");
+    for (const auto &[target, message] : cases) {
+      SCOPED_TRACE(std::string(entryPoint.name) + " for '" + target + "'");
       Session session;
 
-      Compiled compiled = session.compile(entryPoint, testCase.target);
+      Compiled compiled = session.compile(entryPoint, target);
 
-      expectRejected(compiled, session, testCase.message);
+      expectRejected(compiled, session, message);
     }
   }
 }
@@ -430,9 +432,9 @@ TEST(CodegenCAPITest, RejectsBlockSizesNoDeviceLaunches) {
     const char *message;
   };
   const Case cases[] = {
-      {0, "block_size must be a positive integer"},
-      {-128, "block_size must be a positive integer"},
-      {1025, "block_size must be at most 1024"},
+      {0, "block_size must be a positive integer, got 0"},
+      {-128, "block_size must be a positive integer, got -128"},
+      {1025, "block_size must be at most 1024, got 1025"},
   };
   for (const Case &testCase : cases) {
     SCOPED_TRACE(testCase.blockSize);
@@ -467,8 +469,9 @@ TEST(CodegenCAPITest, RejectsAKernelNameTheModuleDoesNotDefine) {
         session.compile(entryPoint.compile, session.parse(entryPoint.program),
                         "absent", "sm_86");
 
-    expectRejected(compiled, session,
-                   "kernel_name does not name the module function");
+    expectRejected(
+        compiled, session,
+        "kernel_name 'absent' does not name a function of the module");
   }
 }
 
@@ -495,7 +498,7 @@ TEST(CodegenCAPITest, RejectsFunctionNamesPTXCannotPrint) {
                       "add.kernel", "sm_86");
 
   expectRejected(compiled, session,
-                 "function name is not a valid PTX identifier");
+                 "function name 'add.kernel' is not a valid PTX identifier");
 }
 
 TEST(CodegenCAPITest, RejectsAModuleThatFailsVerification) {
@@ -528,6 +531,26 @@ TEST(CodegenCAPITest, ReportsTheDiagnosticOfAFailedLowering) {
                  "vector width 128 does not match requested block size 64");
 }
 
+TEST(CodegenCAPITest, RejectsANamedMemorySpaceWithoutAborting) {
+  Session session;
+  std::string program = fixedVectorAdd;
+  const std::string buffer = "%y: memref<?xf32>";
+  program.replace(program.find(buffer), buffer.size(),
+                  "%y: memref<?xf32, \"device\">");
+  const std::string gather = "%rhs = vector.gather";
+  const std::string gatherType = ": memref<?xf32>";
+  program.replace(program.find(gatherType, program.find(gather)),
+                  gatherType.size(), ": memref<?xf32, \"device\">");
+
+  Compiled compiled =
+      session.compile(entryPoints().front().compile, session.parse(program),
+                      "add_kernel", "sm_86");
+
+  expectRejected(compiled, session,
+                 "only default-memory-space pointers are supported, got "
+                 "'memref<?xf32, \"device\">'");
+}
+
 TEST(CodegenCAPITest, RejectsAModuleThatAlreadyHoldsAGPUModule) {
   Session session;
   MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
@@ -541,7 +564,7 @@ TEST(CodegenCAPITest, RejectsAModuleThatAlreadyHoldsAGPUModule) {
                       "add_kernel", "sm_86");
 
   expectRejected(compiled, session,
-                 "lowering did not produce exactly one GPU module");
+                 "lowering did not produce exactly one GPU module, found 2");
 }
 
 /// What one plan call reported back, one flat record list per callback.

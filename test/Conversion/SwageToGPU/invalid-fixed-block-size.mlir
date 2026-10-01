@@ -1,10 +1,10 @@
 // test/Conversion/SwageToGPU/invalid-fixed-block-size.mlir
 // RUN: not swage-opt --swage-fixed-block-to-gpu %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=NOT-POSITIVE
+// RUN:   | FileCheck %s --check-prefixes=NOT-POSITIVE,ZERO
 // RUN: not swage-opt --swage-fixed-block-to-gpu='block-size=0' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=NOT-POSITIVE
+// RUN:   | FileCheck %s --check-prefixes=NOT-POSITIVE,ZERO
 // RUN: not swage-opt --swage-fixed-block-to-gpu='block-size=-128' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=NOT-POSITIVE
+// RUN:   | FileCheck %s --check-prefixes=NOT-POSITIVE,NEGATIVE
 // RUN: not swage-opt --swage-fixed-block-to-gpu='block-size=1025' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=TOO-LARGE
 // RUN: swage-opt --swage-fixed-block-to-gpu='block-size=1024' %s \
@@ -42,10 +42,11 @@ module {
   }
 }
 
-// NOT-POSITIVE: error: block-size must be a positive integer
+// ZERO: error: block-size must be a positive integer, got 0
+// NEGATIVE: error: block-size must be a positive integer, got -128
 // NOT-POSITIVE-NOT: gpu.func
 
-// TOO-LARGE: error: block-size must be at most 1024
+// TOO-LARGE: error: block-size must be at most 1024, got 1025
 // TOO-LARGE-NOT: gpu.func
 
 // LARGEST: gpu.func @add_kernel

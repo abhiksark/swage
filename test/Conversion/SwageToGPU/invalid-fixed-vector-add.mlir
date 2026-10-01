@@ -5,7 +5,7 @@
 module {
   func.func @bad_axis(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
-    // expected-error@+1 {{only swage.program_id axis 0 is supported}}
+    // expected-error@+1 {{only swage.program_id axis 0 is supported, got axis 1}}
     %pid = swage.program_id 1
     return
   }
@@ -38,7 +38,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{fixed vector add requires three rank-one identity-layout f32 memrefs and one i32}}
+  // expected-error@+1 {{fixed vector add requires three rank-one identity-layout f32 memrefs and one i32, got '(memref<?xf32, strided<[2]>>, memref<?xf32>, memref<?xf32>, i32) -> ()'}}
   func.func @bad_layout(
       %x: memref<?xf32, strided<[2]>>, %y: memref<?xf32>,
       %output: memref<?xf32>, %n: i32) {
@@ -72,7 +72,7 @@ module {
 module {
   func.func @rank_two_vector(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
-    // expected-error@+1 {{only rank-one vectors are supported}}
+    // expected-error@+1 {{only rank-one vectors are supported, got 'vector<2x64xf32>'}}
     %zero = arith.constant dense<0.0> : vector<2x64xf32>
     return
   }
@@ -92,7 +92,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{only default-memory-space pointers are supported}}
+  // expected-error@+1 {{only default-memory-space pointers are supported, got 'memref<?xf32, 1>'}}
   func.func @device_memory_space(
       %x: memref<?xf32, 1>, %y: memref<?xf32>, %output: memref<?xf32>,
       %n: i32) {
@@ -103,8 +103,20 @@ module {
 // -----
 
 module {
+  // A memory space need not be an integer. It is still not the default one.
+  // expected-error@+1 {{only default-memory-space pointers are supported, got 'memref<?xf32, "device">'}}
+  func.func @named_memory_space(
+      %x: memref<?xf32>, %y: memref<?xf32, "device">, %output: memref<?xf32>,
+      %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
   // An unreachable second block is still a second block.
-  // expected-error@+1 {{fixed vector add requires one straight-line block}}
+  // expected-error@+1 {{fixed vector add requires one straight-line block, got 2 blocks}}
   func.func @two_blocks(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     return
@@ -117,7 +129,7 @@ module {
 
 module {
   // A declaration has no block at all.
-  // expected-error@+1 {{fixed vector add requires one straight-line block}}
+  // expected-error@+1 {{fixed vector add requires one straight-line block, got 0 blocks}}
   func.func private @declaration(
       memref<?xf32>, memref<?xf32>, memref<?xf32>, i32)
 }
@@ -128,7 +140,7 @@ module {
   func.func @unsupported_operation(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     %c0 = arith.constant 0 : index
-    // expected-error@+1 {{operation is unsupported by fixed vector-add lowering}}
+    // expected-error@+1 {{operation 'memref.load' is unsupported by fixed vector-add lowering}}
     %value = memref.load %x[%c0] : memref<?xf32>
     return
   }
@@ -137,7 +149,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{expected one program_id, two gathers, one f32 add, and one scatter}}
+  // expected-error@+1 {{expected one program_id, two gathers, one f32 add, and one scatter, found 1 program_id, 0 gathers, 0 f32 adds, and 0 scatters}}
   func.func @no_vector_add(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     %pid = swage.program_id 0
@@ -211,7 +223,7 @@ module {
 
 // -----
 
-// expected-error@+1 {{expected exactly one kernel function}}
+// expected-error@+1 {{expected exactly one kernel function, found 2}}
 module {
   func.func @first(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
@@ -225,6 +237,6 @@ module {
 
 // -----
 
-// expected-error@+1 {{expected exactly one kernel function}}
+// expected-error@+1 {{expected exactly one kernel function, found 0}}
 module {
 }
