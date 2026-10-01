@@ -38,15 +38,42 @@ kernel.
 ## Build LLVM, MLIR, and Swage
 
 The native build requires Linux x86-64, CMake 3.20 or newer, Ninja, and a
-C++17 compiler. The pinned LLVM/MLIR build uses about 25 GB and can take about
-an hour on its first build.
+C++17 compiler. `scripts/fetch_llvm.sh` also uses `curl` and a `tar` that can
+extract `.tar.xz` archives.
 
-GPU execution additionally requires a CUDA-enabled PyTorch build and the
-NVIDIA driver. Exact target-admission and zero-work rules live in
+The MLIR Python bindings are built by default and need Python packages to
+build and to run. The pinned LLVM release lists them in its
+`mlir/python/requirements.txt`. At the current pin that file requires:
+
+- `nanobind>=2.9,<3.0`
+- `PyYAML>=5.4.0,<=6.0.1`
+- `typing_extensions>=4.12.2`
+- `numpy>=1.19.5,<=2.1.2`
+- `ml_dtypes>=0.1.0,<=0.6.0`, or `>=0.5.0,<=0.6.0` on Python 3.13 or newer
+
+LLVM configuration stops if `nanobind` cannot be imported. `build_swage.sh`
+runs the lit suite with the `lit` found on `PATH`, and the binding tests run
+under `pytest`. The `dev` extra above provides `lit` and `pytest` but not the
+binding requirements. `build_llvm.sh` configures the bindings for the
+`python3` found on `PATH`, so `python` in the commands on this page must be
+that interpreter.
+
+With the default `RelWithDebInfo` build type, the pinned LLVM/MLIR build uses
+about 25 GB. Build time depends on the machine. The hosted CI workflow uses
+the smaller `Release` build type and notes about three hours for the first
+LLVM build on a new pin, under a 350-minute limit. Later runs reuse the cached
+install tree.
+
+GPU execution additionally requires a CUDA-enabled PyTorch build, the NVIDIA
+driver, and an NVIDIA GPU of compute capability 8.0 (`sm_80`) or newer. An
+older device is rejected during compilation. Exact target-admission and
+zero-work rules live in
 [Runtime and Environment](../reference/runtime-environment.md).
 
 ```bash
 ./scripts/fetch_llvm.sh
+LLVM_SRC="${SWAGE_LLVM_HOME:-$HOME/.swage/llvm}/src-$(cat cmake/llvm-version.txt)"
+python -m pip install -r "$LLVM_SRC/mlir/python/requirements.txt" lit pytest
 ./scripts/build_llvm.sh
 ./scripts/build_swage.sh
 ```
@@ -83,9 +110,16 @@ ninja -C build check-swage-python
 PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
 ```
 
-`check-swage-python` supplies the build-tree `PYTHONPATH` itself. If CMake is
-asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install without Python
-bindings, configuration fails instead of silently omitting the package.
+`check-swage-python` supplies the build-tree `PYTHONPATH` itself. Both
+commands need `pytest` and PyTorch, because several binding test modules
+import `torch`. The hosted CI job installs a CPU-only PyTorch build for them,
+and the CUDA tests skip without a GPU. The second command imports `swage`
+from the installed package, so it needs the editable install from the same
+checkout. The released `0.5.1` wheel does not match the tests on `main`.
+
+If CMake is asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install
+without Python bindings, configuration fails instead of silently omitting the
+package.
 
 Installation is complete when the relevant build and test commands succeed.
 Continue with the [Quickstart](quickstart.md), or use
