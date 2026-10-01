@@ -36,15 +36,18 @@ def _offsets(lengths):
     return offsets
 
 
+_EXACT_PERIOD = 67
+
+
 def _exact_values(first, last):
     """Return the exactly summable test pattern on an index range.
 
     Element ``index`` is ``(2 * (index % 67) - 65) / 4``, an odd number of
     quarters that climbs by one half from -16.25 to 16.75 and then wraps.
 
-    - Every value is a multiple of 0.25 and the magnitudes of a segment
-      sum to less than 2**20, so a sum is the same f32 under any
-      association and tests can compare with no tolerance.
+    - Every value is a multiple of 0.25. In CASES and TASK_CASES the
+      magnitudes of a segment sum to less than 2**20, so a sum is the same
+      f32 under any association and tests can compare with no tolerance.
     - No value is zero, so dropping or repeating one element changes a sum.
     - The 67 values of a period are distinct and 67 exceeds the largest
       shift the tests guard, so a window moved by 1 to 64 elements reads
@@ -55,11 +58,17 @@ def _exact_values(first, last):
 
     A segment whose length is a multiple of 67 would still read the same
     multiset after any shift. No pattern with bounded values avoids every
-    such coincidence, so test_exact_inputs_are_informative_for_every_case
-    checks the properties for the shapes the suite uses.
+    such coincidence, so the informative-input tests below check the
+    properties for the shapes they cover.
+
+    The magnitudes of a LONG_CASES segment sum to more than 2**22, so its
+    sum is not exact under every association. It is exact in float64, in
+    sequential order, and under the lane and chunk structures the static
+    policies use, which test_long_exact_inputs_are_informative_and_exact
+    checks.
     """
     index = torch.arange(first, last)
-    return (2 * (index % 67) - 65).to(torch.float32) / 4
+    return (2 * (index % _EXACT_PERIOD) - 65).to(torch.float32) / 4
 
 
 def _case(lengths):
@@ -98,25 +107,37 @@ TASK_CASES = [
 ]
 
 
+# Planning limits (warp_max_elements, cta_chunk_elements) of the two
+# classified preparations. "mixed" holds the defaults. "split" lowers both
+# so that every segment longer than 16 elements takes the partial and merge
+# kernels.
+_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
+
+# Segments longer than any in CASES and TASK_CASES, with short neighbours on
+# both sides. A merge kernel has 512 lanes, so a lane chains more than one
+# partial only above 512 chunks.
+# - 65537 elements: 17 partials under the default limits, at most one per
+#   merge lane, and 4097 under the split limits, 8 or 9 per lane.
+# - 4096 * 1536 + 1 elements: 1537 partials under the default limits, 3 or
+#   4 per merge lane, and 393217 under the split limits, 768 or 769 per
+#   lane.
+LONG_CASES = [
+    pytest.param([33, 65537, 1], id="seventeen-partials"),
+    pytest.param([1, 4096 * 1536 + 1, 33], id="chained-merge"),
+]
+
 _SHIFT_LIMIT = 64
 
 
-@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
-def test_exact_inputs_are_informative_for_every_case(lengths):
-    """Each non-empty segment has a nonzero sum that depends on its window.
+def _assert_informative(values, offsets):
+    """Require sums that are nonzero and sensitive to the segment window.
 
-    A kernel that reads the right number of elements from the wrong place,
-    or drops or repeats one, must change the expected value. For every
-    segment this checks that the sum is nonzero, that moving both window
-    ends by any 1 to 64 elements in either direction changes it, and that
-    no element is zero, so dropping or duplicating any one changes it too.
-
-    It also checks what makes an exact comparison valid: every value is a
-    multiple of 0.25, and the per-segment sums of magnitudes and of squares
-    stay below 2**20, so the identity and squared sums are exact in f32
-    under any association.
+    Every value must be a nonzero multiple of 0.25, so dropping or
+    duplicating any one element changes a sum. Every non-empty segment must
+    have a nonzero sum that changes when both window ends move by any 1 to
+    64 elements in either direction, which a length that is a multiple of
+    the pattern period could never satisfy.
     """
-    values, offsets = _case(lengths)
     count = values.numel()
     quarters = values.double() * 4
     assert torch.equal(quarters, quarters.round())
@@ -136,6 +157,7 @@ def test_exact_inputs_are_informative_for_every_case(lengths):
     for begin, end in pairwise(offsets.tolist()):
         if begin == end:
             continue
+        assert (end - begin) % _EXACT_PERIOD
         total = prefix[end + _SHIFT_LIMIT] - prefix[begin + _SHIFT_LIMIT]
         assert total != 0
         shifted = (
@@ -143,9 +165,86 @@ def test_exact_inputs_are_informative_for_every_case(lengths):
             - prefix[begin + _SHIFT_LIMIT + shifts]
         )
         assert (shifted != total).all()
+
+
+@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
+def test_exact_inputs_are_informative_for_every_case(lengths):
+    """Each non-empty segment has a nonzero sum that depends on its window.
+
+    A kernel that reads the right number of elements from the wrong place,
+    or drops or repeats one, must change the expected value, which
+    _assert_informative checks for every segment.
+
+    This also checks what makes an exact comparison valid: every value is a
+    multiple of 0.25, and the per-segment sums of magnitudes and of squares
+    stay below 2**20, so the identity and squared sums are exact in f32
+    under any association.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
         segment = values[begin:end].double()
         assert segment.abs().sum() < 2**20
         assert segment.square().sum() < 2**20
+
+
+def _largest_intermediate(values, lanes):
+    """Bound every intermediate of a lanes-then-tree sum of float64 values.
+
+    Lane t accumulates values[t::lanes] in order and a tree then adds whole
+    lanes. An intermediate is therefore a lane prefix, or a sum of whole
+    lanes, whose magnitude is at most the sum of the lane total magnitudes.
+    """
+    rows = -(-values.numel() // lanes)
+    padded = torch.zeros(rows * lanes, dtype=torch.float64)
+    padded[: values.numel()] = values
+    prefix = padded.view(rows, lanes).cumsum(0)
+    return max(prefix.abs().max(), prefix[-1].abs().sum())
+
+
+@pytest.mark.parametrize("lengths", LONG_CASES)
+def test_long_exact_inputs_are_informative_and_exact(lengths):
+    """Long segments keep the window properties and stay exactly summable.
+
+    The magnitudes of these segments sum to more than 2**22, so exactness
+    cannot rest on "any association". Multiples of 0.25 add exactly in f32
+    while every intermediate stays below 2**22, and this bounds every
+    intermediate of the structures the static policies use:
+
+    - warp and cta: 32 or 128 lanes stride the segment, then a tree adds
+      whole lanes.
+    - partial and merge, under both planning limits: any order inside one
+      chunk, because the magnitudes of a chunk sum to less than 2**22, then
+      512 lanes stride the chunk sums and a tree adds whole lanes.
+
+    A schedule outside these structures could round an intermediate. The
+    exact comparison would then fail, it could not pass by accident.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        for lanes in (32, 128):
+            assert _largest_intermediate(segment, lanes) < 2**22
+        for _, chunk in _PLANNING_LIMITS.values():
+            rows = -(-segment.numel() // chunk)
+            chunks = torch.zeros(rows * chunk, dtype=torch.float64)
+            chunks[: segment.numel()] = segment
+            chunks = chunks.view(rows, chunk)
+            assert chunks.abs().sum(1).max() < 2**22
+            assert _largest_intermediate(chunks.sum(1), 512) < 2**22
+
+
+def _exact_sums(values, offsets):
+    """Return each segment's sum, computed in float64 and exact in f32.
+
+    A float64 sum of multiples of 0.25 is exact far beyond these lengths.
+    The cast is exact when the sum is below 2**22, which is asserted.
+    """
+    lengths = (offsets[1:] - offsets[:-1]).long()
+    sums = torch.segment_reduce(values.double(), "sum", lengths=lengths)
+    assert torch.equal(sums.float().double(), sums)
+    return sums.float()
 
 
 def test_exact_values_stay_exact_for_the_longest_compared_segments():
@@ -727,12 +826,49 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("lengths", LONG_CASES)
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "split"])
+def test_static_policies_own_every_element_of_long_segments(policy, lengths):
+    """Compare long position-dependent sums exactly under every policy.
+
+    This is the ownership check above 8193 elements. No value is zero and
+    the comparison has no tolerance, so one dropped or repeated element, a
+    window moved by 1 to 64 elements, a skipped or repeated chunk, and a
+    zero result all change the outcome. The rounding bound of the
+    randomized test cannot see those on a long segment.
+
+    "mixed" prepares with the default limits and "split" with the limits
+    that split every segment longer than 16 elements (_PLANNING_LIMITS).
+    LONG_CASES states how many partials each merge lane chains in both.
+    Each policy runs twice and is checked after each launch.
+    """
+    host_values, host_offsets = _case(lengths)
+    expected = _exact_sums(host_values, host_offsets)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    warp_max, chunk = _PLANNING_LIMITS[
+        "split" if policy == "split" else "mixed"
+    ]
+    prepared = _prepare_planned_reduction(
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
+        module_text=reduction_module("sum", "identity"),
+        kernel_name="segmented_sum",
+        warp_max_elements=warp_max,
+        cta_chunk_elements=chunk,
+        select_schedule=False,
+    )
+    launch = getattr(prepared, "mixed" if policy == "split" else policy)
+
+    for _ in range(2):
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
 RANDOM_LENGTHS = [0, 1, 31, 32, 33, 4095, 4096, 4097, 65537]
 RANDOM_SUITES = ["randn", "cancellation", "magnitude"]
-# Planning limits (warp_max_elements, cta_chunk_elements) of the two
-# classified preparations. "split" lowers both so that every random segment
-# longer than 16 elements takes the partial and merge kernels.
-_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
 _EPS32 = torch.finfo(torch.float32).eps
 
 
@@ -856,6 +992,10 @@ def test_cpu_oracle_matches_float64_reference_on_random_values(
 
     The oracle accumulates left to right, so k is count - 1 per segment in
     the bound k * eps32 * sum(|x|) of _assert_matches_float64_reference.
+
+    This is an accuracy check, not an ownership check: the bound admits a
+    dropped element on a long segment. The bit-exact 65537-element oracle
+    test and the exact tests on CASES check which elements are read.
     """
     values, offsets = _random_case(suite, seed)
 
@@ -899,6 +1039,14 @@ def test_gpu_policies_match_float64_reference_on_random_values(
     every segment longer than 16 elements through partial and merge.
 
     Every policy also runs twice and must reproduce its own bits.
+
+    This is an accuracy check, not an ownership check. The bound scales
+    with the magnitudes of a whole segment, so on a long segment it admits
+    a result that drops or repeats one element, and in the cancellation
+    suite it admits a zero result. Ownership is checked exactly on the
+    position-dependent pattern, up to the lengths in LONG_CASES, by
+    test_static_policies_own_every_element_of_long_segments and the exact
+    tests on CASES and TASK_CASES.
     """
     host_values, host_offsets = _random_case(suite, seed)
     values, offsets = host_values.cuda(), host_offsets.cuda()
