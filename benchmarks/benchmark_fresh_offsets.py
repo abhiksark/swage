@@ -12,10 +12,13 @@ candidates are skipped when it is not installed.
 
 Run with PYTHONPATH=python:build/python_packages and --output result.json.
 A full run requires a clean worktree. Use --smoke to check the harness on a
-few tiny layouts; a smoke record is labelled as not evidence.
+few tiny layouts; a smoke record is labelled as not evidence. The device is
+the current CUDA device; select another with CUDA_VISIBLE_DEVICES.
 """
 
 import argparse
+import array
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -28,14 +31,25 @@ import time
 from datetime import datetime, timezone
 from typing import NamedTuple
 
+import benchmark_provenance
 from benchmark_triton_comparison import (
-    _exact_values,
+    _PADDED_BYTES_PER_ELEMENT,
+    _QUANTUM,
+    _check_modes,
+    _check_sums,
+    _free_device_bytes,
+    _gb_per_s,
     _launch_triton_looped,
     _make_triton_looped_sum,
     _median_iqr,
+    _padded_inputs,
+    _padded_sum,
+    _sum_reference,
     _triton_looped_configs,
+    _useful_bytes,
+    _values,
 )
-from distributions import generate_lengths, summarize_lengths
+from distributions import generate_lengths, summarize_lengths, worst_case_total
 
 _SEGMENT_COUNT = 32_768
 _SEED = 7
@@ -57,22 +71,30 @@ _DISTRIBUTIONS = (
     "power-law",
 )
 _REQUIRED_ENVIRONMENT = ("gpu", "compute_capability", "cuda_driver", "pytorch")
+_I32_MAX = (1 << 31) - 1
+# Exact quarter multiples, or random values checked within a bound.
+_VALUE_KINDS = ("quarters", "normal")
 
 
 class _Layout(NamedTuple):
-    """One host offsets layout and the seed that generated it."""
+    """One host offsets layout and the seed that generated it.
+
+    The lengths and offsets are four-byte integer arrays, so a pool of
+    layouts with 10^6 segments each stays small on the host.
+    """
 
     seed: int
-    lengths: list[int]
-    offsets: list[int]
+    lengths: array.array
+    offsets: array.array
 
 
 class _DeviceLayout(NamedTuple):
-    """One uploaded layout with its inputs and its PyTorch reference."""
+    """One uploaded layout with its inputs and its float64 reference."""
 
     values: object
     offsets: object
-    expected: object
+    reference: object
+    tolerance: object
 
 
 def _arguments(argv=None):
@@ -83,9 +105,9 @@ def _arguments(argv=None):
         "--smoke",
         action="store_true",
         help=(
-            "Run a few tiny layouts to check the harness. Ignores --samples "
-            "and --warmups, allows a dirty worktree, and labels the record "
-            "as not evidence."
+            "Run a few small layouts to check the harness. Ignores "
+            "--samples and --warmups, allows a dirty worktree, and labels "
+            "the record as not evidence."
         ),
     )
     parser.add_argument(
@@ -100,17 +122,72 @@ def _arguments(argv=None):
         default=_WARMUPS,
         help="Untimed fresh layouts per distribution.",
     )
+    parser.add_argument(
+        "--distributions",
+        nargs="+",
+        choices=_DISTRIBUTIONS,
+        default=list(_DISTRIBUTIONS),
+        metavar="NAME",
+        help="Distributions to run, one row each. The default is all nine.",
+    )
+    parser.add_argument(
+        "--segment-count",
+        type=int,
+        help=(
+            f"Segments per layout. The default is {_SEGMENT_COUNT}, or "
+            f"{_SMOKE_SEGMENT_COUNT} with --smoke."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=_SEED,
+        help=(
+            "Seed of the first layout, of the values, and of the candidate "
+            "orders. Layout i of a row uses seed + i."
+        ),
+    )
+    parser.add_argument(
+        "--values",
+        choices=_VALUE_KINDS,
+        default="quarters",
+        help=(
+            "Seeded nonzero quarter multiples, whose sums are checked "
+            "exactly, or seeded standard normal values, which are checked "
+            "within the f32 any-order bound."
+        ),
+    )
     arguments = parser.parse_args(argv)
     if arguments.samples < 2 or arguments.warmups < 1:
         parser.error("samples must be >= 2 and warmups must be >= 1")
+    segment_count = _sizes(arguments)[0]
+    if segment_count <= 0:
+        parser.error("segment-count must be positive")
+    for name in arguments.distributions:
+        total = worst_case_total(name, segment_count)
+        if total > _I32_MAX:
+            parser.error(
+                f"{name} with {segment_count} segments can reach {total} "
+                "elements, which does not fit i32 offsets"
+            )
     return arguments
 
 
 def _sizes(arguments):
     """Return the segment count, warmups, and samples for this run."""
     if arguments.smoke:
-        return _SMOKE_SEGMENT_COUNT, _SMOKE_WARMUPS, _SMOKE_SAMPLES
-    return _SEGMENT_COUNT, arguments.warmups, arguments.samples
+        return (
+            arguments.segment_count or _SMOKE_SEGMENT_COUNT,
+            _SMOKE_WARMUPS,
+            _SMOKE_SAMPLES,
+        )
+    return (
+        _SEGMENT_COUNT
+        if arguments.segment_count is None
+        else arguments.segment_count,
+        arguments.warmups,
+        arguments.samples,
+    )
 
 
 def _git_metadata(root, *, allow_dirty):
@@ -285,9 +362,11 @@ def _nvidia_driver():
     return versions[0]
 
 
-def _candidate_names(*, triton_available):
+def _candidate_names(*, triton_available, pad_to_max=True):
     """Return the names of the candidates this run times."""
     names = ["swage_mixed", "torch"]
+    if pad_to_max:
+        names.append("torch_pad_to_max")
     if triton_available:
         names.extend(
             f"triton_looped_b{block}_w{warps}"
@@ -313,10 +392,13 @@ def _layout_pool(name, count, size, seed):
     """
     pool = []
     for layout_seed in range(seed, seed + size):
-        lengths = generate_lengths(name, count, layout_seed)
-        offsets = [0, *itertools.accumulate(lengths)]
+        lengths = array.array("i", generate_lengths(name, count, layout_seed))
+        offsets = array.array("i", [0, *itertools.accumulate(lengths)])
         pool.append(_Layout(layout_seed, lengths, offsets))
-    if len({tuple(layout.offsets) for layout in pool}) != size:
+    digests = {
+        hashlib.sha256(layout.offsets.tobytes()).digest() for layout in pool
+    }
+    if len(digests) != size:
         raise ValueError(
             f"{name} pool of {size} layouts with {count} segments is not "
             "distinct; every iteration needs its own layout"
@@ -426,7 +508,17 @@ def _environment(torch, *, cuda_driver, nvidia_driver, triton_version):
     }
 
 
-def _configuration(*, segment_count, warmups, samples, triton_available):
+def _configuration(
+    *,
+    segment_count,
+    warmups,
+    samples,
+    triton_available,
+    distributions=_DISTRIBUTIONS,
+    seed=_SEED,
+    values="quarters",
+    clock_tick_us=None,
+):
     """Return the benchmark contract, including what the timer covers."""
     timed_region = {
         "swage_mixed": (
@@ -439,6 +531,11 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
             "torch.segment_reduce on the device offsets with its output "
             "allocation, then synchronize"
         ),
+        "torch_pad_to_max": (
+            "pure PyTorch: reading the longest length from the device "
+            "offsets, padding every segment with zeros to it, the masked "
+            "row sum, their allocations, then synchronize"
+        ),
     }
     if triton_available:
         timed_region["triton_looped"] = (
@@ -446,9 +543,9 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
             "no host classification"
         )
     return {
-        "distributions": list(_DISTRIBUTIONS),
+        "distributions": list(distributions),
         "segment_count": segment_count,
-        "seed": _SEED,
+        "seed": seed,
         "layout_seeds": "seed plus the iteration index, warmups first",
         "iterations": (
             "every iteration in run order, warmups included and flagged as "
@@ -477,15 +574,46 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
             if triton_available
             else "skipped: Triton is not installed"
         ),
-        "values": (
-            "CPU seeded randint(1, 8) / 4, float32, never zero; one buffer "
-            "per distribution, each layout reads its prefix"
+        "pad_to_max": (
+            "timed on a row only when padding every layout of the row to "
+            "its longest segment fits the free device memory at "
+            f"{_PADDED_BYTES_PER_ELEMENT} bytes per padded element; "
+            "otherwise the row lists it under skipped with the bytes it "
+            "would need"
         ),
+        "values_kind": values,
+        "values": (
+            "CPU seeded randint(1, 8) / 4, float32, never zero"
+            if values == "quarters"
+            else "CPU seeded standard normal, float32"
+        )
+        + "; one buffer per distribution, each layout reads its prefix",
         "correctness": (
-            "every candidate in every iteration, warmups included, exact "
-            "against CPU torch.segment_reduce"
+            "every candidate in every iteration, warmups included, against "
+            "a float64 CPU torch.segment_reduce reference: exactly where "
+            "sums of the values are exact in f32 in any order, otherwise "
+            "within gamma(n - 1) times the sum of magnitudes; each row "
+            "counts its exact, bounded, and unchecked segments"
         ),
         "clock": "time.perf_counter_ns between two device synchronizations",
+        "timer": {
+            "tick_us": clock_tick_us,
+            "tick": (
+                "smallest advance of back-to-back time.perf_counter_ns "
+                "reads in this process; each row reports it as a fraction "
+                "of the median sample of every candidate"
+            ),
+            "batching": (
+                "none; a sample is one call on one fresh layout, because "
+                "a second call on the same layout would not be fresh"
+            ),
+        },
+        "effective_gb_per_s": (
+            "per timed sample, the bytes a correct sum has to move on that "
+            "layout (f32 values and i32 offsets read, f32 sums written) "
+            "divided by the sample time; rows report the median and "
+            "quartiles"
+        ),
         "timed_region": timed_region,
         "swage_mixed_prepare_samples_us": (
             "the part of each swage_mixed sample spent inside "
@@ -501,8 +629,12 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
     }
 
 
-def _require_identified_code(source, imported_code):
-    """Refuse a full record whose measured code is not pinned down."""
+def _require_identified_code(source, imported_code, provenance=None):
+    """Refuse a full record whose measured code is not pinned down.
+
+    The provenance block is known only after the run, so the check before
+    the run passes None and the check on the finished record passes it.
+    """
     if not source["worktree_clean"]:
         raise ValueError("a full record requires a clean source worktree")
     if not imported_code["swage_package_in_checkout"]:
@@ -519,6 +651,12 @@ def _require_identified_code(source, imported_code):
         missing.append("native_library_paths")
     if imported_code["llvm_linked"] is None:
         missing.append("llvm_linked")
+    if provenance is not None:
+        missing.extend(
+            field
+            for field in ("native_sha256", "loaded_ptx")
+            if not provenance.get(field)
+        )
     if missing:
         raise ValueError(
             "a full record must identify the code it measured; missing: "
@@ -527,7 +665,14 @@ def _require_identified_code(source, imported_code):
 
 
 def _record(
-    *, source, environment, configuration, results, imported_code, smoke
+    *,
+    source,
+    environment,
+    configuration,
+    results,
+    imported_code,
+    provenance,
+    smoke,
 ):
     """Assemble the JSON record, refusing one that cannot be attributed.
 
@@ -537,6 +682,9 @@ def _record(
         configuration: Benchmark contract from ``_configuration``.
         results: One row per distribution.
         imported_code: Measured package and build from ``_imported_code``.
+        provenance: Finished block from ``benchmark_provenance``: the
+            hashes of the native libraries and of every loaded PTX module,
+            the CPU, and the GPU state before and after the run.
         smoke: Whether this was a smoke run.
 
     Returns:
@@ -563,7 +711,7 @@ def _record(
             f"record is missing provenance fields: {', '.join(missing)}"
         )
     if not smoke:
-        _require_identified_code(source, imported_code)
+        _require_identified_code(source, imported_code, provenance)
     return {
         "benchmark": "fresh-offsets-segmented-sum",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -575,27 +723,46 @@ def _record(
         "smoke": smoke,
         "source": source,
         "imported_code": imported_code,
+        "provenance": provenance,
         "environment": environment,
         "configuration": configuration,
         "results": results,
     }
 
 
-def _upload(torch, pool, device):
-    """Upload one pool and compute each layout's PyTorch reference."""
+def _upload(torch, pool, device, values_kind, seed):
+    """Upload one pool and compute each layout's float64 reference.
+
+    Args:
+        torch: The PyTorch module.
+        pool: Layouts from ``_layout_pool``.
+        device: Device that holds the inputs.
+        values_kind: ``quarters`` or ``normal``.
+        seed: Seed of the values.
+
+    Returns:
+        One ``_DeviceLayout`` per layout. Every layout reads a prefix of
+        one values buffer.
+    """
     largest_total = max(layout.offsets[-1] for layout in pool)
-    host_values = _exact_values(torch, largest_total)
+    host_values = _values(torch, values_kind, largest_total, seed)
+    doubles = host_values.double()
     values = host_values.to(device)
     uploaded = []
     for layout in pool:
         total = layout.offsets[-1]
-        host_offsets = torch.tensor(layout.offsets, dtype=torch.int32)
-        expected = torch.segment_reduce(
-            host_values[:total], "sum", offsets=host_offsets
+        host_offsets = torch.frombuffer(
+            layout.offsets, dtype=torch.int32
+        ).clone()
+        reference, tolerance = _sum_reference(
+            torch, doubles[:total], host_offsets, _QUANTUM[values_kind]
         )
         uploaded.append(
             _DeviceLayout(
-                values[:total], host_offsets.to(device), expected.to(device)
+                values[:total],
+                host_offsets.to(device),
+                reference.to(device),
+                tolerance.to(device),
             )
         )
     return uploaded
@@ -629,6 +796,10 @@ def _run_distribution(
     *,
     device,
     synchronize,
+    free_bytes,
+    clock_tick_us,
+    seed=_SEED,
+    values_kind="quarters",
 ):
     """Measure every candidate on one distribution's fresh layouts.
 
@@ -642,18 +813,35 @@ def _run_distribution(
         samples: Timed iterations.
         device: Device that holds the inputs and outputs.
         synchronize: Callable that waits for all work on that device.
+        free_bytes: Callable returning the bytes the pad-to-max candidate
+            may use; it is called once the layouts are on the device.
+        clock_tick_us: Measured tick of the sample clock, or None.
+        seed: Seed of the first layout, the values, and the orders.
+        values_kind: ``quarters`` or ``normal``.
 
     Returns:
         The record row for this distribution.
     """
-    pool = _layout_pool(name, segment_count, warmups + samples, _SEED)
-    layouts = _upload(torch, pool, device)
-    names = _candidate_names(triton_available=looped_kernel is not None)
+    pool = _layout_pool(name, segment_count, warmups + samples, seed)
+    layouts = _upload(torch, pool, device, values_kind, seed)
+    longest = max(max(layout.lengths) for layout in pool)
+    padded_bytes = segment_count * longest * _PADDED_BYTES_PER_ELEMENT
+    budget = free_bytes()
+    pad_to_max = padded_bytes <= budget
+    skipped = {}
+    if not pad_to_max:
+        skipped["torch_pad_to_max"] = (
+            f"padding {segment_count} segments to {longest} elements needs "
+            f"{padded_bytes} bytes and {budget} are free"
+        )
+    names = _candidate_names(
+        triton_available=looped_kernel is not None, pad_to_max=pad_to_max
+    )
     # A result that was never written must not pass the correctness check.
     outputs = {
         candidate: torch.full((segment_count,), float("nan"), device=device)
         for candidate in names
-        if candidate != "torch"
+        if not candidate.startswith("torch")
     }
     prepare_us = []
 
@@ -674,7 +862,14 @@ def _run_distribution(
             layout.values, "sum", offsets=layout.offsets
         )
 
+    def torch_pad_to_max(layout):
+        return _padded_sum(
+            *_padded_inputs(torch, layout.values, layout.offsets)
+        )
+
     candidates = {"swage_mixed": swage_mixed, "torch": torch_reduce}
+    if pad_to_max:
+        candidates["torch_pad_to_max"] = torch_pad_to_max
     if looped_kernel is not None:
         for block, warps in _triton_looped_configs():
             candidate = f"triton_looped_b{block}_w{warps}"
@@ -683,18 +878,18 @@ def _run_distribution(
             )
 
     def check(candidate, result, layout):
-        torch.testing.assert_close(
+        _check_sums(
+            torch,
+            f"{candidate} on {name}",
             result,
-            layout.expected,
-            rtol=0,
-            atol=0,
-            msg=lambda message: f"{candidate} on {name}: {message}",
+            layout.reference,
+            layout.tolerance,
         )
         if candidate in outputs:
             outputs[candidate].fill_(float("nan"))
 
     orders = [
-        _candidate_order(names, _SEED, name, index)
+        _candidate_order(names, seed, name, index)
         for index in range(len(pool))
     ]
     iterations = _measure(
@@ -705,25 +900,61 @@ def _run_distribution(
         warmups=warmups,
         synchronize=synchronize,
     )
+    useful_bytes = [
+        _useful_bytes(layout.offsets[-1], segment_count) for layout in pool
+    ]
     raw = _timed_samples(iterations, names)
+    summary = {
+        candidate: _median_iqr(timings) for candidate, timings in raw.items()
+    }
+    modes = [_check_modes(layout.tolerance) for layout in layouts]
     return {
         "distribution": name,
         "segment_count": segment_count,
+        "seed": seed,
+        "values": values_kind,
+        "skipped": skipped,
+        "pad_to_max": {
+            "longest_segment": longest,
+            "padded_bytes": padded_bytes,
+            "free_bytes": budget,
+            "timed": pad_to_max,
+        },
+        "check": {
+            mode: sum(counts[mode] for counts in modes) for mode in modes[0]
+        },
         "iterations": [
             {
                 "layout_seed": layout.seed,
                 "layout_statistics": summarize_lengths(layout.lengths),
+                "useful_bytes": layout_bytes,
                 "order_seed": order_seed,
                 **iteration,
             }
-            for layout, (order_seed, _), iteration in zip(
-                pool, orders, iterations, strict=True
+            for layout, layout_bytes, (order_seed, _), iteration in zip(
+                pool, useful_bytes, orders, iterations, strict=True
             )
         ],
         "raw_samples_us": raw,
-        "summary_us": {
-            candidate: _median_iqr(timings)
+        "summary_us": summary,
+        "effective_gb_per_s": {
+            candidate: _median_iqr(
+                [
+                    _gb_per_s(layout_bytes, sample)
+                    for layout_bytes, sample in zip(
+                        useful_bytes[warmups:], timings, strict=True
+                    )
+                ]
+            )
             for candidate, timings in raw.items()
+        },
+        "tick_fraction_of_sample": {
+            candidate: (
+                None
+                if clock_tick_us is None
+                else clock_tick_us / timing["median"]
+            )
+            for candidate, timing in summary.items()
         },
         "swage_mixed_prepare_samples_us": prepare_us[warmups:],
         "correctness_passed": True,
@@ -741,7 +972,11 @@ def _headline(summary):
         for candidate, median in medians.items()
         if candidate.startswith("triton_looped")
     }
-    headline = {name: medians[name] for name in ("swage_mixed", "torch")}
+    headline = {
+        name: medians[name]
+        for name in ("swage_mixed", "torch", "torch_pad_to_max")
+        if name in medians
+    }
     if looped:
         fastest = min(looped, key=looped.get)
         headline[f"fastest {fastest}"] = looped[fastest]
@@ -777,6 +1012,10 @@ def main():
             "fresh-offsets benchmark requires CUDA-enabled PyTorch"
         )
     torch.ones(1, device="cuda").sum().item()
+    provenance = benchmark_provenance.start(
+        torch, benchmark_provenance.swage_build()
+    )
+    clock_tick_us = benchmark_provenance.clock_tick_us()
     identity = _runtime._compiler_identity()
     imported_code = _imported_code(
         root=root,
@@ -809,7 +1048,7 @@ def main():
         print("Triton is not installed; skipping triton_looped", flush=True)
 
     results = []
-    for name in _DISTRIBUTIONS:
+    for name in arguments.distributions:
         row = _run_distribution(
             torch,
             _prepare_planned_sum,
@@ -820,9 +1059,15 @@ def main():
             samples,
             device="cuda",
             synchronize=torch.cuda.synchronize,
+            free_bytes=lambda: _free_device_bytes(torch),
+            clock_tick_us=clock_tick_us,
+            seed=arguments.seed,
+            values_kind=arguments.values,
         )
         results.append(row)
         print(f"{name}: median_us={_headline(row['summary_us'])}", flush=True)
+        for candidate, reason in row["skipped"].items():
+            print(f"{name}: {candidate} not timed: {reason}", flush=True)
 
     record = _record(
         source=source,
@@ -832,9 +1077,14 @@ def main():
             warmups=warmups,
             samples=samples,
             triton_available=triton is not None,
+            distributions=arguments.distributions,
+            seed=arguments.seed,
+            values=arguments.values,
+            clock_tick_us=clock_tick_us,
         ),
         results=results,
         imported_code=imported_code,
+        provenance=benchmark_provenance.finish(provenance),
         smoke=arguments.smoke,
     )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

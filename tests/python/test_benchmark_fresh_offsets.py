@@ -88,6 +88,22 @@ def _imported_code(fresh_offsets, **changes):
     return fresh_offsets._imported_code(**fields)
 
 
+def _provenance(**changes):
+    """Build the provenance block of a run that loaded two kernels."""
+    block = {
+        "gpu": "NVIDIA RTX A6000",
+        "cpu_model": "Test CPU",
+        "native_sha256": {"/work/swage/build/lib.so": "a" * 64},
+        "loaded_ptx": [
+            {"kernel": "segmented_sum", "sha256": "b" * 64, "bytes": 2},
+            {"kernel": "segmented_sum", "sha256": "c" * 64, "bytes": 3},
+        ],
+        "other_compute_process_seen": False,
+    }
+    block.update(changes)
+    return block
+
+
 def _git_results(status, calls):
     """Return a fake git that logs each command and answers in order."""
     results = iter(
@@ -169,6 +185,8 @@ def test_harnesses_import_without_torch_or_triton():
     script = (
         "import sys\n"
         "import benchmark_fresh_offsets\n"
+        "import benchmark_processes\n"
+        "import benchmark_provenance\n"
         "import benchmark_triton_comparison\n"
         "loaded = {'triton', 'torch'} & set(sys.modules)\n"
         "assert not loaded, loaded\n"
@@ -194,11 +212,16 @@ def test_missing_triton_drops_only_the_looped_candidates(
     assert fresh_offsets._candidate_names(triton_available=False) == (
         "swage_mixed",
         "torch",
+        "torch_pad_to_max",
     )
     configuration = fresh_offsets._configuration(
         segment_count=2048, warmups=1, samples=3, triton_available=False
     )
-    assert configuration["candidates"] == ["swage_mixed", "torch"]
+    assert configuration["candidates"] == [
+        "swage_mixed",
+        "torch",
+        "torch_pad_to_max",
+    ]
     assert configuration["triton_looped"] == (
         "skipped: Triton is not installed"
     )
@@ -208,12 +231,15 @@ def test_looped_candidates_cover_the_declared_sweep(fresh_offsets):
     """Time every looped configuration instead of one chosen afterwards."""
     names = fresh_offsets._candidate_names(triton_available=True)
 
-    assert names[:2] == ("swage_mixed", "torch")
-    assert len(names) == 2 + 15
-    assert {name.split("_")[2] for name in names[2:]} == {
+    assert names[:3] == ("swage_mixed", "torch", "torch_pad_to_max")
+    assert len(names) == 3 + 15
+    assert {name.split("_")[2] for name in names[3:]} == {
         f"b{block}" for block in _LOOPED_BLOCKS
     }
-    assert all(name.startswith("triton_looped_b") for name in names[2:])
+    assert all(name.startswith("triton_looped_b") for name in names[3:])
+    assert fresh_offsets._candidate_names(
+        triton_available=True, pad_to_max=False
+    ) == (names[0], names[1], *names[3:])
 
 
 def test_looped_sweep_has_no_longest_segment_floor(triton_comparison):
@@ -249,7 +275,9 @@ def test_layout_pool_yields_distinct_layouts(fresh_offsets):
     assert [layout.seed for layout in pool] == [7, 8, 9, 10, 11, 12]
     assert len({tuple(layout.offsets) for layout in pool}) == 6
     for layout in pool:
-        assert layout.lengths == generate_lengths(
+        # Four bytes per segment, so a pool of 10^6-segment layouts fits.
+        assert layout.lengths.itemsize == layout.offsets.itemsize == 4
+        assert list(layout.lengths) == generate_lengths(
             "power-law", 2048, layout.seed
         )
         assert len(layout.offsets) == 2049
@@ -493,11 +521,36 @@ def test_run_distribution_checks_and_records_every_candidate(
         2,
         device="cpu",
         synchronize=lambda: None,
+        free_bytes=lambda: 1 << 30,
+        clock_tick_us=0.04,
     )
 
     candidates = fresh_offsets._candidate_names(triton_available=True)
     assert row["distribution"] == name
+    assert row["seed"] == 7
+    assert row["values"] == "quarters"
+    assert row["skipped"] == {}
+    assert row["check"] == {
+        "exact_segments": 3 * 64,
+        "bounded_segments": 0,
+        "unchecked_segments": 0,
+    }
     assert row["correctness_passed"] is True
+    assert set(row["effective_gb_per_s"]) == set(candidates)
+    assert set(row["tick_fraction_of_sample"]) == set(candidates)
+    for candidate in candidates:
+        median = row["summary_us"][candidate]["median"]
+        assert row["tick_fraction_of_sample"][candidate] == pytest.approx(
+            0.04 / median
+        )
+        rates = sorted(
+            entry["useful_bytes"] / (entry["samples_us"][candidate] * 1_000)
+            for entry in row["iterations"]
+            if entry["timed"]
+        )
+        assert row["effective_gb_per_s"][candidate]["median"] == (
+            pytest.approx(sum(rates) / 2)
+        )
     assert set(row["raw_samples_us"]) == set(candidates)
     assert all(len(row["raw_samples_us"][c]) == 2 for c in candidates)
     assert set(row["summary_us"]) == set(candidates)
@@ -510,6 +563,9 @@ def test_run_distribution_checks_and_records_every_candidate(
     for index, entry in enumerate(row["iterations"]):
         assert entry["layout_seed"] == 7 + index
         assert entry["layout_statistics"]["count"] == 64
+        assert entry["useful_bytes"] == 4 * (
+            entry["layout_statistics"]["total"] + 65 + 64
+        )
         assert (
             entry["order_seed"],
             entry["candidate_order"],
@@ -538,6 +594,108 @@ def test_reading_one_element_past_a_segment_end_is_rejected(
             2,
             device="cpu",
             synchronize=lambda: None,
+            free_bytes=lambda: 1 << 30,
+            clock_tick_us=0.04,
+        )
+
+
+def _run(fresh_offsets, torch, name, **changes):
+    """Run one row on the CPU with stand-in candidates."""
+    options = {
+        "device": "cpu",
+        "synchronize": lambda: None,
+        "free_bytes": lambda: 1 << 30,
+        "clock_tick_us": 0.04,
+    }
+    options.update(changes)
+    kernel = options.pop("kernel", _EmulatedLoopedKernel())
+    prepare = options.pop("prepare", _reference_prepare(torch))
+    return fresh_offsets._run_distribution(
+        torch, prepare, kernel, name, 64, 1, 2, **options
+    )
+
+
+def test_pad_to_max_is_skipped_with_its_bytes_when_it_does_not_fit(
+    fresh_offsets,
+):
+    """Record what padding would need instead of timing or hiding it."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(fresh_offsets, torch, "power-law", free_bytes=lambda: 1000)
+
+    longest = max(
+        entry["layout_statistics"]["max"] for entry in row["iterations"]
+    )
+    candidates = fresh_offsets._candidate_names(
+        triton_available=True, pad_to_max=False
+    )
+    assert "torch_pad_to_max" not in candidates
+    assert set(row["raw_samples_us"]) == set(candidates)
+    assert all(
+        sorted(entry["candidate_order"]) == sorted(candidates)
+        for entry in row["iterations"]
+    )
+    assert row["pad_to_max"] == {
+        "longest_segment": longest,
+        "padded_bytes": 64 * longest * 17,
+        "free_bytes": 1000,
+        "timed": False,
+    }
+    assert set(row["skipped"]) == {"torch_pad_to_max"}
+    assert str(64 * longest * 17) in row["skipped"]["torch_pad_to_max"]
+
+
+def test_pad_to_max_is_timed_when_it_fits(fresh_offsets):
+    """Time padding and the masked sum from offsets in to result out."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(fresh_offsets, torch, "bimodal")
+
+    assert row["pad_to_max"]["timed"] is True
+    assert row["pad_to_max"]["padded_bytes"] == (
+        64 * row["pad_to_max"]["longest_segment"] * 17
+    )
+    assert len(row["raw_samples_us"]["torch_pad_to_max"]) == 2
+
+
+def test_rows_follow_the_seed_and_the_value_kind(fresh_offsets):
+    """Draw other layouts for another seed and bound random values."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets, torch, "bimodal", seed=100, values_kind="normal"
+    )
+
+    assert row["seed"] == 100
+    assert row["values"] == "normal"
+    assert [entry["layout_seed"] for entry in row["iterations"]] == [
+        100,
+        101,
+        102,
+    ]
+    assert row["iterations"][0]["order_seed"] == "100:bimodal:0"
+    assert row["check"]["bounded_segments"] > 0
+    assert row["check"]["unchecked_segments"] == 0
+
+
+def test_random_values_still_reject_a_wrong_candidate(fresh_offsets):
+    """Keep the check meaningful when no exact comparison is possible."""
+    torch = pytest.importorskip("torch")
+
+    def prepare(values, offsets, output, *, warp_max_elements):
+        def mixed():
+            output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+            output[0] += 1.0
+
+        return types.SimpleNamespace(mixed=mixed)
+
+    with pytest.raises(AssertionError, match="swage_mixed on many-tiny"):
+        _run(
+            fresh_offsets,
+            torch,
+            "many-tiny",
+            values_kind="normal",
+            prepare=prepare,
         )
 
 
@@ -556,9 +714,11 @@ def test_headline_names_the_fastest_looped_configuration(fresh_offsets):
         "fastest triton_looped_b512_w4": 18.3,
     }
     del summary["triton_looped_b128_w1"], summary["triton_looped_b512_w4"]
+    summary["torch_pad_to_max"] = {"median": 900.04}
     assert fresh_offsets._headline(summary) == {
         "swage_mixed": 20_000.0,
         "torch": 55.3,
+        "torch_pad_to_max": 900.0,
     }
 
 
@@ -648,6 +808,55 @@ def test_smoke_selects_tiny_sizes(fresh_offsets):
     assert fresh_offsets._sizes(full) == (32_768, 5, 100)
 
 
+def test_arguments_select_scale_seed_values_and_distributions(fresh_offsets):
+    """Offer 10^6 segments, random values, a seed, and chosen rows."""
+    default = fresh_offsets._arguments(["--output", "x.json"])
+    chosen = fresh_offsets._arguments(
+        [
+            "--output",
+            "x.json",
+            "--distributions",
+            "power-law",
+            "bimodal",
+            "--segment-count",
+            "1000000",
+            "--seed",
+            "1000",
+            "--values",
+            "normal",
+            "--samples",
+            "20",
+            "--warmups",
+            "2",
+        ]
+    )
+
+    assert default.distributions == list(_DISTRIBUTIONS)
+    assert (default.seed, default.values) == (7, "quarters")
+    assert chosen.distributions == ["power-law", "bimodal"]
+    assert (chosen.seed, chosen.values) == (1000, "normal")
+    assert fresh_offsets._sizes(chosen) == (1_000_000, 2, 20)
+    smoke = fresh_offsets._arguments(
+        ["--output", "x.json", "--smoke", "--segment-count", "4096"]
+    )
+    assert fresh_offsets._sizes(smoke) == (4096, 1, 3)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--distributions", "normal"],
+        ["--distributions", "uniform", "--segment-count", "1000000"],
+        ["--segment-count", "0"],
+        ["--values", "ones"],
+    ],
+)
+def test_arguments_reject_what_cannot_be_measured(fresh_offsets, extra):
+    """Refuse a configuration before any device work starts."""
+    with pytest.raises(SystemExit):
+        fresh_offsets._arguments(["--output", "x.json", *extra])
+
+
 @pytest.mark.parametrize(
     "extra", [["--samples", "1"], ["--warmups", "0"], ["--samples", "x"]]
 )
@@ -689,6 +898,7 @@ def test_record_carries_provenance_and_the_smoke_label(fresh_offsets):
         configuration=configuration,
         results=[],
         imported_code=_imported_code(fresh_offsets),
+        provenance=_provenance(),
         smoke=True,
     )
 
@@ -718,6 +928,7 @@ def test_full_record_is_not_labelled_smoke(fresh_offsets):
         configuration={},
         results=[],
         imported_code=_imported_code(fresh_offsets),
+        provenance=_provenance(),
         smoke=False,
     )
 
@@ -741,6 +952,7 @@ def test_record_rejects_missing_environment_provenance(fresh_offsets, field):
             configuration={},
             results=[],
             imported_code=_imported_code(fresh_offsets),
+            provenance=_provenance(),
             smoke=False,
         )
 
@@ -850,6 +1062,7 @@ def test_record_carries_the_imported_code(fresh_offsets):
         configuration={},
         results=[],
         imported_code=_imported_code(fresh_offsets),
+        provenance=_provenance(),
         smoke=False,
     )
 
@@ -879,6 +1092,7 @@ def test_full_record_requires_identified_code(
         "configuration": {},
         "results": [],
         "imported_code": imported_code,
+        "provenance": _provenance(),
     }
 
     with pytest.raises(ValueError, match=message):
@@ -896,5 +1110,60 @@ def test_record_rejects_a_dirty_tree_outside_smoke(fresh_offsets):
             configuration={},
             results=[],
             imported_code=_imported_code(fresh_offsets),
+            provenance=_provenance(),
             smoke=False,
         )
+
+
+def test_record_carries_the_provenance_block(fresh_offsets):
+    """Keep the binary hashes and the machine state beside the revision."""
+    record = fresh_offsets._record(
+        source={"revision": "abc123", "worktree_clean": True, "dirty": []},
+        environment=_environment(fresh_offsets),
+        configuration={},
+        results=[],
+        imported_code=_imported_code(fresh_offsets),
+        provenance=_provenance(),
+        smoke=False,
+    )
+
+    assert record["provenance"] == _provenance()
+
+
+@pytest.mark.parametrize("field", ["native_sha256", "loaded_ptx"])
+def test_full_record_requires_the_binary_hashes(fresh_offsets, field):
+    """Refuse a full record that cannot name the binary it measured."""
+    arguments = {
+        "source": {"revision": "abc123", "worktree_clean": True, "dirty": []},
+        "environment": _environment(fresh_offsets),
+        "configuration": {},
+        "results": [],
+        "imported_code": _imported_code(fresh_offsets),
+        "provenance": _provenance(**{field: type(_provenance()[field])()}),
+    }
+
+    with pytest.raises(ValueError, match=field):
+        fresh_offsets._record(**arguments, smoke=False)
+    assert fresh_offsets._record(**arguments, smoke=True)["smoke"] is True
+
+
+def test_configuration_states_the_methods(fresh_offsets):
+    """Say what is timed, how it is checked, and what the rate counts."""
+    configuration = fresh_offsets._configuration(
+        segment_count=4096,
+        warmups=2,
+        samples=20,
+        triton_available=True,
+        distributions=["power-law"],
+        seed=1000,
+        values="normal",
+        clock_tick_us=0.04,
+    )
+
+    assert configuration["distributions"] == ["power-law"]
+    assert configuration["seed"] == 1000
+    assert configuration["values_kind"] == "normal"
+    assert configuration["timer"]["tick_us"] == 0.04
+    assert "padding" in configuration["timed_region"]["torch_pad_to_max"]
+    assert "offsets" in configuration["effective_gb_per_s"]
+    assert "float64" in configuration["correctness"]

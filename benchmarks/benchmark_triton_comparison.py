@@ -52,8 +52,9 @@ _OPTIONAL_DISTRIBUTIONS = ("alternating-empty", "power-law")
 _QUANTUM = {"ones": 1.0, "quarters": 0.25, "normal": None}
 _F32_UNIT_ROUNDOFF = 2.0**-24
 _F32_EXACT_INTEGERS = 1 << 24
-# Peak bytes per padded element while padding and reducing: an i32 index, a
-# bool mask, the gathered f32, the padded f32, and the masked f32 product.
+# An upper bound of the bytes per padded element alive at once while padding
+# and reducing: an i32 index, a bool mask, the gathered f32, the padded f32,
+# and the masked f32 product.
 _PADDED_BYTES_PER_ELEMENT = 17
 
 
@@ -786,7 +787,7 @@ def _segmented_row(
     seed: int,
     values_kind: str,
     device,
-    memory_budget: int,
+    free_bytes: Callable[[], int],
     synchronize,
 ) -> dict[str, object]:
     """Check and time every candidate on one distribution and seed.
@@ -803,7 +804,8 @@ def _segmented_row(
         seed: Seed of the lengths and of the random value kinds.
         values_kind: Key of ``_QUANTUM``.
         device: Device that holds the inputs and outputs.
-        memory_budget: Bytes the padded baseline may use.
+        free_bytes: Callable returning the bytes the padded baseline may
+            use; it is called once the row's inputs are on the device.
         synchronize: Callable that waits for all work on that device.
 
     Returns:
@@ -846,6 +848,7 @@ def _segmented_row(
             f"elements and the longest segment has {max_length}"
         )
     padded_bytes = segment_count * max_length * _PADDED_BYTES_PER_ELEMENT
+    memory_budget = free_bytes()
     if padded_bytes > memory_budget:
         skipped["torch_padded"] = (
             f"padding {segment_count} segments to {max_length} elements "
@@ -1045,7 +1048,7 @@ def _run_segmented_sum(torch, measure, arguments) -> list[dict[str, object]]:
             seed=seed,
             values_kind=arguments.values,
             device="cuda",
-            memory_budget=_free_device_bytes(torch),
+            free_bytes=lambda: _free_device_bytes(torch),
             synchronize=torch.cuda.synchronize,
         )
         for name in arguments.distributions

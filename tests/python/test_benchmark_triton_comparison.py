@@ -119,7 +119,7 @@ def _row(comparison, torch, name, **changes):
         "seed": 7,
         "values_kind": "quarters",
         "device": "cpu",
-        "memory_budget": 1 << 30,
+        "free_bytes": lambda: 1 << 30,
         "synchronize": lambda: None,
     }
     options.update(changes)
@@ -478,7 +478,11 @@ def test_power_law_row_skips_the_baselines_that_cannot_cover_it(comparison):
     torch = pytest.importorskip("torch")
 
     row, _ = _row(
-        comparison, torch, "power-law", segment_count=2048, memory_budget=1000
+        comparison,
+        torch,
+        "power-law",
+        segment_count=2048,
+        free_bytes=lambda: 1000,
     )
 
     longest = row["statistics"]["max"]
