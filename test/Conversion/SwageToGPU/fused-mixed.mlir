@@ -219,7 +219,7 @@ module {
 // SYNC: gpu.return
 
 // The fused kernel is specialized to four warps per block.
-// BLOCK-SIZE: error: fused mixed lowering requires block-size 128
+// BLOCK-SIZE: error: fused mixed lowering requires block-size 128, got 64
 
 // The fused kernel has its own ABI and always loads segment IDs from its
 // task buffer, so it cannot also honor the task-ID ABI option. The pair is
