@@ -47,6 +47,10 @@ llvm::Error validateClassifierConfiguration(int64_t valueCount,
   return llvm::Error::success();
 }
 
+/// Admits offsets that start at zero, never decrease, and end within the
+/// value count. Every offset is then in [0, i32Max], so every segment length
+/// `offsets[i + 1] - offsets[i]` is too, and the lengths sum to at most the
+/// value count. The counting and narrowing below rely on both facts.
 llvm::Error validateOffsets(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
                             int64_t segmentCount) {
   const uint64_t expectedOffsetCount =
@@ -69,22 +73,16 @@ llvm::Error validateOffsets(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
   return llvm::Error::success();
 }
 
-llvm::Error validateSegmentLengths(llvm::ArrayRef<int64_t> offsets,
-                                   int64_t segmentCount) {
-  for (int64_t segmentId = 0; segmentId < segmentCount; ++segmentId) {
-    const int64_t length = offsets[segmentId + 1] - offsets[segmentId];
-    if (length < 0 || length > i32Max)
-      return invalidMetadata("segment length must fit in i32");
-  }
-  return llvm::Error::success();
-}
-
 struct TaskCounts {
   uint64_t stageZero = 0;
   uint64_t merges = 0;
-  uint64_t partials = 0;
 };
 
+/// Counts descriptors before any is allocated. A chunk holds at least one
+/// element, so the partial tasks of the split segments number at most the
+/// value count and their scratch indices fit in i32 without a check of
+/// their own. The descriptor count adds one task per unsplit segment and one
+/// merge per split segment, and that sum can exceed i32.
 llvm::Expected<TaskCounts> countTasks(llvm::ArrayRef<int64_t> offsets,
                                       int64_t segmentCount,
                                       int64_t ctaChunkElements) {
@@ -95,12 +93,9 @@ llvm::Expected<TaskCounts> countTasks(llvm::ArrayRef<int64_t> offsets,
     if (length > ctaChunkElements) {
       taskCount = static_cast<uint64_t>(length / ctaChunkElements) +
                   static_cast<uint64_t>(length % ctaChunkElements != 0);
-      counts.partials += taskCount;
       ++counts.merges;
     }
     counts.stageZero += taskCount;
-    if (counts.partials > static_cast<uint64_t>(i32Max))
-      return invalidMetadata("scratch index must fit in i32");
     if (counts.stageZero + counts.merges > static_cast<uint64_t>(i32Max))
       return invalidMetadata("descriptor count must fit in i32");
   }
@@ -169,8 +164,6 @@ classifyTasks(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
           valueCount, segmentCount, warpMaxElements, ctaChunkElements))
     return std::move(error);
   if (llvm::Error error = validateOffsets(offsets, valueCount, segmentCount))
-    return std::move(error);
-  if (llvm::Error error = validateSegmentLengths(offsets, segmentCount))
     return std::move(error);
   llvm::Expected<TaskCounts> counts =
       countTasks(offsets, segmentCount, ctaChunkElements);
