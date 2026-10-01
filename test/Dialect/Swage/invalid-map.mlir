@@ -56,3 +56,17 @@ func.func @isolation_violation(%s: !swage.segment<f32>, %outer: f32) -> !swage.s
   }
   return %r : !swage.segment<f32>
 }
+
+// -----
+
+// A region may end in a terminator that is legal anywhere, such as
+// llvm.unreachable, so the yield requirement is checked by the region
+// operation and not by the terminator.
+func.func @region_without_yield(%s: !swage.segment<f32>) -> !swage.segment<f32> {
+  // expected-error @below {{region must terminate with swage.yield}}
+  %r = swage.map %s : !swage.segment<f32> -> !swage.segment<f32> {
+  ^bb0(%x: f32):
+    llvm.unreachable
+  }
+  return %r : !swage.segment<f32>
+}

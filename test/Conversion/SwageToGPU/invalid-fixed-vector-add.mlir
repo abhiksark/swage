@@ -66,3 +66,165 @@ module {
     return
   }
 }
+
+// -----
+
+module {
+  func.func @rank_two_vector(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    // expected-error@+1 {{only rank-one vectors are supported}}
+    %zero = arith.constant dense<0.0> : vector<2x64xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @narrow_vector(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    // expected-error@+1 {{vector width 64 does not match requested block size 128}}
+    %lane = vector.step : vector<64xindex>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{only default-memory-space pointers are supported}}
+  func.func @device_memory_space(
+      %x: memref<?xf32, 1>, %y: memref<?xf32>, %output: memref<?xf32>,
+      %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
+  // An unreachable second block is still a second block.
+  // expected-error@+1 {{fixed vector add requires one straight-line block}}
+  func.func @two_blocks(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    return
+  ^unreachable:
+    return
+  }
+}
+
+// -----
+
+module {
+  // A declaration has no block at all.
+  // expected-error@+1 {{fixed vector add requires one straight-line block}}
+  func.func private @declaration(
+      memref<?xf32>, memref<?xf32>, memref<?xf32>, i32)
+}
+
+// -----
+
+module {
+  func.func @unsupported_operation(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    %c0 = arith.constant 0 : index
+    // expected-error@+1 {{operation is unsupported by fixed vector-add lowering}}
+    %value = memref.load %x[%c0] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{expected one program_id, two gathers, one f32 add, and one scatter}}
+  func.func @no_vector_add(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    %pid = swage.program_id 0
+    return
+  }
+}
+
+// -----
+
+module {
+  // The second gather reads %x again, so the kernel is not x + y.
+  // expected-error@+1 {{gathers, add, and scatter do not form a fixed vector add}}
+  func.func @gathers_one_input_twice(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    %pid = swage.program_id 0
+    %block = arith.constant 128 : index
+    %base = arith.muli %pid, %block : index
+    %lane = vector.step : vector<128xindex>
+    %base_vector = vector.broadcast %base : index to vector<128xindex>
+    %offsets = arith.addi %base_vector, %lane : vector<128xindex>
+    %n_index = arith.index_cast %n : i32 to index
+    %n_vector = vector.broadcast %n_index : index to vector<128xindex>
+    %mask = arith.cmpi slt, %offsets, %n_vector : vector<128xindex>
+    %zero = arith.constant 0.0 : f32
+    %passthrough = vector.broadcast %zero : f32 to vector<128xf32>
+    %c0 = arith.constant 0 : index
+    %lhs = vector.gather %x[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %rhs = vector.gather %x[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %sum = arith.addf %lhs, %rhs : vector<128xf32>
+    vector.scatter %output[%c0] [%offsets], %mask, %sum
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @stores_a_gather(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    %pid = swage.program_id 0
+    %block = arith.constant 128 : index
+    %base = arith.muli %pid, %block : index
+    %lane = vector.step : vector<128xindex>
+    %base_vector = vector.broadcast %base : index to vector<128xindex>
+    %offsets = arith.addi %base_vector, %lane : vector<128xindex>
+    %n_index = arith.index_cast %n : i32 to index
+    %n_vector = vector.broadcast %n_index : index to vector<128xindex>
+    %mask = arith.cmpi slt, %offsets, %n_vector : vector<128xindex>
+    %zero = arith.constant 0.0 : f32
+    %passthrough = vector.broadcast %zero : f32 to vector<128xf32>
+    %c0 = arith.constant 0 : index
+    %lhs = vector.gather %x[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %rhs = vector.gather %y[%c0] [%offsets], %mask, %passthrough
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+          into vector<128xf32>
+    %sum = arith.addf %lhs, %rhs : vector<128xf32>
+    // The add is computed and dropped; the scatter writes %lhs unchanged.
+    // expected-error@+1 {{scatter value must be the vector f32 add}}
+    vector.scatter %output[%c0] [%offsets], %mask, %lhs
+        : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
+    return
+  }
+}
+
+// -----
+
+// expected-error@+1 {{expected exactly one kernel function}}
+module {
+  func.func @first(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    return
+  }
+  func.func @second(
+      %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
+    return
+  }
+}
+
+// -----
+
+// expected-error@+1 {{expected exactly one kernel function}}
+module {
+}
