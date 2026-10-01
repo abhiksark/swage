@@ -1,6 +1,7 @@
 # tests/python/test_benchmark_fresh_offsets.py
 """Tests for the fresh-offsets benchmark and the looped Triton baseline."""
 
+import collections
 import importlib
 import pathlib
 import subprocess
@@ -230,8 +231,43 @@ def test_layout_pool_rejects_a_repeated_layout(fresh_offsets):
         fresh_offsets._layout_pool("one-outlier", 1, 2, 7)
 
 
-def test_measure_times_each_candidate_once_per_fresh_layout(fresh_offsets):
-    """Rotate the order, check every result, and keep every timed sample."""
+def test_candidate_order_is_a_seeded_permutation(fresh_offsets):
+    """Derive each iteration's order from the seed, row, and iteration."""
+    names = fresh_offsets._candidate_names(triton_available=True)
+
+    seed, order = fresh_offsets._candidate_order(names, 7, "bimodal", 3)
+
+    assert seed == "7:bimodal:3"
+    assert sorted(order) == sorted(names)
+    assert (seed, order) == fresh_offsets._candidate_order(
+        names, 7, "bimodal", 3
+    )
+    assert order != fresh_offsets._candidate_order(names, 7, "bimodal", 4)[1]
+    assert order != fresh_offsets._candidate_order(names, 7, "uniform", 3)[1]
+    assert order != fresh_offsets._candidate_order(names, 8, "bimodal", 3)[1]
+
+
+def test_no_candidate_keeps_a_fixed_neighbour(fresh_offsets):
+    """Spread who runs right after the slow candidate across iterations."""
+    names = fresh_offsets._candidate_names(triton_available=True)
+    followers = collections.Counter()
+    positions = collections.Counter()
+    for iteration in range(105):
+        _, order = fresh_offsets._candidate_order(
+            names, 7, "uniform", iteration
+        )
+        position = order.index("swage_mixed")
+        positions[position] += 1
+        if position + 1 < len(order):
+            followers[order[position + 1]] += 1
+
+    assert set(followers) == set(names) - {"swage_mixed"}
+    assert max(followers.values()) <= 15
+    assert len(positions) == len(names)
+
+
+def test_measure_follows_the_given_order_on_fresh_layouts(fresh_offsets):
+    """Run every candidate once per layout and keep every sample."""
     calls = []
     checked = []
     ticks = iter(range(0, 1_000_000, 2_000))
@@ -239,33 +275,62 @@ def test_measure_times_each_candidate_once_per_fresh_layout(fresh_offsets):
         name: (lambda layout, name=name: calls.append((name, layout)) or name)
         for name in ("a", "b", "c")
     }
+    orders = [["c", "a", "b"], ["a", "b", "c"], ["b", "a", "c"]]
 
-    samples = fresh_offsets._measure(
-        ["l0", "l1", "l2", "l3", "l4"],
+    iterations = fresh_offsets._measure(
+        ["l0", "l1", "l2"],
+        orders,
         candidates,
         lambda name, result, layout: checked.append((name, result, layout)),
-        warmups=2,
+        warmups=1,
         synchronize=lambda: None,
         clock=lambda: next(ticks),
     )
 
-    assert [name for name, _ in calls] == [
-        *("a", "b", "c"),
-        *("b", "c", "a"),
-        *("c", "a", "b"),
-        *("a", "b", "c"),
-        *("b", "c", "a"),
+    assert calls == [
+        (name, layout)
+        for layout, order in zip(["l0", "l1", "l2"], orders)
+        for name in order
     ]
-    for name in candidates:
-        assert [layout for called, layout in calls if called == name] == [
-            "l0",
-            "l1",
-            "l2",
-            "l3",
-            "l4",
-        ]
     assert checked == [(name, name, layout) for name, layout in calls]
-    assert samples == {"a": [2.0] * 3, "b": [2.0] * 3, "c": [2.0] * 3}
+    assert iterations == [
+        {
+            "timed": timed,
+            "candidate_order": order,
+            "samples_us": {"a": 2.0, "b": 2.0, "c": 2.0},
+        }
+        for timed, order in zip([False, True, True], orders)
+    ]
+    assert [list(iteration["samples_us"]) for iteration in iterations] == (
+        orders
+    )
+
+
+def test_measure_requires_one_order_per_layout(fresh_offsets):
+    """Refuse a pool and an order list that do not line up."""
+    with pytest.raises(ValueError):
+        fresh_offsets._measure(
+            ["l0", "l1"],
+            [["a"]],
+            {"a": lambda layout: None},
+            lambda name, result, layout: None,
+            warmups=0,
+            synchronize=lambda: None,
+        )
+
+
+def test_timed_samples_are_grouped_by_candidate(fresh_offsets):
+    """Keep the per-candidate series the summaries are computed from."""
+    iterations = [
+        {"timed": False, "samples_us": {"a": 9.0, "b": 8.0}},
+        {"timed": True, "samples_us": {"b": 2.0, "a": 1.0}},
+        {"timed": True, "samples_us": {"a": 3.0, "b": 4.0}},
+    ]
+
+    assert fresh_offsets._timed_samples(iterations, ("a", "b")) == {
+        "a": [1.0, 3.0],
+        "b": [2.0, 4.0],
+    }
 
 
 def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
@@ -291,8 +356,9 @@ def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
         now[0] += 100_000
         assert (name, result) == ("only", f"result of {layout}")
 
-    samples = fresh_offsets._measure(
+    iterations = fresh_offsets._measure(
         ["l0", "l1", "l2"],
+        [["only"]] * 3,
         {"only": candidate},
         check,
         warmups=1,
@@ -310,7 +376,9 @@ def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
     ] * 3
     # The candidate and the device work it left behind: 5 us plus 3 us. The
     # wait before the timer and the correctness check are outside.
-    assert samples == {"only": [8.0, 8.0]}
+    assert [iteration["samples_us"] for iteration in iterations] == [
+        {"only": 8.0}
+    ] * 3
 
 
 def test_exact_values_make_any_extra_or_missing_element_visible(
@@ -368,6 +436,22 @@ def test_run_distribution_checks_and_records_every_candidate(
     assert all(len(row["raw_samples_us"][c]) == 2 for c in candidates)
     assert set(row["summary_us"]) == set(candidates)
     assert len(row["swage_mixed_prepare_samples_us"]) == 2
+    assert [entry["timed"] for entry in row["iterations"]] == [
+        False,
+        True,
+        True,
+    ]
+    for index, entry in enumerate(row["iterations"]):
+        assert entry["layout_seed"] == 7 + index
+        assert entry["layout_statistics"]["count"] == 64
+        assert (
+            entry["order_seed"],
+            entry["candidate_order"],
+        ) == fresh_offsets._candidate_order(candidates, 7, name, index)
+        assert list(entry["samples_us"]) == entry["candidate_order"]
+    assert row["raw_samples_us"] == fresh_offsets._timed_samples(
+        row["iterations"], candidates
+    )
 
 
 @pytest.mark.parametrize("name", _DISTRIBUTIONS)
@@ -421,6 +505,7 @@ def test_measure_stops_at_the_first_wrong_result(fresh_offsets):
     with pytest.raises(AssertionError, match="torch is wrong on l0"):
         fresh_offsets._measure(
             ["l0", "l1"],
+            [["torch"], ["torch"]],
             {"torch": lambda layout: None},
             check,
             warmups=0,

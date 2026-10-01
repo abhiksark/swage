@@ -20,6 +20,7 @@ import itertools
 import json
 import pathlib
 import platform
+import random
 import subprocess
 import sys
 import time
@@ -186,7 +187,7 @@ def _nvidia_driver():
 
 
 def _candidate_names(*, triton_available):
-    """Return the timed candidates in their base rotation order."""
+    """Return the names of the candidates this run times."""
     names = ["swage_mixed", "torch"]
     if triton_available:
         names.extend(
@@ -224,8 +225,31 @@ def _layout_pool(name, count, size, seed):
     return pool
 
 
+def _candidate_order(names, seed, distribution, iteration):
+    """Return one iteration's seeded random candidate order.
+
+    A rotation would give every candidate the same predecessor in almost
+    every iteration, so whatever one candidate leaves behind would always
+    fall on the same neighbour. A fresh permutation spreads it.
+
+    Args:
+        names: Candidate names.
+        seed: The run seed.
+        distribution: Distribution name of the row.
+        iteration: Iteration index within the row, warmups included.
+
+    Returns:
+        The seed string given to ``random.Random`` and the permuted names.
+    """
+    order_seed = f"{seed}:{distribution}:{iteration}"
+    order = list(names)
+    random.Random(order_seed).shuffle(order)
+    return order_seed, order
+
+
 def _measure(
     layouts,
+    orders,
     candidates,
     check,
     *,
@@ -237,31 +261,50 @@ def _measure(
 
     Args:
         layouts: One layout per iteration; none is used twice.
+        orders: The candidate order for each iteration.
         candidates: Callables by name, each taking a layout and returning
             its result.
         check: Callable taking the candidate name, its result, and the
             layout; it raises when the result is wrong.
-        warmups: Leading iterations that are checked but not recorded.
+        warmups: Leading iterations that are flagged as not timed.
         synchronize: Callable that waits for all device work.
         clock: Monotonic nanosecond clock.
 
     Returns:
-        Microsecond samples by candidate name, one per timed iteration.
+        One entry per iteration with its timed flag, the candidate order it
+        ran, and the microsecond sample of each candidate in that order.
     """
-    names = tuple(candidates)
-    samples = {name: [] for name in names}
-    for index, layout in enumerate(layouts):
-        shift = index % len(names)
-        for name in names[shift:] + names[:shift]:
+    iterations = []
+    for index, (layout, order) in enumerate(zip(layouts, orders, strict=True)):
+        samples = {}
+        for name in order:
             synchronize()
             start = clock()
             result = candidates[name](layout)
             synchronize()
             elapsed = (clock() - start) / 1_000.0
             check(name, result, layout)
-            if index >= warmups:
-                samples[name].append(elapsed)
-    return samples
+            samples[name] = elapsed
+        iterations.append(
+            {
+                "timed": index >= warmups,
+                "candidate_order": list(order),
+                "samples_us": samples,
+            }
+        )
+    return iterations
+
+
+def _timed_samples(iterations, names):
+    """Return the timed samples of each candidate in iteration order."""
+    return {
+        name: [
+            iteration["samples_us"][name]
+            for iteration in iterations
+            if iteration["timed"]
+        ]
+        for name in names
+    }
 
 
 def _environment(torch, *, cuda_driver, nvidia_driver, triton_version):
@@ -308,12 +351,22 @@ def _configuration(*, segment_count, warmups, samples, triton_available):
         "segment_count": segment_count,
         "seed": _SEED,
         "layout_seeds": "seed plus the iteration index, warmups first",
+        "iterations": (
+            "every iteration in run order, warmups included and flagged as "
+            "not timed, with its layout, candidate order, and samples; "
+            "raw_samples_us repeats the timed samples by candidate"
+        ),
         "warmups": warmups,
         "samples": samples,
         "layouts_per_distribution": warmups + samples,
         "layout_reuse": "none; every iteration takes the next unused layout",
         "candidates": list(_candidate_names(triton_available=triton_available)),
-        "candidate_order": "rotated by one position every iteration",
+        "candidate_order": (
+            "a new random permutation every iteration, shuffled by "
+            "random.Random(order_seed) with order_seed "
+            "'<seed>:<distribution>:<iteration>'; the seed and the order "
+            "are recorded with each iteration"
+        ),
         "warp_max_elements": _WARP_MAX_ELEMENTS,
         "swage_policy": (
             "_prepare_planned_sum with select_schedule=False; the "
@@ -511,23 +564,32 @@ def _run_distribution(
         if candidate in outputs:
             outputs[candidate].fill_(float("nan"))
 
-    raw = _measure(
+    orders = [
+        _candidate_order(names, _SEED, name, index)
+        for index in range(len(pool))
+    ]
+    iterations = _measure(
         layouts,
+        [order for _, order in orders],
         candidates,
         check,
         warmups=warmups,
         synchronize=synchronize,
     )
+    raw = _timed_samples(iterations, names)
     return {
         "distribution": name,
         "segment_count": segment_count,
-        "layouts": [
+        "iterations": [
             {
-                "seed": layout.seed,
-                "timed": index >= warmups,
-                "statistics": summarize_lengths(layout.lengths),
+                "layout_seed": layout.seed,
+                "layout_statistics": summarize_lengths(layout.lengths),
+                "order_seed": order_seed,
+                **iteration,
             }
-            for index, layout in enumerate(pool)
+            for layout, (order_seed, _), iteration in zip(
+                pool, orders, iterations, strict=True
+            )
         ],
         "raw_samples_us": raw,
         "summary_us": {
