@@ -30,6 +30,10 @@ _OPERATORS = {
     ast.BitXor: "^",
     ast.BitAnd: "&",
 }
+_INSTALLATION = (
+    "docs/getting-started/installation.md in "
+    "https://github.com/abhiksark/swage"
+)
 
 
 class CompilationError(Exception):
@@ -161,8 +165,10 @@ class _Kernel:
             from mlir_swage.dialects import arith, func, swage, vector
         except ImportError as error:
             raise RuntimeError(
-                "Swage emit_mlir() requires the build-tree "
-                "mlir_swage bindings"
+                "Swage emit_mlir() requires the build-tree mlir_swage "
+                "bindings, which the swage-compiler wheel does not include; "
+                f"kernel '{self.__name__}' passed the language check. See "
+                f"{_INSTALLATION} for the native build"
             ) from error
 
         emitter = _Emitter(

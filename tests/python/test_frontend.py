@@ -328,6 +328,22 @@ def test_body_outside_the_language_is_diagnosed_without_native_bindings():
     )
 
 
+def test_accepted_body_without_native_bindings_names_the_installation_page():
+    """Say the body passed and where the native build is described."""
+    with pytest.raises(RuntimeError) as caught:
+        add_kernel.emit_mlir(
+            signature=ADD_SIGNATURE, constexprs={"BLOCK": 128}
+        )
+
+    message = str(caught.value)
+    assert not isinstance(caught.value, sw.CompilationError)
+    assert message.startswith(
+        "Swage emit_mlir() requires the build-tree mlir_swage bindings"
+    )
+    assert "kernel 'add_kernel' passed the language check" in message
+    assert "docs/getting-started/installation.md" in message
+
+
 _WHEEL_ONLY_SCRIPT = """
 import importlib.util
 import sys
@@ -390,6 +406,8 @@ def test_a_process_with_only_the_pure_package_checks_kernel_bodies(tmp_path):
         "RuntimeError|Swage emit_mlir() requires the build-tree mlir_swage "
         "bindings"
     )
+    assert "kernel 'good' passed the language check" in accepted
+    assert "docs/getting-started/installation.md" in accepted
 
 
 _LOAD_OTHER_SOURCE = """
