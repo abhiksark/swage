@@ -41,16 +41,20 @@ target the active device exactly and admit the NVPTX processors that the
 pinned LLVM release defines, currently `sm_80`, `sm_86`, `sm_87`, `sm_88`,
 `sm_89`, `sm_90`, `sm_100`, `sm_101`, `sm_103`, `sm_110`, `sm_120`, and
 `sm_121`; a device below compute capability 8.0, or one the pinned release
-does not define, is rejected during compilation. The runtime then
+does not define, is rejected during compilation. The
+[Support Matrix](support-matrix.md) says which of these targets the GPU
+tests execute on. The runtime then
 emits semantic MLIR, lowers and emits PTX in process through LLVM NVPTX, loads
 the module through `libcuda.so.1`, and enqueues asynchronously on the current
 PyTorch CUDA stream.
 
 Swage does not invoke NVRTC or a subprocess compiler. It does not copy or
-cast tensors, change devices, create a CUDA context, synchronize, or select a
-fallback backend. Loaded functions are reused per specialization and CUDA
-context. Tensor storage remains owned by PyTorch, and submitted tensors are
-retained through `record_stream()`.
+cast tensors, change devices, create a CUDA context, or select a fallback
+backend. A launch of a kernel that is already loaded does not synchronize.
+A launch that loads a kernel can synchronize the context once;
+[Module lifetime](#module-lifetime) states when. Loaded functions are reused
+per specialization and CUDA context. Tensor storage remains owned by
+PyTorch, and submitted tensors are retained through `record_stream()`.
 
 Emitted kernels also pin their own launch width: the PTX carries a
 `.reqntid` directive matching the specialized block size, so a launch
@@ -83,6 +87,66 @@ same driver call with the same error shape and a slower per-launch cost.
 </div>
 
 *The two launch dispatch lanes and when each is taken. [Open the full-size figure](../assets/figures/dispatch-path.svg).*
+
+### Threads
+
+A launch from several threads follows these rules:
+
+- A launch of a kernel that the process has already compiled and loaded
+  takes no lock. It reads the in-process caches and enqueues.
+- The enqueue holds the GIL, as stated above.
+- Compilation releases the GIL. While the native compiler lowers a kernel
+  and emits PTX, other Python threads run.
+- One process-wide lock serializes every compile and every load of a kernel
+  that `launch()` or a private qualification helper starts. Two compiles
+  therefore never run at the same time, and a compile on one thread does
+  not delay a launch of a loaded kernel on another.
+- The native binding also keeps two compiles off one MLIR context. A caller
+  of the binding must not use a context from another thread while a compile
+  of a module in that context runs.
+
+### Module lifetime
+
+The process keeps compiled artifacts and loaded functions in two in-process
+caches. Each keeps 128 entries. When one more entry is stored, the cache
+forgets the entry it stored first, whether or not that kernel is still in
+use. The next launch of a forgotten kernel reads it from the persistent
+cache or compiles it, and loads it again. The private qualification helpers
+keep caches of their own with the same bound.
+
+A loaded CUDA module stays loaded for as long as something holds its
+function handle: a cache entry, a prepared private launch, or a launch in
+progress. Once nothing holds the handle, the module is queued for unloading.
+The queue is emptied the next time the process loads a kernel in the same
+CUDA context:
+
+1. The context is synchronized once, so that launches of the queued modules
+   that are still on a stream finish.
+2. Each queued module is unloaded.
+
+This is the only synchronization on the public path, and a launch of a
+loaded kernel never reaches it. These rules bound it:
+
+- A kernel that a public launch enqueues on a stream that is capturing a
+  CUDA graph stays loaded for the rest of the process, because the graph
+  can replay it at any time.
+- A prepared private launch is not kept that way. The prepared object keeps
+  its kernels loaded and must outlive every graph that captured it.
+- A module of another CUDA context stays queued until that context is
+  current.
+- While the calling thread captures a CUDA graph, nothing is unloaded and
+  the queue waits for a later load.
+- A driver error during the synchronize or an unload is reported as a
+  `RuntimeWarning` and is never raised, because the caller is loading an
+  unrelated kernel.
+
+One limitation remains. A capture that is open on another thread cannot be
+seen from the loading thread. If a load finds queued modules while another
+thread captures a graph in the same context, the synchronize invalidates
+that capture and fails, the modules stay queued, and the process warns
+`Swage left <count> unused CUDA modules loaded`. To avoid it, launch every
+kernel once before any thread starts a capture, so that no kernel is loaded
+while a capture is open.
 
 ## Specialization and cache
 
@@ -327,6 +391,9 @@ standing. It is `None` when PyTorch sees no CUDA device.
   for it, and no test has executed that PTX.
 - `(not admitted)`: compilation rejects the target.
 
+The [Support Matrix](support-matrix.md) uses the same three terms and adds
+the Python, PyTorch, and driver versions that the tests run with.
+
 Three fields describe the persistent cache as the reporting process would use
 it. A process that started earlier, or that runs with other variables, can
 differ.
@@ -348,7 +415,8 @@ is a bare version, so a build against the pinned release shows
 `llvmorg-22.1.8` and `22.1.8`. Any other pair means the bindings were built
 against a different LLVM install than the repository pins.
 
-Continue with [swage](swage.md) for the public call
-surface, [Troubleshooting](../getting-started/troubleshooting.md) for common
-boundary failures, or [Verification](../internals/verification.md)
-for the tests behind runtime claims.
+Continue with the [Support Matrix](support-matrix.md) for the environments
+these rules are tested in. Use
+[Troubleshooting](../getting-started/troubleshooting.md) for common boundary
+failures, or [Verification](../internals/verification.md) for the tests
+behind runtime claims.
