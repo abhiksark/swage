@@ -1,9 +1,28 @@
+# CMakeLists.txt
 cmake_minimum_required(VERSION 3.20.0)
 project(swage LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
 find_package(MLIR REQUIRED CONFIG)
+
+# ADR-0004: Swage builds against exactly the release named in
+# cmake/llvm-version.txt. Any other LLVM/MLIR install is rejected here
+# instead of failing later in the build or passing with different behavior.
+set(SWAGE_LLVM_PIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/llvm-version.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${SWAGE_LLVM_PIN_FILE}")
+file(STRINGS "${SWAGE_LLVM_PIN_FILE}" SWAGE_LLVM_PIN LIMIT_COUNT 1)
+string(STRIP "${SWAGE_LLVM_PIN}" SWAGE_LLVM_PIN)
+string(REGEX REPLACE "^llvmorg-" "" SWAGE_LLVM_PIN_VERSION "${SWAGE_LLVM_PIN}")
+if(NOT "${LLVM_PACKAGE_VERSION}" STREQUAL "${SWAGE_LLVM_PIN_VERSION}")
+  message(FATAL_ERROR
+    "Swage requires LLVM/MLIR ${SWAGE_LLVM_PIN_VERSION}, the release pinned "
+    "as ${SWAGE_LLVM_PIN} in cmake/llvm-version.txt, but found LLVM "
+    "${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}. Build the pinned release with "
+    "scripts/fetch_llvm.sh and scripts/build_llvm.sh, or point MLIR_DIR and "
+    "LLVM_DIR at an install of it.")
+endif()
 
 set(LLVM_LIT_ARGS "-sv" CACHE STRING "Default options for lit")
 
