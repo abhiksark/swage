@@ -678,6 +678,25 @@ def test_language_module_alias_emits_the_same_mlir():
     ) == _emit().operation.get_asm(enable_debug_info=False)
 
 
+def test_the_none_return_annotation_emits_the_same_mlir():
+    """Treat `-> None` as no annotation; it says what a kernel returns."""
+    @sw.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr) -> None:
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    annotated = _emit(kernel=add_kernel)
+
+    assert annotated.operation.verify()
+    assert annotated.operation.get_asm(
+        enable_debug_info=False
+    ) == _emit().operation.get_asm(enable_debug_info=False)
+
+
 @pytest.mark.parametrize(
     "kernel",
     [

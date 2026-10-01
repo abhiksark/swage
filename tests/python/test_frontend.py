@@ -545,28 +545,71 @@ def test_foreign_parameter_annotations_are_rejected():
         f"unsupported annotation 'float' on parameter 'n'; {suffix}"
     )
     assert _reason(string_annotation) == (
-        "unsupported annotation ''sl.constexpr'' on parameter 'BLOCK'; "
-        f"{suffix}"
+        "unsupported string annotation 'sl.constexpr' on parameter "
+        f"'BLOCK'; {suffix}"
     )
     assert _reason(bare_marker) == (
         f"unsupported annotation 'constexpr' on parameter 'BLOCK'; {suffix}"
     )
 
 
-@pytest.mark.parametrize("annotation", ["None", "float"])
-def test_return_annotations_are_rejected(tmp_path, annotation):
-    """Refuse a return annotation; a kernel has no return value."""
+_RETURN_ANNOTATION_SOURCE = """
+import swage as sw
+import swage.language as sl
+
+
+@sw.jit
+def kernel(x_ptr, n) -> {annotation}:
+    return
+"""
+
+
+@pytest.mark.parametrize(
+    ("annotation", "described"),
+    [
+        ("float", "annotation 'float'"),
+        ("sl.int32", "annotation 'sl.int32'"),
+        ("'None'", "string annotation 'None'"),
+    ],
+)
+def test_return_annotations_other_than_none_are_rejected(
+    tmp_path, annotation, described
+):
+    """Refuse a return annotation that promises a value."""
     kernel = _kernel_from_source(
-        tmp_path,
-        "import swage as sw\n\n\n"
-        "@sw.jit\n"
-        f"def kernel(x_ptr, n) -> {annotation}:\n"
-        "    return\n",
+        tmp_path, _RETURN_ANNOTATION_SOURCE.format(annotation=annotation)
     )
 
     assert _reason(kernel, constexprs={}) == (
-        "return annotations are unsupported; a kernel returns nothing"
+        f"unsupported return {described}; a kernel returns nothing, so "
+        "the only accepted return annotation is None"
     )
+
+
+def test_the_none_return_annotation_is_accepted(tmp_path):
+    """Accept the one return annotation that states what a kernel does."""
+    from swage import _runtime
+
+    kernel = _kernel_from_source(
+        tmp_path, _RETURN_ANNOTATION_SOURCE.format(annotation="None")
+    )
+
+    @sw.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr) -> None:
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    _assert_passes_check(kernel, constexprs={})
+    _assert_passes_check(
+        add_kernel, signature=ADD_SIGNATURE, constexprs={"BLOCK": 128}
+    )
+    assert _runtime._launch_descriptors(
+        add_kernel, {}, {"BLOCK": 128}, list(ADD_SIGNATURE)
+    ) == ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
 
 
 def test_index_arithmetic_on_compile_time_operands_is_range_checked():
@@ -684,7 +727,45 @@ def test_a_different_object_spelled_sl_is_not_the_language_module():
         parameter_shadow, signature={"lang": sl.int32}, constexprs={}
     ) == f"unsupported call 'lang.program_id'; {suffix}"
     assert _reason(local_shadow, signature=signature) == (
-        f"unsupported call 'lang.program_id'; {suffix}"
+        "cannot assign to 'lang'; the name is bound to the swage.language "
+        "module"
+    )
+
+
+_ALIAS_ASSIGNMENT_SOURCE = """
+import swage as sw
+import swage.language as sl
+
+
+@sw.jit
+def kernel(x_ptr, n, BLOCK: sl.constexpr):
+    {body}
+"""
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        ("sl = 1", 8),
+        ("offsets = sl.program_id(0) * BLOCK\n    sl = offsets", 9),
+    ],
+    ids=["first-statement", "after-a-call"],
+)
+def test_assigning_to_the_language_alias_is_reported_at_the_assignment(
+    tmp_path, body, line
+):
+    """Point at the assignment, not at the annotation that reads correctly."""
+    kernel = _kernel_from_source(
+        tmp_path, _ALIAS_ASSIGNMENT_SOURCE.format(body=body)
+    )
+
+    with pytest.raises(sw.CompilationError) as caught:
+        kernel.emit_mlir(signature=SIGNATURE, constexprs={"BLOCK": 8})
+
+    assert kernel.constexpr_names == {"BLOCK"}
+    assert str(caught.value) == (
+        f"{kernel.filename}:{line}:5: kernel: cannot assign to 'sl'; the "
+        "name is bound to the swage.language module"
     )
 
 
