@@ -411,3 +411,32 @@ def test_other_compute_process_seen_is_tri_state(
         )
         is seen
     )
+
+
+def test_block_can_be_finished_again_after_more_loads(provenance):
+    """Keep recording for a harness that rewrites its record per row."""
+
+    class Driver:
+        def load(self, ptx, kernel_name):
+            return "module", "function"
+
+    driver = Driver()
+    build = {"loaded_ptx": provenance.record_loaded_ptx(driver)}
+    quiet = _nvidia_smi([_GPU_ROW], [])
+    shared = _nvidia_smi([_GPU_ROW], [f"{_UUID}, 9, python3, 1 MiB"])
+    block = provenance.start(_stub_torch(), build, run=quiet)
+
+    driver.load("first", "segmented_sum")
+    provenance.finish(block, run=shared)
+    assert [entry["bytes"] for entry in block["loaded_ptx"]] == [5]
+    assert block["other_compute_process_seen"] is True
+
+    driver.load("second kernel", "segmented_max")
+    provenance.finish(block, run=quiet)
+    assert [entry["kernel"] for entry in block["loaded_ptx"]] == [
+        "segmented_max",
+        "segmented_sum",
+    ]
+    # A process seen during an earlier row stays seen.
+    assert block["other_compute_process_seen"] is True
+    assert block["gpu_state_after"]["other_compute_processes"] == []

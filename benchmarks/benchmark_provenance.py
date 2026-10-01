@@ -269,7 +269,9 @@ def finish(block, *, run=subprocess.run):
 
     The GPU state is sampled again, the loaded PTX entries are put in a
     stable order without repeats, and ``other_compute_process_seen``
-    summarizes the two samples.
+    summarizes the samples. A harness that rewrites its record as it goes
+    may call this after every row: the PTX list keeps recording, and a
+    process seen at an earlier call stays seen.
     """
     block["gpu_state_after"] = gpu_state(
         block["gpu_uuid"], pid=os.getpid(), run=run
@@ -278,8 +280,11 @@ def finish(block, *, run=subprocess.run):
         (entry["kernel"], entry["sha256"]): entry
         for entry in block["loaded_ptx"]
     }
-    block["loaded_ptx"] = [distinct[key] for key in sorted(distinct)]
-    block["other_compute_process_seen"] = other_compute_process_seen(
+    # In place: the driver keeps appending to this very list.
+    block["loaded_ptx"][:] = [distinct[key] for key in sorted(distinct)]
+    block["other_compute_process_seen"] = block.get(
+        "other_compute_process_seen"
+    ) or other_compute_process_seen(
         block["gpu_state_before"], block["gpu_state_after"]
     )
     return block
