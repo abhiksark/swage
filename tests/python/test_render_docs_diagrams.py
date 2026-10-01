@@ -22,6 +22,7 @@ REQUIRED_LABELS = {
         "not a public API",
         "PLANNED",
         "public segmented API",
+        "split softmax",
     ),
     "frontend-boundary.svg": (
         "restricted AST",
@@ -47,6 +48,7 @@ REQUIRED_LABELS = {
         "fixed-block vector add",
         "segmented direct",
         "SwagePlan direct + split",
+        "direct or split sum or max",
         "GPU / SCF / NVVM / LLVM",
         "CUDA Driver API",
         "sequential CPU oracle",
@@ -54,7 +56,8 @@ REQUIRED_LABELS = {
         "GPU: one CTA / segment",
     ),
     "split-lifecycle.svg": (
-        "identity sum only",
+        "f32 sum or max",
+        "split softmax remains planned",
         "absolute input ranges",
         "unique scratch writer",
         "compact scratch range",
@@ -69,7 +72,8 @@ REQUIRED_LABELS = {
         "specialize / cache",
         "current PyTorch stream",
         "record_stream()",
-        "no synchronization or fallback",
+        "a warm launch never synchronizes",
+        "Only loading a kernel may synchronize",
     ),
 }
 

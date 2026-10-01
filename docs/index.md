@@ -10,8 +10,10 @@
 
 Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
 how one segment-local program can keep its meaning while task derivation
-changes with runtime segment lengths. Its public execution boundary is one
-canonical fixed vector-add kernel; the wider segment compiler exists as
+changes with runtime segment lengths.
+
+Segments are not usable from Python yet. The public execution boundary is
+one canonical fixed vector-add kernel. The wider segment compiler exists as
 private qualification machinery or planned work.
 
 !!! warning "Pre-alpha boundary"
@@ -22,15 +24,19 @@ private qualification machinery or planned work.
 
 ## Public today
 
-- The pure Python `swage` package, distributed as `swage-compiler`.
-- `@swage.jit` capture and compile-only `emit_mlir()` for the restricted
-  fixed-block vector-add subset, when build-tree native bindings are present.
+- The pure Python `swage` package, distributed as `swage-compiler`. On its
+  own it captures a kernel and checks it against the kernel language.
+- Compile-only `emit_mlir()` for the restricted fixed-block vector-add
+  subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
 - `python -m swage.env` environment diagnostics.
 - Native `swage` MLIR parsing, verification, and registered compiler tools.
 
 The published wheel does not include the native `mlir_swage` package or
-compiler build output. Native wheel packaging remains deferred.
+compiler build output. Native wheel packaging remains deferred. These pages
+describe the current source tree, and
+[Installation](getting-started/installation.md) lists what the released
+`0.5.1` wheel lacks.
 
 ## Private qualification
 
@@ -38,8 +44,9 @@ compiler build output. Native wheel packaging remains deferred.
   segment on NVIDIA GPUs.
 - Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
-- Canonical identity-sum planning, direct warp and CTA execution, fused
-  mixed execution, and split-CTA partial and merge execution.
+- Planning, direct warp and CTA execution, fused mixed execution, and
+  split-CTA partial and merge execution for capture-free, single-stage f32
+  sum and max programs.
 
 These paths have tests and recorded qualification evidence. They do not
 widen the public Python language or launch contract.
@@ -48,8 +55,10 @@ widen the public Python language or launch contract.
 
 - Public segment syntax and public segmented launch.
 - Packing several short segments into one warp allocation.
-- Split max and split softmax.
-- Device queues, persistent scheduling, and broader policy selection.
+- Split softmax.
+- Device queues, persistent scheduling, and broader policy selection. One
+  persistent queue exists as a private experiment whose predeclared
+  performance gate failed.
 
 The three lanes are status boundaries, not fallback paths.
 

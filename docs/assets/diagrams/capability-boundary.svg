@@ -46,7 +46,7 @@
   <text x="697" y="543" font-size="17" font-weight="650" fill="#17212B" text-anchor="middle">packed work</text>
   <line x1="561" y1="536" x2="587" y2="536" stroke="#59636E" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#capability-boundary-arrow)"/>
   <rect x="840" y="504" width="205" height="64" rx="14" fill="#FFFDF8" stroke="#59636E" stroke-width="2"/>
-  <text x="942" y="543" font-size="17" font-weight="650" fill="#17212B" text-anchor="middle">split max / softmax</text>
+  <text x="942" y="543" font-size="17" font-weight="650" fill="#17212B" text-anchor="middle">split softmax</text>
   <line x1="806" y1="536" x2="832" y2="536" stroke="#59636E" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#capability-boundary-arrow)"/>
   <text x="350" y="596" font-size="16" font-weight="650" fill="#59636E" text-anchor="start">persistent scheduling</text>
 </svg>
