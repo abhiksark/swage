@@ -60,20 +60,26 @@ class _ColdPathLock:
     that asks for the lock waits forever instead, so a thread that would
     retake a released lock ahead of the exiting thread starts nothing new.
     The exiting thread itself can still take the lock, because a later exit
-    handler may reach a cold path.
+    handler may reach a cold path. When the wait of `close` ran out, the
+    exiting thread does not wait a second time behind the same holder: its
+    next request fails at once.
     """
 
     def __init__(self):
         """Create an open lock that nothing holds."""
         self._lock = threading.RLock()
         self._closed_by = None
+        self._wait_ran_out = False
 
     def acquire(self, timeout=-1):
         """Take the lock; return whether it was taken within `timeout`."""
         closed_by = self._closed_by
-        if closed_by is not None and closed_by != threading.get_ident():
-            # Only a daemon thread gets here, and its process is ending.
-            threading.Event().wait()
+        if closed_by is not None:
+            if closed_by != threading.get_ident():
+                # Only a daemon thread gets here, and its process is ending.
+                threading.Event().wait()
+            if self._wait_ran_out:
+                timeout = 0
         return self._lock.acquire(timeout=timeout)
 
     def release(self):
@@ -88,11 +94,23 @@ class _ColdPathLock:
             holder is still at work and later requests still wait forever.
         """
         self._closed_by = threading.get_ident()
-        return self._lock.acquire(timeout=timeout)
+        acquired = self._lock.acquire(timeout=timeout)
+        self._wait_ran_out = not acquired
+        return acquired
 
     def __enter__(self):
-        """Take the lock for a `with` block."""
-        self.acquire()
+        """Take the lock for a `with` block.
+
+        Raises:
+            RuntimeError: The interpreter exits and the thread that held
+                the lock when the exit wait ran out still holds it.
+        """
+        if not self.acquire():
+            raise RuntimeError(
+                "Swage cannot compile or load a kernel while the "
+                "interpreter exits: another thread still holds the "
+                "cold-path lock"
+            )
         return self
 
     def __exit__(self, *_error):
@@ -1404,7 +1422,7 @@ def _report_modules_left_loaded(count, error):
         warnings.warn(
             f"Swage left {count} unused CUDA {noun} loaded: {error}",
             RuntimeWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
     except RuntimeWarning as raised:
         print(f"RuntimeWarning: {raised}", file=sys.stderr)
@@ -1665,14 +1683,15 @@ class _CudaDriver:
         first_error = None
         try:
             while idle:
-                module = idle.pop()
                 try:
-                    self._call("cuModuleUnload", ctypes.c_void_p(module))
+                    self._call("cuModuleUnload", ctypes.c_void_p(idle[-1]))
                 except RuntimeError as error:
-                    kept.append(module)
+                    kept.append(idle[-1])
                     first_error = first_error or error
+                idle.pop()
         finally:
-            # `idle` holds modules only when the loop was interrupted.
+            # `idle` holds modules only when the loop was interrupted, the
+            # module that was being unloaded among them.
             self._retired.extend((context, module) for module in kept + idle)
         if kept:
             _report_modules_left_loaded(len(kept), first_error)

@@ -146,7 +146,9 @@ and the compiler runs without the GIL. Two process events need care:
   wait is bounded at 5 seconds. A compile takes a few milliseconds, but the
   lock is also held while a load waits for the device, which nothing
   bounds, and a stuck thread must not hold the process open. After the
-  bound the exit continues and the crash is possible again.
+  bound the exit continues and the crash is possible again. A later exit
+  handler that then needs a compile or a load gets a `RuntimeError` at
+  once and does not wait again.
 - Fork. A child forked while another thread compiles would inherit the lock
   in its taken state and wait for it forever at its first compile or load.
   `os.fork()` therefore waits for the compile or load in flight, and the
@@ -205,7 +207,7 @@ One limitation remains. A capture that is open on another thread cannot be
 seen from the loading thread. If a load finds queued modules while another
 thread captures a graph in the same context, the synchronize invalidates
 that capture and fails, the modules stay queued, and the process warns
-`Swage left <count> unused CUDA modules loaded`. To avoid it, launch every
+that it left `<count>` unused CUDA modules loaded. To avoid it, launch every
 kernel once before any thread starts a capture, so that no kernel is loaded
 while a capture is open.
 

@@ -369,6 +369,26 @@ def test_one_failed_unload_does_not_lose_the_modules_after_it(fake_cuda):
     assert list(driver._retired) == [(1, modules[0])]
 
 
+def test_interrupted_unload_keeps_every_module_it_did_not_unload(fake_cuda):
+    """Requeue the module in hand and the ones not yet tried."""
+    driver, modules = _retire_three_modules(fake_cuda)
+    unloads = []
+
+    def interrupt_the_second(module):
+        unloads.append(module.value)
+        if len(unloads) == 2:
+            raise KeyboardInterrupt
+
+    fake_cuda._cuModuleUnload = interrupt_the_second
+
+    with pytest.raises(KeyboardInterrupt):
+        driver.unload_retired()
+
+    assert sorted(module for _, module in driver._retired) == sorted(
+        set(modules) - {unloads[0]}
+    )
+
+
 @pytest.mark.parametrize("failing", ["cuModuleUnload", "cuCtxSynchronize"])
 def test_unload_never_raises_into_a_load_when_warnings_are_errors(
     fake_cuda, capsys, failing

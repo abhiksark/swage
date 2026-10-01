@@ -3436,6 +3436,59 @@ def test_interpreter_exit_does_not_wait_forever(tmp_path):
     assert time.monotonic() - started < 30
 
 
+_STUCK_COMPILE_AND_A_LATER_HANDLER_SCRIPT = """
+import atexit
+import sys
+import threading
+import time
+
+
+def use_the_cold_path():
+    from swage import _runtime
+
+    try:
+        with _runtime._compile_lock:
+            sys.stdout.write("took a lock that another thread holds\\n")
+    except RuntimeError as error:
+        sys.stdout.write(f"refused: {error}\\n")
+    sys.stdout.flush()
+
+
+atexit.register(use_the_cold_path)
+
+from swage import _runtime  # noqa: E402
+
+_runtime._EXIT_WAIT_SECONDS = 0.3
+in_flight = threading.Event()
+
+
+def never_finish():
+    with _runtime._compile_lock:
+        in_flight.set()
+        time.sleep(600)
+
+
+threading.Thread(target=never_finish, daemon=True).start()
+in_flight.wait()
+"""
+
+
+def test_exit_does_not_hang_behind_a_stuck_compile_in_a_later_handler(
+    tmp_path,
+):
+    """Refuse the cold path, not wait again, once the exit wait ran out."""
+    completed = _run_script(
+        _STUCK_COMPILE_AND_A_LATER_HANDLER_SCRIPT, tmp_path, timeout=30
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == (
+        "refused: Swage cannot compile or load a kernel while the "
+        "interpreter exits: another thread still holds the cold-path "
+        "lock\n"
+    )
+
+
 def test_exit_wait_is_bounded_by_a_few_seconds():
     """Keep the bound above a slow compile and below a noticeable hang."""
     from swage import _runtime
