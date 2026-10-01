@@ -100,3 +100,42 @@ def test_git_metadata_requires_clean_worktree(
 
     with pytest.raises(RuntimeError, match="clean source worktree"):
         persistent_benchmark._git_metadata(pathlib.Path("."))
+
+
+def test_gate_runs_only_on_its_device_unless_asked(persistent_benchmark):
+    """Keep the gate on the 84-SM A6000 and let another GPU rerun it."""
+    assert not persistent_benchmark._arguments(
+        ["--output", "x.json"]
+    ).any_device
+    assert persistent_benchmark._arguments(
+        ["--output", "x.json", "--any-device"]
+    ).any_device
+    assert persistent_benchmark._gate_device(
+        "NVIDIA RTX A6000", (8, 6), 84, any_device=False
+    )
+    with pytest.raises(RuntimeError, match="170 SMs at sm_120.*--any-device"):
+        persistent_benchmark._gate_device(
+            "NVIDIA GeForce RTX 5090", (12, 0), 170, any_device=False
+        )
+    assert not persistent_benchmark._gate_device(
+        "NVIDIA GeForce RTX 5090", (12, 0), 170, any_device=True
+    )
+    assert not persistent_benchmark._gate_device(
+        "NVIDIA RTX A6000", (8, 6), 80, any_device=True
+    )
+
+
+def test_rerun_configuration_records_the_resident_blocks_it_used(
+    persistent_benchmark,
+):
+    """Record the device's own residency instead of the A6000 constant."""
+    assert (
+        persistent_benchmark._configuration()["persistent_resident_blocks"]
+        == 168
+    )
+    assert (
+        persistent_benchmark._configuration(340)["persistent_resident_blocks"]
+        == 340
+    )
+    assert persistent_benchmark._resident_blocks(True, 84) == 168
+    assert persistent_benchmark._resident_blocks(False, 170) == 340

@@ -1,5 +1,11 @@
 # benchmarks/benchmark_mixed_sum.py
-"""Run the frozen mixed-policy segmented-sum benchmark."""
+"""Run the frozen mixed-policy segmented-sum benchmark.
+
+The inputs, the timing loop, and the gate are frozen. The gate is decided
+on an NVIDIA RTX A6000 at sm_86. With --any-device the same measurement
+runs on another GPU; that record is labelled as a rerun and is not gate
+evidence.
+"""
 
 import argparse
 import json
@@ -10,6 +16,11 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+import benchmark_provenance
+from benchmark_triton_comparison import _gb_per_s, _useful_bytes
+
+_GATE_GPU = "NVIDIA RTX A6000"
+_GATE_CAPABILITY = (8, 6)
 _COUNT = 32_768
 _SEED = 7
 _WARP_MAX_ELEMENTS = 32
@@ -18,11 +29,55 @@ _SAMPLES = 100
 _GATE_RATIO = 1.05
 
 
-def _arguments():
+def _arguments(argv=None):
     """Parse the output path without exposing policy tuning controls."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=pathlib.Path, required=True)
-    return parser.parse_args()
+    parser.add_argument(
+        "--any-device",
+        action="store_true",
+        help=(
+            "Run the same measurement on a GPU other than the gate device. "
+            "The record is labelled as a rerun, not gate evidence, and the "
+            "exit status does not depend on the ratio."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _gate_device(gpu_name, capability, *, any_device):
+    """Return whether this is the device the gate was declared on.
+
+    Args:
+        gpu_name: Device name reported by PyTorch.
+        capability: Its compute capability as a major and minor pair.
+        any_device: Whether another device may rerun the measurement.
+
+    Returns:
+        True on the gate device, False on another device with the option.
+
+    Raises:
+        RuntimeError: If the device is not the gate device and the option
+            was not given.
+    """
+    if gpu_name == _GATE_GPU and tuple(capability) == _GATE_CAPABILITY:
+        return True
+    if not any_device:
+        raise RuntimeError(
+            "mixed-policy evidence must run on NVIDIA RTX A6000 at "
+            "sm_86; found "
+            f"{gpu_name} at sm_{capability[0]}{capability[1]}; pass "
+            "--any-device to rerun the measurement here without gate "
+            "evidence"
+        )
+    return False
+
+
+def _status(gate_device):
+    """Return the label that separates gate evidence from a rerun."""
+    if gate_device:
+        return "frozen gate run"
+    return "rerun on another device; not gate evidence"
 
 
 def _git_metadata(root):
@@ -78,6 +133,92 @@ def _configuration():
             "allocation",
             "module loading",
         ],
+    }
+
+
+def _positions(policies, sample_count):
+    """Return each policy's place in the rotation, sample by sample.
+
+    ``_measure`` rotates the launch order by one policy per sample and
+    synchronizes only after the last launch of a sample. The policy in
+    place 0 starts on an idle stream, so its interval includes host
+    dispatch; the later places queue behind a running kernel.
+    """
+    count = len(policies)
+    return {
+        name: [(index - sample) % count for sample in range(sample_count)]
+        for index, name in enumerate(policies)
+    }
+
+
+def _position_medians(samples):
+    """Return the median of each policy at each place in the rotation.
+
+    Args:
+        samples: The samples of each policy in run order, as ``_measure``
+            returns them.
+
+    Returns:
+        For each policy, one median per place, place 0 first.
+    """
+    policies = tuple(samples)
+    positions = _positions(policies, len(samples[policies[0]]))
+    return {
+        name: [
+            statistics.median(
+                value
+                for value, position in zip(
+                    samples[name], positions[name], strict=True
+                )
+                if position == place
+            )
+            for place in range(len(policies))
+        ]
+        for name in policies
+    }
+
+
+def _ratio_tick_interval(numerator, denominator, tick):
+    """Return the ratios half a timer tick on each median allows.
+
+    A median that is a few dozen ticks long is known to about one tick, so
+    the ratio of two such medians carries no more digits than this range.
+    None when no tick was observed.
+    """
+    if tick is None:
+        return None
+    half = tick / 2
+    return [
+        (numerator - half) / (denominator + half),
+        (numerator + half) / (denominator - half),
+    ]
+
+
+def _timer(samples, medians, numerator, denominator):
+    """Return the observed timer tick and what it means for the ratio.
+
+    Args:
+        samples: The samples of each policy.
+        medians: The median of each policy.
+        numerator: Policy on top of the gate ratio.
+        denominator: Policy under it.
+
+    Returns:
+        The smallest gap between two different samples as the tick, each
+        median in ticks, and the tick-limited range of the gate ratio.
+    """
+    tick = benchmark_provenance.smallest_step(
+        [value for policy in samples.values() for value in policy]
+    )
+    return {
+        "tick_ms": tick,
+        "ticks_per_median": {
+            name: None if tick is None else median / tick
+            for name, median in medians.items()
+        },
+        "ratio_tick_interval": _ratio_tick_interval(
+            medians[numerator], medians[denominator], tick
+        ),
     }
 
 
@@ -151,12 +292,13 @@ def main():
     device = torch.cuda.current_device()
     gpu_name = torch.cuda.get_device_name(device)
     capability = torch.cuda.get_device_capability(device)
-    if gpu_name != "NVIDIA RTX A6000" or capability != (8, 6):
-        raise RuntimeError(
-            "mixed-policy evidence must run on NVIDIA RTX A6000 at "
-            "sm_86; found "
-            f"{gpu_name} at sm_{capability[0]}{capability[1]}"
-        )
+    gate_device = _gate_device(
+        gpu_name, capability, any_device=arguments.any_device
+    )
+    torch.ones(1, device="cuda").sum().item()
+    provenance = benchmark_provenance.start(
+        torch, benchmark_provenance.swage_build()
+    )
 
     lengths = generate_lengths("bimodal", _COUNT, _SEED)
     offsets = [0]
@@ -180,11 +322,16 @@ def main():
         for name, policy_samples in samples.items()
     }
     ratio, passed = _evaluate_gate(medians)
+    position_medians = _position_medians(samples)
+    useful_bytes = _useful_bytes(offsets[-1], _COUNT)
     properties = torch.cuda.get_device_properties(device)
     result = {
         "benchmark": "frozen-mixed-policy-segmented-sum",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "status": _status(gate_device),
+        "gate_device": gate_device,
         "source": source,
+        "provenance": benchmark_provenance.finish(provenance),
         "environment": {
             "platform": platform.platform(),
             "python": sys.version,
@@ -205,6 +352,35 @@ def main():
             "maximum_ratio": _GATE_RATIO,
             "passed": passed,
         },
+        # The fields below describe the frozen samples; the gate above is
+        # decided on the medians alone, as it was declared.
+        "position_matched": {
+            "places": (
+                "place 0 is launched on an idle stream and includes host "
+                "dispatch; later places queue behind a running kernel"
+            ),
+            "medians_ms": position_medians,
+            "mixed_to_best_pure_ratio": [
+                _evaluate_gate(
+                    {
+                        name: places[place]
+                        for name, places in position_medians.items()
+                    }
+                )[0]
+                for place in range(len(position_medians))
+            ],
+        },
+        "timer": _timer(
+            samples,
+            medians,
+            "mixed",
+            min(("warp", "cta"), key=medians.get),
+        ),
+        "useful_bytes": useful_bytes,
+        "effective_gb_per_s": {
+            name: _gb_per_s(useful_bytes, median * 1_000.0)
+            for name, median in medians.items()
+        },
     }
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(
@@ -216,11 +392,12 @@ def main():
                 "medians_ms": medians,
                 "mixed_to_best_pure_ratio": ratio,
                 "passed": result["gate"]["passed"],
+                "status": result["status"],
             },
             sort_keys=True,
         )
     )
-    if not result["gate"]["passed"]:
+    if gate_device and not result["gate"]["passed"]:
         raise SystemExit("mixed-policy performance gate failed")
 
 
