@@ -423,26 +423,72 @@ def test_split_partial_kernel_clamps_plan_ranges():
 
 
 @requires_cuda
-@pytest.mark.parametrize("block_size", [40, 100])
-def test_partly_filled_last_warp_gives_exact_sums(block_size):
-    """Admit a power-of-two warp count whose last warp is not full."""
-    lengths = [1, 31, 33, 97, 300, 4097]
+@pytest.mark.parametrize(
+    "block_size", [1, 31, 33, 40, 64, 97, 100, 256, 512, 1024]
+)
+@pytest.mark.parametrize("kind", ["sum", "max", "softmax"])
+def test_admitted_block_sizes_reduce_position_dependent_data(block_size, kind):
+    """Run admitted block sizes other than 32 and 128 with data.
+
+    The sizes cover a single lane, one partly filled warp, a partly filled
+    last warp behind full ones (33, 40, 97, 100), and whole warps up to
+    1024 threads. Segment lengths fall below and above each block size.
+
+    Sum and max use ``(2 * (index % 67) - 65) / 4``, nonzero multiples of
+    0.25 whose sums are exact in f32 under any order at these lengths, and
+    are compared with no tolerance. A window moved by 1 to 64 elements, or
+    a dropped or repeated element, changes a sum.
+
+    Softmax uses quarter-step logits with spread 4 and the tolerance of
+    test_softmax_store_stays_inside_the_validated_output against float64
+    PyTorch. It is a measured tolerance: the largest deviation is 2.8e-06,
+    at block size 1, where one lane chains all 4097 terms.
+    """
+    from swage._segmented_qualification import launch_softmax_gpu
+
+    lengths = [0, 1, 31, 33, 97, 300, 4097]
     offsets = list(accumulate(lengths, initial=0))
-    host_values = ((torch.arange(offsets[-1]) * 7) % 13 + 1).to(torch.float32)
-    expected = _clamped_sums(host_values, pairwise(offsets))
+    index = torch.arange(offsets[-1])
+    if kind == "softmax":
+        host_values = ((index % 17) - 8).to(torch.float32) / 4
+        expected = torch.cat(
+            [
+                torch.softmax(host_values[begin:end].double(), 0)
+                for begin, end in pairwise(offsets)
+            ]
+        ).float()
+        tolerance = {"rtol": 1e-5, "atol": 0}
+    else:
+        host_values = (2 * (index % 67) - 65).to(torch.float32) / 4
+        identity = 0.0 if kind == "sum" else float("-inf")
+        reduce = torch.sum if kind == "sum" else torch.amax
+        expected = torch.stack(
+            [
+                reduce(host_values[begin:end].double())
+                if end > begin
+                else torch.tensor(identity, dtype=torch.float64)
+                for begin, end in pairwise(offsets)
+            ]
+        ).float()
+        tolerance = {"rtol": 0, "atol": 0}
     values = host_values.cuda()
     device_offsets = _device_i32(offsets)
 
     # Repeat the launch: a fault that depends on which lane's store survives
     # would not show every time.
     for _ in range(4):
-        output = _nan_output(len(lengths))
-        launch_gpu(
-            values, device_offsets, output, "sum", block_size=block_size
-        )
+        output = _nan_output(expected.numel())
+        if kind == "softmax":
+            launch_softmax_gpu(
+                values, device_offsets, output, block_size=block_size
+            )
+        else:
+            launch_gpu(
+                values, device_offsets, output, kind, block_size=block_size
+            )
         torch.cuda.synchronize()
 
-        assert torch.equal(output.cpu(), expected)
+        torch.testing.assert_close(output.cpu(), expected, **tolerance)
 
 
 @requires_cuda

@@ -1317,6 +1317,25 @@ def _llvm_root(root):
     return pathlib.Path(match.group(1)).parents[2]
 
 
+def _llvm_tool(llvm_root, name):
+    """Return one LLVM tool, preferring the pinned install over PATH.
+
+    The runner libraries always come from the pinned install. A tool found
+    on PATH may belong to a different LLVM, so it is used only when the
+    install does not provide that tool.
+    """
+    pinned = llvm_root / "bin" / name
+    if pinned.is_file():
+        return pinned
+    found = shutil.which(name)
+    if found is None:
+        raise RuntimeError(
+            f"{name} was found neither at {pinned} nor on PATH; the CPU "
+            "oracle requires it from the pinned LLVM install"
+        )
+    return pathlib.Path(found)
+
+
 def _run(command, source):
     """Run one compiler stage and return its text output."""
     result = subprocess.run(
@@ -1343,10 +1362,8 @@ def _execute(module_text):
     root = pathlib.Path(__file__).resolve().parents[2]
     llvm_root = _llvm_root(root)
     swage_opt = root / "build" / "bin" / "swage-opt"
-    mlir_opt = shutil.which("mlir-opt") or llvm_root / "bin" / "mlir-opt"
-    mlir_runner = (
-        shutil.which("mlir-runner") or llvm_root / "bin" / "mlir-runner"
-    )
+    mlir_opt = _llvm_tool(llvm_root, "mlir-opt")
+    mlir_runner = _llvm_tool(llvm_root, "mlir-runner")
     lowered = _run(
         [swage_opt, "--swage-segmented-reduction-to-scf"], module_text
     )

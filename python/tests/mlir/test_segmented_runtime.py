@@ -2,6 +2,7 @@
 """Differential qualification for native segmented reductions."""
 
 import gc
+import os
 import threading
 import weakref
 from itertools import pairwise
@@ -12,6 +13,7 @@ from reduction_programs import reduction_module
 from swage._segmented_qualification import (
     _execute,
     _launch_segmented_sum_tasks,
+    _llvm_tool,
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _prepare_planned_sum,
@@ -34,15 +36,18 @@ def _offsets(lengths):
     return offsets
 
 
+_EXACT_PERIOD = 67
+
+
 def _exact_values(first, last):
     """Return the exactly summable test pattern on an index range.
 
     Element ``index`` is ``(2 * (index % 67) - 65) / 4``, an odd number of
     quarters that climbs by one half from -16.25 to 16.75 and then wraps.
 
-    - Every value is a multiple of 0.25 and the magnitudes of a segment
-      sum to less than 2**20, so a sum is the same f32 under any
-      association and tests can compare with no tolerance.
+    - Every value is a multiple of 0.25. In CASES and TASK_CASES the
+      magnitudes of a segment sum to less than 2**20, so a sum is the same
+      f32 under any association and tests can compare with no tolerance.
     - No value is zero, so dropping or repeating one element changes a sum.
     - The 67 values of a period are distinct and 67 exceeds the largest
       shift the tests guard, so a window moved by 1 to 64 elements reads
@@ -53,11 +58,17 @@ def _exact_values(first, last):
 
     A segment whose length is a multiple of 67 would still read the same
     multiset after any shift. No pattern with bounded values avoids every
-    such coincidence, so test_exact_inputs_are_informative_for_every_case
-    checks the properties for the shapes the suite uses.
+    such coincidence, so the informative-input tests below check the
+    properties for the shapes they cover.
+
+    The magnitudes of a LONG_CASES segment sum to more than 2**22, so its
+    sum is not exact under every association. It is exact in float64, in
+    sequential order, and under the lane and chunk structures the static
+    policies use, which test_long_exact_inputs_are_informative_and_exact
+    checks.
     """
     index = torch.arange(first, last)
-    return (2 * (index % 67) - 65).to(torch.float32) / 4
+    return (2 * (index % _EXACT_PERIOD) - 65).to(torch.float32) / 4
 
 
 def _case(lengths):
@@ -96,25 +107,37 @@ TASK_CASES = [
 ]
 
 
+# Planning limits (warp_max_elements, cta_chunk_elements) of the two
+# classified preparations. "mixed" holds the defaults. "split" lowers both
+# so that every segment longer than 16 elements takes the partial and merge
+# kernels.
+_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
+
+# Segments longer than any in CASES and TASK_CASES, with short neighbours on
+# both sides. A merge kernel has 512 lanes, so a lane chains more than one
+# partial only above 512 chunks.
+# - 65537 elements: 17 partials under the default limits, at most one per
+#   merge lane, and 4097 under the split limits, 8 or 9 per lane.
+# - 4096 * 1536 + 1 elements: 1537 partials under the default limits, 3 or
+#   4 per merge lane, and 393217 under the split limits, 768 or 769 per
+#   lane.
+LONG_CASES = [
+    pytest.param([33, 65537, 1], id="seventeen-partials"),
+    pytest.param([1, 4096 * 1536 + 1, 33], id="chained-merge"),
+]
+
 _SHIFT_LIMIT = 64
 
 
-@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
-def test_exact_inputs_are_informative_for_every_case(lengths):
-    """Each non-empty segment has a nonzero sum that depends on its window.
+def _assert_informative(values, offsets):
+    """Require sums that are nonzero and sensitive to the segment window.
 
-    A kernel that reads the right number of elements from the wrong place,
-    or drops or repeats one, must change the expected value. For every
-    segment this checks that the sum is nonzero, that moving both window
-    ends by any 1 to 64 elements in either direction changes it, and that
-    no element is zero, so dropping or duplicating any one changes it too.
-
-    It also checks what makes an exact comparison valid: every value is a
-    multiple of 0.25, and the per-segment sums of magnitudes and of squares
-    stay below 2**20, so the identity and squared sums are exact in f32
-    under any association.
+    Every value must be a nonzero multiple of 0.25, so dropping or
+    duplicating any one element changes a sum. Every non-empty segment must
+    have a nonzero sum that changes when both window ends move by any 1 to
+    64 elements in either direction, which a length that is a multiple of
+    the pattern period could never satisfy.
     """
-    values, offsets = _case(lengths)
     count = values.numel()
     quarters = values.double() * 4
     assert torch.equal(quarters, quarters.round())
@@ -134,6 +157,7 @@ def test_exact_inputs_are_informative_for_every_case(lengths):
     for begin, end in pairwise(offsets.tolist()):
         if begin == end:
             continue
+        assert (end - begin) % _EXACT_PERIOD
         total = prefix[end + _SHIFT_LIMIT] - prefix[begin + _SHIFT_LIMIT]
         assert total != 0
         shifted = (
@@ -141,9 +165,86 @@ def test_exact_inputs_are_informative_for_every_case(lengths):
             - prefix[begin + _SHIFT_LIMIT + shifts]
         )
         assert (shifted != total).all()
+
+
+@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
+def test_exact_inputs_are_informative_for_every_case(lengths):
+    """Each non-empty segment has a nonzero sum that depends on its window.
+
+    A kernel that reads the right number of elements from the wrong place,
+    or drops or repeats one, must change the expected value, which
+    _assert_informative checks for every segment.
+
+    This also checks what makes an exact comparison valid: every value is a
+    multiple of 0.25, and the per-segment sums of magnitudes and of squares
+    stay below 2**20, so the identity and squared sums are exact in f32
+    under any association.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
         segment = values[begin:end].double()
         assert segment.abs().sum() < 2**20
         assert segment.square().sum() < 2**20
+
+
+def _largest_intermediate(values, lanes):
+    """Bound every intermediate of a lanes-then-tree sum of float64 values.
+
+    Lane t accumulates values[t::lanes] in order and a tree then adds whole
+    lanes. An intermediate is therefore a lane prefix, or a sum of whole
+    lanes, whose magnitude is at most the sum of the lane total magnitudes.
+    """
+    rows = -(-values.numel() // lanes)
+    padded = torch.zeros(rows * lanes, dtype=torch.float64)
+    padded[: values.numel()] = values
+    prefix = padded.view(rows, lanes).cumsum(0)
+    return max(prefix.abs().max(), prefix[-1].abs().sum())
+
+
+@pytest.mark.parametrize("lengths", LONG_CASES)
+def test_long_exact_inputs_are_informative_and_exact(lengths):
+    """Long segments keep the window properties and stay exactly summable.
+
+    The magnitudes of these segments sum to more than 2**22, so exactness
+    cannot rest on "any association". Multiples of 0.25 add exactly in f32
+    while every intermediate stays below 2**22, and this bounds every
+    intermediate of the structures the static policies use:
+
+    - warp and cta: 32 or 128 lanes stride the segment, then a tree adds
+      whole lanes.
+    - partial and merge, under both planning limits: any order inside one
+      chunk, because the magnitudes of a chunk sum to less than 2**22, then
+      512 lanes stride the chunk sums and a tree adds whole lanes.
+
+    A schedule outside these structures could round an intermediate. The
+    exact comparison would then fail, it could not pass by accident.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        for lanes in (32, 128):
+            assert _largest_intermediate(segment, lanes) < 2**22
+        for _, chunk in _PLANNING_LIMITS.values():
+            rows = -(-segment.numel() // chunk)
+            chunks = torch.zeros(rows * chunk, dtype=torch.float64)
+            chunks[: segment.numel()] = segment
+            chunks = chunks.view(rows, chunk)
+            assert chunks.abs().sum(1).max() < 2**22
+            assert _largest_intermediate(chunks.sum(1), 512) < 2**22
+
+
+def _exact_sums(values, offsets):
+    """Return each segment's sum, computed in float64 and exact in f32.
+
+    A float64 sum of multiples of 0.25 is exact far beyond these lengths.
+    The cast is exact when the sum is below 2**22, which is asserted.
+    """
+    lengths = (offsets[1:] - offsets[:-1]).long()
+    sums = torch.segment_reduce(values.double(), "sum", lengths=lengths)
+    assert torch.equal(sums.float().double(), sums)
+    return sums.float()
 
 
 def test_exact_values_stay_exact_for_the_longest_compared_segments():
@@ -197,6 +298,26 @@ def _transformed_values(values, transform):
         for _ in range(2 if transform == "affine4" else 16):
             values = -0.5 * values + 0.125
     return values
+
+
+_TRANSFORM_RTOL = _TRANSFORM_ATOL = 1e-5
+
+
+def _assert_tolerance_sees_every_element(values, offsets, kind):
+    """Require a toleranced sum comparison to reject any single drop.
+
+    A tolerance relative to a segment sum admits the loss of every element
+    smaller than it. Each compared element must therefore exceed the
+    tolerance of its own segment. Max has no such requirement: it is exact
+    apart from element rounding and never depends on a non-maximal value.
+    """
+    if kind != "sum":
+        return
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        if segment.numel():
+            allowed = _TRANSFORM_ATOL + _TRANSFORM_RTOL * segment.sum().abs()
+            assert segment.abs().min() > allowed
 
 
 @pytest.mark.parametrize("kind", ["sum", "max"])
@@ -300,9 +421,9 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
     offsets = torch.tensor(
         [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
     )
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_planned_reduction(
         values.cuda(),
@@ -316,8 +437,8 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
         torch.testing.assert_close(
             output.cpu(),
             expected,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=_TRANSFORM_RTOL,
+            atol=_TRANSFORM_ATOL,
         )
 
 
@@ -334,9 +455,18 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 
     count = torch.cuda.get_device_properties(0).multi_processor_count
     host_values, host_offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(host_values, transform), host_offsets, kind
-    ).cuda()
+    if transform == "exp2":
+        # exp2 of the full pattern spans 33 binades, so a tolerance relative
+        # to the sum would admit dropping most elements. One eighth of the
+        # pattern is still exact in f32 and position dependent, and keeps
+        # exp2 within [0.24, 4.3], above the tolerance of an 8192-element
+        # sum.
+        host_values = host_values / 8
+    toleranced = transform in ("exp2", "affine32")
+    transformed = _transformed_values(host_values, transform)
+    if toleranced:
+        _assert_tolerance_sees_every_element(transformed, host_offsets, kind)
+    expected = _pytorch_reference(transformed, host_offsets, kind).cuda()
     output = torch.full((count + 1,), -123.0, device="cuda")
 
     def unexpected_split(*args, **kwargs):
@@ -354,8 +484,8 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
     assert prepared.mixed is prepared.cta
     prepared.mixed()
     tolerance = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if transform in ("exp2", "affine32") else {"rtol": 0, "atol": 0}
+        {"rtol": _TRANSFORM_RTOL, "atol": _TRANSFORM_ATOL}
+        if toleranced else {"rtol": 0, "atol": 0}
     )
     torch.testing.assert_close(output[:-1], expected, **tolerance)
     # The first launch may only queue the wait for task storage. Capture
@@ -381,9 +511,9 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     """A shape eligible for CTA still splits an expensive element program."""
     count = torch.cuda.get_device_properties(0).multi_processor_count
     values, offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(count, device="cuda")
     prepared = _prepare_planned_reduction(
         values.cuda(), offsets.cuda(), output,
@@ -392,7 +522,9 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     )
     assert prepared.mixed is not prepared.cta
     prepared.mixed()
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=_TRANSFORM_RTOL, atol=_TRANSFORM_ATOL
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -597,6 +729,67 @@ def test_cpu_oracle_returns_nothing_for_zero_segments(kind):
     assert actual.dtype == torch.float32
 
 
+def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
+    """A different LLVM on PATH must not become the oracle.
+
+    The runner libraries always come from the pinned install, so tools
+    from another LLVM would pair with them silently. Decoys placed first
+    on PATH record any use and fail.
+    """
+    marker = tmp_path / "used"
+    for name in ("mlir-opt", "mlir-runner"):
+        decoy = tmp_path / name
+        decoy.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    values, offsets = _case([3, 4])
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    torch.testing.assert_close(
+        actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
+    )
+    assert not marker.exists()
+
+
+def _fake_tool(directory, name):
+    """Create an executable placeholder and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_llvm_tool_prefers_the_pinned_install_over_path(tmp_path, monkeypatch):
+    """Use the install's tool even when PATH offers another one."""
+    pinned = _fake_tool(tmp_path / "install" / "bin", "mlir-opt")
+    _fake_tool(tmp_path / "elsewhere", "mlir-opt")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-opt") == pinned
+
+
+def test_llvm_tool_falls_back_to_path_when_the_install_lacks_it(
+    tmp_path, monkeypatch
+):
+    """An install without the tool defers to PATH."""
+    found = _fake_tool(tmp_path / "elsewhere", "mlir-runner")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-runner") == found
+
+
+def test_llvm_tool_names_both_places_when_the_tool_is_missing(
+    tmp_path, monkeypatch
+):
+    """Fail with the searched locations instead of an exec error."""
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    with pytest.raises(RuntimeError, match="neither at .*install.* nor on"):
+        _llvm_tool(tmp_path / "install", "mlir-opt")
+
+
 @pytest.mark.parametrize("count", [-1, 1 << 31])
 def test_rejects_counts_outside_i32(count):
     """Keep explicit value and segment counts inside the CUDA ABI."""
@@ -664,12 +857,49 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("lengths", LONG_CASES)
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "split"])
+def test_static_policies_own_every_element_of_long_segments(policy, lengths):
+    """Compare long position-dependent sums exactly under every policy.
+
+    This is the ownership check above 8193 elements. No value is zero and
+    the comparison has no tolerance, so one dropped or repeated element, a
+    window moved by 1 to 64 elements, a skipped or repeated chunk, and a
+    zero result all change the outcome. The rounding bound of the
+    randomized test cannot see those on a long segment.
+
+    "mixed" prepares with the default limits and "split" with the limits
+    that split every segment longer than 16 elements (_PLANNING_LIMITS).
+    LONG_CASES states how many partials each merge lane chains in both.
+    Each policy runs twice and is checked after each launch.
+    """
+    host_values, host_offsets = _case(lengths)
+    expected = _exact_sums(host_values, host_offsets)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    warp_max, chunk = _PLANNING_LIMITS[
+        "split" if policy == "split" else "mixed"
+    ]
+    prepared = _prepare_planned_reduction(
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
+        module_text=reduction_module("sum", "identity"),
+        kernel_name="segmented_sum",
+        warp_max_elements=warp_max,
+        cta_chunk_elements=chunk,
+        select_schedule=False,
+    )
+    launch = getattr(prepared, "mixed" if policy == "split" else policy)
+
+    for _ in range(2):
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
 RANDOM_LENGTHS = [0, 1, 31, 32, 33, 4095, 4096, 4097, 65537]
 RANDOM_SUITES = ["randn", "cancellation", "magnitude"]
-# Planning limits (warp_max_elements, cta_chunk_elements) of the two
-# classified preparations. "split" lowers both so that every random segment
-# longer than 16 elements takes the partial and merge kernels.
-_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
 _EPS32 = torch.finfo(torch.float32).eps
 
 
@@ -793,6 +1023,10 @@ def test_cpu_oracle_matches_float64_reference_on_random_values(
 
     The oracle accumulates left to right, so k is count - 1 per segment in
     the bound k * eps32 * sum(|x|) of _assert_matches_float64_reference.
+
+    This is an accuracy check, not an ownership check: the bound admits a
+    dropped element on a long segment. The bit-exact 65537-element oracle
+    test and the exact tests on CASES check which elements are read.
     """
     values, offsets = _random_case(suite, seed)
 
@@ -836,6 +1070,14 @@ def test_gpu_policies_match_float64_reference_on_random_values(
     every segment longer than 16 elements through partial and merge.
 
     Every policy also runs twice and must reproduce its own bits.
+
+    This is an accuracy check, not an ownership check. The bound scales
+    with the magnitudes of a whole segment, so on a long segment it admits
+    a result that drops or repeats one element, and in the cancellation
+    suite it admits a zero result. Ownership is checked exactly on the
+    position-dependent pattern, up to the lengths in LONG_CASES, by
+    test_static_policies_own_every_element_of_long_segments and the exact
+    tests on CASES and TASK_CASES.
     """
     host_values, host_offsets = _random_case(suite, seed)
     values, offsets = host_values.cuda(), host_offsets.cuda()
@@ -1035,10 +1277,21 @@ def test_persistent_split_sum_matches_nontrivial_oracles():
     )
 
 
+# The short tail segments have 31 elements, not 32. On the exact pattern a
+# 32-element window that starts at -7.75 sums to zero, which 31 of 2048
+# such segments would do, and a zero sum equals the empty-segment identity.
+_SKEW_LENGTHS = [1] * 2048 + [65_537] * 8 + [31] * 2048
+
+
+def test_extreme_skew_inputs_are_informative():
+    """Every skewed segment has a nonzero, window-dependent sum."""
+    _assert_informative(*_case(_SKEW_LENGTHS))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_extreme_skew_completes_without_starvation():
     """Drain many claims and dependency groups repeatedly with seven CTAs."""
-    lengths = [1] * 2048 + [65_537] * 8 + [32] * 2048
+    lengths = _SKEW_LENGTHS
     host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
@@ -2278,6 +2531,46 @@ def test_gpu_softmax_of_singleton_is_exactly_one():
     launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
 
     torch.testing.assert_close(output.cpu(), torch.ones(3), rtol=0, atol=0)
+
+
+def _uniform_softmax_case():
+    """Segments of identical logits whose softmax is exactly 1 / n.
+
+    Within a segment every shifted logit is exactly zero, exp2 of zero is
+    exactly one on both backends, n ones sum to n in any order, and one
+    divided by a power of two is exact. A normalizer that misses or repeats
+    one element gives 1 / (n - 1) or 1 / (n + 1) instead, which the derived
+    tolerance admits on a long segment. Neighbouring segments hold
+    different logits, so a window that reaches into a neighbour changes the
+    maximum or a term. This checks how many elements the normalizer
+    counted, not which positions were read inside one segment.
+    """
+    lengths = [2, 4096, 1, 65536, 64]
+    levels = torch.tensor([0.5, -1.25, 3.0, 1.75, -0.25])
+    counts = torch.tensor(lengths)
+    values = torch.repeat_interleave(levels, counts)
+    expected = torch.repeat_interleave(1 / counts.float(), counts)
+    return values, torch.tensor(_offsets(lengths), dtype=torch.int32), expected
+
+
+def test_cpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The sequential normalizer counts every element of a long segment."""
+    values, offsets, expected = _uniform_softmax_case()
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    assert _bits(actual) == _bits(expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The one-CTA normalizer counts every element of a long segment."""
+    host_values, host_offsets, expected = _uniform_softmax_case()
+    output = torch.full((expected.numel(),), float("nan"), device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    assert _bits(output.cpu()) == _bits(expected)
 
 
 def _semantic_edge_case():
