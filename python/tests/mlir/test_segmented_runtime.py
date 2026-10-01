@@ -2065,7 +2065,7 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
     )
 
 
-# Softmax tolerances, measured on an RTX A6000 at sm_86.
+# GPU softmax tolerance against PyTorch, measured on an RTX A6000 at sm_86.
 #
 # The dominant term is the f32 rounding of `x * 1.44269502`, whose relative
 # effect on exp2 is about 6e-08 per unit of intra-segment spread. It is
@@ -2075,10 +2075,51 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
 # constant, so the fix for a failure just above rtol is the distribution.
 _GPU_RTOL, _GPU_ATOL = 2e-6, 1e-7
 
-# Anything compared against cpu_softmax_oracle carries a hard 5e-06 relative
-# floor, because the oracle parses printMemrefF32's six-significant-digit
-# text. That floor is the transport, not the arithmetic.
-_ORACLE_RTOL, _ORACLE_ATOL = 1e-5, 1e-6
+# Tolerances against cpu_softmax_oracle, derived instead of measured.
+#
+# The oracle returns exact f32 bit patterns, so nothing here pays for a
+# transport. What remains is arithmetic, counted in unit roundoffs
+# u = eps32 / 2 for one segment of n elements whose logits are quarter
+# multiples (the shift by the maximum is then exact) with spread at most 4.
+#
+# Each exponential differs between two paths by at most 11 u:
+# - Oracle against PyTorch. The oracle evaluates exp2(fl(c * log2e)) where
+#   PyTorch evaluates exp(c). Rounding the product moves the result by
+#   |c| u, at most 4 u, and the f32 constant log2e is 0.22 u low, at most
+#   0.9 u more. glibc documents a known maximum error of 1 ulp (2 u) for
+#   exp2f, and 2 ulp (4 u) are budgeted for PyTorch's exp.
+# - GPU against oracle. Both use the same f32 product, so that term
+#   cancels. PTX documents ex2.approx.f32 within 2 ulp of the correctly
+#   rounded result (5 u), and exp2f adds 2 u, 7 u together.
+#
+# The normalizer is a sum of positive terms. It inherits at most the same
+# 11 u from its terms, plus (n - 1) u of rounding on each side, because no
+# summation order puts an element through more than n - 1 rounding
+# additions. The final division rounds once on each side.
+#
+# The normalizer is common to a segment, so the ratio between any two
+# outputs of one segment does not depend on it. To first order:
+#   outputs within a segment agree up to one common factor within
+#       (2 * 11 + 4) u = 13 eps32, and
+#   that factor is within
+#       (2 * 11 + 2 + 2 * (n - 1)) u = (12 + n - 1) eps32 of one.
+# _SOFTMAX_ELEMENT_EPS = 14 leaves one eps32 for the higher-order terms.
+#
+# The first bound is independent of n and resolves 1.7e-06 at every
+# position. The second is what the reduction order requires: the oracle
+# chains n - 1 additions, so the relative bound reaches 4.9e-04 for the
+# 4096-element segment. The former flat pair (rtol 1e-05, atol 1e-06) was
+# dominated by its absolute term on long segments, whose outputs are near
+# 1e-03 or smaller, so the allowed error is now smaller at every compared
+# element except the outlier itself (1.0 in a 127-element segment, 1.7e-05
+# against 1.1e-05). On an RTX A6000 at sm_86 the largest observed
+# deviations are 2.9e-06 for the common factor (the 4096-element segment)
+# and 3.3e-07 for the spread within a segment.
+#
+# Outputs below the smallest normal f32 are subnormal and carry absolute
+# accuracy only. That covers the one-outlier segment, whose other outputs
+# are near 4e-44 and whose spread of 102 is outside the budget above.
+_SOFTMAX_ELEMENT_EPS = 14
 
 
 def _softmax_case(lengths, outlier=None):
@@ -2105,6 +2146,26 @@ SOFTMAX_CASES = [
     pytest.param([1, 127, 640], 100.0, id="one-outlier"),
     pytest.param([0, 5, 0, 7, 0, 3, 0, 1, 0], None, id="alternating-empty"),
 ]
+
+
+def _assert_softmax_matches_oracle(actual, expected, offsets):
+    """Compare two f32 softmax results under the derived segment bounds."""
+    assert actual.shape == expected.shape
+    floor = torch.finfo(torch.float32).tiny
+    for begin, end in pairwise(offsets.tolist()):
+        got = actual[begin:end].double()
+        want = expected[begin:end].double()
+        rtol = (_SOFTMAX_ELEMENT_EPS + end - begin - 1) * _EPS32
+        assert ((got - want).abs() <= floor + rtol * want.abs()).all(), (
+            f"segment [{begin}, {end}) exceeds rtol {rtol}"
+        )
+        normal = want >= floor
+        if normal.any():
+            ratio = got[normal] / want[normal]
+            limit = 1 + _SOFTMAX_ELEMENT_EPS * _EPS32
+            assert ratio.max() <= ratio.min() * limit, (
+                f"segment [{begin}, {end}) disagrees between positions"
+            )
 
 
 def _pytorch_softmax_reference(values, offsets):
@@ -2135,9 +2196,7 @@ def test_cpu_softmax_matches_pytorch(lengths, outlier):
     actual = cpu_softmax_oracle(values, offsets)
     expected = _pytorch_softmax_reference(values, offsets)
 
-    torch.testing.assert_close(
-        actual, expected, rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL
-    )
+    _assert_softmax_matches_oracle(actual, expected, offsets)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -2160,11 +2219,10 @@ def test_gpu_softmax_matches_pytorch_and_cpu_oracle(lengths, outlier):
     torch.testing.assert_close(
         output.cpu(), expected, rtol=_GPU_RTOL, atol=_GPU_ATOL
     )
-    torch.testing.assert_close(
+    _assert_softmax_matches_oracle(
         output.cpu(),
         cpu_softmax_oracle(host_values, host_offsets),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
+        host_offsets,
     )
 
 
@@ -2185,13 +2243,12 @@ def test_gpu_softmax_is_repeatable():
 
 
 def test_cpu_softmax_of_singleton_is_exactly_one():
-    """A one-element segment normalizes to 1.0 within the text transport.
+    """A one-element segment normalizes to exactly 1.0.
 
-    The assertion uses no tolerance, but the value reaches it through
-    printMemrefF32's six significant digits, so its real strictness is the
-    5e-06 floor documented above and not bit equality. That is still about
-    twice as tight as _ORACLE_RTOL. The bit-exactness claim belongs to the
-    GPU twin, which compares device memory directly.
+    The shifted logit is zero, exp2 of zero is one, a sum of one term is
+    that term, and a value divided by itself is one. The oracle returns
+    result bits, so the zero tolerance here is bit equality, the same claim
+    the GPU twin makes on device memory.
     """
     values, offsets = _softmax_case([1, 1, 1])
 
