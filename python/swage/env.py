@@ -9,6 +9,7 @@ The report never fails: components that are unavailable are reported as
 such instead of raising.
 """
 
+import importlib
 import importlib.util
 import pathlib
 import platform
@@ -18,6 +19,32 @@ import swage
 
 # Enough of the commit hash to identify a checkout in a bug report.
 _REVISION_LENGTH = 12
+_NATIVE_EXTENSION = "mlir_swage._mlir_libs._swageDialectsNanobind"
+# The NVPTX processors the compiler admits: `isPinnedProcessor` in
+# lib/CAPI/Codegen.cpp. Any other target is rejected during compilation.
+_ADMITTED_TARGETS = frozenset(
+    f"sm_{number}"
+    for number in (80, 86, 87, 88, 89, 90, 100, 101, 103, 110, 120, 121)
+)
+# The admitted targets that the GPU test tier executes on. README.md and
+# ROADMAP.md record the evidence, which comes from one NVIDIA RTX A6000.
+_QUALIFIED_TARGETS = frozenset({"sm_86"})
+
+
+def _target(major: int, minor: int) -> str:
+    """Name the target of a compute capability and its qualification.
+
+    Returns:
+        The `sm_` target followed by `(qualified)` when the GPU tests
+        execute on it, `(admitted, not qualified)` when it compiles with no
+        execution evidence, or `(not admitted)` when compilation rejects it.
+    """
+    target = f"sm_{major}{minor}"
+    if target in _QUALIFIED_TARGETS:
+        return f"{target} (qualified)"
+    if target in _ADMITTED_TARGETS:
+        return f"{target} (admitted, not qualified)"
+    return f"{target} (not admitted)"
 
 
 def _torch_info() -> dict:
@@ -26,29 +53,42 @@ def _torch_info() -> dict:
         return {
             "torch": None,
             "torch_cuda_build": None,
-            "cuda_driver": None,
             "cuda": False,
             "gpu": None,
+            "target": None,
         }
     import torch
 
     info = {
         "torch": torch.__version__,
         "torch_cuda_build": torch.version.cuda,
-        "cuda_driver": None,
         "cuda": torch.cuda.is_available(),
         "gpu": None,
+        "target": None,
     }
     if info["cuda"]:
-        from ._runtime import driver_version
-
-        info["cuda_driver"] = driver_version()
         major, minor = torch.cuda.get_device_capability()
         info["gpu"] = {
             "name": torch.cuda.get_device_name(),
             "compute_capability": f"{major}.{minor}",
         }
+        info["target"] = _target(major, minor)
     return info
+
+
+def _cuda_driver() -> str | None:
+    """Return the CUDA driver version, or `None` when it cannot be read.
+
+    The version comes from `libcuda.so.1`, so it is reported with a
+    CPU-only PyTorch and with no PyTorch at all.
+    """
+    try:
+        from . import _runtime
+
+        return _runtime.driver_version()
+    except Exception:
+        # The report never fails; an unreadable driver has no version.
+        return None
 
 
 def _llvm_pin() -> str | None:
@@ -67,16 +107,18 @@ def _native_info() -> dict:
     imported, so the pure-Python package keeps working without `mlir_swage`.
     """
     try:
-        from mlir_swage._mlir_libs._swageDialectsNanobind import (
-            swage as native_swage,
-        )
+        extension = importlib.import_module(_NATIVE_EXTENSION)
+        native_swage = extension.swage
     except Exception:
         # Any failure to load the bindings, not only a missing package, is
         # an unavailable backend; the report must describe it, not raise.
-        return {"available": False, "llvm_linked": None}
+        return {"available": False, "llvm_linked": None, "file": None}
     return {
         "available": True,
         "llvm_linked": getattr(native_swage, "__llvm_version__", None),
+        # `mlir_swage` is a namespace package with no file of its own, so
+        # the loaded extension is what identifies the build.
+        "file": getattr(extension, "__file__", None),
     }
 
 
@@ -109,6 +151,47 @@ def _revision() -> str | None:
     return short if clean else f"{short}-dirty"
 
 
+def _cache_info() -> dict:
+    """Describe the persistent cache as the reporting process would use it.
+
+    Returns:
+        `cache_dir`, the cache root; `cache`, which reads `active`, `off`,
+        or `rejected` with the mode or the reason in parentheses; and
+        `compile_on_miss`, which says whether a kernel that is not cached is
+        compiled. A cache variable that a launch would reject is reported
+        as `unknown` with the error.
+    """
+    try:
+        from . import _runtime
+
+        status = _runtime._cache_status()
+    except Exception as error:
+        # The report never fails; it names the setting a launch rejects.
+        return {
+            "cache_dir": None,
+            "cache": f"unknown ({error})",
+            "compile_on_miss": None,
+        }
+    if status.rejected:
+        state = f"rejected ({status.problem})"
+    elif status.problem is not None:
+        state = f"off ({status.problem})"
+    elif status.writes:
+        state = (
+            f"active (reads and writes; {status.entries} of at most "
+            f"{status.max_entries} entries)"
+        )
+    else:
+        state = f"active (reads only; {status.entries} entries)"
+    return {
+        "cache_dir": str(status.directory),
+        "cache": state,
+        "compile_on_miss": (
+            "allowed" if status.compiles else "refused (SWAGE_NO_COMPILE=1)"
+        ),
+    }
+
+
 def report() -> dict:
     """Build the full environment report as a dictionary."""
     info = _torch_info()
@@ -116,16 +199,20 @@ def report() -> dict:
     return {
         "swage": swage.__version__,
         "revision": _revision(),
+        "swage_file": swage.__file__,
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "torch": info["torch"],
         "torch_cuda_build": info["torch_cuda_build"],
-        "cuda_driver": info["cuda_driver"],
+        "cuda_driver": _cuda_driver(),
         "cuda": info["cuda"],
         "gpu": info["gpu"],
+        "target": info["target"],
         "llvm_pin": _llvm_pin(),
         "llvm_linked": native["llvm_linked"],
+        "mlir_swage_file": native["file"],
         "backends": {"mlir": _mlir_backend(native)},
+        **_cache_info(),
     }
 
 
