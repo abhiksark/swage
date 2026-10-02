@@ -4,8 +4,7 @@
 # `find_package(Swage REQUIRED CONFIG)` and links the imported targets
 # MLIRSwage, MLIRSwageTransforms, MLIRSwagePlan, MLIRSwageTarget,
 # MLIRSwageToPlan, MLIRSwagePlanToGPU, MLIRSwagePlanToSCF,
-# MLIRSwageFixedBlockToGPU, MLIRSwageSegmentedReduction, or SwageCAPI. The
-# targets carry no include
+# MLIRSwageFixedBlockToGPU, or SwageCAPI. The targets carry no include
 # directories, as with MLIR itself, so the consumer also adds
 # SWAGE_INCLUDE_DIRS, MLIR_INCLUDE_DIRS, and LLVM_INCLUDE_DIRS.
 

@@ -1021,6 +1021,10 @@ class SwagePlanToGPUPass
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwagePlanToGPUPass)
 
+  SwagePlanToGPUPass() = default;
+  explicit SwagePlanToGPUPass(const TargetDescription &target)
+      : target(&target) {}
+
   StringRef getArgument() const final { return "swage-plan-to-gpu"; }
   StringRef getDescription() const final {
     return "Convert every plan function to a GPU kernel module";
@@ -1033,9 +1037,12 @@ public:
   }
 
   void runOnOperation() final {
-    if (failed(convertPlanToGPU(getOperation(), nvidiaTarget())))
+    if (failed(convertPlanToGPU(getOperation(), *target)))
       signalPassFailure();
   }
+
+private:
+  const TargetDescription *target = &nvidiaTarget();
 };
 
 } // namespace
@@ -1074,6 +1081,11 @@ LogicalResult convertPlanToGPU(ModuleOp module,
 
 std::unique_ptr<Pass> createSwagePlanToGPUPass() {
   return std::make_unique<SwagePlanToGPUPass>();
+}
+
+std::unique_ptr<Pass>
+createSwagePlanToGPUPass(const TargetDescription &target) {
+  return std::make_unique<SwagePlanToGPUPass>(target);
 }
 
 void registerSwagePlanToGPUPass() { PassRegistration<SwagePlanToGPUPass>(); }

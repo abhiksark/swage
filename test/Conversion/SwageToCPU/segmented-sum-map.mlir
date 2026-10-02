@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-sum-map.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 // Two reduction stages, where the second reduces a swage.map that captures the
 // first stage's result. The map is fused into the consumer's element loop and

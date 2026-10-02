@@ -1,5 +1,5 @@
 // test/Conversion/SwageToCPU/map-store-fused.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // A map fused into a map_store terminal, which is the one consumer kind the

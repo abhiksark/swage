@@ -30,8 +30,9 @@ target_link_libraries(SwageUnitTests
   MLIRCAPIVector
   MLIRParser
   MLIRSwagePlan
-  MLIRSwageSegmentedReduction
+  MLIRSwagePlanToGPU
   MLIRSwageTarget
+  MLIRSwageToPlan
   SwageCAPI
   SwageRuntime
 )

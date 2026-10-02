@@ -3,17 +3,12 @@
 // the parameters of that kernel at the persistent launch width of the
 // target and holds one persistent task operation. Its block, partial, and
 // warp regions hold the program, and its merge region an identity reduction
-// of the same kind over scratch.
-//
-// The queue kernel is admitted for an identity sum only. The third RUN line
-// gives the planner the programs the persistent lowering refuses and finds
-// each refused where it is written.
+// of the same kind over scratch. The programs the schedule refuses are in
+// ../SwageToGPU/invalid-persistent.mlir.
 //
 // RUN: swage-opt --swage-to-plan='schedule=persistent' %s | FileCheck %s
 // RUN: swage-opt --swage-to-plan='schedule=persistent block-threads=32' %s \
 // RUN:   | FileCheck %s
-// RUN: swage-opt --swage-to-plan='schedule=persistent' --verify-diagnostics \
-// RUN:   --split-input-file %S/../SwageToGPU/invalid-persistent.mlir
 // RUN: not swage-opt --swage-to-plan='schedule=persistent,direct' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=SAME-KERNEL
 

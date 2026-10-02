@@ -3,7 +3,8 @@
 // each argument by its role, and removes the roles, which mean nothing once
 // the Swage operations are gone.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 // CHECK-LABEL: func.func @segmented_sum(
 // CHECK-SAME: %[[SEGMENTS:.*]]: i32, %[[OUTPUT:.*]]: memref<?xf32>, %{{.*}}: i32, %[[OFFSETS:.*]]: memref<?xi32>, %[[VALUES:.*]]: memref<?xf32>)

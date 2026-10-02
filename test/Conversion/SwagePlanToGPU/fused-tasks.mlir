@@ -7,7 +7,8 @@
 //
 // RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s \
 // RUN:   --implicit-check-not=swage --implicit-check-not=func.func
-// RUN: not swage-opt --swage-plan-to-gpu %S/Inputs/fused-partial-subgroup.mlir \
+// RUN: not swage-opt \
+// RUN:   --swage-plan-to-gpu %S/Inputs/fused-partial-subgroup.mlir \
 // RUN:   2>&1 | FileCheck %s --check-prefix=SUBGROUPS
 
 // CHECK: gpu.module @fused_module {

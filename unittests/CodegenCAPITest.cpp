@@ -494,6 +494,35 @@ TEST(CodegenCAPITest, RejectsBlockSizesNoDeviceLaunches) {
   }
 }
 
+TEST(CodegenCAPITest, RejectsBlockSizesWithoutAPowerOfTwoWarpCount) {
+  struct Case {
+    int64_t blockSize;
+    const char *message;
+  };
+  const Case cases[] = {
+      {96, "block-size must give a power-of-two warp count, got 96 (3 warps)"},
+      {160,
+       "block-size must give a power-of-two warp count, got 160 (5 warps)"},
+  };
+  for (const Case &testCase : cases) {
+    SCOPED_TRACE(testCase.blockSize);
+    // The direct kernel and the task-id kernel take the width of the call.
+    for (bool useTaskIds : {false, true}) {
+      Session session;
+      Compiled compiled;
+      StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
+      StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+
+      MlirLogicalResult result = swageCompileSegmentedReductionToPTX(
+          session.parse(segmentedSum), ref("segmented_sum"), testCase.blockSize,
+          ref("sm_86"), useTaskIds, storeString, &lowered, storeString, &ptx);
+      compiled.succeeded = mlirLogicalResultIsSuccess(result);
+
+      expectRejected(compiled, session, testCase.message);
+    }
+  }
+}
+
 TEST(CodegenCAPITest, RejectsAKernelNameTheModuleDoesNotDefine) {
   for (const EntryPoint &entryPoint : entryPoints()) {
     SCOPED_TRACE(entryPoint.name);

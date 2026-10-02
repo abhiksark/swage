@@ -27,7 +27,7 @@ add_mlir_public_c_api_library(SwageCAPI
   MLIRSwage
   MLIRSwageFixedBlockToGPU
   MLIRSwagePlan
-  MLIRSwageSegmentedReduction
+  MLIRSwagePlanToGPU
   MLIRSwageTarget
   MLIRSwageToPlan
   MLIRTargetLLVM

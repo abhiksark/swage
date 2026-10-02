@@ -1,7 +1,7 @@
 // test/Conversion/SwageToGPU/invalid-split.mlir
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu='merge' \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 
 // Both split stages lower one capture-free reduction. A partial block sees

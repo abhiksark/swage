@@ -80,6 +80,10 @@ llvm::LogicalResult admitTaskProgram(ModuleOp module, llvm::StringRef function);
 
 /// `--swage-to-plan`: `planSegmentFunctions` for `nvidiaTarget()`.
 std::unique_ptr<Pass> createSwageToPlanPass();
+/// The same pass with its options set from `options`, for `target`, which
+/// must outlive the pass.
+std::unique_ptr<Pass> createSwageToPlanPass(const PlanOptions &options,
+                                            const TargetDescription &target);
 void registerSwageToPlanPass();
 
 } // namespace mlir::swage

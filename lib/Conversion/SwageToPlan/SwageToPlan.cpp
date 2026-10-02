@@ -327,6 +327,12 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   source.erase();
 }
 
+/// The name of `schedule` in the `schedule` option.
+StringRef nameOf(PlanSchedule schedule) {
+  std::optional<KernelSchedule> kernel = kernelSchedule(schedule);
+  return kernel ? StringRef(kernel->name) : StringRef("sequential");
+}
+
 std::optional<PlanSchedule> parseSchedule(StringRef text) {
   if (text == "sequential")
     return PlanSchedule::Sequential;
@@ -346,7 +352,17 @@ public:
 
   SwageToPlanPass() = default;
   // Pass::clone copies the option values after it copies the pass.
-  SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {}
+  SwageToPlanPass(const SwageToPlanPass &other)
+      : PassWrapper(other), target(other.target) {}
+  SwageToPlanPass(const PlanOptions &options, const TargetDescription &target)
+      : target(&target) {
+    SmallVector<std::string> names;
+    for (PlanSchedule schedule : options.schedules)
+      names.push_back(nameOf(schedule).str());
+    schedules = names;
+    blockThreads = options.blockThreads;
+    selectedFunction = options.function.str();
+  }
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
@@ -375,11 +391,12 @@ public:
       options.schedules.push_back(PlanSchedule::Direct);
     options.blockThreads = blockThreads;
     options.function = selectedFunction;
-    if (failed(planSegmentFunctions(getOperation(), options, nvidiaTarget())))
+    if (failed(planSegmentFunctions(getOperation(), options, *target)))
       signalPassFailure();
   }
 
 private:
+  const TargetDescription *target = &nvidiaTarget();
   ListOption<std::string> schedules{
       *this, "schedule",
       llvm::cl::desc(
@@ -509,6 +526,11 @@ LogicalResult admitTaskProgram(ModuleOp module, StringRef function) {
 
 std::unique_ptr<Pass> createSwageToPlanPass() {
   return std::make_unique<SwageToPlanPass>();
+}
+
+std::unique_ptr<Pass> createSwageToPlanPass(const PlanOptions &options,
+                                            const TargetDescription &target) {
+  return std::make_unique<SwageToPlanPass>(options, target);
 }
 
 void registerSwageToPlanPass() { PassRegistration<SwageToPlanPass>(); }

@@ -1,5 +1,6 @@
 // test/Conversion/SwageToGPU/segmented-sum-region.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // A non-identity reduction region is inlined into the block-stride loop.

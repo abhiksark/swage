@@ -1,18 +1,16 @@
 // test/Conversion/SwageToGPU/persistent.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' %s \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' %s \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=PERWARP
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' %s \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=RANGE
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' %s \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu %s \
 // RUN:   | swage-opt | FileCheck %s --implicit-check-not=swage.
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=128 persistent' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=BLOCK-SIZE
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=128 persistent fused-mixed' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=BLOCK-SIZE
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent fused-mixed' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=FUSED
+// RUN: swage-opt --swage-to-plan='schedule=persistent block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s | FileCheck %s --implicit-check-not=swage.
+// RUN: not swage-opt --swage-to-plan='schedule=persistent,fused-mixed' \
+// RUN:   --swage-plan-to-gpu %s 2>&1 | FileCheck %s --check-prefix=FUSED
 
 // The experimental persistent kernel drains three device queues in one
 // launch: direct CTA tasks, split partials with their merges, then direct
@@ -558,7 +556,9 @@ module {
 // RANGE-DAG: {{ to|arith.(max|min)[su]i}} %[[MERGE_END_USE]]{{ step|, }}
 // RANGE: gpu.all_reduce add
 
-// The persistent kernel is specialized to 512 threads, and the block-size
-// requirements keep it from being combined with the fused mixed schedule.
-// BLOCK-SIZE: error: persistent lowering requires block-size 512, got 128
-// FUSED: error: fused mixed lowering requires block-size 128, got 512
+// The persistent kernel is specialized to 512 threads. The target fixes its
+// launch width, so the fifth RUN line gives block-threads another value and
+// matches the same kernel. The kernel takes the name of its function, as
+// the fused mixed kernel does, so one schedule list cannot hold both.
+// FUSED: error: schedules persistent and fused-mixed both name their kernel @<function>; a schedule list names each kernel once
+// FUSED-NOT: gpu.func

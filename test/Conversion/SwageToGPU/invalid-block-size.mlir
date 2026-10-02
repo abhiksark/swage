@@ -1,15 +1,21 @@
 // test/Conversion/SwageToGPU/invalid-block-size.mlir
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=0' %s 2>&1 \
+// RUN: not swage-opt --swage-to-plan='schedule=direct block-threads=0' \
+// RUN:   --swage-plan-to-gpu %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=NOT-POSITIVE
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=1025' %s 2>&1 \
+// RUN: not swage-opt --swage-to-plan='schedule=direct block-threads=1025' \
+// RUN:   --swage-plan-to-gpu %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=TOO-LARGE
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=96' %s 2>&1 \
+// RUN: not swage-opt --swage-to-plan='schedule=direct block-threads=96' \
+// RUN:   --swage-plan-to-gpu %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=THREE-WARPS
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=160' %s 2>&1 \
+// RUN: not swage-opt --swage-to-plan='schedule=direct block-threads=160' \
+// RUN:   --swage-plan-to-gpu %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=FIVE-WARPS
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=100' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=100' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=FOUR-WARPS
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=40' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=40' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=TWO-WARPS
 
 // The CTA reduction lowers through gpu.all_reduce, whose second stage combines
@@ -38,16 +44,16 @@ module {
   }
 }
 
-// NOT-POSITIVE: error: block-size must be a positive integer, got 0
+// NOT-POSITIVE: error: block-threads must be a launch width the target admits, from 1 to 1024 threads with a power-of-two subgroup count, got 0
 // NOT-POSITIVE-NOT: gpu.func
 
-// TOO-LARGE: error: block-size must be at most 1024, got 1025
+// TOO-LARGE: error: block-threads must be a launch width the target admits, from 1 to 1024 threads with a power-of-two subgroup count, got 1025
 // TOO-LARGE-NOT: gpu.func
 
-// THREE-WARPS: error: block-size must give a power-of-two warp count, got 96 (3 warps)
+// THREE-WARPS: error: block-threads must be a launch width the target admits, from 1 to 1024 threads with a power-of-two subgroup count, got 96
 // THREE-WARPS-NOT: gpu.func
 
-// FIVE-WARPS: error: block-size must give a power-of-two warp count, got 160 (5 warps)
+// FIVE-WARPS: error: block-threads must be a launch width the target admits, from 1 to 1024 threads with a power-of-two subgroup count, got 160
 // FIVE-WARPS-NOT: gpu.func
 
 // FOUR-WARPS: gpu.func @segmented_sum

@@ -92,11 +92,9 @@ turns each plan function into a `gpu.module`, with one pattern per
 operation. The oracle is planned in place with `policy<sequential>` and
 converted to loops over its memrefs by `--swage-plan-to-scf`, which lowers
 reductions and stores with the patterns the kernel conversion uses.
-`--swage-to-plan` and the two conversions run the steps from text,
-`--swage-segmented-reduction-to-gpu` runs both for the direct, task-id,
-fused, and persistent schedules, `--swage-split-segmented-reduction-to-gpu`
-for the two split stages, and `--swage-segmented-reduction-to-scf` runs
-both for the oracle.
+`--swage-to-plan` and the two conversions run the steps from text, and the
+code generation C API runs the planner and the kernel conversion as two
+passes.
 [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
 order in which the schedules moved to this shape.
 

@@ -137,7 +137,9 @@ def main():
         root / "benchmarks/distributions.py",
         root / "python/tests/mlir/reduction_programs.py",
         root / "python/swage/_segmented_qualification.py",
-        root / "lib/Conversion/SegmentedReduction/SegmentedReduction.cpp",
+        root / "lib/Conversion/SwageToPlan/SwageToPlan.cpp",
+        root / "lib/Conversion/SwagePlanToGPU/SwagePlanToGPU.cpp",
+        root / "lib/Conversion/SwagePlanToGPU/Emission.cpp",
         native_path,
     ]
     telemetry = subprocess.run(

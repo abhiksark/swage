@@ -1,8 +1,10 @@
 // test/Conversion/SwageToGPU/split-merge.mlir
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu='merge' %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage. \
 // RUN:       --implicit-check-not=arith.mulf
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu='merge' %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=RANGE
 
 // The merge stage of a split reduction, lowered from the same module as

@@ -1,7 +1,8 @@
 // test/Conversion/SwageToCPU/invalid-segmented-reduction.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 
 module {

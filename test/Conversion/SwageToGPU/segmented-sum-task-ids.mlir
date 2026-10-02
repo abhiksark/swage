@@ -1,5 +1,6 @@
 // test/Conversion/SwageToGPU/segmented-sum-task-ids.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=32 use-task-ids=true' %s \
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=32' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s
 
 module {

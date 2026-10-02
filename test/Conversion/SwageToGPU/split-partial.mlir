@@ -1,5 +1,6 @@
 // test/Conversion/SwageToGPU/split-partial.mlir
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // The partial stage of a split reduction. Each block reduces one planned

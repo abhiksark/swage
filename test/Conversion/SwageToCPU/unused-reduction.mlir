@@ -3,8 +3,10 @@
 // map and lower it as a stage like any other: fusion removes maps and
 // nothing else.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=GPU
 
 // CHECK-LABEL: func.func @unused_maximum(

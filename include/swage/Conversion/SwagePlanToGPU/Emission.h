@@ -7,10 +7,9 @@
 //===----------------------------------------------------------------------===//
 //
 // The pieces every segmented kernel is built from: the bounded range of a
-// segment, one reduction stage, and the two sinks. The conversion patterns
-// and the schedules that are still emitted by the segmented lowering call
-// the same functions, so a kernel has the same text whichever path built
-// it. This header is internal to the Swage conversions.
+// segment, one reduction stage, and the two sinks. Every conversion
+// pattern calls the same functions, so a reduction or a store has the same
+// text in every kernel. This header is internal to the Swage conversions.
 //
 //===----------------------------------------------------------------------===//
 

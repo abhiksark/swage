@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-sum-map-chain.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 // A chain of two maps feeding one reduce. The two stages do not commute, so
 // the emitted order is load-bearing: centering must happen before scaling.

@@ -5,18 +5,21 @@
 // checked before any function is changed: the last RUN line prints the
 // module after the failure and finds no gpu.module in it.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 use-task-ids' \
+// RUN:   --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 fused-mixed' \
+// RUN:   --swage-to-plan='schedule=fused-mixed' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=512 persistent' \
+// RUN:   --swage-to-plan='schedule=persistent' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file \
 // RUN:   --mlir-print-ir-after-failure %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=UNCHANGED --implicit-check-not=gpu.module
