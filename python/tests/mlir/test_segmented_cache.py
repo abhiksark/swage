@@ -998,6 +998,109 @@ def test_in_place_offsets_change_stops_an_empty_prepared_launch():
             launch()
 
 
+def _write_through_data(offsets, new_offsets):
+    offsets.data.copy_(new_offsets)
+
+
+def _write_through_dlpack(offsets, new_offsets):
+    torch.from_dlpack(offsets.__dlpack__()).copy_(new_offsets)
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+@pytest.mark.parametrize(
+    "write",
+    [_write_through_data, _write_through_dlpack],
+    ids=["data", "dlpack"],
+)
+def test_uncounted_offsets_write_is_not_detected(policy, write):
+    """Pin the documented limit of the stale-offsets check.
+
+    PyTorch does not count a write through `.data` or through a DLPack
+    alias, so the version counter stays put and the launch proceeds. A
+    segment that the plan runs as one task is reduced over the new offsets.
+    A segment that the plan split keeps its prepared ranges, so the output
+    of `mixed` and of the persistent kernel matches neither layout. The
+    kernels clamp every range, which test_segmented_bounds.py covers.
+    """
+    old_lengths, new_lengths = [10, 5000, 20, 3], [5000, 10, 3, 20]
+    values, offsets, old = _case(old_lengths)
+    _, new_offsets, new = _case(new_lengths)
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+    version = offsets._version
+
+    write(offsets, new_offsets)
+    launch()
+
+    torch.cuda.synchronize()
+    assert offsets._version == version
+    assert torch.equal(offsets, new_offsets)
+    result = output.cpu()
+    # Segment 1 has 5000 elements at preparation and is the only split one.
+    split = policy in ("mixed", "persistent")
+    expected = new["sum"].clone()
+    if split:
+        expected[1] = old["sum"][1]
+        assert not torch.equal(result, new["sum"])
+    assert not torch.equal(result, old["sum"])
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_write_to_a_sibling_view_stops_the_launch(policy):
+    """Pin the documented false refusal of the stale-offsets check.
+
+    Views of one tensor share one version counter. A write to another view
+    therefore stops the launch although the offsets did not change, and a
+    clone of the offsets, which has a counter of its own, does not.
+    """
+    values, host_offsets, expected = _case([1, 33, 4097, 2])
+    arena = torch.zeros(10, dtype=torch.int32, device="cuda")
+    arena[:5] = host_offsets
+    offsets, sibling = arena[:5], arena[5:]
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+    own_output = torch.full((4,), _SENTINEL, device="cuda")
+    own_launch = _prepared_launch(policy, values, offsets.clone(), own_output)
+
+    sibling.fill_(7)
+
+    assert torch.equal(offsets, host_offsets)
+    with pytest.raises(RuntimeError, match=_STALE):
+        launch()
+    own_launch()
+    torch.cuda.synchronize()
+    assert output.cpu().tolist() == [_SENTINEL] * 4
+    torch.testing.assert_close(
+        own_output.cpu(), expected["sum"], rtol=0, atol=0
+    )
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_offsets_from_outside_inference_mode_launch_inside_it(policy):
+    """Admit normal offsets in inference mode, also as a clone made outside.
+
+    Only a tensor created under `torch.inference_mode()` lacks a version
+    counter. Preparing and launching inside the context is fine.
+    """
+    with torch.inference_mode():
+        values, inference_offsets, expected = _case([1, 33, 4097, 2])
+        output = torch.full((4,), _SENTINEL, device="cuda")
+    offsets = inference_offsets.clone()
+    assert inference_offsets.is_inference() and not offsets.is_inference()
+
+    with torch.inference_mode():
+        launch = _prepared_launch(policy, values, offsets, output)
+        launch()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+
 _GUARD = 8
 
 

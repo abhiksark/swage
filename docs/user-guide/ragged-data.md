@@ -53,6 +53,52 @@ For `N` segments over one values buffer:
 Ragged softmax writes one result per value instead of one per segment, so
 its `output` needs at least `offsets[N]` elements.
 
+### Offsets of a prepared launch
+
+The one-shot helpers `launch_gpu` and `launch_softmax_gpu` validate the
+offsets on every call. A prepared launch, which
+`_prepare_planned_reduction`, `_prepare_planned_sum`, and
+`_prepare_persistent_sum` return, validates them once at preparation and
+then launches the plan it built from that host copy. Two more rules apply
+to its `offsets`:
+
+- `offsets` is not an inference tensor. Offsets created under
+  `torch.inference_mode()` are rejected at preparation with a `ValueError`,
+  because an inference tensor has no version counter for the next rule to
+  compare. Create the offsets outside the context, or clone them outside
+  it. Offsets created under `torch.no_grad()` are admitted, and a launch
+  may be prepared and run inside `torch.inference_mode()` with offsets that
+  were created outside it. The one-shot helpers accept inference tensors.
+- `offsets` does not change after preparation. Each launch compares the
+  version counter, data pointer, element count, and dtype of the tensor
+  with the ones recorded at preparation, and raises a `RuntimeError` before
+  anything is enqueued when one differs. Prepare again after changing the
+  offsets.
+
+The second rule is checked on the host through what PyTorch records, so the
+check has these limits:
+
+- A write that PyTorch does not count is not detected. The tests pin two
+  such writes: an in-place write through `offsets.data`, such as
+  `offsets.data.copy_(new)`, and a write through a DLPack alias of the
+  tensor. A write through a raw pointer by another library or by another
+  kernel is not counted either. The launch proceeds and reports nothing.
+  Every access stays in bounds, because the kernels clamp each range they
+  load to the buffer it indexes. The result is not a validated one: a
+  segment that the plan runs as one task is reduced over the new offsets,
+  and a segment that the plan split keeps the ranges recorded at
+  preparation, so the output can mix the old and the new layout.
+- A write to another view of the same tensor is refused although the
+  offsets did not change, because every view of a tensor shares one version
+  counter. Give the offsets a tensor of their own, for example with
+  `clone()`.
+- A replayed CUDA graph runs no host check. A replay after the offsets
+  changed behaves as in the first case.
+
+Assigning other storage to the tensor, as `offsets.data = other` does, is
+not one of these limits: the data pointer changes, and the launch is
+refused also when the new storage has the same size.
+
 ## Converting other layouts to offsets
 
 The contract admits one layout. Each layout below is not admitted and needs

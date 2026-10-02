@@ -117,6 +117,32 @@ it. The comparison is host work only. It cannot see storage that was freed
 and allocated again at the prepared address with the prepared count and
 dtype.
 
+A prepared private launch also compares the version counter of the offsets
+tensor with the one recorded at preparation and raises a `RuntimeError`
+when it moved, because the plan was built from the offsets as they were
+then. The comparison is one host attribute read. It has these limits:
+
+- Offsets created under `torch.inference_mode()` have no version counter.
+  Preparation rejects them with a `ValueError`. Offsets created outside the
+  context, or cloned outside it, are admitted, also when the launch is
+  prepared and run inside it. The one-shot helpers `launch_gpu` and
+  `launch_softmax_gpu` compare no counter and accept inference tensors.
+- A write that PyTorch does not count is not detected: an in-place write
+  through `offsets.data`, a write through a DLPack alias, and a write
+  through a raw pointer by another library or another kernel. The launch
+  proceeds without a diagnostic. The device-side bounds keep every access
+  inside the buffers. A segment that the plan runs as one task is reduced
+  over the new offsets, and a segment that the plan split keeps the ranges
+  recorded at preparation, so the output can mix the old and the new
+  layout.
+- A write to another view of the same tensor is refused although the
+  offsets did not change, because every view of a tensor shares one version
+  counter. A launch into such a view counts as a write, since a launch
+  advances the version counter of its output. The output of the prepared
+  launch itself is exempt: preparation detects a counter shared between
+  offsets and output and allows for it.
+- A replayed CUDA graph runs no host check.
+
 <div class="doc-figure" tabindex="0" markdown="1">
 
 ![Fail-closed validation, current-stream launch, and tensor retention](../assets/diagrams/runtime-lifecycle.svg)

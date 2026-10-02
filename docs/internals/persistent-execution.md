@@ -125,12 +125,26 @@ because the kernel is loaded in one context. A thread that has no current
 CUDA context is given the context of the prepared device before that
 comparison. A launch raises if the values, offsets, or output tensor was
 rebound to other storage after preparation, and if the offsets tensor was
-modified in place, which it detects through the tensor version counter. The
-kernel clamps
-every loaded range that indexes the values buffer to the value count and
-every merge range that indexes scratch to the partial count. It skips a
-segment ID outside the segment count and a merge ID outside the merge count
-(ADR-0012). CUDA
+modified in place, which it detects through the tensor version counter.
+
+That check sees only what PyTorch counts:
+
+- A write through `offsets.data`, a DLPack alias, a raw pointer, or another
+  kernel is not detected. The launch proceeds: warp and CTA tasks use the
+  new offsets, split segments keep their prepared partial and merge ranges,
+  and the output can mix both layouts.
+- A write to another view of the same tensor is refused although the
+  offsets are unchanged, because views share one version counter.
+- Offsets created under `torch.inference_mode()` have no version counter
+  and are refused at preparation.
+- A replayed CUDA graph runs no host check.
+
+[Ragged Data](../user-guide/ragged-data.md#offsets-of-a-prepared-launch)
+states the contract and the remedies. The kernel clamps every loaded range
+that indexes the values buffer to the value count and every merge range
+that indexes scratch to the partial count, so an undetected change stays
+inside the buffers. It skips a segment ID outside the segment count and a
+merge ID outside the merge count (ADR-0012). CUDA
 graph capture is supported after an ordinary launch that observed task
 storage ready, matching the prepared static path's task-readiness contract.
 A first launch that only queued the wait for task storage does not count, so
