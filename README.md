@@ -68,12 +68,15 @@ names the programs and the paths they run through:
 
 Each item of evidence was recorded on one NVIDIA RTX A6000 (`sm_86`):
 
-- Mixed-policy gate: the frozen record has a mixed-to-best-pure ratio of
-  `0.939394`, below its predeclared `1.05` limit. The first schedule used two
-  launches, measured `1.238806` on the same frozen input, and failed that
-  gate. The fused one-launch schedule was predeclared in
+- Mixed-policy gate: the frozen record, measured at revision `dcbcf39`, has
+  a mixed-to-best-pure ratio of `0.939394`, below its predeclared `1.05`
+  limit. The first schedule used two launches, measured `1.238806` on the
+  same frozen input, and failed that gate. The fused one-launch schedule was
+  predeclared in
   [ADR-0016](docs/adr/ADR-0016-fused-mixed-policy-schedule.md) before the
-  passing run.
+  passing run. Both ratios describe the PTX of the revision they were
+  measured at. Kernels generated now also pass through an LLVM pass pipeline
+  before PTX emission, and no committed record measures them.
 - Split correctness: exact and nontrivial f32 split sums match PyTorch and
   the CPU oracle. Split execution is a correctness result and does not retune
   the frozen benchmark.

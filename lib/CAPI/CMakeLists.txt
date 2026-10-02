@@ -7,6 +7,7 @@ add_mlir_public_c_api_library(SwageCAPI
   NVPTXCodeGen
   NVPTXDesc
   NVPTXInfo
+  Passes
 
   LINK_LIBS PUBLIC
   MLIRArithToLLVM

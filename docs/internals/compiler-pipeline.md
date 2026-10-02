@@ -13,7 +13,8 @@ add. Private direct segmented branches lower to the sequential CPU oracle
 or the one-CTA GPU path.
 The private SwagePlan branch adds the narrow classification companion for
 direct or split capture-free sum/max lowering. GPU branches rejoin upstream GPU, SCF,
-NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the CUDA Driver API.
+NVVM, and LLVM lowering. One short list of LLVM passes then runs on the
+translated module before LLVM NVPTX emits PTX for the CUDA Driver API.
 No branch introduces a second production IR or a silent backend fallback.
 
 The two public segmented calls run fixed modules through the private
@@ -92,6 +93,47 @@ descriptors through persistent device claim counters and split completion
 publication; its predeclared performance gate failed. The branch does not
 implement general cost inference, general schedule selection, packing, or a
 public reusable queue.
+
+## LLVM pass pipeline
+
+Every GPU branch translates its lowered module to LLVM IR and runs the same
+list of LLVM passes on it before the NVPTX backend emits PTX. The list
+applies to the public fixed vector add and to every private segmented
+kernel:
+
+| Pass | What it does to a kernel |
+|---|---|
+| `early-cse` | Keeps one value for each repeated subexpression |
+| `instcombine` | Folds casts, comparisons, and index arithmetic |
+| `simplifycfg` | Merges blocks and turns small branches into selects |
+| `loop-rotate` | Leaves one conditional branch in each loop iteration |
+| `licm` | Hoists loop-invariant arithmetic out of loops |
+| `instcombine` | Folds what rotation and hoisting exposed |
+
+The list is curated instead of a default `O2` or `O3` pipeline, because the
+passes must leave three things exactly as the lowering produced them:
+
+- **Synchronization.** Each barrier, warp shuffle, memory fence, and atomic
+  of the lowering reaches the PTX once. A default pipeline for this target
+  narrows the thread-index ranges from the launch width and then deletes
+  shuffle paths for small block sizes, so no default pipeline runs. Loop
+  unrolling does not run either: the persistent queue loops hold
+  synchronization that must not be repeated.
+- **Floating-point results.** No pass adds a fast-math flag, reassociates,
+  or contracts a multiply and an add. Each f32 operation stays the
+  round-to-nearest operation of the semantic program, in the same order, so
+  results are bit-identical to those of the kernels without the passes.
+- **The launch contract.** Kernel names, parameters, and the `.reqntid`
+  launch width are unchanged. No module-level pass runs.
+
+The passes do not remove the unused shuffle path of a block reduction or
+its second barrier. Removing either changes the synchronization structure
+that this stage preserves.
+
+`python/tests/mlir/test_kernel_optimization.py` pins the synchronization of
+every kernel family and the rotated loops,
+`python/tests/mlir/test_segmented_numerics.py` pins the arithmetic, and
+`python/tests/mlir/test_segmented_bounds.py` pins the device-side bounds.
 
 ## Ownership boundary
 
