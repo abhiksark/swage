@@ -130,6 +130,9 @@ def _case():
         "max": torch.segment_reduce(
             values.double(), "max", lengths=lengths, initial=float("-inf")
         ),
+        "min": torch.segment_reduce(
+            values.double(), "min", lengths=lengths, initial=float("inf")
+        ),
     }
     return (
         values.cuda(),
@@ -162,7 +165,7 @@ def _run_kernels():
     values, offsets, expected = _case()
     output = torch.empty(len(_LENGTHS), device="cuda")
     results = {}
-    for kind in ("sum", "max"):
+    for kind in ("sum", "max", "min"):
         for block_size in (33, 100, 128, 512):
             results[f"direct {kind} block {block_size}"] = _exact(
                 lambda: launch_gpu(values, offsets, output, kind, block_size),

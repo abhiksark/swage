@@ -2,7 +2,8 @@
 
 # Task Planning
 
-Planning turns an admitted capture-free sum or max and its runtime offsets
+Planning turns an admitted capture-free sum, max, or min and its runtime
+offsets
 into classified tasks without executing them. This page records the
 exact internal contracts; none of them is a public API.
 
@@ -10,7 +11,8 @@ exact internal contracts; none of them is a public API.
 [Verification](verification.md) and
 [ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
-Planning admission accepts a capture-free, single-stage f32 sum or max with
+Planning admission accepts a capture-free, single-stage f32 sum, max, or
+min with
 optional single-consumer map chains and a scalar output per segment. Element
 regions use the existing admitted arithmetic and `math.exp2` operations.
 Admission is read-only analysis of one segment function. Captures, multiple

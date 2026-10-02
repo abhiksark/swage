@@ -13,7 +13,7 @@
   <rect data-role="canvas" x="0" y="0" width="1200" height="760" fill="#FFFDF8"/>
   <text x="48" y="54" font-size="32" font-weight="750" fill="#17212B" text-anchor="start">Private split lifecycle</text>
   <rect x="900" y="28" width="245" height="38" rx="19" fill="#F7E2EF" stroke="#8E4775" stroke-width="2"/>
-  <text x="1022" y="54" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">f32 sum or max</text>
+  <text x="1022" y="54" font-size="16" font-weight="750" fill="#8E4775" text-anchor="middle">sum, max, or min</text>
   <text x="48" y="88" font-size="18" font-weight="500" fill="#4B5563" text-anchor="start">One oversized segment; split softmax remains planned.</text>
   <rect x="50" y="122" width="1100" height="92" rx="14" fill="#FCE5DC" stroke="#A94500" stroke-width="2"/>
   <text x="80" y="158" font-size="20" font-weight="750" fill="#17212B" text-anchor="start">segment 7</text>

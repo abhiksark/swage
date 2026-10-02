@@ -120,6 +120,7 @@ surface than the tables above suggest for the package as a whole:
 | Argument checks that need no native build, and the wheel-only error | Tested in the pure Python tier | `tests/python/test_segments.py`, with a stand-in for PyTorch |
 | Argument and offsets validation on host tensors | Tested in the native tier | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU |
 | Results, schedules, streams, threads, graph capture, and resource use | Tested in the GPU tier on `sm_86` | The CUDA tests of `python/tests/mlir/test_public_segments.py` and the example test in `test_examples.py` |
+| The kinds `"sum"`, `"max"`, and `"min"` | Tested in the GPU tier on `sm_86` | Each kind runs the differential suite, the long segments, the empty segments, and its special values in `python/tests/mlir/test_public_segments.py` |
 | f32 values with int32 offsets, rank one | The only admitted data model | Other dtypes and ranks raise a `TypeError`; the same file |
 | A second GPU on one host | Unknown | The calls require the current device; the tests run on a host with one GPU |
 | Gradients | Rejected | `values` that require grad raise a `ValueError`; the same files |

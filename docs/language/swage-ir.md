@@ -254,7 +254,7 @@ merge the partial results. What stays guaranteed depends on the kind and the
 element type:
 
 - `max` and `min`: the result does not depend on the order. A
-  floating-point `max` is NaN when any element is NaN.
+  floating-point `max` or `min` is NaN when any element is NaN.
 - Floating-point `sum`: the result equals the exact sum only up to rounding,
   and the rounding depends on the order that the lowering and the schedule
   choose. Bitwise equality between two lowerings, or between two schedules
@@ -264,8 +264,8 @@ element type:
 - Integer `sum`: the overflow behavior is not defined, and no lowering
   admits an integer element type.
 
-Lowerings add no fast-math flags. The current lowerings admit `sum` and
-`max` over `f32` and reject `min`.
+Lowerings add no fast-math flags. The current lowerings admit `sum`,
+`max`, and `min` over `f32`.
 
 ### `swage.map_store`
 

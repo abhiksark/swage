@@ -376,18 +376,6 @@ LogicalResult verifySegmentCaptures(SegmentProgramAnalysis &analysis) {
   return success();
 }
 
-LogicalResult verifyReductionKinds(SegmentProgramAnalysis &analysis) {
-  for (ReduceOp reduction : analysis.reductions) {
-    ReductionKind kind = reduction.getKind();
-    if (kind != ReductionKind::Sum && kind != ReductionKind::Max)
-      return reduction.emitError()
-             << "segmented reduction supports only kind<sum> and kind<max>, "
-                "got kind<"
-             << stringifyReductionKind(kind) << ">";
-  }
-  return success();
-}
-
 LogicalResult verifySegmentRegions(SegmentProgramAnalysis &analysis) {
   for (MapOp map : analysis.maps)
     if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size())))
@@ -436,8 +424,10 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
 } // namespace
 
 LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis) {
+  // Every kind of `swage.reduce` has a lowering, so the kind is not
+  // checked here. The kind functions of the emission are switches over
+  // every kind without a default.
   if (failed(verifySegmentCaptures(analysis)) ||
-      failed(verifyReductionKinds(analysis)) ||
       failed(verifySegmentRegions(analysis)))
     return failure();
   return success();

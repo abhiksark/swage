@@ -18,7 +18,6 @@
 // UNCHANGED-LABEL: func.func @warp_policy_on_a_wide_block(
 // UNCHANGED-LABEL: func.func @double_values(
 // UNCHANGED-LABEL: func.func @wide_offsets(
-// UNCHANGED-LABEL: func.func @minimum(
 // UNCHANGED-LABEL: func.func @exponential(
 // UNCHANGED-LABEL: func.func @clashes(
 // UNCHANGED-LABEL: func.func @convertible(
@@ -147,29 +146,6 @@ module {
 // -----
 
 // The consumers hold only what a kernel can run.
-module {
-  func.func @minimum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
-      attributes {swage_plan.block_threads = 128 : i32} {
-    swage_plan.tasks policy<cta>
-        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
-        value_count(%value_count : i32) segment_count(%segment_count : i32)
-        into(%output : memref<?xf32>) {
-    ^bb0(%segment: !swage.segment<f32>):
-      // expected-error@+1 {{segmented reduction supports only kind<sum> and kind<max>, got kind<min>}}
-      %sum = swage.reduce %segment kind<min> : !swage.segment<f32> -> f32 {
-      ^bb0(%value: f32):
-        swage.yield %value : f32
-      }
-      swage_plan.yield %sum : f32
-    }
-    return
-  }
-}
-
-// -----
-
 module {
   func.func @exponential(
       %values: memref<?xf32>, %offsets: memref<?xi32>,

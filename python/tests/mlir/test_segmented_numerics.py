@@ -64,10 +64,13 @@ STATIC_POLICIES = ["warp", "cta", "mixed", "split"]
 SUM_PATHS = [*STATIC_POLICIES, "one-cta", "persistent"]
 
 
-def _sum_launch(path, values, offsets, output):
-    """Prepare one sum path with a pinned schedule and return its launch."""
+def _sum_launch(path, values, offsets, output, kind="sum"):
+    """Prepare one path with a pinned schedule and return its launch.
+
+    The persistent path reduces a sum only. Every other path takes `kind`.
+    """
     if path == "one-cta":
-        return lambda: launch_gpu(values, offsets, output, "sum")
+        return lambda: launch_gpu(values, offsets, output, kind)
     if path == "persistent":
         return _prepare_persistent_sum(values, offsets, output).launch
     warp_max, chunk = _PLANNING_LIMITS["split" if path == "split" else "mixed"]
@@ -75,8 +78,8 @@ def _sum_launch(path, values, offsets, output):
         values,
         offsets,
         output,
-        module_text=reduction_module("sum", "identity"),
-        kernel_name="segmented_sum",
+        module_text=reduction_module(kind, "identity"),
+        kernel_name=f"segmented_{kind}",
         warp_max_elements=warp_max,
         cta_chunk_elements=chunk,
         select_schedule=False,
@@ -84,11 +87,11 @@ def _sum_launch(path, values, offsets, output):
     return getattr(prepared, "mixed" if path == "split" else path)
 
 
-def _run_sum(path, host_values, host_offsets, launches=1):
-    """Launch one sum path on fresh device tensors and return each result."""
+def _run_sum(path, host_values, host_offsets, launches=1, kind="sum"):
+    """Launch one path on fresh device tensors and return each result."""
     values, offsets = host_values.cuda(), host_offsets.cuda()
     output = torch.empty(host_offsets.numel() - 1, device="cuda")
-    launch = _sum_launch(path, values, offsets, output)
+    launch = _sum_launch(path, values, offsets, output, kind)
     results = []
     for _ in range(launches):
         output.fill_(float("nan"))
@@ -623,6 +626,62 @@ def test_sum_propagates_special_values(case, policy):
         assert actual.isnan().all()
     else:
         assert _bits(actual) == _bits(expected)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("policy", [*STATIC_POLICIES, "one-cta"])
+@pytest.mark.parametrize("kind", ["min", "max"])
+def test_extremes_propagate_nan_and_order_infinities(kind, policy):
+    """A minimum and a maximum follow IEEE-754 minimum and maximum.
+
+    The cases are written for the minimum and negated for the maximum. The
+    finite values of a segment descend, so its minimum is its last element
+    or the one before it, which a lane other than the one that stores the
+    result reads. Each case runs at lengths on both sides of the warp and
+    chunk limits, so the split schedule carries the special value through
+    a partial and a merge. Results that are not NaN are compared bit for
+    bit.
+    """
+    sign = 1.0 if kind == "min" else -1.0
+    infinity = float("inf")
+    expected = []
+    segments = []
+    for length in SPECIAL_LENGTHS:
+        ramp = torch.arange(length, 0, -1, dtype=torch.float32)
+        cases = {
+            "nan-first": (ramp.clone(), float("nan")),
+            "nan-last": (ramp.clone(), float("nan")),
+            "negative-infinity": (ramp.clone(), -infinity),
+            "all-positive-infinity": (
+                torch.full((length,), infinity),
+                infinity,
+            ),
+            "positive-infinity": (ramp.clone(), 2.0),
+            "opposite-infinities": (ramp.clone(), -infinity),
+            "subnormal": (ramp.clone(), _DENORMAL),
+        }
+        cases["nan-first"][0][0] = float("nan")
+        cases["nan-last"][0][-1] = float("nan")
+        cases["negative-infinity"][0][length // 2] = -infinity
+        cases["positive-infinity"][0][-1] = infinity
+        cases["opposite-infinities"][0][0] = infinity
+        cases["opposite-infinities"][0][-1] = -infinity
+        cases["subnormal"][0][-1] = _DENORMAL
+        for values, result in cases.values():
+            segments.append(sign * values)
+            expected.append(sign * result)
+    host_values = torch.cat(segments)
+    host_offsets = torch.tensor(
+        _offsets([segment.numel() for segment in segments]),
+        dtype=torch.int32,
+    )
+    expected = torch.tensor(expected, dtype=torch.float32)
+
+    (actual,) = _run_sum(policy, host_values, host_offsets, kind=kind)
+
+    nan = expected.isnan()
+    assert actual[nan].isnan().all()
+    assert _bits(actual[~nan]) == _bits(expected[~nan])
 
 
 # One entry per kernel that adds f32 values, as (label, compile function,

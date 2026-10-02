@@ -45,8 +45,8 @@ verified Swage semantic MLIR
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
         |     (public segment_softmax runs its softmax module)
-        +-- private single-stage sum/max planning and split execution
-        |     (public segment_reduce runs its identity sum and max)
+        +-- private single-stage reduction planning and split execution
+        |     (public segment_reduce runs its identity sum, max, and min)
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -77,7 +77,8 @@ pipeline and links to exact references live in
 - Ordinary scalar arithmetic uses upstream `arith` and `math` operations.
 - Region captures are explicit and ordered.
 - A reduction combines every element of its segment exactly once and fixes
-  no combining order. A maximum is the same in every order. An f32 sum is
+  no combining order. A maximum and a minimum are the same in every
+  order. An f32 sum is
   not: its rounding depends on the order that a lowering and a schedule
   choose, so changing the task derivation can change the result within
   rounding error. No lowering adds fast-math flags.

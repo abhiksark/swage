@@ -150,7 +150,8 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
 
 /// Admits the function `kernelName` names for planning and classifies the
 /// offsets into one record list per callback. The function must hold a
-/// capture-free sum or max; other functions of the module are not looked at.
+/// capture-free sum, max, or min; other functions of the module are not
+/// looked at.
 /// The limits must satisfy
 /// `0 < warpMaxElements <= ctaChunkElements <= INT32_MAX`. The call reads
 /// the module and runs no pass.

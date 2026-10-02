@@ -117,7 +117,7 @@ module {
 """
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 def test_static_schedules_share_reduction_program(kind, transform):
     """One admitted program compiles unchanged through every static path."""
@@ -177,6 +177,7 @@ def test_static_schedules_share_reduction_program(kind, transform):
         ("max", "identity"),
         ("max", "square"),
         ("max", "maps"),
+        ("min", "identity"),
     ],
 )
 def test_persistent_admission_remains_identity_sum(kind, transform):
@@ -579,20 +580,10 @@ def test_split_lowering_transforms_only_input_elements(compiler):
         "_compile_split_merge_reduction_ptx",
     ],
 )
-def test_split_lowering_rejects_min_and_unsupported_target(compiler):
-    """Keep unsupported reduction kinds and targets outside split lowering."""
+def test_split_lowering_rejects_an_unsupported_target(compiler):
+    """Keep unsupported targets outside split lowering."""
     with ir.Context() as context:
         swage.register_dialects(context)
-        minimum = ir.Module.parse(
-            SEGMENTED_SUM.replace("kind<sum>", "kind<min>")
-        )
-        with pytest.raises(ValueError, match="supports only kind<sum>"):
-            getattr(native_swage, compiler)(
-                minimum,
-                kernel_name="segmented_sum",
-                target="sm_80",
-            )
-
         total = ir.Module.parse(SEGMENTED_SUM)
         with pytest.raises(ValueError, match="target must match"):
             getattr(native_swage, compiler)(

@@ -65,7 +65,7 @@ DISTRIBUTIONS = sorted(_distributions._NAMES)
 # longest segment grows with the count, and at this count it passes the
 # 4096-element chunk limit and the 8192-element selection limit.
 _SEGMENT_COUNTS = {name: 257 for name in DISTRIBUTIONS} | {"power-law": 2048}
-KINDS = ["sum", "max"]
+KINDS = ["sum", "max", "min"]
 
 
 def _host_case(lengths, generator):
@@ -92,7 +92,8 @@ def _public_depth(length):
 def _assert_reduction_matches(kind, host_values, host_offsets, actual):
     """Compare one public result with PyTorch and with float64.
 
-    A maximum is exact. A sum lies within `k * eps32 * sum(|x|)` of the
+    A maximum and a minimum are exact. A sum lies within
+    `k * eps32 * sum(|x|)` of the
     float64 sum, the bound of docs/internals/segmented-reductions.md, and
     within that bound plus the sequential one of `torch.segment_reduce`,
     whose own tree is not documented.
@@ -106,7 +107,7 @@ def _assert_reduction_matches(kind, host_values, host_offsets, actual):
         covered.double(), kind, lengths=lengths.long()
     )
     assert actual.shape == theirs.shape == reference.shape
-    if kind == "max":
+    if kind != "sum":
         assert _bits(actual) == _bits(theirs)
         assert torch.equal(actual.double(), reference)
         return
@@ -170,12 +171,14 @@ def test_public_package_exports_exactly_the_two_segmented_calls():
     assert public - {"compile", "env", "language"} == set(swage.__all__)
 
 
-@pytest.mark.parametrize("kind", ["mean", "min", "SUM", "", None, 0, b"sum"])
+@pytest.mark.parametrize("kind", ["mean", "prod", "SUM", "", None, 0, b"sum"])
 def test_segment_reduce_rejects_an_unsupported_kind(kind):
-    """Admit only the two kinds the kernels implement."""
+    """Admit only the three kinds the kernels implement."""
     values, offsets = _host_segments()
 
-    with pytest.raises(ValueError, match="^kind must be 'sum' or 'max', got"):
+    with pytest.raises(
+        ValueError, match="^kind must be 'sum', 'max', or 'min', got"
+    ):
         swage.segment_reduce(values, offsets, kind)
 
 
@@ -534,17 +537,24 @@ def test_segment_reduce_returns_an_empty_result_for_an_empty_batch(
     "lengths", [[0], [0] * 300, [0, 5, 0, 0, 33, 0, 4097, 0]]
 )
 def test_segment_reduce_gives_empty_segments_their_identity(lengths):
-    """Return 0.0 for an empty sum and negative infinity for an empty max."""
+    """Return 0.0 for an empty sum and an infinity for an empty extreme.
+
+    An empty maximum is negative infinity and an empty minimum is positive
+    infinity, the identity of each kind.
+    """
     host_values, host_offsets = _host_segments(lengths)
     empty = torch.tensor(lengths) == 0
 
     total = _reduce("sum", host_values, host_offsets)
     maximum = _reduce("max", host_values, host_offsets)
+    minimum = _reduce("min", host_values, host_offsets)
 
     assert _bits(total[empty]) == _bits(torch.zeros(int(empty.sum())))
     assert torch.all(maximum[empty] == float("-inf"))
+    assert torch.all(minimum[empty] == float("inf"))
     _assert_reduction_matches("sum", host_values, host_offsets, total)
     _assert_reduction_matches("max", host_values, host_offsets, maximum)
+    _assert_reduction_matches("min", host_values, host_offsets, minimum)
 
 
 @_needs_cuda
@@ -556,7 +566,11 @@ def test_segment_reduce_ignores_values_past_the_final_offset(kind):
 
     actual = _reduce(kind, host_values, host_offsets)
 
-    expected = {"sum": [1.0, 5.0], "max": [1.0, 3.0]}[kind]
+    expected = {
+        "sum": [1.0, 5.0],
+        "max": [1.0, 3.0],
+        "min": [1.0, 2.0],
+    }[kind]
     assert actual.tolist() == expected
     _assert_reduction_matches(kind, host_values, host_offsets, actual)
 
@@ -623,6 +637,51 @@ def test_segment_reduce_max_propagates_nan_and_orders_infinities(length):
         float("-inf"),
         float(length - 2),
         float("inf"),
+    ]
+    assert _bits(actual[2:]) == _bits(theirs[2:])
+
+
+@_needs_cuda
+@pytest.mark.parametrize("length", SPECIAL_LENGTHS)
+def test_segment_reduce_min_propagates_nan_and_orders_infinities(length):
+    """Return NaN for a segment that holds one, wherever it sits.
+
+    The finite values descend, so the minimum of a segment is its last
+    element or the one before it, which a lane other than the one that
+    stores the result reads.
+    """
+    ramp = torch.arange(length, 0, -1, dtype=torch.float32)
+    segments = {
+        "nan-first": ramp.clone(),
+        "nan-last": ramp.clone(),
+        "negative-infinity": ramp.clone(),
+        "all-positive-infinity": torch.full((length,), float("inf")),
+        "positive-infinity": ramp.clone(),
+        "opposite-infinities": ramp.clone(),
+    }
+    segments["nan-first"][0] = float("nan")
+    segments["nan-last"][-1] = float("nan")
+    segments["negative-infinity"][length // 2] = float("-inf")
+    segments["positive-infinity"][-1] = float("inf")
+    segments["opposite-infinities"][0] = float("inf")
+    segments["opposite-infinities"][-1] = float("-inf")
+    host_values = torch.cat(list(segments.values()))
+    host_offsets = torch.tensor(
+        _offsets([length] * len(segments)), dtype=torch.int32
+    )
+    theirs = torch.segment_reduce(
+        host_values.cuda(), "min", offsets=host_offsets.long().cuda()
+    ).cpu()
+
+    actual = _reduce("min", host_values, host_offsets)
+
+    assert actual[:2].isnan().all()
+    assert theirs[:2].isnan().all()
+    assert actual[2:].tolist() == [
+        float("-inf"),
+        float("inf"),
+        2.0,
+        float("-inf"),
     ]
     assert _bits(actual[2:]) == _bits(theirs[2:])
 

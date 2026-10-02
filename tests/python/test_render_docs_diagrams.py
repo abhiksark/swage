@@ -49,7 +49,7 @@ REQUIRED_LABELS = {
         "fixed-block vector add",
         "segmented direct",
         "SwagePlan direct + split",
-        "direct or split sum or max",
+        "direct or split reduction",
         "runs segment_softmax",
         "runs segment_reduce",
         "GPU / SCF / NVVM / LLVM",
@@ -59,7 +59,7 @@ REQUIRED_LABELS = {
         "GPU: one CTA / segment",
     ),
     "split-lifecycle.svg": (
-        "f32 sum or max",
+        "sum, max, or min",
         "split softmax remains planned",
         "absolute input ranges",
         "unique scratch writer",

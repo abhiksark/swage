@@ -60,8 +60,8 @@ PYTHONPATH=build/python_packages \
 artifact: /srv/swage/sm_86
 format_version: 2
 target: sm_86
-programs: segmented_sum, segmented_max, ragged_softmax
-kernels: 9
+programs: segmented_sum, segmented_max, segmented_min, ragged_softmax
+kernels: 13
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -72,7 +72,7 @@ The command takes these options:
 |---|---|
 | `--target` | The NVPTX processor to compile for, one of the processors [Runtime and Environment](../reference/runtime-environment.md#launch-lifecycle) lists. Required. |
 | `--output` | The directory to create. It must not exist, and its parent must. Required. |
-| `--program` | `sum`, `max`, or `softmax`. Repeat it to include several. Without it, all three are included. |
+| `--program` | `sum`, `max`, `min`, or `softmax`. Repeat it to include several. Without it, all four are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one of the native build. See [The runtime library](#the-runtime-library). |
 
 These rules hold for every run:
@@ -106,7 +106,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 9 kernels of segmented_sum, segmented_max, ragged_softmax, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 13 kernels of segmented_sum, segmented_max, segmented_min, ragged_softmax, written by swage 0.5.1 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -138,12 +138,12 @@ still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
-An artifact for all three programs holds eleven files:
+An artifact for all four programs holds fifteen files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: four roles for `segmented_sum`, four for `segmented_max`, and one for `ragged_softmax` |
+| `<program>.<role>.ptx` | One kernel: four roles for each of `segmented_sum`, `segmented_max`, and `segmented_min`, and one for `ragged_softmax` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
 The roles of a reduction are `cta` for the pure CTA schedule, `mixed` for

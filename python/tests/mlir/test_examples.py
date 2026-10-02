@@ -83,6 +83,7 @@ def test_segment_reduce_example_runs_on_cuda():
     assert completed.stdout.splitlines() == [
         "sum: [3.0, 0.0, 12.0, 6.0]",
         "max: [2.0, -inf, 5.0, 6.0]",
+        "min: [1.0, inf, 3.0, 6.0]",
         "softmax: [0.2689, 0.7311, 0.09, 0.2447, 0.6652, 1.0]",
         "=== CUDA results match PyTorch ===",
     ]

@@ -277,9 +277,10 @@ def _pytorch_reference(values, offsets, kind):
         if kind == "sum":
             results.append(segment.sum())
         elif segment.numel():
-            results.append(segment.max())
+            results.append(segment.max() if kind == "max" else segment.min())
         else:
-            results.append(torch.tensor(float("-inf"), dtype=torch.float32))
+            identity = float("-inf") if kind == "max" else float("inf")
+            results.append(torch.tensor(identity, dtype=torch.float32))
     return torch.stack(results)
 
 
@@ -323,7 +324,7 @@ def _assert_tolerance_sees_every_element(values, offsets, kind):
             assert segment.abs().min() > allowed
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 def test_composable_reduction_cpu_oracle(kind, transform):
     """The same native program supplies a sequential composition oracle."""
@@ -349,7 +350,7 @@ def test_composable_reduction_cpu_oracle(kind, transform):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 @pytest.mark.parametrize("small_chunks", [False, True])
 def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
@@ -409,7 +410,7 @@ def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize(
     "transform",
     [
@@ -446,7 +447,7 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize(
     "transform", ["identity", "square", "maps", "affine4", "affine32", "exp2"]
 )
@@ -506,7 +507,7 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize(
     "transform", ["exp2_chain", "rational8"]
 )
@@ -720,7 +721,7 @@ def test_cpu_softmax_oracle_is_bit_exact_for_equal_logits():
     assert _bits(actual) == _bits(expected)
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_cpu_oracle_returns_nothing_for_zero_segments(kind):
     """A segment-free call yields an empty result, not an unwritten slot."""
     values = torch.empty(0, dtype=torch.float32)
@@ -916,7 +917,7 @@ def test_rejects_wrong_offset_dtype_rank_and_undersized_output():
         )
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("lengths", CASES)
 def test_cpu_reduction_matches_pytorch(lengths, kind):
     """Execute sequential reductions through upstream mlir-runner."""
@@ -929,7 +930,7 @@ def test_cpu_reduction_matches_pytorch(lengths, kind):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("lengths", CASES)
 def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     """Qualify one-CTA reductions against both independent references."""
@@ -1084,15 +1085,15 @@ def _summation_depth(policy, count):
 def _assert_matches_float64_reference(actual, values, kind, policy):
     """Compare one policy's f32 results with the float64 reference.
 
-    Max must be exact. A sum must lie within k * eps32 * sum(|x|) of the
-    reference per segment, where k is _summation_depth. The worst-case
+    Max and min must be exact. A sum must lie within k * eps32 * sum(|x|)
+    of the reference per segment, where k is _summation_depth. The worst-case
     error of a summation tree is ((1 + u) ** k - 1) * sum(|x|) with unit
     roundoff u = eps32 / 2, which is below 2 * k * u while k * u <= 1 / 2.
     The factor of two in eps32 is that margin, and it also covers the
     rounding of the float64 reference.
     """
     reference = _float64_reference(values, kind)
-    if kind == "max":
+    if kind != "sum":
         torch.testing.assert_close(
             actual, reference.float(), rtol=0, atol=0, msg=policy
         )
@@ -1112,7 +1113,7 @@ def _assert_matches_float64_reference(actual, values, kind, policy):
 
 @pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize("suite", RANDOM_SUITES)
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_cpu_oracle_matches_float64_reference_on_random_values(
     kind, suite, seed
 ):
@@ -1135,7 +1136,7 @@ def test_cpu_oracle_matches_float64_reference_on_random_values(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize("suite", RANDOM_SUITES)
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_gpu_policies_match_float64_reference_on_random_values(
     kind, suite, seed
 ):
@@ -2315,7 +2316,7 @@ def test_prepared_mixed_sum_is_repeatable():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_gpu_reduction_is_repeatable(kind):
     """Run the same loaded shape twice without stale CTA state."""
     host_values, host_offsets = _case([0, 2, 0, 129])
@@ -2365,6 +2366,46 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "max"),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
+
+
+def test_cpu_min_propagates_nan_and_uses_positive_infinity_identity():
+    """Make min NaN and empty semantics explicit in the CPU oracle."""
+    values = torch.tensor([3.0, float("nan"), 1.0, 5.0, 4.0])
+    offsets = torch.tensor([0, 3, 3, 5], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "min")
+
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([float("nan"), float("inf"), 4.0]),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_min_propagates_nan_and_uses_positive_infinity_identity():
+    """Match the specified min semantics through CTA reduction."""
+    host_values = torch.tensor([3.0, float("nan"), 1.0, 5.0, 4.0])
+    host_offsets = torch.tensor([0, 3, 3, 5], dtype=torch.int32)
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    output = torch.empty(3, device="cuda")
+
+    launch_gpu(values, offsets, output, "min")
+
+    expected = torch.tensor([float("nan"), float("inf"), 4.0])
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
+    torch.testing.assert_close(
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, "min"),
         rtol=0,
         atol=0,
         equal_nan=True,

@@ -13,7 +13,7 @@ how one segment-local program can keep its meaning while task derivation
 changes with runtime segment lengths.
 
 Segments are usable from Python through two calls with fixed programs:
-`swage.segment_reduce` for a sum or a maximum per segment, and
+`swage.segment_reduce` for a sum, a maximum, or a minimum per segment, and
 `swage.segment_softmax` for a softmax within each segment. There is no
 public segment syntax, and the kernel language compiles one canonical fixed
 vector-add kernel. The wider segment compiler exists as private
@@ -32,7 +32,7 @@ qualification machinery or planned work.
 - Compile-only `emit_mlir()` for the restricted fixed-block vector-add
   subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
-- `swage.segment_reduce` for `"sum"` and `"max"`, and
+- `swage.segment_reduce` for `"sum"`, `"max"`, and `"min"`, and
   `swage.segment_softmax`, over rank-one f32 values and int32 offsets on
   one CUDA device, when build-tree native bindings are present. The calls
   admit no other dtype, kind, or rank, record no gradient, and prepare
@@ -55,13 +55,13 @@ describe the current source tree, and
 
 ## Private qualification
 
-- Segmented sum and max through a sequential CPU oracle and one CTA per
+- Segmented sum, max, and min through a sequential CPU oracle and one CTA per
   segment on NVIDIA GPUs.
 - Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
 - Planning, direct warp and CTA execution, fused mixed execution, and
   split-CTA partial and merge execution for capture-free, single-stage f32
-  sum and max programs.
+  sum, max, and min programs.
 
 These paths have tests and recorded qualification evidence. The two
 segmented calls run a fixed sum, max, and softmax through them with default

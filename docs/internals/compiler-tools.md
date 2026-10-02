@@ -43,7 +43,7 @@ functions of the C API and not registered passes.
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
 | `--swage-fuse-maps` | none | Fuse each `swage.map` that has one consumer into that consumer, in every function |
-| `--swage-to-plan` | `schedule`, a list of `direct` (default), `task-ids`, `fused-mixed`, `split-partial`, `split-merge`, `persistent`, or `sequential` alone; `block-threads`, default 128, the launch width of the direct and task-id kernels, from 1 to 1024 with a power-of-two warp count, `ceil(block-threads / 32)`; optional `function` | Replace every admitted segment function by one plan function per schedule, or plan it in place for the sequential oracle. Every schedule but `direct` and `sequential` admits a capture-free, single-stage f32 sum or max, and `persistent` admits the identity f32 sum only |
+| `--swage-to-plan` | `schedule`, a list of `direct` (default), `task-ids`, `fused-mixed`, `split-partial`, `split-merge`, `persistent`, or `sequential` alone; `block-threads`, default 128, the launch width of the direct and task-id kernels, from 1 to 1024 with a power-of-two warp count, `ceil(block-threads / 32)`; optional `function` | Replace every admitted segment function by one plan function per schedule, or plan it in place for the sequential oracle. Every schedule but `direct` and `sequential` admits a capture-free, single-stage f32 sum, max, or min, and `persistent` admits the identity f32 sum only |
 | `--swage-plan-to-gpu` | none | Convert every plan function to a `gpu.module` that holds its kernel, and leave every other operation as it is |
 | `--swage-plan-to-scf` | none | Convert every sequential task operation to loops over its memrefs, remove the roles of its function, and leave every other operation as it is |
 
@@ -105,7 +105,8 @@ segment functions compiles one kernel per call.
 
 `schedule=split-partial` and `schedule=split-merge` plan one stage of a
 split reduction each. Both stages admit private capture-free, single-stage
-f32 sum/max programs with optional map chains and give 512-thread kernels
+f32 sum, max, and min programs with optional map chains and give
+512-thread kernels
 whose names carry a `__partial` or `__merge` suffix. Only the partial stage
 evaluates the element program.
 

@@ -15,29 +15,6 @@
 // same four programs are refused by the split stages in invalid-split.mlir.
 
 module {
-  func.func @segmented_min(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    // expected-error@+1 {{segmented reduction supports only kind<sum> and kind<max>, got kind<min>}}
-    %maximum = swage.reduce %segment kind<min>
-        : !swage.segment<f32> -> f32 {
-    ^bb0(%value: f32):
-      swage.yield %value : f32
-    }
-    memref.store %maximum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
-module {
   func.func @captured_map(
       %values: memref<?xf32> {swage.role = #swage.role<values>},
       %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},

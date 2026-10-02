@@ -205,10 +205,11 @@ Parameters
     device with one entry more than there are segments. It starts at zero,
     never decreases, and ends at or below the number of values. Values past
     the final offset belong to no segment.
-:   `kind`: `"sum"` or `"max"`. The sum of an empty segment is `0.0` and
-    its maximum is negative infinity. A maximum over a NaN is NaN. A sum
-    follows IEEE-754 addition, and its rounding depends on the schedule the
-    call selects. No argument pins the schedule.
+:   `kind`: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment is
+    `0.0`, its maximum is negative infinity, and its minimum is positive
+    infinity. A maximum or a minimum over a NaN is NaN, and both are exact.
+    A sum follows IEEE-754 addition, and its rounding depends on the
+    schedule the call selects. No argument pins the schedule.
 :   `out`: an optional result tensor, keyword-only. A contiguous rank-one
     `torch.float32` tensor on the device of `values` with exactly one
     element per segment, which shares no memory with `values` or `offsets`,
@@ -252,6 +253,7 @@ offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
 
 totals = swage.segment_reduce(values, offsets, "sum")  # [3, 0, 12, 6]
 maxima = swage.segment_reduce(values, offsets, "max")  # [2, -inf, 5, 6]
+minima = swage.segment_reduce(values, offsets, "min")  # [1, inf, 3, 6]
 ```
 
 Related: [Segmented Calls](../user-guide/segmented-calls.md),
@@ -350,8 +352,8 @@ Options
 :   `--target`: the NVPTX processor of the device that will run the
     kernels, such as `sm_86`. Required.
 :   `--output`: the directory to create. It must not exist. Required.
-:   `--program`: a program to include, `sum`, `max`, or `softmax`. It may
-    be repeated. All three are included without it.
+:   `--program`: a program to include, `sum`, `max`, `min`, or `softmax`.
+    It may be repeated. All four are included without it.
 :   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
     of the native build, for a serving host of another machine.
 

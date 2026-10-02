@@ -587,7 +587,7 @@ def compiler_pipeline() -> bytes:
             420,
             "PRIVATE QUALIFICATION",
             "segmented direct",
-            ("sum, max, stable softmax", "runs segment_softmax"),
+            ("sum, max, min, stable softmax", "runs segment_softmax"),
             "purple",
             "purple_fill",
         ),
@@ -595,7 +595,7 @@ def compiler_pipeline() -> bytes:
             785,
             "PRIVATE QUALIFICATION",
             "SwagePlan direct + split",
-            ("direct or split sum or max", "runs segment_reduce"),
+            ("direct or split reduction", "runs segment_reduce"),
             "green",
             "green_fill",
         ),
@@ -696,7 +696,7 @@ def split_lifecycle() -> bytes:
     )
     svg.text(48, 54, "Private split lifecycle", size=32, weight=750)
     svg.status_tag(
-        900, 28, 245, "f32 sum or max", color="purple", fill="purple_fill"
+        900, 28, 245, "sum, max, or min", color="purple", fill="purple_fill"
     )
     svg.text(
         48,

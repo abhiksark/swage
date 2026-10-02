@@ -8,7 +8,7 @@ import torch
 
 
 def main():
-    """Run sum, max, and softmax over four segments and check each result."""
+    """Run every kind and the softmax over four segments and check each."""
     # Six values in four segments: [1, 2], [], [3, 4, 5], and [6]. The
     # repeated offset makes the second segment empty.
     values = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], device="cuda")
@@ -16,22 +16,27 @@ def main():
 
     totals = swage.segment_reduce(values, offsets, "sum")
     maxima = swage.segment_reduce(values, offsets, "max")
+    minima = swage.segment_reduce(values, offsets, "min")
     weights = swage.segment_softmax(values, offsets)
 
     # Each call returns after it enqueued its kernels. Reading a result, as
     # the lines below do, waits for them.
     print("sum:", totals.tolist())
     print("max:", maxima.tolist())
+    print("min:", minima.tolist())
     print("softmax:", [round(weight, 4) for weight in weights.tolist()])
 
     # torch.segment_reduce takes int64 offsets and gives the same values,
-    # including 0.0 and negative infinity for the empty segment.
+    # including 0.0 and the two infinities for the empty segment.
     long_offsets = offsets.long()
     torch.testing.assert_close(
         totals, torch.segment_reduce(values, "sum", offsets=long_offsets)
     )
     torch.testing.assert_close(
         maxima, torch.segment_reduce(values, "max", offsets=long_offsets)
+    )
+    torch.testing.assert_close(
+        minima, torch.segment_reduce(values, "min", offsets=long_offsets)
     )
     for begin, end in pairwise(offsets.tolist()):
         torch.testing.assert_close(

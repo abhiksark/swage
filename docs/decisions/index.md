@@ -38,6 +38,12 @@ gates belong in the roadmap.
   (accepted; implemented step by step, and the record says which steps
   exist)
 
+## Segmented data model
+
+- [ADR-0022: Wider data model for the segmented reductions](../adr/ADR-0022-wider-data-model-for-segmented-reductions.md)
+  (accepted; implemented step by step, and the record says which steps
+  exist)
+
 ## Deployment
 
 - [ADR-0021: Ahead-of-time artifact format](../adr/ADR-0021-ahead-of-time-artifact-format.md)

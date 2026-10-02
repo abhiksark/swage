@@ -13,8 +13,6 @@
 
 // UNCHANGED-LABEL: func.func @double_values(
 // UNCHANGED: swage_plan.tasks policy<sequential>
-// UNCHANGED-LABEL: func.func @minimum(
-// UNCHANGED: swage_plan.tasks policy<sequential>
 // UNCHANGED-LABEL: func.func @convertible(
 // UNCHANGED: swage_plan.tasks policy<sequential>
 // UNCHANGED-LABEL: func.func @exponential(
@@ -34,28 +32,6 @@ module {
         swage.yield %value : f64
       }
       swage_plan.yield %sum : f64
-    }
-    return
-  }
-}
-
-// -----
-
-module {
-  func.func @minimum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
-    swage_plan.tasks policy<sequential>
-        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
-        value_count(%value_count : i32) segment_count(%segment_count : i32)
-        into(%output : memref<?xf32>) {
-    ^bb0(%segment: !swage.segment<f32>):
-      // expected-error@+1 {{segmented reduction supports only kind<sum> and kind<max>, got kind<min>}}
-      %sum = swage.reduce %segment kind<min> : !swage.segment<f32> -> f32 {
-      ^bb0(%value: f32):
-        swage.yield %value : f32
-      }
-      swage_plan.yield %sum : f32
     }
     return
   }

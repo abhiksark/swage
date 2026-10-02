@@ -553,7 +553,7 @@ def test_split_partial_kernel_clamps_plan_ranges():
 @pytest.mark.parametrize(
     "block_size", [1, 31, 33, 40, 64, 97, 100, 256, 512, 1024]
 )
-@pytest.mark.parametrize("kind", ["sum", "max", "softmax"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "softmax"])
 def test_admitted_block_sizes_reduce_position_dependent_data(block_size, kind):
     """Run admitted block sizes other than 32 and 128 with data.
 
@@ -561,7 +561,7 @@ def test_admitted_block_sizes_reduce_position_dependent_data(block_size, kind):
     last warp behind full ones (33, 40, 97, 100), and whole warps up to
     1024 threads. Segment lengths fall below and above each block size.
 
-    Sum and max use ``(2 * (index % 67) - 65) / 4``, nonzero multiples of
+    Sum, max, and min use ``(2 * (index % 67) - 65) / 4``, nonzero multiples of
     0.25 whose sums are exact in f32 under any order at these lengths, and
     are compared with no tolerance. A window moved by 1 to 64 elements, or
     a dropped or repeated element, changes a sum.
@@ -587,8 +587,11 @@ def test_admitted_block_sizes_reduce_position_dependent_data(block_size, kind):
         tolerance = {"rtol": 1e-5, "atol": 0}
     else:
         host_values = (2 * (index % 67) - 65).to(torch.float32) / 4
-        identity = 0.0 if kind == "sum" else float("-inf")
-        reduce = torch.sum if kind == "sum" else torch.amax
+        identity, reduce = {
+            "sum": (0.0, torch.sum),
+            "max": (float("-inf"), torch.amax),
+            "min": (float("inf"), torch.amin),
+        }[kind]
         expected = torch.stack(
             [
                 reduce(host_values[begin:end].double())

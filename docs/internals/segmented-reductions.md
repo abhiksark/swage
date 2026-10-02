@@ -2,18 +2,19 @@
 
 # Segmented Reductions
 
-Canonical segmented sum and max execute through a sequential CPU
+Canonical segmented sum, max, and min execute through a sequential CPU
 oracle and a one-CTA GPU path. This page records the exact internal
 contracts; none of them is a public API. The public
-`swage.segment_reduce` runs the identity sum and max through the planned
-path, and [Sum rounding](#sum-rounding) says which schedule it gets.
+`swage.segment_reduce` runs the identity sum, max, and min through the
+planned path, and [Sum rounding](#sum-rounding) says which schedule it gets.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
 
 An admitted segment function has one axis-zero segment ID, one segment over
 rank-one f32 values and rank-one i32 offsets, one capture-free
-reduction of kind `sum` or `max`, with an optional element expression and
+reduction of kind `sum`, `max`, or `min`, with an optional element
+expression and
 single-consumer map chains, one rank-one f32 output, and explicit i32
 value and segment counts. A module may hold any number of segment functions
 next to other functions. A lowering turns each segment function into a
@@ -33,8 +34,9 @@ values*, offsets*, output*, value_count:i32, segment_count:i32
 
 The CPU path lowers to sequential SCF and memref operations and executes with
 upstream `mlir-runner`. The GPU path uses one CTA per segment and block-stride
-loads. Empty sums produce zero; empty maxima produce negative infinity. Max
-uses NaN-propagating semantics. The same single-stage programs also support
+loads. Empty sums produce zero, empty maxima negative infinity, and empty
+minima positive infinity. Max and min use NaN-propagating semantics: the
+kernels combine with `arith.maximumf` and `arith.minimumf`. The same single-stage programs also support
 private warp, fused mixed, and split execution; see [Task Planning](planning.md)
 and [Split Execution](split-execution.md).
 

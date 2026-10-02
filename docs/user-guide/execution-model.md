@@ -44,7 +44,7 @@ A task is a unit that a runtime can schedule for a segment. One semantic
 segment may require one task or several tasks. A task can represent direct
 work, a chunk of a long segment, a partial result, or a merge.
 
-The static sum and max paths, which `swage.segment_reduce` runs with these
+The static reduction paths, which `swage.segment_reduce` runs with these
 defaults, derive:
 
 - one direct warp task for a segment of at most 32 elements;
@@ -52,9 +52,9 @@ defaults, derive:
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
 The thresholds are planning limits that the private helpers can change
-and the public call cannot. Static work supports capture-free f32 sum/max
-programs and their fused element expressions, of which the public call runs
-the identity sum and the identity max. The
+and the public call cannot. Static work supports capture-free f32 sum,
+max, and min programs and their fused element expressions, of which the
+public call runs the three identity programs. The
 experimental private resident kernel retains identity-sum admission and
 consumes these descriptors through device counters, but its clean
 A6000 run failed the predeclared performance gate. Packing several short
@@ -92,9 +92,9 @@ not yet provide a public general planner.
 Deriving different tasks for one segment never changes which elements a
 reduction combines: every element contributes exactly once. It can change
 the order in which they are combined, because `swage.reduce` leaves that
-order open. The two admitted kinds respond differently:
+order open. The admitted kinds respond differently:
 
-- A maximum is the same in every order.
+- A maximum and a minimum are the same in every order.
 - An f32 sum is not. Addition in f32 is not associative, so two schedules
   can return different sums of one segment, within rounding error.
 

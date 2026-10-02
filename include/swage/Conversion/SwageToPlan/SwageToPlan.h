@@ -74,7 +74,7 @@ llvm::LogicalResult planSegmentFunctions(ModuleOp module,
                                          const TargetDescription &target);
 
 /// Whether the segment function named `function` holds a program that host
-/// classification can turn into tasks: one capture-free sum or max whose
+/// classification can turn into tasks: one capture-free reduction whose
 /// result is stored per segment. Reads `module` and never changes it.
 llvm::LogicalResult admitTaskProgram(ModuleOp module, llvm::StringRef function);
 

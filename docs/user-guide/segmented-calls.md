@@ -5,7 +5,7 @@
 Two functions run a fixed program over every segment of a ragged batch:
 
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` returns one
-  f32 result per segment, a sum or a maximum.
+  f32 result per segment: a sum, a maximum, or a minimum.
 - `swage.segment_softmax(values, offsets, *, out=None)` returns one f32
   result per value, the softmax within its segment.
 
@@ -37,6 +37,7 @@ offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
 
 totals = swage.segment_reduce(values, offsets, "sum")  # [3, 0, 12, 6]
 maxima = swage.segment_reduce(values, offsets, "max")  # [2, -inf, 5, 6]
+minima = swage.segment_reduce(values, offsets, "min")  # [1, inf, 3, 6]
 weights = swage.segment_softmax(values, offsets)       # six weights
 ```
 
@@ -110,6 +111,14 @@ A maximum propagates NaN:
 - A negative infinity among finite elements gives the largest finite
   element.
 
+A minimum is its mirror:
+
+- An empty segment gives positive infinity.
+- A NaN element gives NaN, wherever it sits in the segment.
+- A negative infinity gives negative infinity, also beside a positive one.
+- A positive infinity among finite elements gives the smallest finite
+  element.
+
 A batch with no segment, whose offsets are the single entry `0`, returns a
 tensor of no elements and needs no kernel.
 [Ragged Data](ragged-data.md#empty-segments-and-nan) shows how to replace
@@ -125,8 +134,8 @@ segment:
   element.
 - No segment affects the results of another.
 
-A maximum involves no rounding and is exact. The other two results are
-rounded:
+A maximum and a minimum involve no rounding and are exact. The other two
+results are rounded:
 
 - A sum lies within `k * eps32 * sum(|x|)` of the exact sum of its segment,
   where `eps32` is `2**-23` and `k` depends on the schedule. For these calls

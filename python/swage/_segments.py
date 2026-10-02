@@ -12,7 +12,7 @@ from . import _artifact, _runtime
 from . import _segmented_qualification as _qualification
 from ._frontend import _INSTALLATION
 
-_KINDS = ("sum", "max")
+_KINDS = ("sum", "max", "min")
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
@@ -39,11 +39,13 @@ def segment_reduce(values, offsets, kind, *, out=None):
             device, with one entry more than there are segments. It starts
             at zero, never decreases, and ends at or below the number of
             values. Two equal neighbors describe an empty segment.
-        kind: `"sum"` or `"max"`. The sum of an empty segment is `0.0` and
-            its maximum is negative infinity. A maximum over a NaN is NaN,
-            and a sum follows IEEE-754 addition. The rounding of a sum
-            depends on the schedule the call selects from the segment
-            lengths, the batch, and the device, and no argument pins it.
+        kind: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment
+            is `0.0`, its maximum is negative infinity, and its minimum is
+            positive infinity. A maximum or a minimum over a NaN is NaN,
+            and a sum follows IEEE-754 addition. A maximum and a minimum
+            are exact. The rounding of a sum depends on the schedule the
+            call selects from the segment lengths, the batch, and the
+            device, and no argument pins it.
         out: Optional result tensor: contiguous, rank one, `torch.float32`,
             on the device of `values`, with exactly one element per segment,
             sharing no memory with `values` or `offsets`, and not requiring
@@ -72,7 +74,9 @@ def segment_reduce(values, offsets, kind, *, out=None):
     """
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
-        raise ValueError(f"kind must be 'sum' or 'max', got {kind!r}")
+        raise ValueError(
+            f"kind must be 'sum', 'max', or 'min', got {kind!r}"
+        )
     _require_inputs(torch, values, offsets)
     segment_count = max(offsets.numel() - 1, 0)
     _require_out(torch, out, segment_count, "segment", values, offsets)

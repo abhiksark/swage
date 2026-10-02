@@ -29,29 +29,6 @@ module {
 // -----
 
 module {
-  func.func @unsupported_min(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    // expected-error@+1 {{segmented reduction supports only kind<sum> and kind<max>, got kind<min>}}
-    %minimum = swage.reduce %segment kind<min>
-        : !swage.segment<f32> -> f32 {
-    ^bb0(%value: f32):
-      swage.yield %value : f32
-    }
-    memref.store %minimum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
-module {
   // expected-error@+1 {{swage.role<offsets> requires a rank-one i32 memref with a dynamic size, the identity layout, and the default memory space, got 'memref<?xi64>'}}
   func.func @bad_offsets(
       %values: memref<?xf32> {swage.role = #swage.role<values>},

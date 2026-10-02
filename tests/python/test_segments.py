@@ -272,7 +272,7 @@ def test_the_pytorch_extra_declares_numpy():
     ]
 
 
-@pytest.mark.parametrize("kind", ["mean", "min", "prod", "", None, 1])
+@pytest.mark.parametrize("kind", ["mean", "prod", "MIN", "", None, 1])
 def test_segment_reduce_rejects_an_unsupported_kind_without_bindings(
     kind, monkeypatch
 ):
@@ -281,7 +281,8 @@ def test_segment_reduce_rejects_an_unsupported_kind_without_bindings(
     values, offsets = _inputs(torch)
 
     with pytest.raises(
-        ValueError, match=f"^kind must be 'sum' or 'max', got {kind!r}$"
+        ValueError,
+        match=f"^kind must be 'sum', 'max', or 'min', got {kind!r}$",
     ):
         swage.segment_reduce(values, offsets, kind)
 

@@ -18,7 +18,7 @@ find its content in the topic pages below.
 | [Compiler Pipeline](compiler-pipeline.md) | The spine, the admitted branches, and ownership |
 | [Swage Dialect](swage-dialect.md) | The semantic operations and types |
 | [Textual Swage IR](../language/swage-ir.md) | Textual syntax, SSA data flow, and one complete module |
-| [Segmented Reductions](segmented-reductions.md) | Direct segmented sum and max, CPU oracle, one CTA per segment, and sum rounding |
+| [Segmented Reductions](segmented-reductions.md) | Direct segmented sum, max, and min, CPU oracle, one CTA per segment, and sum rounding |
 | [Ragged Softmax](ragged-softmax.md) | Fused multi-phase softmax in one CTA, and its accuracy |
 | [SwagePlan Dialect](swage-plan-dialect.md) | The private planning IR surface |
 | [Task Planning](planning.md) | Classification of segments into tasks |

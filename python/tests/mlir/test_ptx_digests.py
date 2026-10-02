@@ -51,6 +51,12 @@ _REGENERATE = (
 # `_PROCESSORS` is the list `test_target_compile.py` keeps equal to the
 # processors the code generation C API admits, so a newly admitted processor
 # fails here as a missing kernel until the data is regenerated.
+#
+# The programs that were in the matrix when the gate was added are compiled
+# for every processor. A program that was added later is compiled for the
+# oldest admitted processor and for the one the kernels are executed on,
+# unless its entry below says otherwise.
+_NEWER_PROCESSORS = (80, 86)
 
 _FIXED_VECTOR_ADD = """
 module {
@@ -107,16 +113,19 @@ _PERSISTENT_VARIANT = (
     "persistent", "_compile_persistent_segmented_reduction_ptx", {},
 )
 
-# The reduction programs: a kind and an element transform of
-# `reduction_programs.reduction_module`. Together they cover both admitted
-# kinds, a region with arithmetic, a chain of maps, and `math.exp2`.
+# The reduction programs: a kind, an element transform of
+# `reduction_programs.reduction_module`, and the processors each is compiled
+# for. Together they cover every admitted kind, a region with arithmetic, a
+# chain of maps, and `math.exp2`.
 _REDUCTIONS = (
-    ("sum", "identity"),
-    ("sum", "square"),
-    ("sum", "maps"),
-    ("sum", "exp2"),
-    ("max", "identity"),
-    ("max", "maps"),
+    ("sum", "identity", _PROCESSORS),
+    ("sum", "square", _PROCESSORS),
+    ("sum", "maps", _PROCESSORS),
+    ("sum", "exp2", _PROCESSORS),
+    ("max", "identity", _PROCESSORS),
+    ("max", "maps", _PROCESSORS),
+    ("min", "identity", _NEWER_PROCESSORS),
+    ("min", "maps", _NEWER_PROCESSORS),
 )
 
 
@@ -125,17 +134,19 @@ def _programs():
 
     Returns:
         A dict from program name to a tuple of the semantic module text, the
-        kernel name, and the variants to compile. A variant is a name, a
-        native compile function name, and that function's options.
+        kernel name, the variants to compile, and the processors to compile
+        them for. A variant is a name, a native compile function name, and
+        that function's options.
     """
     programs = {
         "fixed-add": (
             _FIXED_VECTOR_ADD,
             "add_kernel",
             (("block-128", "_compile_ptx", {"block_size": 128}),),
+            _PROCESSORS,
         ),
     }
-    for kind, transform in _REDUCTIONS:
+    for kind, transform, processors in _REDUCTIONS:
         variants = _REDUCTION_VARIANTS
         # The persistent queue admits the identity sum only.
         if (kind, transform) == ("sum", "identity"):
@@ -144,6 +155,7 @@ def _programs():
             reduction_module(kind, transform),
             f"segmented_{kind}",
             variants,
+            processors,
         )
     # The one program with a `map_store` terminal, as the runtime compiles
     # it: one block per segment, at its default width and at one warp.
@@ -162,11 +174,18 @@ def _programs():
                 {"block_size": 32},
             ),
         ),
+        _PROCESSORS,
     )
     return programs
 
 
 _PROGRAMS = _programs()
+# Every program with each processor it is compiled for.
+_CELLS = [
+    (program, processor)
+    for program, (_, _, _, processors) in _PROGRAMS.items()
+    for processor in processors
+]
 
 
 def _sha256(text):
@@ -184,7 +203,7 @@ def _compile(program, processor):
         A dict from `program/variant/sm_N` to the pair of digests of the
         lowered MLIR and of the PTX.
     """
-    text, kernel_name, variants = _PROGRAMS[program]
+    text, kernel_name, variants, _ = _PROGRAMS[program]
     target = f"sm_{processor}"
     digests = {}
     with ir.Context() as context:
@@ -203,9 +222,8 @@ def _compile(program, processor):
 def _compile_matrix():
     """Compile the whole matrix and return its digests, sorted by key."""
     digests = {}
-    for program in _PROGRAMS:
-        for processor in _PROCESSORS:
-            digests.update(_compile(program, processor))
+    for program, processor in _CELLS:
+        digests.update(_compile(program, processor))
     return dict(sorted(digests.items()))
 
 
@@ -252,8 +270,7 @@ def _guidance(recorded_llvm):
     return "\n".join(lines)
 
 
-@pytest.mark.parametrize("processor", _PROCESSORS)
-@pytest.mark.parametrize("program", _PROGRAMS)
+@pytest.mark.parametrize(("program", "processor"), _CELLS)
 def test_kernel_text_matches_the_recorded_digests(program, processor):
     """Compile one program for one processor and compare every digest."""
     recorded = _recorded()
@@ -279,9 +296,9 @@ def test_the_data_file_holds_exactly_the_matrix():
     recorded = _recorded()
     expected = {
         f"{program}/{variant}/sm_{processor}"
-        for program, (_, _, variants) in _PROGRAMS.items()
+        for program, (_, _, variants, processors) in _PROGRAMS.items()
         for variant, _, _ in variants
-        for processor in _PROCESSORS
+        for processor in processors
     }
     stale = sorted(set(recorded["digests"]) - expected)
     missing = sorted(expected - set(recorded["digests"]))

@@ -610,8 +610,8 @@ def _load_once(driver, ptx, kernel_name):
 
 def _semantic_module(kind):
     """Return the canonical private qualification module."""
-    if kind not in {"sum", "max"}:
-        raise ValueError("reduction kind must be 'sum' or 'max'")
+    if kind not in {"sum", "max", "min"}:
+        raise ValueError("reduction kind must be 'sum', 'max', or 'min'")
     return f"""
 module {{
   func.func @segmented_{kind}(
@@ -1106,7 +1106,7 @@ def _prepare_planned_reduction(
     cta_chunk_elements=None,
     select_schedule=True,
 ):
-    """Prepare static policies for one private capture-free sum/max module.
+    """Prepare static policies for one private capture-free reduction.
 
     Args:
         values: Contiguous rank-one CUDA f32 input tensor.

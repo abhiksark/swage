@@ -159,6 +159,7 @@ _SOFTMAX_KERNELS = (
 _PROGRAMS = {
     "segmented_sum": _REDUCTION_KERNELS,
     "segmented_max": _REDUCTION_KERNELS,
+    "segmented_min": _REDUCTION_KERNELS,
     "ragged_softmax": _SOFTMAX_KERNELS,
 }
 

@@ -29,6 +29,7 @@ from swage import _segmented_qualification as qualification
 PROGRAM_TEXTS = {
     "segmented_sum": qualification._semantic_module("sum"),
     "segmented_max": qualification._semantic_module("max"),
+    "segmented_min": qualification._semantic_module("min"),
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
@@ -311,6 +312,7 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
     } == {
         "segmented_sum": reduction,
         "segmented_max": reduction,
+        "segmented_min": reduction,
         "ragged_softmax": softmax,
     }
 
@@ -1046,7 +1048,8 @@ def test_a_request_outside_the_table_is_refused(artifact_dir, monkeypatch):
         match=(
             r"holds no kernel 'segmented_sum' \(_compile_segmented_reduction"
             r"_ptx, block_size=64, use_task_ids=True\); it holds the "
-            "programs segmented_sum, segmented_max, ragged_softmax"
+            "programs segmented_sum, segmented_max, segmented_min, "
+            "ragged_softmax"
         ),
     ):
         artifact.kernel(compiler, text, {**options, "block_size": 64})
@@ -1127,9 +1130,10 @@ def test_admission_refuses_a_program_the_build_host_did_not_plan(
     assert str(error.value) == (
         f"the artifact at {artifact_dir} holds no planned program with the "
         f"text of this call (SHA-256 {_digest(text)}); it holds the planned "
-        "programs segmented_sum, segmented_max. The artifact was written "
-        "without this program, or from another program text than this "
-        "swage runs. Nothing was compiled or launched"
+        "programs segmented_sum, segmented_max, segmented_min. The "
+        "artifact was written without this program, or from another "
+        "program text than this swage runs. Nothing was compiled or "
+        "launched"
     )
 
 
@@ -1154,6 +1158,7 @@ def test_the_manifest_is_kept_for_reports(artifact_dir, monkeypatch):
     assert artifact.programs == (
         "segmented_sum",
         "segmented_max",
+        "segmented_min",
         "ragged_softmax",
     )
 
@@ -1473,8 +1478,9 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 9 kernels of "
-        "segmented_sum, segmented_max, ragged_softmax, written by swage "
+        f"{artifact_dir} (format 2, target sm_86, 13 kernels of "
+        "segmented_sum, segmented_max, segmented_min, ragged_softmax, "
+        "written by swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"
     )

@@ -1,0 +1,324 @@
+<!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
+# ADR-0022: Wider data model for the segmented reductions
+
+- Status: accepted; step 1 of the migration sequence is implemented
+- Date: 2026-10-03
+- Accepted: 2026-10-03, with the recommended answer to every question at the
+  end
+
+This record widens what the segmented reductions compute and what they
+read: two more kinds, one more element type, a trailing feature dimension,
+and 64-bit offsets. It is built one migration step at a time, and
+"Migration sequence" says which steps exist. Until its step lands, a part
+of the design is written in the conditional, and the calls behave as the
+user guide states.
+
+## Context
+
+`swage.segment_reduce` returns a sum or a maximum of rank-one
+`torch.float32` values under `torch.int32` offsets. `swage.segment_softmax`
+has the same data model. Callers of ragged data ask for more: a minimum and
+a mean, `torch.float64` values, values with a trailing feature dimension
+`[N, D]`, and the `torch.int64` offsets that PyTorch and PyTorch Geometric
+produce.
+
+ADR-0020 states, under "How the design would make the later work easier",
+what such a widening would cost. Each claim was checked against the code
+before this decision:
+
+| Claim of ADR-0020 | Finding |
+|---|---|
+| Patterns take the element type from `!swage.segment<T>` | True for `ReducePattern` and `MapStorePattern` in `lib/Conversion/SwagePlanToGPU/ConsumerPatterns.cpp`. `identityFor` in `lib/Conversion/SwagePlanToGPU/Emission.cpp` built an f32 constant whatever the type, so an f64 reduction would have fed an f32 identity into an f64 addition. |
+| `clampRange` and `isLoadedIndexInRange` take their width from their operands | True for `isLoadedIndexInRange`. `clampRange` creates a 32-bit zero, and `loadTaskWord` loads an i32. `emitSegmentBinding` is generic in the word type. |
+| A new type is a row in the admission tables, not an emitter edit | `isAdmittedElementType` and `isAdmittedIndexType` are the tables. `verifyRegion` and `verifyOperationCaptures` in `lib/Conversion/SwageToPlan/Admission.cpp` tested for f32 directly, and `identityFor` is an emitter edit. |
+| A new kind is one case in each of three functions | The three functions were two-way choices in which every kind that is not `sum` took the branch of `max`. A kind admitted without rewriting them would have computed a maximum under its own name. |
+| The planner would decide whether a kind may be split | No such decision point exists. `verifyPlanningProgram` does not look at the kind. |
+| The task region already admits a body with no reduction | True of the plan verifier. Admission requires a reduction, and `fuseAdmittedMaps` reads the first one. |
+| The four-value segment makes an extent a subtraction | False as built. The binding is base, first, end, and stride, with `first` the start plus the thread index, so `end - first` is the extent on thread zero only. In a merge region the bound range is scratch, whose extent is the partial count. |
+
+What was known and what was not, when the decision was taken:
+
+- `swage-opt` and the pinned `mlir-translate` and `llc` were run on f64
+  programs, so the lowering of f64 to PTX text was seen. The f64 CPU oracle
+  transport was run through the pinned `mlir-opt` and `mlir-runner`.
+- The conventions of `torch.segment_reduce` for the new kinds were checked
+  on PyTorch 2.12.0, on the CPU.
+- No f64 kernel had run on a device. Step 3 treats the first run as an
+  experiment and records what it found here.
+- The cost of the rank-two schedule was estimated from instruction counts
+  and not measured.
+
+## Decision
+
+### Kinds
+
+`min` is a third case of the three kind functions `identityFor`, `combine`,
+and `allReduceOperationFor`. Its identity is positive infinity, its combine
+is `arith.minimumf`, and its block reduction is the `minimumf` case of
+`gpu.all_reduce`. The three functions are switches over every kind without
+a default, so a kind without a case is a compiler diagnostic and never the
+lowering of another kind. A minimum mirrors a maximum: an empty segment
+gives positive infinity, a NaN element gives NaN, and the result does not
+depend on the order. A split works as for the other kinds, because the
+merge region already holds an identity reduction of the kind of the
+program. The persistent schedule keeps `kind<sum>`.
+
+`mean` is a composition in the semantic IR and not a kind:
+
+```mlir
+%sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 { ... }
+%n = swage.extent %segment : !swage.segment<f32>
+%count = arith.index_cast %n : index to i32
+%divisor = arith.sitofp %count : i32 to f32
+%mean = arith.divf %sum, %divisor : f32
+memref.store %mean, %output[%sid] : memref<?xf32>
+```
+
+The division runs once per segment, between the reduction and the store.
+The reasons for a composition:
+
+- `include/swage/Dialect/Swage/IR/SwageOps.td` and ADR-0008 define a kind
+  as an identity and an order-free combine, which is what lets a lowering
+  split and merge with the same kind. A mean has no identity, and a mean of
+  partial means is wrong.
+- A `kind<mean>` reduction in a merge region would read a range of scratch
+  and divide by a number that is not the extent of that range.
+- `lib/AGENTS.md` asks for standard dialects for ordinary arithmetic, and a
+  division is ordinary arithmetic.
+- `swage.extent` exists and has no consumer.
+
+By layer:
+
+- Admission would learn `swage.extent` and a scalar epilogue of exactly
+  `arith.index_cast`, `arith.sitofp`, and `arith.divf` after the
+  reductions.
+- The regions of `swage_plan.tasks`, `swage_plan.fused_tasks`, and
+  `swage_plan.merge_tasks` would take an optional second argument, the
+  extent of the semantic segment of the task. `swage_plan.partial_tasks`
+  never takes it: a partial task yields the raw sum, and the merge sums the
+  partial results and divides once.
+- A merge would get its extent from the partial range records, through one
+  optional operand on `merge_tasks`. The chunks of a split segment are
+  consecutive records, so the extent is the end of the last minus the begin
+  of the first. No existing kernel, record, or launch argument list
+  changes.
+- An empty segment gives NaN, from zero divided by zero, as
+  `torch.segment_reduce` returns.
+
+### Element types
+
+float64 is admitted for the four reductions and refused for
+`segment_softmax`:
+
+- `!swage.segment<f64>` already verifies, and the plan buffers already
+  admit f64. The admission tables admit f32 and f64, the region checks
+  compare with the element type of the function, and `identityFor` takes
+  the element type. That is the only emitter edit.
+- `gpu.shuffle` on f64 lowers to two 32-bit shuffles, so a warp tree is ten
+  shuffles where f32 has five. `gpu.all_reduce` lowers for `add`,
+  `minimumf`, and `maximumf` on f64.
+- The pinned NVPTX backend has no f64 `exp2`: `llc` on `llvm.exp2.f64`
+  aborts. Admission therefore refuses `math.exp2` on any type but f32, so
+  that a program the GPU cannot compile is refused with a diagnostic on
+  both backends.
+- The CPU oracle transport becomes typed: f64 values and results travel as
+  64-bit patterns.
+- A float64 reference no longer suffices for an f64 sum. The tests use an
+  exactly rounded reference.
+
+f16, bf16, and integer values stay refused. A 16-bit shuffle has no
+lowering, a half-precision sum needs an accumulator type that no admitted
+region operation expresses, and bf16 `ex2.approx` needs a newer processor
+than the floor. ADR-0008 gives an integer sum no lowering and no defined
+overflow, and `torch.segment_reduce` raises for integer values, so there is
+no reference.
+
+### Trailing dimension
+
+`[N, D]` values are a strided column segment in the IR, lowered to a column
+tile: one thread reduces one column of one segment.
+
+```mlir
+%sid = swage.segment_id 0
+%col = swage.segment_id 1
+%segment = swage.make_segment %values, %offsets, %sid column(%col)
+    : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
+%sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 { ... }
+memref.store %sum, %output[%sid, %col] : memref<?x?xf32>
+```
+
+- The program instance is one segment and one column, and it yields a
+  scalar. The segment type stays `!swage.segment<f32>`, so no runtime
+  identity enters a type and no thread or block index enters the IR.
+- A sixth role, `feature_count`, gives the extent of the second axis.
+- The plan gains a `column` policy with one kernel per program and no
+  split: thread `t` of a block runs the region for the columns `t`,
+  `t + block_threads`, and so on, each alone. Nothing is combined across
+  threads, so the kernel holds no shuffle, barrier, or shared memory.
+- Each thread holds one scalar accumulator per reduction stage, never one
+  per column.
+- A column sum is added in row order, the order of the CPU oracle. Its
+  bound is `(n - 1) * eps * sum(|x|)`, weaker than the rank-one bound for a
+  long segment, and its bits do not depend on the batch.
+- `[N, 1]` values take the rank-one schedules through a view.
+
+Stated limits of this schedule: a long segment with few columns is reduced
+by few threads, and a long segment occupies one block for its whole length.
+
+### int64 offsets
+
+int64 offsets are narrowed on the host after they were checked. The kernels
+read a private int32 copy, and the cap of `2**31 - 1` rows and segments
+stays:
+
+- The width of an offset is a property of its storage. Under the cap every
+  valid offset fits in int32, so narrowing loses nothing and adds no kernel.
+- The offsets are validated as int64 first: they start at zero, never
+  decrease, and end at or below the row count. Narrowing first would turn
+  `[0, 2**32 + 3, 5]` into a valid array.
+- The narrowed copy is uploaded as a private int32 tensor, in the same
+  tensor as the task records where a call uploads records, and retained on
+  the stream like them. No kernel reads the caller's int64 tensor.
+- Lifting the cap could not lift the segment count: a launch uses one block
+  per task on the x axis of the grid.
+
+int64 therefore does not reach the dialect or the lowering.
+
+### The matrix
+
+- The kernel function name is `segmented_<kind>[_f64][_r2]` and
+  `ragged_softmax[_r2]`. f32 rank one stays unsuffixed, so the three
+  existing programs keep their text.
+- One generator produces every program text and returns the existing text
+  for the existing programs.
+- No C API entry point is added.
+- The 552 digest pairs that existed before this record do not move at any
+  step. New cells cover every new program on each variant it admits, on
+  `sm_80` and `sm_86`. The f64 `sum` and `max` programs are covered on every
+  admitted processor, because f64 `maximum` takes another
+  instruction-selection path.
+- The artifact moves to format version 2 in step 1, as ADR-0021 records.
+
+### Public contract when every step is in
+
+`swage.segment_reduce(values, offsets, kind, *, out=None)`:
+
+- `values`: contiguous, rank one or two, `torch.float32` or
+  `torch.float64`, on the current CUDA device, not requiring grad. Rank two
+  is `[N, D]`, reduced along axis 0 within each segment. Nothing is cast.
+- `offsets`: contiguous, rank one, `torch.int32` or `torch.int64`, with one
+  entry more than there are segments.
+- `kind`: `"sum"`, `"max"`, `"min"`, or `"mean"`.
+- `out`: the dtype of `values`, shape `[S]` or `[S, D]`.
+
+| Kind | Empty segment | A NaN element |
+|---|---|---|
+| `sum` | `0.0` | NaN |
+| `max` | negative infinity | NaN |
+| `min` | positive infinity | NaN |
+| `mean` | NaN | NaN |
+
+`swage.segment_softmax` takes rank one or two `torch.float32` values and
+refuses float64. On `[N, D]` the softmax is per column.
+
+## Rejected alternatives
+
+- `mean` as a kind with a finalize step. It has a smaller admission
+  surface. It makes the meaning of a reduction depend on its parent
+  operation, needs a planner rewrite of the kind in a partial task, and
+  puts a division inside the reduction pattern.
+- A fourth merge-record word for the extent. The persistent kernel reads
+  merge records too, so existing digest pairs would move, both classifiers
+  would change, and the runtime ABI version would change.
+- Offsets and the value count on the merge ABI. Two more arguments, and the
+  divisor would come from reloaded offsets while the sums come from
+  recorded ranges.
+- An i64 load of the offsets with a device clamp. It doubles every kernel
+  that reads offsets and gains nothing under the cap.
+- Lifting the cap. It needs 64-bit classification on every call and cannot
+  lift the segment count.
+- A segment of `[D]` rows. The reduction would yield a value of runtime
+  size, which the rules forbid.
+- `D` launches over strided columns. `D` host round trips.
+- A column loop inside the existing row tiles. It keeps the split and the
+  rank-one bound, at the cost of doubling four schedules and one
+  cross-thread combine per column and segment. It could be added later as a
+  planner choice, on measurement.
+- A float64 softmax through an `exp2` expansion in the tree. That is a
+  math-library decision of its own.
+
+## Migration sequence
+
+Every step keeps the 552 existing digest pairs and is gated by lit, the
+unit tests, `tests/python`, and `python/tests/mlir` on the qualification
+GPU.
+
+Step 1. `min`, and artifact format version 2. Implemented.
+
+- The kind functions are switches, and `unittests/EmissionTest.cpp` holds
+  each kind to its own identity, combine, and block reduction.
+- Admission admits `kind<min>`. The kind check is gone, because every kind
+  of `swage.reduce` now has a lowering.
+- `test/Conversion/SwageToPlan/segmented-min.mlir` and the files of the
+  same name under `SwageToCPU` and `SwageToGPU` pin the plan, the oracle,
+  and every kernel schedule. The GPU file refuses a maximum in any of them.
+- `swage.segment_reduce` takes `kind="min"`.
+- The digest matrix gains the identity and the map-chain minimum on `sm_80`
+  and `sm_86`, 28 pairs.
+- The artifact is format version 2 and holds `segmented_min`.
+
+Step 2. int64 offsets. Python only. Not implemented.
+
+Step 3. float64 reductions, rank one. Not implemented.
+
+Step 4. `mean`, both dtypes, rank one. Not implemented.
+
+Step 5. Rank-two reductions. Not implemented.
+
+Step 6. Rank-two softmax, f32. Not implemented.
+
+## Risks and the test that detects each
+
+| Risk | Detected by |
+|---|---|
+| A new kind falls into the branch of another kind | The switches without a default; `unittests/EmissionTest.cpp`; the `segmented-min.mlir` files; exact comparison with PyTorch |
+| An f32 identity in an f64 kernel | The f64 lit files; the verifier after the conversion |
+| f64 `exp2` reaches NVPTX and aborts the process | The admission rule; a negative lit case; a compile-only Python test |
+| A mean of partial means, or a wrong divisor | A plan check on `arith.divf`; a bitwise `sum / length` test on split lengths |
+| The merge reads a range record out of bounds | A stray-record case with canaries |
+| int64 wraps on narrowing | The refusal of `[0, 2**32 + 3, 5]` |
+| The private offsets copy is freed early | A lifetime test |
+| A column reads a neighbor or writes past `[S, D]` | Position-dependent values; canaries; bounds lit |
+| The PTX scan passes arithmetic of the wrong type | The typed arithmetic scan |
+| An existing kernel's text moves | The 552 digest pairs |
+| f64 behaves differently on the device | The GPU tier, from step 3 |
+
+## Scope
+
+Not part of this record: autograd; f16, bf16, and integer values; `prod`,
+weighted sums, and arg-reductions; a lengths argument, a base offset, and
+an option for the value of an empty segment; lifting the `2**31 - 1` cap;
+the persistent kernel beyond the f32 identity sum; rank three and above; a
+split or a row-parallel tile for rank two; libdevice or a math library;
+device-side classification; and a public segment syntax.
+
+## Questions decided at acceptance
+
+Each question was answered as recommended.
+
+1. `mean` as a composition, or a kind with a finalize step? A composition.
+2. Where does the merge get its extent? From the partial range records.
+3. int64 offsets: host narrowing, or an i64 load in the kernels? Host
+   narrowing, with the cap kept.
+4. A float64 softmax? Refused.
+5. Rank two as one column-tile schedule without a split? Yes, with its
+   costs in the contract.
+6. `swage.segment_id 1` for the column, or a new operation?
+   `swage.segment_id 1`.
+7. Artifact format version 2, without the unlaunched warp kernel? Yes, in
+   step 1.
+8. An empty `mean` is NaN? Yes, as `torch.segment_reduce`.
+9. `[N, 1]` through the rank-one schedules? Yes.
+10. The `(n - 1)` bound for rank two? Accepted and documented.
+11. New digest cells on two processors, with f64 `sum` and `max` on every
+    admitted processor? Yes.

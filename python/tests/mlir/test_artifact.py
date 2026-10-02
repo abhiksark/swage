@@ -53,8 +53,11 @@ _CHILD = pathlib.Path(__file__).with_name("artifact_child.py")
 _PROGRAMS = {
     "segmented_sum": qualification._semantic_module("sum"),
     "segmented_max": qualification._semantic_module("max"),
+    "segmented_min": qualification._semantic_module("min"),
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
+# The kinds of the reduction, each a program of its own.
+_KINDS = ("sum", "max", "min")
 
 
 def _run(*arguments):
@@ -113,7 +116,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write nine kernels, the runtime library, and what describes them."""
+    """Write thirteen kernels, the library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -123,7 +126,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 9
+    assert len(_kernel_ids()) == 13
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -212,13 +215,20 @@ def test_the_manifest_identifies_each_program(manifest):
             "small_element_program": True,
         },
         {
+            "name": "segmented_min",
+            "sha256": hashlib.sha256(
+                _PROGRAMS["segmented_min"].encode()
+            ).hexdigest(),
+            "small_element_program": True,
+        },
+        {
             "name": "ragged_softmax",
             "sha256": hashlib.sha256(
                 _PROGRAMS["ragged_softmax"].encode()
             ).hexdigest(),
         },
     ]
-    for name in ("segmented_sum", "segmented_max"):
+    for name in ("segmented_sum", "segmented_max", "segmented_min"):
         assert (
             qualification._admit_program(_PROGRAMS[name], name, 32, 4096)
             is True
@@ -335,8 +345,9 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         f"artifact: {output}",
         "format_version: 2",
         "target: sm_86",
-        "programs: segmented_sum, segmented_max, ragged_softmax",
-        "kernels: 9",
+        "programs: segmented_sum, segmented_max, segmented_min, "
+        "ragged_softmax",
+        "kernels: 13",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -645,6 +656,7 @@ def test_a_written_artifact_loads(selected, written, manifest):
     assert selected.programs == (
         "segmented_sum",
         "segmented_max",
+        "segmented_min",
         "ragged_softmax",
     )
 
@@ -732,7 +744,7 @@ def _cases():
         lengths = _distributions.generate_lengths(name, count, 0)
         generator = torch.Generator().manual_seed(0)
         values, offsets = _host_case(lengths, generator)
-        for kind in ("sum", "max"):
+        for kind in _KINDS:
             cases[f"{kind}/{name}"] = (kind, values, offsets)
         logits = 4 * torch.randn(sum(lengths), generator=generator)
         cases[f"softmax/{name}"] = ("softmax", logits, offsets)
@@ -742,7 +754,7 @@ def _cases():
     values, offsets = _host_case(selected.tolist(), generator)
     long_values, long_offsets = _host_case([100_003], generator)
     empty = torch.zeros(1, dtype=torch.int32)
-    for kind in ("sum", "max"):
+    for kind in _KINDS:
         cases[f"{kind}/direct-cta"] = (kind, values, offsets)
         cases[f"{kind}/one-long"] = (kind, long_values, long_offsets)
         cases[f"{kind}/no-segment"] = (kind, torch.empty(0), empty)
@@ -759,9 +771,9 @@ def _case_names():
     names = [
         f"{kind}/{name}"
         for name in DISTRIBUTIONS
-        for kind in ("sum", "max", "softmax")
+        for kind in (*_KINDS, "softmax")
     ]
-    for kind in ("sum", "max"):
+    for kind in _KINDS:
         names += [
             f"{kind}/direct-cta",
             f"{kind}/one-long",
@@ -908,7 +920,8 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
     cases, report = child_with_bindings
 
     assert sorted(report["results"]) == sorted(cases)
-    assert len(cases) == 5
+    # Three named cases and the direct-CTA batch of every kind.
+    assert len(cases) == 3 + len(_KINDS)
     bindings = pathlib.Path(ir.__file__).absolute().parents[1]
     assert str(bindings) in report["path"]
     assert report["modules"] == []

@@ -9,7 +9,8 @@ loaded:
     python artifact_child.py CASES RESULTS [importable]
 
 CASES is a `torch.save` file of `{name: (kind, values, offsets)}` with host
-tensors, where kind is `"sum"`, `"max"`, or `"softmax"`. RESULTS receives
+tensors, where kind is a kind of `segment_reduce` or `"softmax"`. RESULTS
+receives
 the host result of every case, the files mapped into the process, and what
 the driver launches with.
 

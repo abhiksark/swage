@@ -40,7 +40,8 @@ In both ABIs `segment_count` is the number of segments that `offsets` and
 
 Each initial block contains four independent one-segment warp slots. CTA
 tasks follow at one segment per block. An empty task set enqueues no kernel.
-Static execution admits capture-free, single-stage f32 sum/max programs,
+Static execution admits capture-free, single-stage f32 sum, max, and min
+programs,
 including fused map chains. Each schedule evaluates the same element program
 only on valid input elements. See
 [ADR-0019](../adr/ADR-0019-composable-private-reductions.md).

@@ -81,7 +81,7 @@ def _segmented_kernels():
         A pytest parameter of the module text, the native compiler, the
         kernel name, the compiler options, and the expected counts.
     """
-    for kind in ("sum", "max"):
+    for kind in ("sum", "max", "min"):
         text = _semantic_module(kind)
         name = f"segmented_{kind}"
         # Block size 1 is where a pipeline that knew the launch width would
