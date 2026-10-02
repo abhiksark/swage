@@ -160,6 +160,11 @@ struct SegmentSite {
 /// binding from its operands and the policy from the operation it sits in;
 /// and the yielded scalar is stored by the thread whose `logicalThreadId`
 /// is zero. Returns false when a consumer could not be legalized.
+///
+/// A region that takes the extent of its segment gets the clamped end minus
+/// the clamped start, which is the same in every thread. Its scalar
+/// epilogue is ordinary arithmetic, so it is legal as it stands and every
+/// thread runs it after the reductions.
 bool convertSegmentTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
                         Location loc, Region &region, const SegmentSite &site,
                         Value ids, Value taskId, Value logicalThreadId,
@@ -181,6 +186,11 @@ bool convertSegmentTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
                               ValueRange{bound.segment.base,
                                          bound.segment.first, bound.segment.end,
                                          bound.segment.stride});
+  if (consumersBlock.getNumArguments() == 2)
+    rewriter.replaceAllUsesWith(
+        consumersBlock.getArgument(1),
+        arith::SubIOp::create(body, loc, bound.segment.end, bound.start)
+            .getResult());
 
   auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
   SmallVector<Operation *> consumers = operationsOf(consumersBlock);
@@ -358,12 +368,19 @@ private:
 /// so the reduction pattern takes the binding from its operand and the
 /// policy from the operation it sits in. Returns a null value when a
 /// consumer could not be legalized.
+///
+/// `extent` is given for a region that takes the extent of its segment: it
+/// replaces the second argument, and the scalar epilogue of the region runs
+/// after the reduction.
 Value convertRangeTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
-                       Region &region, const SegmentBinding &range) {
+                       Region &region, const SegmentBinding &range,
+                       Value extent = Value()) {
   Block &consumersBlock = region.front();
   rewriter.replaceAllUsesWith(
       consumersBlock.getArgument(0),
       ValueRange{range.base, range.first, range.end, range.stride});
+  if (extent)
+    rewriter.replaceAllUsesWith(consumersBlock.getArgument(1), extent);
   auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
   SmallVector<Operation *> consumers = operationsOf(consumersBlock);
   consumers.pop_back();
@@ -433,6 +450,38 @@ public:
   }
 };
 
+/// The extent of a split segment, as an index: the end of range record
+/// `partialEnd - 1` minus the begin of range record `partialBegin`, or zero
+/// when the clamped range of partials `[partialBegin, partialEnd)` is empty.
+/// The branch holds no barrier, so every thread may take it on its own.
+Value emitSplitExtent(OpBuilder &builder, Location loc, Value ranges,
+                      Value partialBegin, Value partialEnd, Value zero) {
+  namespace record = swage_plan::partial_record;
+  Value hasPartials = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::slt, partialBegin, partialEnd);
+  auto extent =
+      scf::IfOp::create(builder, loc, TypeRange{builder.getIndexType()},
+                        hasPartials, /*withElseRegion=*/true);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(&extent.getThenRegion().front());
+  Value fields = arith::ConstantIndexOp::create(builder, loc, record::Words);
+  Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+  Value firstBase = arith::MulIOp::create(builder, loc, partialBegin, fields);
+  Value last = arith::SubIOp::create(builder, loc, partialEnd, one);
+  Value lastBase = arith::MulIOp::create(builder, loc, last, fields);
+  Value beginWord =
+      loadRecordField(builder, loc, ranges, firstBase, record::Begin);
+  Value endWord = loadRecordField(builder, loc, ranges, lastBase, record::End);
+  Value extentWord = arith::SubIOp::create(builder, loc, endWord, beginWord);
+  scf::YieldOp::create(builder, loc,
+                       arith::IndexCastOp::create(
+                           builder, loc, builder.getIndexType(), extentWord)
+                           .getResult());
+  builder.setInsertionPointToStart(&extent.getElseRegion().front());
+  scf::YieldOp::create(builder, loc, zero);
+  return extent.getResult(0);
+}
+
 /// One block of threads per split segment: the kernel prelude, the guard on
 /// the task index, the merge record of the segment, the reduction of the
 /// region over the scratch slots the record names, and the store of its
@@ -442,6 +491,14 @@ public:
 /// count, and one that fails stores nothing. The reduction itself stays
 /// unconditional, which keeps its block-wide combination under the
 /// block-uniform guard alone.
+///
+/// With `ranges`, the region takes the extent of the split segment. The
+/// chunks of one segment are consecutive range records, so the extent is
+/// the end of the last record minus the begin of the first. The two records
+/// are addressed through the clamped range of partials, which keeps both
+/// loads inside the `partial_count` records, and an empty range reads none
+/// and has the extent zero. The words themselves are data: they reach a
+/// division and never an address.
 class MergeTasksPattern : public OpConversionPattern<MergeTasksOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -487,10 +544,13 @@ public:
           Value end;
           std::tie(begin, end) = clampRange(body, bodyLoc, beginWord, endWord,
                                             adaptor.getPartialCount());
+          Value extent;
+          if (Value ranges = adaptor.getRanges())
+            extent = emitSplitExtent(body, bodyLoc, ranges, begin, end, zero);
           Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
-          Value total =
-              convertRangeTask(rewriter, body, tasks.getBody(),
-                               {adaptor.getScratch(), first, end, block});
+          Value total = convertRangeTask(
+              rewriter, body, tasks.getBody(),
+              {adaptor.getScratch(), first, end, block}, extent);
           converted = static_cast<bool>(total);
           if (converted)
             emitLeaderStore(body, bodyLoc, total, adaptor.getOutput(), segment,

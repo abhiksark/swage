@@ -136,11 +136,13 @@ LogicalResult verifyTaskConsumers(Operation *task, Type valuesType,
            << element << " and offsets of " << word;
   SegmentProgramAnalysis analysis;
   analysis.element = element;
+  // What is neither is the scalar epilogue of the region: ordinary
+  // arithmetic that no pattern lowers and the dialect verifier admitted.
   for (Operation &operation : consumers.without_terminator()) {
     if (auto reduction = dyn_cast<ReduceOp>(operation))
       analysis.reductions.push_back(reduction);
-    else
-      analysis.mapStores.push_back(cast<MapStoreOp>(operation));
+    else if (auto mapStore = dyn_cast<MapStoreOp>(operation))
+      analysis.mapStores.push_back(mapStore);
   }
   return verifyConsumerPrograms(analysis);
 }

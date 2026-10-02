@@ -9,6 +9,7 @@
 #include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -151,39 +152,72 @@ LogicalResult TasksOp::verify() {
   return success();
 }
 
+/// Whether the region of a task operation takes the extent of its segment,
+/// its second argument.
+static bool takesExtent(Region &region) {
+  return region.front().getNumArguments() == 2;
+}
+
 /// Verify what every task region shares: one argument, the bound segment,
 /// with the element type of the buffer it is bound from; consumers that read
 /// that argument; and a `swage_plan.yield` at the end. `buffer` names the
 /// buffer in a diagnostic, and `allowStores` admits `swage.map_store`.
+///
+/// With `allowExtent` the region may take the extent of the segment as a
+/// second argument, of type `index`, and may then hold a scalar epilogue
+/// after its consumers.
 static LogicalResult verifyTaskRegion(Operation *task, Region &region,
                                       Type element, StringRef buffer,
-                                      bool allowStores) {
+                                      bool allowStores,
+                                      bool allowExtent = false) {
   Block &body = region.front();
+  bool extent = allowExtent && takesExtent(region);
   auto segment =
-      body.getNumArguments() == 1
+      body.getNumArguments() == 1 || extent
           ? dyn_cast<swage::SegmentType>(body.getArgument(0).getType())
           : swage::SegmentType();
   if (!segment)
     return task->emitOpError(
         "region takes the bound segment as its one argument, of type "
         "!swage.segment<T>");
+  if (extent && !body.getArgument(1).getType().isIndex())
+    return task->emitOpError()
+           << "region takes the extent of the bound segment as its second "
+              "argument, of type index, got "
+           << body.getArgument(1).getType();
   if (segment.getElementType() != element)
     return task->emitOpError() << "region binds a segment of " << element
                                << ", the element type of the " << buffer
                                << ", got " << body.getArgument(0).getType();
   if (!body.mightHaveTerminator() || !isa<YieldOp>(body.getTerminator()))
     return task->emitOpError("region must end in swage_plan.yield");
+  bool inEpilogue = false;
   for (Operation &operation : body.without_terminator()) {
+    // The scalar epilogue of a region that takes an extent: ordinary
+    // arithmetic, after every consumer.
+    if (extent &&
+        isa<arith::IndexCastOp, arith::SIToFPOp, arith::DivFOp>(operation)) {
+      inEpilogue = true;
+      continue;
+    }
     bool admitted = allowStores
                         ? isa<swage::ReduceOp, swage::MapStoreOp>(operation)
                         : isa<swage::ReduceOp>(operation);
-    if (!admitted)
-      return operation.emitOpError()
-             << "is not allowed in the region of '" << task->getName()
-             << "'; the region holds "
-             << (allowStores ? "swage.reduce and swage.map_store operations"
-                             : "swage.reduce operations")
-             << " and ends in swage_plan.yield";
+    if (!admitted) {
+      InFlightDiagnostic diagnostic =
+          operation.emitOpError()
+          << "is not allowed in the region of '" << task->getName()
+          << "'; the region holds "
+          << (allowStores ? "swage.reduce and swage.map_store operations"
+                          : "swage.reduce operations");
+      if (extent)
+        diagnostic << ", then the arith.index_cast, arith.sitofp, and "
+                      "arith.divf operations of a scalar epilogue,";
+      return diagnostic << " and ends in swage_plan.yield";
+    }
+    if (inEpilogue)
+      return operation.emitOpError(
+          "must come before the scalar epilogue of the task region");
     if (operation.getOperand(0) != body.getArgument(0))
       return operation.emitOpError(
           "must read the bound segment, the argument of the task region");
@@ -214,7 +248,7 @@ static LogicalResult verifyYieldedScalar(Operation *task, Region &region,
 LogicalResult TasksOp::verifyRegions() {
   Type element = cast<MemRefType>(getValues().getType()).getElementType();
   if (failed(verifyTaskRegion(getOperation(), getBody(), element, "values",
-                              /*allowStores=*/true)))
+                              /*allowStores=*/true, /*allowExtent=*/true)))
     return failure();
   auto yield = cast<YieldOp>(getBody().front().getTerminator());
   if (static_cast<bool>(yield.getValue()) != static_cast<bool>(getOutput()))
@@ -235,14 +269,26 @@ LogicalResult MergeTasksOp::verify() {
     if (type != word)
       return emitOpError() << name << " must have the element type of the "
                            << "merges, " << word << ", got " << type;
+  if (getRanges() &&
+      cast<MemRefType>(getRanges().getType()).getElementType() != word)
+    return emitOpError()
+           << "an element of ranges must have the element type of the merges, "
+           << word << ", got "
+           << cast<MemRefType>(getRanges().getType()).getElementType();
   return success();
 }
 
 LogicalResult MergeTasksOp::verifyRegions() {
   Type element = cast<MemRefType>(getScratch().getType()).getElementType();
   if (failed(verifyTaskRegion(getOperation(), getBody(), element, "scratch",
-                              /*allowStores=*/false)))
+                              /*allowStores=*/false, /*allowExtent=*/true)))
     return failure();
+  // The bound range is scratch, so the extent of the split segment has to
+  // come from the range records of its partial tasks.
+  if (static_cast<bool>(getRanges()) != takesExtent(getBody()))
+    return emitOpError("ranges and the extent argument of the region are "
+                       "given together: the extent of a split segment is "
+                       "read from the range records of its partial tasks");
   return verifyYieldedScalar(getOperation(), getBody(), getOutput());
 }
 
@@ -266,7 +312,7 @@ LogicalResult FusedTasksOp::verifyRegions() {
   Type element = cast<MemRefType>(getValues().getType()).getElementType();
   for (Region *region : {&getWarp(), &getCta()})
     if (failed(verifyTaskRegion(getOperation(), *region, element, "values",
-                                /*allowStores=*/false)) ||
+                                /*allowStores=*/false, /*allowExtent=*/true)) ||
         failed(verifyYieldedScalar(getOperation(), *region, getOutput())))
       return failure();
   return success();

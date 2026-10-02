@@ -43,6 +43,11 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
   EXPECT_EQ(namesOf(KernelKind::SplitMerge),
             (Names{"scratch", "output", "merge_records", "partial_count",
                    "merge_count", "segment_count"}));
+  // The merge that reads the extent of a split segment takes the range
+  // records after the merge records, and the three counts of the merge.
+  EXPECT_EQ(namesOf(KernelKind::SplitMergeExtent),
+            (Names{"scratch", "output", "merge_records", "partial_ranges",
+                   "partial_count", "merge_count", "segment_count"}));
   EXPECT_EQ(
       namesOf(KernelKind::Persistent),
       (Names{"values", "offsets", "output", "warp_ids", "cta_ids",
@@ -52,9 +57,10 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
 }
 
 TEST(KernelLayoutTest, EveryKernelTakesItsBuffersBeforeItsCounts) {
-  for (KernelKind kind : {KernelKind::Direct, KernelKind::TaskIds,
-                          KernelKind::FusedMixed, KernelKind::SplitPartial,
-                          KernelKind::SplitMerge, KernelKind::Persistent}) {
+  for (KernelKind kind :
+       {KernelKind::Direct, KernelKind::TaskIds, KernelKind::FusedMixed,
+        KernelKind::SplitPartial, KernelKind::SplitMerge,
+        KernelKind::SplitMergeExtent, KernelKind::Persistent}) {
     SCOPED_TRACE(static_cast<int>(kind));
     bool sawCount = false;
     for (KernelArgument argument : kernelLayout(kind).arguments()) {

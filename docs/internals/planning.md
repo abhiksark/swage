@@ -21,6 +21,15 @@ Admission is read-only analysis of one segment function. Captures, multiple
 reductions, and map-store outputs remain outside static planning. Persistent
 execution retains its separate restriction to the f32 identity sum.
 
+A program may divide its reduction by the extent of its segment, which is
+how a mean is written. Admission accepts exactly that scalar epilogue:
+`swage.extent` of the segment, `arith.index_cast` to the count type,
+`arith.sitofp` to the element type, and `arith.divf` of the reduction result
+by that value, whose quotient the function stores. The epilogue is not an
+element program, so it adds no element work and the schedule selection
+treats a mean as it treats its sum. The classification of a batch does not
+depend on it either.
+
 Two callers run the same admission. `--swage-to-plan` with
 `schedule=task-ids` admits a function and then replaces it by the plan
 function of the task-id kernel, described on

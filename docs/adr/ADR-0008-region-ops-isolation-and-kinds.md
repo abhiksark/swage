@@ -4,6 +4,7 @@
 - Status: accepted
 - Date: 2026-08-18
 - Amended: 2026-10-02, the statement about associativity
+- Amended: 2026-10-03, a mean is a composition and not a kind
 
 ## Context
 
@@ -50,6 +51,20 @@ not agree bit for bit
 ([ADR-0019](ADR-0019-composable-private-reductions.md)). Integer `sum`
 has no lowering, and its overflow behavior is not defined. The operation
 description in `SwageOps.td` states the current contract.
+
+A mean is not a kind, and the kind enum does not grow for it
+([ADR-0022](ADR-0022-wider-data-model-for-segmented-reductions.md)). A kind
+is an identity and a combine with no fixed order, and that is what lets a
+lowering merge partial results with the kind of the program. A mean has no
+identity, and a mean of partial means is not the mean. A `kind<mean>`
+reduction in the merge of a split would also read a range of partial
+results and divide by a number that is not the extent of that range. A mean
+is therefore written with what the dialect already has: a `kind<sum>`
+reduction, `swage.extent` of the same segment, and one `arith.divf`, which
+runs once per segment after the reduction. The lowerings admit exactly that
+scalar epilogue, and the split lowering sums the partial results and
+divides once. An empty segment gives NaN, zero divided by zero, where the
+kinds give their identity.
 
 Semantic contract:
 

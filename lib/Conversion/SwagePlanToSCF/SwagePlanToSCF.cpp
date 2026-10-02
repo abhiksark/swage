@@ -78,6 +78,12 @@ public:
           rewriter.replaceAllUsesWith(
               region.getArgument(0),
               ValueRange{adaptor.getValues(), start, end, one});
+          // A region that takes the extent of its segment runs its scalar
+          // epilogue after the reductions, once per segment.
+          if (region.getNumArguments() == 2)
+            rewriter.replaceAllUsesWith(
+                region.getArgument(1),
+                arith::SubIOp::create(body, bodyLoc, end, start).getResult());
 
           SmallVector<Operation *> consumers = operationsOf(region);
           consumers.pop_back();

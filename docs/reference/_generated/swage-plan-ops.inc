@@ -28,7 +28,9 @@ segment of its task: `warp` for a warp task, whose threads combine
 within one subgroup, and `cta` for a block task, whose threads combine
 across the block. Both hold the `swage.reduce` of the program and end in
 `swage_plan.yield` with its result, which is stored at `output[s]` for
-the segment `s` of the task.
+the segment `s` of the task. Each may take the extent of its segment as
+a second argument and hold a scalar epilogue, as the region of
+`swage_plan.tasks` may.
 
 Every bound the kernel needs is an operand: a loaded range is clamped to
 `value_count`, a warp task index is compared with `warp_task_count` and
@@ -88,6 +90,7 @@ operation ::= `swage_plan.merge_tasks` `scratch` `(` $scratch `:` type($scratch)
               `merges` `(` $merges `:` type($merges) `)`
               `merge_count` `(` $merge_count `:` type($merge_count) `)`
               `segment_count` `(` $segment_count `:` type($segment_count) `)`
+              (`ranges` `(` $ranges^ `:` type($ranges) `)`)?
               `into` `(` $output `:` type($output) `)`
               attr-dict-with-keyword $body
 ```
@@ -106,10 +109,21 @@ kind of the program: the merge combines partial results and never runs
 the element program. The threads of a task combine their partial
 results across the whole block.
 
+With `ranges`, the region takes a second argument of type `index`: the
+extent of the split segment, which is not the extent of the bound range
+of scratch. `ranges` holds the range records `swage_plan.partial_tasks`
+reads. The chunks of one segment are consecutive records, so the extent
+is the end of record `partial_end - 1` minus the begin of record
+`partial_begin`, and zero for an empty range of partials. The region may
+then hold a scalar epilogue after its reduction, as the region of
+`swage_plan.tasks` may: the partial tasks yield the raw reduction, and
+the merge divides once.
+
 Every bound the kernel needs is an operand: a loaded range is clamped to
 `partial_count`, a task index is compared with `merge_count`, and a
 loaded segment is compared with `segment_count`, and one that fails the
-comparison stores nothing.
+comparison stores nothing. The two range records of an extent are
+addressed through the clamped range of partials.
 
 Example:
 
@@ -139,6 +153,7 @@ Traits: `RecursiveMemoryEffects`, `SingleBlock`
 | `merge_count` | signless integer |
 | `segment_count` | signless integer |
 | `output` | 1D memref of signless integer or floating-point values |
+| `ranges` | 1D memref of signless integer values |
 
 
 #### `swage_plan.partial_tasks` (swage_plan::PartialTasksOp)
@@ -165,7 +180,9 @@ words, written by host classification.
 The region holds the `swage.reduce` of the program, which applies the
 element program to every element of the chunk, and ends in
 `swage_plan.yield` with its result. The threads of a task combine their
-partial results across the whole block.
+partial results across the whole block. The region takes no extent and
+holds no scalar epilogue: a chunk yields the raw reduction, and the
+merge of its segment runs the epilogue once.
 
 Every bound the kernel needs is an operand: a loaded range is clamped to
 `value_count`, and a task index is compared with `partial_count`.
@@ -355,6 +372,13 @@ The region runs once per task. Its argument is the bound segment,
 It holds `swage.reduce` and `swage.map_store` operations that read that
 segment, in the order they run, and ends in `swage_plan.yield`. With
 `into`, the yielded scalar of segment `s` is stored at `output[s]`.
+
+The region may take a second argument of type `index`, the extent of the
+bound segment, `offsets[s + 1] - offsets[s]`. With it, the region may
+hold a scalar epilogue after its consumers: `arith.index_cast`,
+`arith.sitofp`, and `arith.divf` operations, which run once per task.
+The planner writes them for a program that divides its reduction by the
+extent of its segment.
 
 Every bound a kernel needs is an operand, so a plan cannot omit one:
 

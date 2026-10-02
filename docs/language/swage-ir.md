@@ -182,6 +182,27 @@ The general form is `%length = swage.extent %segment : !swage.segment<T>`.
 Its `index` result is the runtime length
 `offsets[id + 1] - offsets[id]`, which may be zero.
 
+The lowerings admit the extent in one place, the scalar epilogue of a mean:
+
+```mlir
+%sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+^bb0(%element: f32):
+  swage.yield %element : f32
+}
+%length = swage.extent %segment : !swage.segment<f32>
+%count = arith.index_cast %length : index to i32
+%divisor = arith.sitofp %count : i32 to f32
+%mean = arith.divf %sum, %divisor : f32
+memref.store %mean, %output[%id] : memref<?xf32>
+```
+
+A mean is this composition and not a reduction kind. A kind has an identity
+and an order-free combine, which is what lets a lowering split a segment
+and merge the parts with the same kind. A mean has no identity, and a mean
+of partial means is wrong. The division runs once per segment, after the
+reduction, and a lowering that splits the segment sums the partial results
+and divides once. An empty segment gives NaN, zero divided by zero.
+
 ### `swage.map`
 
 ```mlir
@@ -265,9 +286,10 @@ element type:
   admits an integer element type.
 
 Lowerings add no fast-math flags. The current lowerings admit `sum`,
-`max`, and `min` over `f32` and over `f64`. Every value of a region has
-the element type of its function, and `math.exp2` is admitted over `f32`
-only, because the device has no `f64` `exp2`.
+`max`, and `min` over `f32` and over `f64`, and a `sum` divided by the
+extent of its segment, as [`swage.extent`](#swageextent) shows. Every value
+of a region has the element type of its function, and `math.exp2` is
+admitted over `f32` only, because the device has no `f64` `exp2`.
 
 ### `swage.map_store`
 

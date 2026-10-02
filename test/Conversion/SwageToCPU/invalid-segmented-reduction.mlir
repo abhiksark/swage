@@ -101,8 +101,13 @@ module {
 
 // -----
 
+// The scalar epilogue of a mean is fixed: the extent of the segment, cast to
+// the count type and converted to the element type, divides one reduction,
+// and the quotient is what the function stores. Each case below breaks one
+// part of that shape.
 module {
-  func.func @extra_operation(
+  // expected-error@+1 {{a scalar epilogue divides one reduction by the extent of its segment: one swage.extent, then arith.index_cast, arith.sitofp, and arith.divf, in that order, found 1 swage.extent and 0 arith.index_cast, arith.sitofp, or arith.divf operations}}
+  func.func @extent_without_a_division(
       %values: memref<?xf32> {swage.role = #swage.role<values>},
       %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
       %output: memref<?xf32> {swage.role = #swage.role<output>},
@@ -111,7 +116,6 @@ module {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    // expected-error@+1 {{operation 'swage.extent' is unsupported by segmented reduction lowering}}
     %extent = swage.extent %segment : !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
@@ -119,6 +123,172 @@ module {
       swage.yield %value : f32
     }
     memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{a scalar epilogue divides one reduction by the extent of its segment: one swage.extent, then arith.index_cast, arith.sitofp, and arith.divf, in that order, found 0 swage.extent and 1 arith.index_cast, arith.sitofp, or arith.divf operations}}
+  func.func @division_without_an_extent(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %half = arith.divf %sum, %sum : f32
+    memref.store %half, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @wide_count(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %extent = swage.extent %segment : !swage.segment<f32>
+    // expected-error@+1 {{the arith.index_cast of a scalar epilogue casts the extent to 'i32', the type of the counts, got 'index' to 'i64'}}
+    %count = arith.index_cast %extent : index to i64
+    %divisor = arith.sitofp %count : i64 to f32
+    %mean = arith.divf %sum, %divisor : f32
+    memref.store %mean, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @wide_divisor(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %extent = swage.extent %segment : !swage.segment<f32>
+    %count = arith.index_cast %extent : index to i32
+    // expected-error@+1 {{the arith.sitofp of a scalar epilogue converts the extent count to f32, the element type, got 'i32' to 'f64'}}
+    %divisor = arith.sitofp %count : i32 to f64
+    %square = arith.divf %divisor, %divisor : f64
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+// A count divided by the sum is not a mean.
+module {
+  func.func @divides_the_count(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %extent = swage.extent %segment : !swage.segment<f32>
+    %count = arith.index_cast %extent : index to i32
+    %divisor = arith.sitofp %count : i32 to f32
+    // expected-error@+1 {{the arith.divf of a scalar epilogue divides the result of a swage.reduce by the converted extent}}
+    %inverse = arith.divf %divisor, %sum : f32
+    memref.store %inverse, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @stores_the_sum_beside_an_epilogue(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %extent = swage.extent %segment : !swage.segment<f32>
+    %count = arith.index_cast %extent : index to i32
+    %divisor = arith.sitofp %count : i32 to f32
+    %mean = arith.divf %sum, %divisor : f32
+    // expected-error@+1 {{a segment function with a scalar epilogue stores the result of its arith.divf at output[segment_id]}}
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+}
+
+// -----
+
+// A map store writes one result per element, so it has no scalar to divide.
+module {
+  func.func @epilogue_beside_a_map_store(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    %extent = swage.extent %segment : !swage.segment<f32>
+    %count = arith.index_cast %extent : index to i32
+    %divisor = arith.sitofp %count : i32 to f32
+    // expected-error@+1 {{a scalar epilogue needs a memref.store at output[segment_id]; a swage.map_store has no scalar to divide}}
+    %mean = arith.divf %sum, %divisor : f32
+    swage.map_store %segment, %output captures(%sum : f32)
+        : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%value: f32, %total: f32):
+      %shifted = arith.subf %value, %total : f32
+      swage.yield %shifted : f32
+    }
     return
   }
 }

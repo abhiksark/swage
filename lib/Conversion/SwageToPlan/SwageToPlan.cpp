@@ -140,30 +140,51 @@ Type parameterType(KernelArgument argument, FunctionType source,
 /// operation and end the region. The reductions come first, in program
 /// order, and a map store follows them, which is the order every lowering
 /// runs them in.
+///
+/// With `runEpilogue`, the scalar epilogue of the program follows the
+/// reductions, the region takes the extent of the bound segment as its
+/// second argument in place of `swage.extent`, and the region yields the
+/// result of the epilogue. Without, the region yields the raw reduction and
+/// the epilogue stays behind with the function: that is a partial task,
+/// whose merge runs the epilogue once.
 void fillTaskRegion(Operation *task, SegmentProgramAnalysis &analysis,
-                    Value output) {
+                    Value output, bool runEpilogue = true) {
   Location loc = task->getLoc();
   MakeSegmentOp segment = analysis.segments.front();
+  runEpilogue &= !analysis.epilogue.empty();
   OpBuilder builder(task->getContext());
   Block *body = builder.createBlock(&task->getRegion(0), {},
                                     {segment.getResult().getType()}, {loc});
   for (ReduceOp reduction : analysis.reductions)
     reduction->moveBefore(body, body->end());
+  if (runEpilogue) {
+    ExtentOp extent = analysis.extents.front();
+    extent.getResult().replaceAllUsesWith(
+        body->addArgument(builder.getIndexType(), loc));
+    extent.erase();
+    for (Operation *operation : analysis.epilogue)
+      operation->moveBefore(body, body->end());
+  }
   for (MapStoreOp mapStore : analysis.mapStores) {
     mapStore->moveBefore(body, body->end());
     mapStore.getOutputMutable().assign(output);
   }
   segment.getResult().replaceAllUsesWith(body->getArgument(0));
-  swage_plan::YieldOp::create(builder, loc,
-                              analysis.mapStores.empty()
-                                  ? analysis.storedReduction.getResult()
-                                  : Value());
+  Value scalar;
+  if (analysis.mapStores.empty())
+    scalar = runEpilogue ? analysis.storedValue
+                         : analysis.storedReduction.getResult();
+  swage_plan::YieldOp::create(builder, loc, scalar);
 }
 
 /// Give a task operation its merge region: an identity reduction, of the
 /// kind of the program, over the bound range of scratch. Scratch holds
 /// completed partial reductions, so the element program of the function
 /// stays behind with the function and the merge never runs it.
+///
+/// The scalar epilogue of the program runs here, once per split segment,
+/// on the merged reduction: the region gets a copy of it and takes the
+/// extent of the segment as its second argument.
 void fillMergeRegion(Region &region, SegmentProgramAnalysis &analysis) {
   Location loc = region.getParentOp()->getLoc();
   ReduceOp reduction = analysis.reductions.front();
@@ -173,7 +194,17 @@ void fillMergeRegion(Region &region, SegmentProgramAnalysis &analysis) {
       &region, {}, {analysis.segments.front().getResult().getType()}, {loc});
   auto merged = ReduceOp::create(builder, loc, element, body->getArgument(0),
                                  ValueRange(), reduction.getKind());
-  swage_plan::YieldOp::create(builder, loc, merged.getResult());
+  Value scalar = merged.getResult();
+  if (!analysis.epilogue.empty()) {
+    IRMapping mapping;
+    mapping.map(analysis.extents.front().getResult(),
+                body->addArgument(builder.getIndexType(), loc));
+    mapping.map(analysis.storedReduction.getResult(), merged.getResult());
+    for (Operation *operation : analysis.epilogue)
+      builder.clone(*operation, mapping);
+    scalar = mapping.lookup(analysis.storedValue);
+  }
+  swage_plan::YieldOp::create(builder, loc, scalar);
   Block *identity =
       builder.createBlock(&merged.getBody(), {}, {element}, {loc});
   YieldOp::create(builder, loc, identity->getArgument(0));
@@ -217,7 +248,12 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   const KernelSchedule kernel = *kernelSchedule(schedule);
   MLIRContext *context = source.getContext();
   Location loc = source.getLoc();
-  const KernelLayout layout = swage_plan::kernelLayout(kernel.kind);
+  // The merge of a program with an epilogue needs the extent of each split
+  // segment, which it reads from the range records of the partial tasks.
+  bool mergeExtent =
+      schedule == PlanSchedule::SplitMerge && !analysis.epilogue.empty();
+  const KernelLayout layout = swage_plan::kernelLayout(
+      mergeExtent ? KernelKind::SplitMergeExtent : kernel.kind);
   SmallVector<Type> inputs;
   for (KernelArgument argument : layout.arguments())
     inputs.push_back(
@@ -277,7 +313,8 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::MergeRecords),
         argument(KernelArgument::MergeCount),
         argument(KernelArgument::SegmentCount),
-        argument(KernelArgument::Output));
+        argument(KernelArgument::Output),
+        mergeExtent ? argument(KernelArgument::PartialRanges) : Value());
   } else if (schedule == PlanSchedule::SplitPartial) {
     // A partial task reduces one chunk into its scratch slot.
     task = swage_plan::PartialTasksOp::create(
@@ -308,7 +345,9 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
     source.erase();
     return;
   }
-  fillTaskRegion(task, analysis, output);
+  // A partial task yields the raw reduction of its chunk.
+  fillTaskRegion(task, analysis, output,
+                 /*runEpilogue=*/schedule != PlanSchedule::SplitPartial);
   // A warp task and a block task run the same program, so the block region
   // of a fused task operation is a copy of its warp region.
   if (schedule == PlanSchedule::FusedMixed) {

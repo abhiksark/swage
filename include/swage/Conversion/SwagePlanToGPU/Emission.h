@@ -41,10 +41,14 @@ struct SegmentBinding {
   Value stride; ///< Index distance between two elements of one thread.
 };
 
-/// A bound segment and the index of its output slot.
+/// A bound segment, the index of its output slot, and where it starts.
 struct BoundSegment {
   SegmentBinding segment;
   Value segmentId64; ///< The segment ID as i64, for the scalar store.
+  /// Index of the first element of the segment. `segment.first` is the
+  /// first element of one thread, so the extent of the segment is
+  /// `segment.end - start` and not `segment.end - segment.first`.
+  Value start;
 };
 
 /// How the threads that ran one reduction loop combine their accumulators.

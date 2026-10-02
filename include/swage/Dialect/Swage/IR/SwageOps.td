@@ -117,10 +117,21 @@ def Swage_ExtentOp : Swage_Op<"extent"> {
     declares that read on its operand. Two instances are not merged across
     a write, and an unused instance is still removable.
 
+    The lowerings admit the extent in one place: the scalar epilogue of a
+    mean, where the extent is cast to the count type, converted to the
+    element type, and divides the result of a `sum` reduction of the same
+    segment. The division runs once per segment, after the reduction, so a
+    mean is a composition and not a reduction kind: a kind has an identity
+    and an order-free combine, which a mean lacks. A lowering that splits a
+    segment sums the partial results and divides once.
+
     Example:
 
     ```mlir
     %n = swage.extent %seg : !swage.segment<f32>
+    %count = arith.index_cast %n : index to i32
+    %divisor = arith.sitofp %count : i32 to f32
+    %mean = arith.divf %sum, %divisor : f32
     ```
   }];
   let arguments = (ins

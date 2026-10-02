@@ -171,7 +171,7 @@ BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
   Value end;
   std::tie(start, end) = clampRange(builder, loc, startI32, endI32, valueCount);
   Value first = arith::AddIOp::create(builder, loc, start, logicalThreadId);
-  return {{values, first, end, stride}, segmentId64};
+  return {{values, first, end, stride}, segmentId64, start};
 }
 
 /// Load the element at `index` of the buffer `base`. A pointer is addressed

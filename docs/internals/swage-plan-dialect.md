@@ -55,9 +55,19 @@ func.func @segmented_sum(
 
 The region of the task operation runs once per task, on the segment the
 task binds. It holds the `swage.reduce` and `swage.map_store` operations of
-the program, in the order the kernel runs them, and nothing else: the
-planner has fused every map into its consumer, and the task operation has
-absorbed the segment id, the segment construction, and the scalar store.
+the program, in the order the kernel runs them: the planner has fused every
+map into its consumer, and the task operation has absorbed the segment id,
+the segment construction, and the scalar store.
+
+A program that divides its reduction by the extent of its segment, which is
+how a mean is written, adds one thing. The planner absorbs `swage.extent`
+too: the region takes the extent as a second argument, of type `index`, and
+holds the scalar epilogue of the program after its consumers, the
+`arith.index_cast`, `arith.sitofp`, and `arith.divf` that run once per task.
+The region of `swage_plan.partial_tasks` never takes an extent: a chunk
+yields its raw reduction, and the merge of its segment runs the epilogue
+once, on an extent that `swage_plan.merge_tasks` reads from the range
+records through its `ranges` operand.
 
 Every bound a kernel applies is an operand of the task operation, so a plan
 cannot omit one. A loaded range is clamped to `value_count`. A task index is
@@ -91,7 +101,9 @@ after its kernel, `<function>__partial` or `<function>__merge`, and the
 records its task operation loads are laid out as `TaskRecords.h` says,
 which the host classifier fills by the same fields. The region of a merge
 task is an identity reduction over scratch: the merge combines partial
-results and never runs the element program. The persistent schedule admits
+results and never runs the element program. The merge kernel of a program
+with an epilogue takes the range records as a fourth buffer, after its
+merge records. The persistent schedule admits
 the identity f32 sum only, and its plan function reads the same records and
 a counter buffer whose layout is in `TaskRecords.h` as well. There is no
 public

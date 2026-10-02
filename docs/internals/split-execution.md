@@ -25,9 +25,13 @@ then one writer stores `output[7]`. Mixed execution submits direct fused work,
 partial CTAs, and merge CTAs in that order on the current stream, skipping any
 empty phase. This lifecycle supports private capture-free, single-stage
 sum, max, and min over f32 or f64 values, including fused map chains. The
-scratch has the element type of the program. Partial tasks evaluate the element
-program on input values; merges combine scratch using the reduction kind
-without reapplying that program. It does not support split softmax.
+scratch has the element type of the program. Partial tasks evaluate the
+element program on input values; merges combine scratch using the reduction
+kind without reapplying that program. It does not support split softmax.
+
+A mean is split as its sum. A partial task stores the raw sum of its chunk
+and never divides. The merge sums the partial sums and divides once by the
+extent of the segment, so no mean of partial means is formed.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -49,6 +53,24 @@ Merge ABI:
 scratch*, output*, merge_records*, partial_count:i32, merge_count:i32,
 segment_count:i32
 ```
+
+Merge ABI of a program that divides by the extent of its segment:
+
+```text
+scratch*, output*, merge_records*, partial_ranges*, partial_count:i32,
+merge_count:i32, segment_count:i32
+```
+
+The bound range of a merge is scratch, whose extent is a number of partial
+results. The extent of the segment is not in a merge record, so this merge
+kernel reads it from the range records the partial kernel reads: the chunks
+of one segment are consecutive records, and the extent is the end of the
+last one minus the begin of the first. The two records are addressed
+through the range of partials after its clamp to `partial_count`, so a
+stray merge record reads no range record outside the buffer, and an empty
+range of partials reads none and has the extent zero. No existing kernel,
+record, or launch tuple changed for this: the kernels of a sum, a maximum,
+and a minimum keep the merge ABI above.
 
 Both kernels use 512 threads, sized so one 4096-element chunk fully
 occupies a CTA at eight elements per thread. Partial ranges are absolute

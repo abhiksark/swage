@@ -35,6 +35,9 @@ enum class KernelKind {
   SplitPartial,
   /// One result per split segment from its partial results.
   SplitMerge,
+  /// The same for a program that needs the extent of the split segment: the
+  /// merge also reads the range records of the partial tasks.
+  SplitMergeExtent,
   /// Resident blocks that claim tasks from queues.
   Persistent,
 };
@@ -173,6 +176,11 @@ inline constexpr KernelArgument splitMergeArguments[] = {
     KernelArgument::Scratch,      KernelArgument::Output,
     KernelArgument::MergeRecords, KernelArgument::PartialCount,
     KernelArgument::MergeCount,   KernelArgument::SegmentCount};
+inline constexpr KernelArgument splitMergeExtentArguments[] = {
+    KernelArgument::Scratch,      KernelArgument::Output,
+    KernelArgument::MergeRecords, KernelArgument::PartialRanges,
+    KernelArgument::PartialCount, KernelArgument::MergeCount,
+    KernelArgument::SegmentCount};
 inline constexpr KernelArgument persistentArguments[] = {
     KernelArgument::Values,          KernelArgument::Offsets,
     KernelArgument::Output,          KernelArgument::WarpIds,
@@ -197,6 +205,8 @@ constexpr KernelLayout kernelLayout(KernelKind kind) {
     return KernelLayout(detail::splitPartialArguments);
   case KernelKind::SplitMerge:
     return KernelLayout(detail::splitMergeArguments);
+  case KernelKind::SplitMergeExtent:
+    return KernelLayout(detail::splitMergeExtentArguments);
   case KernelKind::Persistent:
     return KernelLayout(detail::persistentArguments);
   }

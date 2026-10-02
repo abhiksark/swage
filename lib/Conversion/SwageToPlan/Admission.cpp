@@ -320,6 +320,10 @@ LogicalResult collectSegmentOperations(func::FuncOp function,
       analysis.mapStores.push_back(mapStore);
     else if (auto returnOp = dyn_cast<func::ReturnOp>(operation))
       analysis.returns.push_back(returnOp);
+    else if (auto extent = dyn_cast<ExtentOp>(operation))
+      analysis.extents.push_back(extent);
+    else if (isa<arith::IndexCastOp, arith::SIToFPOp, arith::DivFOp>(operation))
+      analysis.epilogue.push_back(&operation);
     else
       return operation.emitError()
              << "operation '" << operation.getName()
@@ -418,6 +422,57 @@ LogicalResult verifySegmentRegions(SegmentProgramAnalysis &analysis) {
   return success();
 }
 
+/// Admit the scalar epilogue of a mean, or none: the extent of the segment,
+/// cast to the count type and then to the element type, divides one
+/// reduction result. The division runs once per segment, after the
+/// reduction, so a lowering that splits a segment sums the partial results
+/// and divides once.
+///
+/// The shape is fixed instead of open to any scalar arithmetic, because the
+/// merge of a split segment has to rebuild it from partial results.
+LogicalResult verifyEpilogue(func::FuncOp function,
+                             SegmentProgramAnalysis &analysis) {
+  if (analysis.extents.empty() && analysis.epilogue.empty())
+    return success();
+  Type word = function.getArgument(analysis.abi.valueCount).getType();
+  Type element = analysis.element;
+  auto count = analysis.epilogue.size() == 3
+                   ? dyn_cast<arith::IndexCastOp>(analysis.epilogue[0])
+                   : arith::IndexCastOp();
+  auto divisor = count ? dyn_cast<arith::SIToFPOp>(analysis.epilogue[1])
+                       : arith::SIToFPOp();
+  auto division =
+      divisor ? dyn_cast<arith::DivFOp>(analysis.epilogue[2]) : arith::DivFOp();
+  if (analysis.extents.size() != 1 || !division)
+    return function.emitError()
+           << "a scalar epilogue divides one reduction by the extent of its "
+              "segment: one swage.extent, then arith.index_cast, "
+              "arith.sitofp, and arith.divf, in that order, found "
+           << analysis.extents.size() << " swage.extent and "
+           << analysis.epilogue.size()
+           << " arith.index_cast, arith.sitofp, or arith.divf operations";
+  // The one segment of the function is the only segment an extent can
+  // read: a map has exactly one consumer, which consumes its elements.
+  ExtentOp extent = analysis.extents.front();
+  if (count.getIn() != extent.getResult() || count.getType() != word)
+    return count.emitError()
+           << "the arith.index_cast of a scalar epilogue casts the extent to "
+           << word << ", the type of the counts, got "
+           << count.getIn().getType() << " to " << count.getType();
+  if (divisor.getIn() != count.getOut() || divisor.getType() != element)
+    return divisor.emitError()
+           << "the arith.sitofp of a scalar epilogue converts the extent "
+              "count to "
+           << spelled(element) << ", the element type, got "
+           << divisor.getIn().getType() << " to " << divisor.getType();
+  if (!division.getLhs().getDefiningOp<ReduceOp>() ||
+      division.getRhs() != divisor.getOut())
+    return division.emitError(
+        "the arith.divf of a scalar epilogue divides the result of a "
+        "swage.reduce by the converted extent");
+  return success();
+}
+
 DenseMap<Operation *, unsigned>
 indexReductionStages(SegmentProgramAnalysis &analysis) {
   DenseMap<Operation *, unsigned> stageOf;
@@ -432,7 +487,19 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
   SegmentIdOp segmentId = analysis.segmentIds.front();
   if (analysis.mapStores.empty()) {
     memref::StoreOp store = analysis.stores.front();
-    analysis.storedReduction = store.getValue().getDefiningOp<ReduceOp>();
+    analysis.storedValue = store.getValue();
+    Value reduced = analysis.storedValue;
+    // A program with an epilogue stores its last result, which divides a
+    // reduction.
+    if (!analysis.epilogue.empty()) {
+      auto division = cast<arith::DivFOp>(analysis.epilogue.back());
+      if (reduced != division.getResult())
+        return store.emitError("a segment function with a scalar epilogue "
+                               "stores the result of its arith.divf at "
+                               "output[segment_id]");
+      reduced = division.getLhs();
+    }
+    analysis.storedReduction = reduced.getDefiningOp<ReduceOp>();
     if (!analysis.storedReduction ||
         !stageOf.contains(analysis.storedReduction.getOperation()) ||
         store.getMemRef() != function.getArgument(analysis.abi.output) ||
@@ -444,6 +511,10 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
              function.getArgument(analysis.abi.output)) {
     return analysis.mapStores.front().emitError(
         "swage.map_store must write the function output buffer");
+  } else if (!analysis.epilogue.empty()) {
+    return analysis.epilogue.back()->emitError(
+        "a scalar epilogue needs a memref.store at output[segment_id]; a "
+        "swage.map_store has no scalar to divide");
   }
   return success();
 }
@@ -471,7 +542,8 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
   if (failed(collectSegmentOperations(function, analysis)) ||
       failed(verifySegmentRoot(function, analysis)) ||
       failed(verifyMapConsumers(analysis)) ||
-      failed(verifyConsumerPrograms(analysis)))
+      failed(verifyConsumerPrograms(analysis)) ||
+      failed(verifyEpilogue(function, analysis)))
     return failure();
 
   DenseMap<Operation *, unsigned> stageOf = indexReductionStages(analysis);
@@ -511,6 +583,10 @@ LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
   ReduceOp reduction = analysis.reductions.front();
   if (reduction.getKind() != ReductionKind::Sum)
     return reduction.emitError("persistent execution requires kind<sum>");
+  if (!analysis.epilogue.empty())
+    return analysis.epilogue.back()->emitError(
+        "persistent execution stores the reduction result as it is and takes "
+        "no scalar epilogue");
   if (!analysis.element.isF32())
     return reduction.emitError()
            << "persistent execution requires f32 values, got "

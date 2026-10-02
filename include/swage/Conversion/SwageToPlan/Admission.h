@@ -48,7 +48,19 @@ struct SegmentProgramAnalysis {
   SmallVector<memref::StoreOp> stores;
   SmallVector<MapStoreOp> mapStores;
   SmallVector<func::ReturnOp> returns;
+  /// The `swage.extent` of the program: none, or the one its epilogue reads.
+  SmallVector<ExtentOp> extents;
+  /// The scalar epilogue between the stored reduction and the store, in
+  /// program order: empty, or the `arith.index_cast` of the extent, the
+  /// `arith.sitofp` of that count, and the `arith.divf` of the reduction by
+  /// it. A program with an epilogue stores a mean.
+  SmallVector<Operation *> epilogue;
+  /// The reduction whose result the program stores, as it is or divided by
+  /// the extent.
   ReduceOp storedReduction;
+  /// The value the program stores per segment: the result of
+  /// `storedReduction`, or the result of the epilogue.
+  Value storedValue;
   /// The element type of the values. Every region, capture, and result of
   /// the program has it.
   Type element;
@@ -105,7 +117,7 @@ std::optional<int64_t> estimateElementWork(Operation *root);
 void fuseAdmittedMaps(SegmentProgramAnalysis &analysis);
 
 /// Persistent partials and merges still implement only the identity sum of
-/// f32 values.
+/// f32 values, stored as it is.
 LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis);
 
 } // namespace mlir::swage
