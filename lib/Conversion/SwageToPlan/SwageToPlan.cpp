@@ -62,6 +62,9 @@ std::optional<KernelSchedule> kernelSchedule(PlanSchedule schedule) {
   case PlanSchedule::SplitMerge:
     return KernelSchedule{"split-merge", KernelKind::SplitMerge, "__merge",
                           true, false};
+  case PlanSchedule::Persistent:
+    return KernelSchedule{"persistent", KernelKind::Persistent, "", true,
+                          false};
   case PlanSchedule::Sequential:
     return std::nullopt;
   }
@@ -76,6 +79,8 @@ int64_t blockThreadsOf(PlanSchedule schedule, const PlanOptions &options,
     return target.splitBlockThreads;
   if (schedule == PlanSchedule::FusedMixed)
     return target.ctaBlockThreads;
+  if (schedule == PlanSchedule::Persistent)
+    return target.persistentBlockThreads;
   return options.blockThreads;
 }
 
@@ -155,18 +160,17 @@ void fillTaskRegion(Operation *task, SegmentProgramAnalysis &analysis,
                                   : Value());
 }
 
-/// Give the task operation of a merge its region: an identity reduction, of
-/// the kind of the program, over the bound range of scratch. Scratch holds
+/// Give a task operation its merge region: an identity reduction, of the
+/// kind of the program, over the bound range of scratch. Scratch holds
 /// completed partial reductions, so the element program of the function
 /// stays behind with the function and the merge never runs it.
-void fillMergeRegion(Operation *task, SegmentProgramAnalysis &analysis) {
-  Location loc = task->getLoc();
+void fillMergeRegion(Region &region, SegmentProgramAnalysis &analysis) {
+  Location loc = region.getParentOp()->getLoc();
   ReduceOp reduction = analysis.reductions.front();
   Type element = reduction.getResult().getType();
-  OpBuilder builder(task->getContext());
+  OpBuilder builder(loc.getContext());
   Block *body = builder.createBlock(
-      &task->getRegion(0), {},
-      {analysis.segments.front().getResult().getType()}, {loc});
+      &region, {}, {analysis.segments.front().getResult().getType()}, {loc});
   auto merged = ReduceOp::create(builder, loc, element, body->getArgument(0),
                                  ValueRange(), reduction.getKind());
   swage_plan::YieldOp::create(builder, loc, merged.getResult());
@@ -240,7 +244,23 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   builder.setInsertionPointToEnd(entry);
   Operation *task = nullptr;
   Value output;
-  if (schedule == PlanSchedule::FusedMixed) {
+  if (schedule == PlanSchedule::Persistent) {
+    output = argument(KernelArgument::Output);
+    task = swage_plan::PersistentTasksOp::create(
+        builder, loc, argument(KernelArgument::Values),
+        argument(KernelArgument::Offsets), argument(KernelArgument::ValueCount),
+        argument(KernelArgument::SegmentCount),
+        argument(KernelArgument::WarpIds),
+        argument(KernelArgument::WarpTaskCount),
+        argument(KernelArgument::CtaIds),
+        argument(KernelArgument::CtaTaskCount),
+        argument(KernelArgument::PartialRanges),
+        argument(KernelArgument::PartialMergeIds),
+        argument(KernelArgument::PartialCount),
+        argument(KernelArgument::MergeRecords),
+        argument(KernelArgument::MergeCount), argument(KernelArgument::Scratch),
+        argument(KernelArgument::Counters), output);
+  } else if (schedule == PlanSchedule::FusedMixed) {
     output = argument(KernelArgument::Output);
     task = swage_plan::FusedTasksOp::create(
         builder, loc, argument(KernelArgument::Values),
@@ -284,7 +304,7 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   }
   func::ReturnOp::create(builder, loc);
   if (schedule == PlanSchedule::SplitMerge) {
-    fillMergeRegion(task, analysis);
+    fillMergeRegion(task->getRegion(0), analysis);
     source.erase();
     return;
   }
@@ -295,6 +315,15 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
     IRMapping mapping;
     task->getRegion(0).cloneInto(&task->getRegion(1), mapping);
   }
+  // A block task, a partial task, and a warp task of the queue kernel run
+  // the program too, and its merge combines their partial results.
+  if (auto persistent = dyn_cast<swage_plan::PersistentTasksOp>(task)) {
+    for (Region *region : {&persistent.getPartial(), &persistent.getWarp()}) {
+      IRMapping mapping;
+      persistent.getCta().cloneInto(region, mapping);
+    }
+    fillMergeRegion(persistent.getMerge(), analysis);
+  }
   source.erase();
 }
 
@@ -303,7 +332,8 @@ std::optional<PlanSchedule> parseSchedule(StringRef text) {
     return PlanSchedule::Sequential;
   for (PlanSchedule schedule :
        {PlanSchedule::Direct, PlanSchedule::TaskIds, PlanSchedule::FusedMixed,
-        PlanSchedule::SplitPartial, PlanSchedule::SplitMerge})
+        PlanSchedule::SplitPartial, PlanSchedule::SplitMerge,
+        PlanSchedule::Persistent})
     if (text == kernelSchedule(schedule)->name)
       return schedule;
   return std::nullopt;
@@ -335,7 +365,7 @@ public:
       if (!schedule) {
         getOperation().emitError()
             << "schedule must be direct, task-ids, fused-mixed, "
-               "split-partial, split-merge, or sequential, got '"
+               "split-partial, split-merge, persistent, or sequential, got '"
             << name << "'";
         return signalPassFailure();
       }
@@ -358,7 +388,8 @@ private:
           "task buffer), fused-mixed (warp tasks and block tasks in one "
           "launch), split-partial (one block per chunk of a long segment), "
           "split-merge (one block per split segment, over its partial "
-          "results), or sequential (no kernel: the CPU oracle, alone)")};
+          "results), persistent (resident blocks that drain task queues), "
+          "or sequential (no kernel: the CPU oracle, alone)")};
   Option<int64_t> blockThreads{
       *this, "block-threads",
       llvm::cl::desc("Launch width of the direct and task-ids kernels in "
@@ -429,6 +460,9 @@ LogicalResult planSegmentFunctions(ModuleOp module, const PlanOptions &options,
                        return kernelSchedule(schedule)->needsTaskProgram;
                      }) &&
         failed(verifyPlanningProgram(analysis)))
+      return failure();
+    if (llvm::is_contained(schedules, PlanSchedule::Persistent) &&
+        failed(verifyPersistentProgram(analysis)))
       return failure();
     // A kernel replaces its function. The oracle keeps it, so its callers
     // stay and no symbol is created.

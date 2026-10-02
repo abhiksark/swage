@@ -39,6 +39,9 @@ enum class PlanSchedule {
   /// One block of threads per split segment, which reduces its partial
   /// results: the second stage, whose kernel is named `<function>__merge`.
   SplitMerge,
+  /// Resident blocks that drain a block queue, a partial queue with its
+  /// merges, and a warp queue in one launch.
+  Persistent,
   /// No kernel: one thread visits the segments in order. The CPU oracle.
   Sequential,
 };

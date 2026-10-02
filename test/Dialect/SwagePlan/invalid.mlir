@@ -480,7 +480,7 @@ module {
 
 module {
   func.func @yield_outside_a_task_region() {
-    // expected-error@+1 {{'swage_plan.yield' op expects parent op to be one of 'swage_plan.tasks, swage_plan.partial_tasks, swage_plan.merge_tasks, swage_plan.fused_tasks'}}
+    // expected-error@+1 {{'swage_plan.yield' op expects parent op to be one of 'swage_plan.tasks, swage_plan.partial_tasks, swage_plan.merge_tasks, swage_plan.fused_tasks, swage_plan.persistent_tasks'}}
     swage_plan.yield
   }
 }

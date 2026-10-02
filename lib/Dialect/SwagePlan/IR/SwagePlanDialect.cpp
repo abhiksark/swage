@@ -51,6 +51,10 @@ std::optional<TaskPolicy> mlir::swage_plan::policyOfRegion(Region *region) {
   // The first region of a fused task operation is its warp region.
   if (isa_and_nonnull<FusedTasksOp>(task))
     return region->getRegionNumber() == 0 ? TaskPolicy::Warp : TaskPolicy::CTA;
+  // The last region of a persistent task operation is its warp region. The
+  // block, partial, and merge regions before it combine across the block.
+  if (isa_and_nonnull<PersistentTasksOp>(task))
+    return region->getRegionNumber() == 3 ? TaskPolicy::Warp : TaskPolicy::CTA;
   return std::nullopt;
 }
 
@@ -104,7 +108,8 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
     return op->emitError("a plan function has a body of one block");
   Block &body = function.getBody().front();
   if (llvm::range_size(body) != 2 ||
-      !isa<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp>(body.front()) ||
+      !isa<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp,
+           PersistentTasksOp>(body.front()) ||
       !isa<func::ReturnOp>(body.back()))
     return op->emitError()
            << "a plan function holds one task operation followed by a return, "
@@ -187,15 +192,16 @@ static LogicalResult verifyTaskRegion(Operation *task, Region &region,
 }
 
 /// Require that the region of `task` yields a scalar of the element type of
-/// `into`, the buffer that receives it.
+/// `sink`, the buffer that receives it, which a diagnostic calls `name`.
 static LogicalResult verifyYieldedScalar(Operation *task, Region &region,
-                                         Value into) {
+                                         Value sink, StringRef name = "into") {
   auto yield = cast<YieldOp>(region.front().getTerminator());
-  Type slot = cast<MemRefType>(into.getType()).getElementType();
+  Type slot = cast<MemRefType>(sink.getType()).getElementType();
   if (!yield.getValue() || yield.getValue().getType() != slot) {
-    InFlightDiagnostic diagnostic =
-        task->emitOpError() << "region must yield " << slot
-                            << ", the element type of the into buffer, got ";
+    InFlightDiagnostic diagnostic = task->emitOpError()
+                                    << "region must yield " << slot
+                                    << ", the element type of the " << name
+                                    << " buffer, got ";
     if (yield.getValue())
       diagnostic << yield.getValue().getType();
     else
@@ -283,4 +289,51 @@ LogicalResult PartialTasksOp::verifyRegions() {
                               /*allowStores=*/false)))
     return failure();
   return verifyYieldedScalar(getOperation(), getBody(), getScratch());
+}
+
+LogicalResult PersistentTasksOp::verify() {
+  auto elementOf = [](Value buffer) {
+    return cast<MemRefType>(buffer.getType()).getElementType();
+  };
+  Type word = elementOf(getOffsets());
+  const std::pair<const char *, Type> words[] = {
+      {"value_count", getValueCount().getType()},
+      {"segment_count", getSegmentCount().getType()},
+      {"an element of warp_ids", elementOf(getWarpIds())},
+      {"warp_task_count", getWarpTaskCount().getType()},
+      {"an element of cta_ids", elementOf(getCtaIds())},
+      {"cta_task_count", getCtaTaskCount().getType()},
+      {"an element of ranges", elementOf(getRanges())},
+      {"an element of merge_ids", elementOf(getMergeIds())},
+      {"partial_count", getPartialCount().getType()},
+      {"an element of merges", elementOf(getMerges())},
+      {"merge_count", getMergeCount().getType()},
+      {"an element of counters", elementOf(getCounters())}};
+  for (auto [name, type] : words)
+    if (type != word)
+      return emitOpError() << name << " must have the element type of the "
+                           << "offsets, " << word << ", got " << type;
+  return success();
+}
+
+LogicalResult PersistentTasksOp::verifyRegions() {
+  Type element = cast<MemRefType>(getValues().getType()).getElementType();
+  Type partial = cast<MemRefType>(getScratch().getType()).getElementType();
+  Operation *task = getOperation();
+  // A block task and a warp task reduce a segment of values into the output.
+  for (Region *region : {&getCta(), &getWarp()})
+    if (failed(verifyTaskRegion(task, *region, element, "values",
+                                /*allowStores=*/false)) ||
+        failed(verifyYieldedScalar(task, *region, getOutput())))
+      return failure();
+  // A partial task reduces a chunk of values into scratch, and a merge
+  // reduces a range of scratch into the output.
+  if (failed(verifyTaskRegion(task, getPartial(), element, "values",
+                              /*allowStores=*/false)) ||
+      failed(verifyYieldedScalar(task, getPartial(), getScratch(), "scratch")))
+    return failure();
+  if (failed(verifyTaskRegion(task, getMerge(), partial, "scratch",
+                              /*allowStores=*/false)))
+    return failure();
+  return verifyYieldedScalar(task, getMerge(), getOutput());
 }

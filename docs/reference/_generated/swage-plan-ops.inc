@@ -198,6 +198,136 @@ Traits: `RecursiveMemoryEffects`, `SingleBlock`
 | `scratch` | 1D memref of signless integer or floating-point values |
 
 
+#### `swage_plan.persistent_tasks` (swage_plan::PersistentTasksOp)
+
+_Drain the block, partial, and warp task queues from resident blocks_
+
+Syntax:
+
+```
+operation ::= `swage_plan.persistent_tasks` `segments` `(` $values `,` $offsets `:` type($values) `,` type($offsets) `)`
+              `value_count` `(` $value_count `:` type($value_count) `)`
+              `segment_count` `(` $segment_count `:` type($segment_count) `)`
+              `warp_ids` `(` $warp_ids `:` type($warp_ids) `)`
+              `warp_task_count` `(` $warp_task_count `:` type($warp_task_count) `)`
+              `cta_ids` `(` $cta_ids `:` type($cta_ids) `)`
+              `cta_task_count` `(` $cta_task_count `:` type($cta_task_count) `)`
+              `ranges` `(` $ranges `:` type($ranges) `)`
+              `merge_ids` `(` $merge_ids `:` type($merge_ids) `)`
+              `partial_count` `(` $partial_count `:` type($partial_count) `)`
+              `merges` `(` $merges `:` type($merges) `)`
+              `merge_count` `(` $merge_count `:` type($merge_count) `)`
+              `scratch` `(` $scratch `:` type($scratch) `)`
+              `counters` `(` $counters `:` type($counters) `)`
+              `into` `(` $output `:` type($output) `)`
+              attr-dict `cta` $cta `partial` $partial `merge` $merge `warp` $warp
+```
+
+The body of the persistent queue kernel. A launch holds a fixed number of
+resident blocks, and each block claims tasks until every queue is empty:
+first the block tasks, then the partial tasks with the merges they
+complete, then the warp tasks. A claim adds to a counter in device
+memory, so no task runs twice and no block waits for another.
+
+The operation has four regions, each a task region over the range its
+task binds, which hold a `swage.reduce` and end in `swage_plan.yield`
+with its result:
+
+- `cta` runs once per block task. Task `t` binds segment `cta_ids[t]`,
+  its threads combine across the block, and the scalar is stored at
+  `output[s]` for the segment `s` of the task.
+- `partial` runs once per partial task. Task `t` binds the half-open
+  range of values that record `t` of `ranges` names and stores the
+  scalar at `scratch[t]`. It then counts one completion for the merge
+  `merge_ids[t]`.
+- `merge` runs in the block that completed the last partial task of a
+  merge. Merge `m` binds the half-open range of scratch slots that
+  record `m` of `merges` names and stores the scalar at
+  `output[segment]` for the segment of that record.
+- `warp` runs once per warp task, on the lanes of one subgroup. Task `t`
+  binds segment `warp_ids[t]` and stores the scalar at `output[s]`.
+
+`counters` holds one claim counter per queue followed by one completion
+counter per merge, all zero when the launch starts. The records
+of `ranges` and `merges` are the ones `swage_plan.partial_tasks` and
+`swage_plan.merge_tasks` read.
+
+Every bound the kernel needs is an operand: a loaded range of values is
+clamped to `value_count` and a loaded range of scratch to
+`partial_count`; a claimed task index is compared with the count of its
+queue; a loaded segment id is compared with `segment_count` and a
+loaded merge id with `merge_count`, and one that fails the comparison
+stores nothing and updates no counter.
+
+Example:
+
+```mlir
+swage_plan.persistent_tasks
+    segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+    value_count(%value_count : i32) segment_count(%segment_count : i32)
+    warp_ids(%warp_ids : memref<?xi32>)
+    warp_task_count(%warp_task_count : i32)
+    cta_ids(%cta_ids : memref<?xi32>)
+    cta_task_count(%cta_task_count : i32)
+    ranges(%ranges : memref<?xi32>) merge_ids(%merge_ids : memref<?xi32>)
+    partial_count(%partial_count : i32)
+    merges(%merges : memref<?xi32>) merge_count(%merge_count : i32)
+    scratch(%scratch : memref<?xf32>) counters(%counters : memref<?xi32>)
+    into(%output : memref<?xf32>) cta {
+^bb0(%segment: !swage.segment<f32>):
+  %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%value: f32):
+    swage.yield %value : f32
+  }
+  swage_plan.yield %sum : f32
+} partial {
+^bb0(%chunk: !swage.segment<f32>):
+  %sum = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%value: f32):
+    swage.yield %value : f32
+  }
+  swage_plan.yield %sum : f32
+} merge {
+^bb0(%partials: !swage.segment<f32>):
+  %sum = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%partial: f32):
+    swage.yield %partial : f32
+  }
+  swage_plan.yield %sum : f32
+} warp {
+^bb0(%segment: !swage.segment<f32>):
+  %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%value: f32):
+    swage.yield %value : f32
+  }
+  swage_plan.yield %sum : f32
+}
+```
+
+Traits: `RecursiveMemoryEffects`
+
+##### Operands:
+
+| Operand | Description |
+| :-----: | ----------- |
+| `values` | 1D memref of signless integer or floating-point values |
+| `offsets` | 1D memref of signless integer values |
+| `value_count` | signless integer |
+| `segment_count` | signless integer |
+| `warp_ids` | 1D memref of signless integer values |
+| `warp_task_count` | signless integer |
+| `cta_ids` | 1D memref of signless integer values |
+| `cta_task_count` | signless integer |
+| `ranges` | 1D memref of signless integer values |
+| `merge_ids` | 1D memref of signless integer values |
+| `partial_count` | signless integer |
+| `merges` | 1D memref of signless integer values |
+| `merge_count` | signless integer |
+| `scratch` | 1D memref of signless integer or floating-point values |
+| `counters` | 1D memref of signless integer values |
+| `output` | 1D memref of signless integer or floating-point values |
+
+
 #### `swage_plan.tasks` (swage_plan::TasksOp)
 
 _Run a segment program once per task, on one segment each_
@@ -296,7 +426,7 @@ the scalar result of the bound segment, which the task operation stores
 at its `into` buffer. Without one, the region writes its results itself,
 through `swage.map_store`.
 
-Traits: `AlwaysSpeculatableImplTrait`, `HasParent<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp>`, `Terminator`
+Traits: `AlwaysSpeculatableImplTrait`, `HasParent<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp, PersistentTasksOp>`, `Terminator`
 
 Interfaces: `ConditionallySpeculatable`, `NoMemoryEffect (MemoryEffectOpInterface)`
 

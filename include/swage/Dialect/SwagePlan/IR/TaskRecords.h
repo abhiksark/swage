@@ -9,7 +9,8 @@
 // The records host classification writes and a split kernel reads, as data.
 // A record is a run of i32 words in a task buffer. The classifier fills the
 // words by these fields and a lowering loads them by the same fields, so
-// the two cannot disagree about a stride.
+// the two cannot disagree about a stride. The counters of the persistent
+// queue kernel are laid out here for the same reason.
 //
 //===----------------------------------------------------------------------===//
 
@@ -29,6 +30,13 @@ enum Field : unsigned { Begin, End, Words };
 namespace merge_record {
 enum Field : unsigned { Segment, PartialBegin, PartialEnd, Words };
 } // namespace merge_record
+
+/// The counters of the persistent queue kernel: the next unclaimed task of
+/// each queue, then one count of completed partial tasks per merge, so the
+/// counter of merge `m` is at `FirstCompletion + m`.
+namespace persistent_counter {
+enum Slot : unsigned { WarpClaim, CtaClaim, PartialClaim, FirstCompletion };
+} // namespace persistent_counter
 
 } // namespace mlir::swage_plan
 

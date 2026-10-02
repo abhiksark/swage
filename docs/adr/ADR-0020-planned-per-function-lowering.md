@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 to 8 of the migration sequence are implemented
+- Status: accepted; steps 0 to 9 of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
@@ -15,11 +15,10 @@ the symbol checks before mutation), step 3 (map fusion), and step 4 (the
 plan stage and the conversion for the direct and task-id schedules, softmax
 included), step 5 (the CPU oracle on the shared patterns), step 6 (the
 split partial stage, schedule lists, and the record layouts), step 7 (the
-fused mixed kernel), and step 8 (the split merge stage). Not implemented:
-steps 9 and 10. Until
-its step lands, a part of the design is written in the conditional below,
-and the segmented lowering works as "Context" describes, except where an
-implemented step replaced it.
+fused mixed kernel), step 8 (the split merge stage), and step 9 (the
+persistent queue kernel). Not implemented: step 10, which removes the
+legacy pass names. Until it lands, the three legacy passes stay registered,
+and each of them plans and converts.
 
 Byte-identical emission is the acceptance criterion of every step through
 step 9: the committed digests of the lowered MLIR and of the PTX must not
@@ -395,8 +394,7 @@ func.func @segmented_sum(%values: memref<?xf32> {...}, %offsets: memref<?xi32> {
 Each operand group carries its types, so the optional groups (`ids`,
 `task_count`, `into`) parse without ambiguity.
 
-Operations. `tasks`, `partial_tasks`, `merge_tasks`, `fused_tasks`, and
-`yield` exist; `persistent_tasks` would be added in step 9:
+Operations. All six exist:
 
 | Operation | Operands | Regions | Bounds the operation requires |
 |---|---|---|---|
@@ -404,7 +402,7 @@ Operations. `tasks`, `partial_tasks`, `merge_tasks`, `fused_tasks`, and
 | `swage_plan.partial_tasks` | values, value_count, ranges, partial_count, scratch | 1 | range clamped to value_count; task below partial_count |
 | `swage_plan.merge_tasks` | scratch, partial_count, merges, merge_count, output, segment_count | 1 | range clamped to partial_count; output index below segment_count |
 | `swage_plan.fused_tasks` | values, offsets, output, ids, value_count, warp_task_count, cta_task_count, segment_count | 2 (warp, CTA) | as `tasks` with ids |
-| `swage_plan.persistent_tasks` | the ten buffers and six counts | 4 (CTA, partial, merge, warp) | all of the above, plus merge id below merge_count |
+| `swage_plan.persistent_tasks` | the ten buffers and six counts of the persistent layout | 4 (CTA, partial, merge, warp) | all of the above, plus merge id below merge_count |
 | `swage_plan.yield` | optional scalar | terminator | none |
 
 Notes on the operations:
@@ -429,6 +427,16 @@ Notes on the operations:
   function. "The merge never runs the element program" is a property of
   plan IR: `SwageToPlan/split-merge.mlir` plans a program with a map and a
   transformed reduction and finds no arithmetic in the merge plan.
+- The four regions of `persistent_tasks` are task regions like the
+  others: the block and warp regions bind a segment of the values and
+  yield into the output, the partial region binds a chunk of the values
+  and yields into scratch, and the merge region binds a range of scratch
+  and yields into the output. The planner fills the block region with the
+  program, copies it into the partial and warp regions, and writes the
+  identity reduction of the merge. `policyOfRegion` gives `warp` for the
+  last region and `cta` for the three before it. The operation says
+  nothing about claims, barriers, or fences; those belong to the
+  conversion.
 - `policy` reuses the `#swage_plan.policy` attribute. The task-id schedule
   uses `warp` exactly when `block_threads` equals the subgroup width. The
   direct schedule always uses `cta`.
@@ -449,7 +457,7 @@ kernel but the last is planned from a copy of the semantic function.
 | `fused-mixed` | `@f` | `fused_tasks` | target value (128) | yes |
 | `split-partial` | `@f__partial` | `partial_tasks` | target value (512) | yes |
 | `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | yes |
-| `persistent` | `@f` | `persistent_tasks` | target value (512) | step 9 |
+| `persistent` | `@f` | `persistent_tasks` | target value (512) | yes |
 | `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | yes |
 
 - `schedule` defaults to `direct` and `block-threads` to the block-task
@@ -495,8 +503,8 @@ the descriptor classifier. `swageClassifySegments` is unchanged.
 
 ### The conversion: `--swage-plan-to-gpu`
 
-Implemented in step 4 for `tasks`. The patterns of the other task
-operations are written in the conditional.
+Implemented in step 4 for `tasks` and in steps 6 to 9 for the other task
+operations.
 
 Location and shape:
 
@@ -536,13 +544,13 @@ Patterns:
 
 | Pattern | Root | Emits | Exists |
 |---|---|---|---|
-| `PlanKernelFuncPattern` | `func.func` with `swage_plan.block_threads` | module, kernel shell, launch width through the target hook; would add the workgroup claim slots when the body holds `persistent_tasks` | yes |
+| `PlanKernelFuncPattern` | `func.func` with `swage_plan.block_threads` | module, kernel shell, launch width through the target hook; the two workgroup claim slots when the body holds `persistent_tasks` | yes |
 | `PlanKernelReturnPattern` | `func.return` of a plan function | `gpu.return` | yes |
 | `TasksPattern` | `tasks` | prelude, block-uniform guard, binding (offsets loads, `clampRange`, `isLoadedIndexInRange`), then the sink | yes |
 | `PartialTasksPattern` | `partial_tasks` | prelude, guard, the range record of the chunk (`loadRecordField`, `clampRange`), then the store of the result in the scratch slot of the task | yes |
 | `MergeTasksPattern` | `merge_tasks` | the same shape over merge records: the loaded segment is compared with the segment count and gates the store | yes |
 | `FusedTasksPattern` | `fused_tasks` | the fused skeleton, with slots `block_threads / subgroupWidth`; each of its two sites binds and converts a region through `convertSegmentTask`, which `TasksPattern` uses too | yes |
-| `PersistentTasksPattern` | `persistent_tasks` | the persistent skeleton: claims, barriers, fences | step 9 |
+| `PersistentTasksPattern` | `persistent_tasks` | the persistent skeleton: claims, barriers, fences. The block and warp regions go through `convertSegmentTask`, the partial and merge regions through `convertRangeTask`, which `PartialTasksPattern` and `MergeTasksPattern` use too | yes |
 | `ReducePattern` | `swage.reduce` | identity, strided `scf.for`, element program, combine; then the shuffle tree (warp) or `gpu.all_reduce uniform` (CTA) | yes |
 | `MapStorePattern` | `swage.map_store` | the guard-free strided store loop | yes |
 
@@ -999,11 +1007,29 @@ Step 8. Split merge.
 Step 9. Persistent queue.
 
 - Files: `persistent_tasks` and `PersistentTasksPattern`; the persistent
-  branch (877-1235) deleted.
+  schedule in the planner; the counter layout in `TaskRecords.h`; the
+  persistent emitter deleted, so `--swage-segmented-reduction-to-gpu` only
+  validates its options, plans, and converts.
+- Emitted IR: none.
 - Gate: `persistent.mlir` (all four prefixes and the round trip);
   `invalid-persistent.mlir`; the `PERSISTENT` prefixes;
-  `test_persistent_runtime.py`; racecheck; ten consecutive native-tier
-  runs.
+  `test_persistent_runtime.py`, run alone thirty times; racecheck; ten
+  consecutive native-tier runs.
+- What was built differently from the sketch:
+  - The persistent pattern runs while the plan function is still its
+    parent, so it finds the claim slots through the kernel that owns the
+    parameters its operands were replaced by. The function pattern adds
+    the slots, as sketched.
+  - The conversion checks two more rules before it changes anything, for
+    plan functions written by hand: the launch width is the persistent
+    width of the target, and every region holds one capture-free identity
+    `kind<sum>` reduction. The planner admits no other program for this
+    schedule, and the queue kernel has been run with no other.
+  - The record index arithmetic of the queue kernel stays as the emitter
+    wrote it, because the kernel text is pinned: the kernel reuses its
+    index constant one for the fields of a record, and the leader
+    predicate of the prelude for its stores, where the split patterns
+    create a constant and a comparison per site.
 
 Step 10. Remove the legacy surface.
 
