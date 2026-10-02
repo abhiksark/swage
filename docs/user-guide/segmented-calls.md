@@ -56,8 +56,11 @@ stream. It does not wait for them. Reading a result, as `tolist()` or
 
 `values` and `offsets` follow
 [the offsets contract](ragged-data.md#the-offsets-contract): rank-one,
-contiguous, `torch.float32` values and `torch.int32` offsets on the current
-CUDA device. Nothing is cast, moved to another device, or repaired. An
+contiguous, `torch.float32` values and `torch.int32` or `torch.int64`
+offsets on the current CUDA device. No values are cast, and nothing is
+moved to another device or repaired. int64 offsets are checked and then
+narrowed on the host, as [int64 offsets](ragged-data.md#int64-offsets)
+describes, so offsets that PyTorch produced as int64 need no cast first. An
 argument outside the contract raises before anything is enqueued.
 
 The two calls differ in one offsets rule:
@@ -184,7 +187,8 @@ preparation for the next call:
 2. It validates the offsets on the host and, for `segment_reduce`,
    classifies every segment into warp, CTA, and split tasks.
 3. For `segment_reduce`, it uploads the task records and allocates scratch
-   for split segments.
+   for split segments. With int64 offsets it also uploads the narrowed
+   int32 copy the kernels read.
 4. It enqueues the kernels.
 
 A second call with the same offsets tensor repeats all four steps. The task

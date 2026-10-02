@@ -763,6 +763,10 @@ def _cases():
         4 * torch.randn(100_003, generator=generator),
         long_offsets,
     )
+    # int64 offsets, which a call narrows on the host with numpy alone.
+    for kind in ("sum", "softmax"):
+        _, values, offsets = cases[f"{kind}/uniform"]
+        cases[f"{kind}/int64-offsets"] = (kind, values, offsets.long())
     return cases
 
 
@@ -779,7 +783,12 @@ def _case_names():
             f"{kind}/one-long",
             f"{kind}/no-segment",
         ]
-    return [*names, "softmax/one-long"]
+    return [
+        *names,
+        "softmax/one-long",
+        "sum/int64-offsets",
+        "softmax/int64-offsets",
+    ]
 
 
 @pytest.fixture(scope="module")

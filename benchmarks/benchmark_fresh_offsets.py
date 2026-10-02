@@ -107,12 +107,18 @@ class _Layout(NamedTuple):
 
 
 class _DeviceLayout(NamedTuple):
-    """One uploaded layout with its inputs and its float64 reference."""
+    """One uploaded layout with its inputs and its float64 reference.
+
+    `offsets` are int32. `long_offsets` are the same offsets as int64, the
+    width PyTorch produces, for the candidate that times the public call on
+    them.
+    """
 
     values: object
     offsets: object
     reference: object
     tolerance: object
+    long_offsets: object
 
 
 def _arguments(argv=None):
@@ -410,6 +416,7 @@ def _candidate_names(*, triton_available):
         "swage_mixed",
         "swage_cta_call",
         "swage_public_call",
+        "swage_public_call_int64",
         "torch",
         "torch_pad_to_max",
     ]
@@ -623,6 +630,12 @@ def _configuration(
             "loading the call performs at this revision, task upload, and "
             "the launches of the selected schedule), then synchronize"
         ),
+        "swage_public_call_int64": (
+            "swage_public_call with int64 offsets, which are uploaded with "
+            "the layout and outside the timer: the same call, with the "
+            "validation of the int64 host copy, its narrowing to int32, and "
+            "the upload of the private int32 copy the kernels read"
+        ),
         "torch": (
             "torch.segment_reduce on the device offsets with its output "
             "allocation, then synchronize"
@@ -723,7 +736,8 @@ def _configuration(
             "swage.segment_reduce, the call a user makes: it selects the "
             "schedule automatically, which swage_mixed disables, so the two "
             "can run different kernels on one layout, and it has no "
-            "separate preparation sample"
+            "separate preparation sample. swage_public_call_int64 is the "
+            "same call on the int64 form of the same offsets"
         ),
         "triton_looped": (
             "every block and warp configuration is timed; none is selected"
@@ -938,6 +952,7 @@ def _upload(torch, pool, device, values_kind, seed):
                 host_offsets.to(device),
                 reference.to(device),
                 tolerance.to(device),
+                host_offsets.long().to(device),
             )
         )
     return uploaded
@@ -1012,6 +1027,16 @@ def _candidates(
 
         return call
 
+    def swage_public_call_int64():
+        output = output_of("swage_public_call_int64")
+
+        def call(layout):
+            return swage.public(
+                layout.values, layout.long_offsets, "sum", out=output
+            )
+
+        return call
+
     def torch_reduce():
         return lambda layout: torch.segment_reduce(
             layout.values, "sum", offsets=layout.offsets
@@ -1061,6 +1086,7 @@ def _candidates(
         "swage_mixed": swage_mixed,
         "swage_cta_call": swage_cta_call,
         "swage_public_call": swage_public_call,
+        "swage_public_call_int64": swage_public_call_int64,
         "torch": torch_reduce,
         "torch_pad_to_max": torch_pad_to_max,
     }

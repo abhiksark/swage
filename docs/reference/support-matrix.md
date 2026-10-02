@@ -121,7 +121,8 @@ surface than the tables above suggest for the package as a whole:
 | Argument and offsets validation on host tensors | Tested in the native tier | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU |
 | Results, schedules, streams, threads, graph capture, and resource use | Tested in the GPU tier on `sm_86` | The CUDA tests of `python/tests/mlir/test_public_segments.py` and the example test in `test_examples.py` |
 | The kinds `"sum"`, `"max"`, and `"min"` | Tested in the GPU tier on `sm_86` | Each kind runs the differential suite, the long segments, the empty segments, and its special values in `python/tests/mlir/test_public_segments.py` |
-| f32 values with int32 offsets, rank one | The only admitted data model | Other dtypes and ranks raise a `TypeError`; the same file |
+| f32 values, rank one | The only admitted values | Other dtypes and ranks raise a `TypeError`; the same file |
+| int32 and int64 offsets | Tested in the GPU tier on `sm_86` | int64 offsets are refused by their 64-bit values, give the bits of int32 offsets on every distribution of the suite, and reach a kernel only as a retained private int32 copy; other offset dtypes raise a `TypeError`; the same file |
 | A second GPU on one host | Unknown | The calls require the current device; the tests run on a host with one GPU |
 | Gradients | Rejected | `values` that require grad raise a `ValueError`; the same files |
 | Tensors created under `torch.inference_mode()` | Tested in the GPU tier on `sm_86` | `values`, `offsets`, and `out` are inference tensors in `python/tests/mlir/test_public_segments.py` |

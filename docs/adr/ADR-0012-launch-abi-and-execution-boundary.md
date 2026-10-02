@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-08-20
 - Amended: 2026-10-02, the statement about copies and synchronization
+- Amended: 2026-10-03, int64 offsets of the public segmented calls
 
 ## Context
 
@@ -27,6 +28,10 @@ loads a kernel may synchronize the context once, to unload modules that
 nothing holds any more. The private helpers copy the offsets, and
 caller-supplied task IDs, to the host when a call is validated or a plan is
 prepared, and each copy of a CUDA tensor waits for the work queued on it.
+The public segmented calls admit int64 offsets beside int32 ones. They
+validate the int64 host copy, narrow it, and upload it as a private int32
+tensor, which is the one cast a segmented call performs; the kernels never
+read the caller's int64 tensor (ADR-0022).
 PyTorch, `mlir_swage`, and `libcuda` remain lazy dependencies;
 `emit_mlir()` remains compile-only and direct kernel calls remain
 unavailable.

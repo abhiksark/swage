@@ -39,13 +39,15 @@ For `N` segments over one values buffer:
 
 - `values` is a contiguous rank-one `torch.float32` tensor.
 - `offsets` is a contiguous rank-one `torch.int32` tensor with `N + 1`
-  entries.
+  entries. The two public calls also take `torch.int64` offsets, the
+  default integer width of PyTorch.
 - `offsets[0]` is zero.
 - `offsets` never decreases. Two equal neighbors describe an empty segment.
 - `offsets[N]` is at most the number of values. Values past it belong to no
   segment. `swage.segment_softmax` is stricter: `offsets[N]` must equal the
   number of values.
-- The number of values and the number of segments are each below `2**31`.
+- The number of values and the number of segments are each below `2**31`,
+  for both offset widths.
 - `values` does not require grad.
 - For a GPU launch, both tensors are CUDA tensors on the current device.
 
@@ -59,6 +61,31 @@ size differs:
   [Segmented Calls](segmented-calls.md#arguments) states the rules.
 - The private helpers take a required `output` with at least `N` elements
   for a reduction and at least `offsets[N]` elements for a softmax.
+
+### int64 offsets
+
+The kernels read every offset as a 32-bit word. A public call that is given
+`torch.int64` offsets therefore does three things on the host, before
+anything is enqueued:
+
+1. It copies the offsets to the host as int64 and checks them against the
+   rules above. The check uses the 64-bit values, so offsets such as
+   `[0, 2**32 + 3, 5]`, which a cast to int32 would turn into valid ones,
+   are refused.
+2. It narrows the checked copy to int32. Every valid offset lies between
+   zero and the number of values, which is below `2**31`, so nothing is
+   lost.
+3. It uploads the narrowed copy as a private int32 tensor, which the
+   kernels read. For `segment_reduce` the copy travels in the tensor that
+   holds the task records, where the call uploads one. Otherwise, and for
+   `segment_softmax`, it is an upload of its own.
+
+The caller's int64 tensor is never read by a kernel. A call with int64
+offsets returns the bits of the same call with int32 offsets, and costs the
+wider host copy, the check, and the upload on top of it.
+
+The private helpers pass the caller's offsets tensor to their kernels and
+take `torch.int32` only.
 
 ### Offsets of a prepared launch
 
@@ -114,9 +141,8 @@ refused also when the new storage has the same size.
 The contract admits one layout. Each layout below is not admitted and needs
 a conversion in PyTorch first:
 
-- `int64` offsets: check that the final offset is below `2**31`, then cast
-  with `offsets.to(torch.int32)`. The cast wraps silently if the check is
-  skipped.
+- Offsets of another integer width than 32 or 64 bits: cast them with
+  `offsets.to(torch.int64)`, which loses nothing.
 - Offsets without the final entry, as `torch.nn.EmbeddingBag` takes them:
   append the number of values.
 - Offsets that start above zero, as a slice of a larger batch has them:
@@ -139,14 +165,12 @@ segment_count = 4
 
 lengths = torch.bincount(index, minlength=segment_count)
 offsets = torch.zeros(segment_count + 1, dtype=torch.int64)
-offsets[1:] = torch.cumsum(lengths, dim=0)
-assert int(offsets[-1]) < 2**31
-offsets = offsets.to(torch.int32)  # tensor([0, 2, 2, 5, 6])
+offsets[1:] = torch.cumsum(lengths, dim=0)  # tensor([0, 2, 2, 5, 6])
 ```
 
 `minlength` keeps segments that have no values, so segment 1 stays in the
-result as an empty segment. The result is the offsets example at the top of
-this page. For an unsorted index, sort first and carry the values along:
+result as an empty segment. The result holds the offsets of the example at
+the top of this page as int64, which the public calls take as they are. For an unsorted index, sort first and carry the values along:
 
 ```python
 order = torch.argsort(index, stable=True)

@@ -5,6 +5,8 @@
 This file pins what the wrapper adds and what a caller can rely on:
 
 - The argument contract. These tests use host tensors and need no GPU.
+- That int64 offsets are validated before they are narrowed, give the bits
+  of int32 offsets, and reach a kernel only as a private int32 copy.
 - Results against `torch.segment_reduce`, `torch.softmax`, and float64
   references, on the shapes of the nine benchmark distributions, on empty
   batches and segments, on one long segment, and on special values.
@@ -263,9 +265,19 @@ def test_segmented_calls_reject_values_outside_the_data_model(
     ("offsets", "error", "message"),
     [
         (
-            torch.tensor([0, 2, 2, 5, 6]),
+            torch.tensor([0, 2, 2, 5, 6], dtype=torch.int16),
             TypeError,
-            "offsets must have dtype torch.int32",
+            "offsets must have dtype torch.int32 or torch.int64",
+        ),
+        (
+            torch.tensor([0, 2, 2, 5, 6], dtype=torch.uint8),
+            TypeError,
+            "offsets must have dtype torch.int32 or torch.int64",
+        ),
+        (
+            torch.tensor([0.0, 2.0, 6.0]),
+            TypeError,
+            "offsets must have dtype torch.int32 or torch.int64",
         ),
         (
             torch.tensor([[0, 6]], dtype=torch.int32),
@@ -314,6 +326,48 @@ def test_segmented_calls_reject_offsets_outside_the_contract(
         _call(function, values, offsets)
 
 
+@pytest.mark.parametrize("function", FUNCTIONS)
+@pytest.mark.parametrize(
+    ("offsets", "message"),
+    [
+        ([[0, 6]], "offsets must have rank one"),
+        ([], "offsets must contain at least the initial zero"),
+        ([1, 6], "offsets must start at zero"),
+        ([0, 4, 3, 6], "offsets must be nondecreasing"),
+        ([0, -1, 6], "offsets must not be negative"),
+        ([0, 2, 7], "final offset 7 exceeds value count 6"),
+        # Narrowing these to int32 first would give [0, 3, 5] and
+        # [0, 2, 6], which are valid. They are refused as int64.
+        ([0, 2**32 + 3, 5], "offsets must be nondecreasing"),
+        (
+            [0, 2, 2**32 + 6],
+            "final offset 4294967302 exceeds value count 6",
+        ),
+        ([0, -(2**32), 6], "offsets must not be negative"),
+        ([2**32, 2**32 + 6], "offsets must start at zero"),
+    ],
+)
+def test_int64_offsets_are_validated_before_they_are_narrowed(
+    function, offsets, message
+):
+    """Refuse int64 offsets by their 64-bit values, in the int32 words."""
+    values, _ = _host_segments()
+    wide = torch.tensor(offsets, dtype=torch.int64)
+    error = TypeError if "rank" in message else ValueError
+
+    with pytest.raises(error, match=f"^{message}$"):
+        _call(function, values, wide)
+
+
+def test_valid_int64_offsets_pass_the_offsets_check_on_the_host():
+    """Admit int64 offsets up to the device check, as int32 offsets are."""
+    values, offsets = _host_segments()
+
+    for function in FUNCTIONS:
+        with pytest.raises((TypeError, RuntimeError), match="CUDA"):
+            _call(function, values, offsets.long())
+
+
 def test_segment_softmax_requires_offsets_that_cover_every_value():
     """Leave no element of a softmax result unwritten.
 
@@ -325,14 +379,15 @@ def test_segment_softmax_requires_offsets_that_cover_every_value():
     values, _ = _host_segments()
     short = torch.tensor([0, 2, 5], dtype=torch.int32)
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            "^offsets must end at the value count for a softmax: final "
-            "offset 5, value count 6$"
-        ),
-    ):
-        swage.segment_softmax(values, short)
+    for offsets in (short, short.long()):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "^offsets must end at the value count for a softmax: final "
+                "offset 5, value count 6$"
+            ),
+        ):
+            swage.segment_softmax(values, offsets)
 
     # The reduction passes its offsets check and stops at the device check.
     with pytest.raises((TypeError, RuntimeError), match="CUDA"):
@@ -482,6 +537,202 @@ def test_segment_reduce_matches_pytorch_and_float64(name, kind, seed):
     actual = _reduce(kind, host_values, host_offsets)
 
     _assert_reduction_matches(kind, host_values, host_offsets, actual)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("kind", [*KINDS, "softmax"])
+@pytest.mark.parametrize("name", DISTRIBUTIONS)
+def test_int64_offsets_give_the_bits_of_int32_offsets(name, kind):
+    """Return the same result whichever width the offsets are stored in.
+
+    The kernels read a private int32 copy of int64 offsets, so both calls
+    run the same kernels on the same ranges.
+    """
+    lengths = _distributions.generate_lengths(name, _SEGMENT_COUNTS[name], 0)
+    generator = torch.Generator().manual_seed(0)
+    host_values, host_offsets = _host_case(lengths, generator)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+
+    def call(offsets):
+        if kind == "softmax":
+            return swage.segment_softmax(values, offsets)
+        return swage.segment_reduce(values, offsets, kind)
+
+    narrow = call(offsets)
+    wide = call(offsets.long())
+
+    assert wide.dtype == narrow.dtype
+    assert _bits(wide.cpu()) == _bits(narrow.cpu())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("kind", KINDS)
+def test_int64_offsets_reach_the_selected_cta_schedule(kind):
+    """Take the direct-CTA selection with int64 offsets too.
+
+    That schedule uploads no task records, so the private copy of the
+    offsets is an upload of its own.
+    """
+    blocks = torch.cuda.get_device_properties(0).multi_processor_count
+    generator = torch.Generator().manual_seed(blocks)
+    lengths = torch.randint(4097, 8193, (blocks + 3,), generator=generator)
+    host_values, host_offsets = _host_case(lengths.tolist(), generator)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+
+    narrow = swage.segment_reduce(values, offsets, kind)
+    wide = swage.segment_reduce(values, offsets.long(), kind)
+
+    assert _bits(wide.cpu()) == _bits(narrow.cpu())
+    _assert_reduction_matches(kind, host_values, host_offsets, wide.cpu())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_int64_offsets_of_an_empty_batch_need_no_upload(function):
+    """Return an empty result for int64 offsets that hold no segment."""
+    values = torch.empty(0, device="cuda")
+    offsets = torch.zeros(1, dtype=torch.int64, device="cuda")
+
+    assert _call(function, values, offsets).shape == (0,)
+
+
+def _launched_and_retained(monkeypatch):
+    """Record every launch and every tensor a call retains on a stream.
+
+    Returns:
+        Two lists that fill during the test: the pointer arguments of each
+        launch, and the `(first byte, one past the last byte, stream)` of
+        each tensor that was passed to `record_stream`.
+    """
+    driver = _runtime._get_driver()
+    launches, retained = [], []
+
+    def recording(original):
+        def launch(function, grid, block, stream, arguments):
+            launches.append(arguments)
+            return original(function, grid, block, stream, arguments)
+
+        return launch
+
+    # The fused launch goes through the task-ID launch.
+    for name in ("launch_segmented", "launch_segmented_tasks"):
+        monkeypatch.setattr(driver, name, recording(getattr(driver, name)))
+    record_stream = torch.Tensor.record_stream
+
+    def retaining(tensor, stream):
+        begin = tensor.data_ptr()
+        retained.append(
+            (begin, begin + tensor.numel() * tensor.element_size(), stream)
+        )
+        return record_stream(tensor, stream)
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", retaining)
+    return launches, retained
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    "case", ["reduce-records", "reduce-selected-cta", "softmax"]
+)
+def test_a_kernel_reads_a_retained_private_copy_of_int64_offsets(
+    case, monkeypatch
+):
+    """Pass every kernel an int32 copy that outlives the call on its stream.
+
+    The caller's int64 tensor is never a kernel argument. The pointer in
+    the offsets slot lies in a tensor the call retained on the launch
+    stream with `record_stream`, so the memory of the copy is not reused
+    before the kernels ran, although the call drops the tensor when it
+    returns. The result has the bits of the int32 call, so the copy holds
+    the offsets.
+    """
+    if case == "reduce-selected-cta":
+        blocks = torch.cuda.get_device_properties(0).multi_processor_count
+        lengths = [4097 + index for index in range(blocks)]
+    else:
+        lengths = [3, 40, 0, 4100]
+    host_values, host_offsets = _host_segments(lengths)
+    values = host_values.cuda()
+    offsets = host_offsets.long().cuda()
+    function = (
+        swage.segment_softmax if case == "softmax" else swage.segment_reduce
+    )
+    expected = _call(function, values, host_offsets.cuda()).cpu()
+    torch.cuda.synchronize()
+    launches, retained = _launched_and_retained(monkeypatch)
+    side = torch.cuda.Stream()
+
+    with torch.cuda.stream(side):
+        result = _call(function, values, offsets)
+        side.synchronize()
+    # The offsets are the second pointer of every kernel that takes them.
+    # A merge kernel has six arguments and no offsets, and a partial
+    # kernel, the five-argument launch of a reduction, takes range records.
+    partial = 5 if function is swage.segment_reduce else None
+    copies = [
+        arguments[1]
+        for arguments in launches
+        if len(arguments) not in (6, partial)
+    ]
+
+    caller = (
+        offsets.data_ptr(),
+        offsets.data_ptr() + offsets.numel() * offsets.element_size(),
+    )
+    assert copies
+    for pointer in copies:
+        assert not caller[0] <= pointer < caller[1]
+        size = 4 * offsets.numel()
+        assert any(
+            begin <= pointer and pointer + size <= end
+            and stream.cuda_stream == side.cuda_stream
+            for begin, end, stream in retained
+        )
+    assert not any(
+        begin < caller[1] and caller[0] < end for begin, end, _ in retained
+    )
+    assert _bits(result.cpu()) == _bits(expected)
+
+
+@_needs_cuda
+def test_int64_calls_stay_correct_while_their_memory_is_reused():
+    """Reuse device memory right after each call and keep every result.
+
+    Each call returns before its kernels ran and drops its private offsets
+    copy. The loop then allocates and overwrites int32 tensors of the same
+    size on the same stream, which is where the allocator would hand the
+    memory of the copy out again.
+    """
+    segments = 257
+    values = torch.randn(segments * 200 + 14_000, device="cuda")
+    host_values = values.cpu()
+    side = torch.cuda.Stream()
+    torch.cuda.synchronize()
+
+    with torch.cuda.stream(side):
+        for seed in range(40):
+            generator = torch.Generator().manual_seed(seed)
+            host_offsets = torch.tensor(
+                _fresh_layout(generator, segments), dtype=torch.int32
+            )
+            offsets = host_offsets.long().cuda()
+            kind = KINDS[seed % len(KINDS)]
+            result = swage.segment_reduce(values, offsets, kind)
+            weights = swage.segment_softmax(
+                values[: int(host_offsets[-1])], offsets
+            )
+            for _ in range(4):
+                torch.full(
+                    (segments + 1,), -7, dtype=torch.int32, device="cuda"
+                )
+            _assert_reduction_matches(
+                kind, host_values, host_offsets, result.cpu()
+            )
+            _assert_softmax_matches(
+                host_values[: int(host_offsets[-1])],
+                host_offsets,
+                weights.cpu(),
+            )
 
 
 def test_the_differential_batches_reach_every_schedule():

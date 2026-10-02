@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; step 1 of the migration sequence is implemented
+- Status: accepted; steps 1 and 2 of the migration sequence are implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end
@@ -267,7 +267,22 @@ Step 1. `min`, and artifact format version 2. Implemented.
   and `sm_86`, 28 pairs.
 - The artifact is format version 2 and holds `segmented_min`.
 
-Step 2. int64 offsets. Python only. Not implemented.
+Step 2. int64 offsets. Python only. Implemented.
+
+- The shared validation of the private runner admits int64 offsets for the
+  two public launch paths, validates the int64 host copy, and narrows it.
+  The private helpers keep int32.
+- `segment_reduce` uploads the narrowed copy behind its task records, or as
+  a tensor of its own for the selected CTA schedule. `segment_softmax`
+  uploads it as a tensor of its own. A batch without segments uploads
+  nothing.
+- `python/tests/mlir/test_public_segments.py` pins the refusals by 64-bit
+  value, the bits of the int32 call on every distribution and kind and for
+  the softmax, and that every kernel reads a copy the call retained on the
+  launch stream and never the caller's tensor.
+- The fresh-offsets harness has a candidate, `swage_public_call_int64`,
+  that times the call on int64 offsets. No record holds it.
+- No kernel, no digest, and no artifact changes.
 
 Step 3. float64 reductions, rank one. Not implemented.
 

@@ -901,7 +901,11 @@ def test_rejects_wrong_offset_dtype_rank_and_undersized_output():
     """Validate tensor metadata before device or pointer access."""
     values = torch.empty(2)
     output = torch.empty(1)
-    with pytest.raises(TypeError, match="offsets must have dtype torch.int32"):
+    # The private helpers pass the caller's offsets to their kernels, so
+    # they take int32 only. The public calls narrow int64 offsets.
+    with pytest.raises(
+        TypeError, match="^offsets must have dtype torch.int32$"
+    ):
         _validate_tensors(values, torch.tensor([0, 2]), output)
     with pytest.raises(TypeError, match="offsets must have rank one"):
         _validate_tensors(

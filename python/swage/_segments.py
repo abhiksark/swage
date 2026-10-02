@@ -35,10 +35,13 @@ def segment_reduce(values, offsets, kind, *, out=None):
         values: Contiguous rank-one `torch.float32` CUDA tensor on the
             current device. It must not require grad: the call records no
             gradient.
-        offsets: Contiguous rank-one `torch.int32` tensor on the same
-            device, with one entry more than there are segments. It starts
-            at zero, never decreases, and ends at or below the number of
-            values. Two equal neighbors describe an empty segment.
+        offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
+            on the same device, with one entry more than there are
+            segments. It starts at zero, never decreases, and ends at or
+            below the number of values. Two equal neighbors describe an
+            empty segment. int64 offsets are checked and narrowed on the
+            host, and the kernels read a private int32 copy that the call
+            uploads.
         kind: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment
             is `0.0`, its maximum is negative infinity, and its minimum is
             positive infinity. A maximum or a minimum over a NaN is NaN,
@@ -107,11 +110,14 @@ def segment_softmax(values, offsets, *, out=None):
         values: Contiguous rank-one `torch.float32` CUDA tensor on the
             current device. It must not require grad: the call records no
             gradient.
-        offsets: Contiguous rank-one `torch.int32` tensor on the same
-            device, with one entry more than there are segments. It starts
-            at zero, never decreases, and ends at the number of values, so
-            every value belongs to a segment. Two equal neighbors describe
-            an empty segment, which has no result element.
+        offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
+            on the same device, with one entry more than there are
+            segments. It starts at zero, never decreases, and ends at the
+            number of values, so every value belongs to a segment. Two
+            equal neighbors describe an empty segment, which has no result
+            element. int64 offsets are checked and narrowed on the host,
+            and the kernel reads a private int32 copy that the call
+            uploads.
         out: Optional result tensor: contiguous, rank one, `torch.float32`,
             on the device of `values`, with exactly one element per value,
             sharing no memory with `values` or `offsets`, and not requiring
@@ -145,13 +151,25 @@ def segment_softmax(values, offsets, *, out=None):
     _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
     output = _result(torch, out, value_count, values)
-    value_count, segment_count, _ = _qualification._validate_shapes(
-        values, offsets, output, _validate_covering_offsets
+    value_count, segment_count, host_offsets = (
+        _qualification._validate_shapes(
+            values,
+            offsets,
+            output,
+            _validate_covering_offsets,
+            int64_offsets=True,
+        )
     )
+    # A batch without segments enqueues nothing and uploads nothing.
+    kernel_offsets = offsets
+    if segment_count:
+        kernel_offsets = _qualification._kernel_offsets(
+            torch, offsets, host_offsets
+        )
     _qualification._enqueue_softmax(
         torch,
         values,
-        offsets,
+        kernel_offsets,
         output,
         value_count,
         segment_count,

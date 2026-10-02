@@ -201,10 +201,12 @@ Parameters
 :   `values`: a contiguous rank-one `torch.float32` CUDA tensor on the
     current device. It must not require grad and must not be a lazy
     negation or conjugate view.
-:   `offsets`: a contiguous rank-one `torch.int32` tensor on the same
-    device with one entry more than there are segments. It starts at zero,
-    never decreases, and ends at or below the number of values. Values past
-    the final offset belong to no segment.
+:   `offsets`: a contiguous rank-one `torch.int32` or `torch.int64` tensor
+    on the same device with one entry more than there are segments. It
+    starts at zero, never decreases, and ends at or below the number of
+    values. Values past the final offset belong to no segment. int64
+    offsets are checked as 64-bit values and then narrowed on the host; the
+    kernels read a private int32 copy that the call uploads.
 :   `kind`: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment is
     `0.0`, its maximum is negative infinity, and its minimum is positive
     infinity. A maximum or a minimum over a NaN is NaN, and both are exact.

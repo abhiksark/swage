@@ -18,7 +18,7 @@ Segments are usable from Python through two calls with fixed programs:
 `swage.segment_reduce` computes a sum, a maximum, or a minimum per segment,
 and
 `swage.segment_softmax` computes a softmax within each segment, over
-rank-one f32 values and int32 offsets on one CUDA device. Both are newer
+rank-one f32 values and int32 or int64 offsets on one CUDA device. Both are newer
 than the released wheel. They need a native build, or an artifact directory
 that a native build wrote ahead of time. There is no public segment syntax:
 the kernel language compiles and launches one kernel, a fixed-block vector
@@ -43,7 +43,8 @@ release, except for the items marked as completed after it.
   `swage.segment_reduce(values, offsets, kind, *, out=None)` returns the
   sum, the maximum, or the minimum of every segment, and
   `swage.segment_softmax(values, offsets, *, out=None)` returns the softmax
-  within every segment. They take rank-one f32 values and int32 offsets on
+  within every segment. They take rank-one f32 values and int32 or int64
+  offsets on
   the current CUDA device, and nothing else: no other dtype, kind, or rank,
   and no gradient. A call validates and classifies its offsets on the host
   every time, so with offsets that change on every call it is slower than

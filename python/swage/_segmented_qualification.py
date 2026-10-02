@@ -105,11 +105,13 @@ def _validate_offset_sequence(offsets, value_count):
     """Validate the offset array itself and return the segment count.
 
     Args:
-        offsets: Host offsets. An int32 array, the host copy of a validated
+        offsets: Host offsets. An int32 or int64 array, the host copy of a
             tensor, is checked with array operations. Any other sequence is
             checked one element at a time, which also rejects a value that
-            is not a signed i32 integer; the dtype rules that out for the
-            array.
+            is not a signed i32 integer. An array that passes holds no value
+            outside the signed i32 range either: every offset lies between
+            the initial zero and the final offset, which is at most the
+            value count.
         value_count: Number of values the offsets index.
 
     Returns:
@@ -129,7 +131,10 @@ def _validate_offset_sequence(offsets, value_count):
     _validate_counts(value_count, segment_count)
     if offsets[0] != 0:
         raise ValueError("offsets must start at zero")
-    if isinstance(offsets, numpy.ndarray) and offsets.dtype == numpy.int32:
+    if isinstance(offsets, numpy.ndarray) and offsets.dtype in (
+        numpy.int32,
+        numpy.int64,
+    ):
         # The first decrease is the first invalid offset: every offset
         # before it is at least the initial zero, so a negative offset is
         # always a decrease.
@@ -223,15 +228,36 @@ def _validate_storage(name, tensor):
 
 
 def _validate_shapes(
-    values, offsets, output, validate_offsets, *, require_cuda=True
+    values,
+    offsets,
+    output,
+    validate_offsets,
+    *,
+    require_cuda=True,
+    int64_offsets=False,
 ):
     """Validate tensor shapes against one of the two output ABIs.
+
+    Args:
+        values: The values tensor.
+        offsets: The offsets tensor.
+        output: The result tensor.
+        validate_offsets: The validator of the output ABI, called with the
+            host offsets as an int32 array, the value count, and the number
+            of output elements.
+        require_cuda: Whether the tensors must be on the current CUDA
+            device.
+        int64_offsets: Whether `torch.int64` offsets are admitted beside
+            `torch.int32` ones. A caller that sets it must give its kernels
+            `_kernel_offsets`: a kernel reads int32 words.
 
     Returns:
         The value count, the segment count, and the offsets on the host as
         one int32 array. Copying a CUDA tensor to the host waits for the
         work queued on it; that copy is the only device synchronization
-        here, and no Python integer is created per offset.
+        here, and no Python integer is created per offset. int64 offsets
+        are validated as they are and narrowed afterwards, so a value that
+        would wrap into a valid offset is refused.
     """
     torch = _runtime._import_torch()
     for name, tensor in (
@@ -244,8 +270,13 @@ def _validate_shapes(
     for name, tensor in (("values", values), ("output", output)):
         if tensor.dtype != torch.float32:
             raise TypeError(f"{name} must have dtype torch.float32")
-    if offsets.dtype != torch.int32:
-        raise TypeError("offsets must have dtype torch.int32")
+    if offsets.dtype != torch.int32 and not (
+        int64_offsets and offsets.dtype == torch.int64
+    ):
+        raise TypeError(
+            "offsets must have dtype torch.int32"
+            + (" or torch.int64" if int64_offsets else "")
+        )
     for name, tensor in (
         ("values", values),
         ("offsets", offsets),
@@ -265,6 +296,13 @@ def _validate_shapes(
 
     value_count = values.numel()
     host_offsets = offsets.detach().cpu().numpy()
+    if offsets.dtype == torch.int64:
+        import numpy
+
+        # Valid offsets lie between zero and the value count, which is
+        # below 2**31, so the narrowing below is exact.
+        _validate_offset_sequence(host_offsets, value_count)
+        host_offsets = host_offsets.astype(numpy.int32)
     segment_count = validate_offsets(host_offsets, value_count, output.numel())
     _validate_disjoint("values", values, output)
     _validate_disjoint("offsets", offsets, output)
@@ -283,6 +321,27 @@ def _validate_shapes(
         if tensor.device.index != current_device:
             raise ValueError(f"{name} must be on the current CUDA device")
     return value_count, segment_count, host_offsets
+
+
+def _kernel_offsets(torch, offsets, host_offsets):
+    """Return the int32 offsets tensor a kernel reads.
+
+    A kernel loads each offset as an i32 word. int32 offsets are read where
+    the caller keeps them. Validated int64 offsets are uploaded as a
+    private int32 tensor on the current stream, and the caller's tensor is
+    never a kernel argument. The caller of this function retains the
+    result on the launch stream.
+
+    Args:
+        torch: The PyTorch module.
+        offsets: The validated offsets tensor of the caller.
+        host_offsets: Its int32 host copy, as `_validate_shapes` returns.
+    """
+    if offsets.dtype == torch.int32:
+        return offsets
+    return torch.tensor(
+        host_offsets, dtype=torch.int32, device=offsets.device
+    )
 
 
 def _validate_tensors(values, offsets, output, *, require_cuda=True):
@@ -1474,9 +1533,13 @@ def _launch_planned_reduction(
     result is then not a validated one. The kernels clamp every range they
     load, so such a write cannot move an access outside the buffers.
 
+    int64 offsets are admitted. The kernels read a private int32 copy of
+    them, which is uploaded behind the task records in the same tensor, or
+    as a tensor of its own for a batch that uploads no records.
+
     Args:
         values: Contiguous rank-one CUDA f32 input tensor.
-        offsets: Contiguous rank-one CUDA i32 segment offsets.
+        offsets: Contiguous rank-one CUDA i32 or i64 segment offsets.
         output: Disjoint contiguous CUDA f32 output, one value per segment.
         module_text: Native qualification MLIR with the semantic program.
         kernel_name: Name of the segment function in the module.
@@ -1492,7 +1555,7 @@ def _launch_planned_reduction(
         warp_max_elements, cta_chunk_elements
     )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, validate
+        values, offsets, output, validate, int64_offsets=True
     )
     native_swage = _native_swage()
     device = offsets.device
@@ -1523,8 +1586,8 @@ def _launch_planned_reduction(
         return None
     driver = _runtime._get_driver()
     values_pointer = values.data_ptr()
-    offsets_pointer = offsets.data_ptr()
     output_pointer = output.data_ptr()
+    narrowed = offsets.dtype != torch.int32
     if _selects_direct_cta(
         torch,
         device,
@@ -1545,6 +1608,7 @@ def _launch_planned_reduction(
         )
         _, cta_function = _load_once(driver, cta_ptx, kernel_name)
         all_tasks = _identity_ids(torch, device, segment_count)
+        kernel_offsets = _kernel_offsets(torch, offsets, host_offsets)
         stream = torch.cuda.current_stream()
         driver.launch_segmented_tasks(
             cta_function,
@@ -1553,7 +1617,7 @@ def _launch_planned_reduction(
             stream.cuda_stream,
             (
                 values_pointer,
-                offsets_pointer,
+                kernel_offsets.data_ptr(),
                 output_pointer,
                 all_tasks.data_ptr(),
                 value_count,
@@ -1561,7 +1625,7 @@ def _launch_planned_reduction(
                 segment_count,
             ),
         )
-        retained = (values, offsets, output, all_tasks)
+        retained = (values, kernel_offsets, output, all_tasks)
     else:
         # Every kernel is held before anything is uploaded or enqueued, so
         # a refused compile leaves the device untouched.
@@ -1595,12 +1659,25 @@ def _launch_planned_reduction(
                 driver, merge_ptx, f"{kernel_name}__merge"
             )
         # One upload carries every record: the warp ids, the CTA ids, the
-        # partial ranges, and the merge records, in that order.
+        # partial ranges, and the merge records, in that order. The private
+        # copy of int64 offsets follows them in the same tensor.
+        if narrowed:
+            import numpy
+
+            record_words = len(records)
+            records = numpy.concatenate(
+                (numpy.asarray(records, dtype=numpy.int32), host_offsets)
+            )
         task_records = torch.tensor(records, dtype=torch.int32, device=device)
         mixed_pointer = task_records.data_ptr()
         partial_pointer = mixed_pointer + 4 * direct_count
         merge_pointer = partial_pointer + 8 * partial_count
-        retained = (values, offsets, output, task_records)
+        if narrowed:
+            offsets_pointer = mixed_pointer + 4 * record_words
+            retained = (values, output, task_records)
+        else:
+            offsets_pointer = offsets.data_ptr()
+            retained = (values, offsets, output, task_records)
         stream = torch.cuda.current_stream()
         if direct_count:
             # A fused block serves one warp task per subgroup.

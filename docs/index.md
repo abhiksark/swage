@@ -33,7 +33,8 @@ qualification machinery or planned work.
   subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
 - `swage.segment_reduce` for `"sum"`, `"max"`, and `"min"`, and
-  `swage.segment_softmax`, over rank-one f32 values and int32 offsets on
+  `swage.segment_softmax`, over rank-one f32 values and int32 or int64
+  offsets on
   one CUDA device, when build-tree native bindings are present. The calls
   admit no other dtype, kind, or rank, record no gradient, and prepare
   their offsets on the host at every call.

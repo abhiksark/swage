@@ -293,6 +293,9 @@ The fresh-offsets harness and the comparison harness time these candidates:
   policy alone, with automatic schedule selection, which `swage_mixed`
   disables, so the two can run different kernels on one layout. No
   committed record holds this candidate.
+- In fresh offsets only, `swage_public_call_int64`: the same call on the
+  int64 form of the same offsets, which the call checks and narrows on the
+  host. No committed record holds this candidate.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.

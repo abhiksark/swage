@@ -279,6 +279,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
         "swage_mixed",
         "swage_cta_call",
         "swage_public_call",
+        "swage_public_call_int64",
         "torch",
         "torch_pad_to_max",
     )
@@ -289,6 +290,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
         "swage_mixed",
         "swage_cta_call",
         "swage_public_call",
+        "swage_public_call_int64",
         "torch",
         "torch_pad_to_max",
     ]
@@ -301,24 +303,25 @@ def test_looped_candidates_cover_the_declared_sweep(fresh_offsets):
     """Time every looped configuration instead of one chosen afterwards."""
     names = fresh_offsets._candidate_names(triton_available=True)
 
-    assert names[:5] == (
+    assert names[:6] == (
         "swage_mixed",
         "swage_cta_call",
         "swage_public_call",
+        "swage_public_call_int64",
         "torch",
         "torch_pad_to_max",
     )
-    assert len(names) == 5 + 15 + 4 + 15
-    looped = names[5:20]
+    assert len(names) == 6 + 15 + 4 + 15
+    looped = names[6:21]
     assert {name.split("_")[2] for name in looped} == {
         f"b{block}" for block in _LOOPED_BLOCKS
     }
     assert all(name.startswith("triton_looped_b") for name in looped)
-    assert names[20:24] == tuple(
+    assert names[21:25] == tuple(
         f"triton_planned_w{warps}" for warps in (1, 2, 4, 8)
     )
     # The looping matched scheduler sweeps the blocks and warps of looped.
-    assert names[24:] == tuple(
+    assert names[25:] == tuple(
         name.replace("triton_looped", "triton_planned_looped")
         for name in looped
     )
@@ -1456,6 +1459,52 @@ def test_the_public_call_candidate_times_segment_reduce_itself(
     assert row["check"]["exact_segments"] == 3 * 64
 
 
+def test_the_int64_public_call_candidate_passes_int64_offsets(
+    fresh_offsets,
+):
+    """Time the public call on offsets of the width PyTorch produces.
+
+    The candidate is `swage_public_call` with the int64 form of the same
+    offsets, uploaded with the layout and outside the timer. Its result is
+    checked against the same reference.
+    """
+    torch = pytest.importorskip("torch")
+    calls = {"swage_public_call": [], "swage_public_call_int64": []}
+
+    def public(values, offsets, kind, *, out):
+        name = (
+            "swage_public_call"
+            if offsets.dtype == torch.int32
+            else "swage_public_call_int64"
+        )
+        calls[name].append((offsets.dtype, offsets.tolist()))
+        out.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+        return out
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        swage=types.SimpleNamespace(public=public),
+        only=["swage_public_call", "swage_public_call_int64"],
+        warm_calls=0,
+    )
+
+    assert row["candidates"] == [
+        "swage_public_call",
+        "swage_public_call_int64",
+    ]
+    narrow = calls["swage_public_call"]
+    wide = calls["swage_public_call_int64"]
+    assert {dtype for dtype, _ in narrow} == {torch.int32}
+    assert {dtype for dtype, _ in wide} == {torch.int64}
+    # Both candidates run every layout, in a seeded order of their own.
+    assert sorted(offsets for _, offsets in wide) == sorted(
+        offsets for _, offsets in narrow
+    )
+    assert len(row["raw_samples_us"]["swage_public_call_int64"]) == 2
+
+
 def test_a_wrong_public_call_is_rejected(fresh_offsets):
     """Check the public candidate against the reference like any other."""
     torch = pytest.importorskip("torch")
@@ -1843,6 +1892,10 @@ def test_configuration_states_what_the_public_call_candidate_times(
     assert "swage_public_call times the public swage.segment_reduce" in policy
     assert "selects the schedule" in policy
     assert "no separate preparation sample" in policy
+    wide = configuration["timed_region"]["swage_public_call_int64"]
+    assert wide.startswith("swage_public_call with int64 offsets")
+    assert "narrowing" in wide
+    assert "swage_public_call_int64 is the same call" in policy
 
 
 def test_a_family_left_out_by_option_is_not_reported_as_skipped(
