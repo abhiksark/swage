@@ -93,6 +93,9 @@ The public segmented calls have these checks in
   destroy one CUDA event per reduction, leave device memory where it was,
   and leave nothing for the cycle collector.
 
+These checks were executed on that device from the branch that added the
+calls. The trusted GPU workflow has not executed them yet.
+
 The trusted GPU workflow runs only on `main` through the self-hosted
 `swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every
 CUDA-gated test file runs there, including one added later; hosted CI has no

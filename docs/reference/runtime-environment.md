@@ -336,9 +336,9 @@ Four conditions are refused with an error instead of being handled:
 A call works on a thread that has not used CUDA: its first PyTorch CUDA
 operation makes the context of the current device current there.
 
-One error that reaches a caller of the public calls uses the terms of the
-private helpers that raise it: the refusal under `SWAGE_NO_COMPILE=1` refers
-to the private segmented path.
+Two errors that reach a caller of the public calls use the terms of the
+code that raises them: the PyTorch errors speak of a launch, and the refusal
+under `SWAGE_NO_COMPILE=1` refers to the private segmented path.
 
 ## Specialization and cache
 
