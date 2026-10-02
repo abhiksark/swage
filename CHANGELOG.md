@@ -15,6 +15,17 @@ semantic versioning (`0.x`; anything may change).
   the host at every call, and are refused under CUDA graph capture. A
   Segmented Calls user-guide page, API reference entries, and
   `examples/segment_reduce.py` document them.
+- `python -m swage.compile --target <processor> --output <directory>` writes
+  the kernels of `swage.segment_reduce` and `swage.segment_softmax` for one
+  NVPTX processor, with a small C runtime library and a manifest, without a
+  GPU. `SWAGE_ARTIFACT_DIR` makes a process run the two calls from such a
+  directory without `mlir_swage` and with no LLVM in the process; nothing is
+  compiled, and a directory that cannot serve a call raises. The owner of an
+  artifact directory is not compared with the current user; a directory or
+  file with group or other write permission is refused.
+  `python -m swage.env` reports the selected artifact. `libSwageRuntime` and
+  `swage-c/Runtime.h` (the task classifier and a kernel launcher in plain C)
+  are built and installed beside the bindings, for Linux x86-64 only.
 - `scripts/build_native_wheel.sh` builds a `swage-compiler-native` wheel of
   `mlir_swage` from a checkout; no native wheel is published. The bindings
   record the `swage` version and source revision they were built from,
