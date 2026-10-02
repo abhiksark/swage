@@ -28,6 +28,7 @@
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
+#include "swage/Dialect/SwagePlan/IR/KernelLayout.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
@@ -666,25 +667,20 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  // The task-ID, fused, and persistent ABIs load segment IDs from a task
-  // buffer. The direct ABI uses the block index as the segment ID.
-  bool loadsSegmentIds = useTaskIds || fusedMixed || persistent;
-  SmallVector<Type> inputs{pointer, pointer, pointer};
-  if (persistent) {
-    // Stable direct IDs, split metadata, scratch, queue/dependency counters,
-    // and explicit ABI counts.
-    inputs.append({pointer, pointer, pointer, pointer, pointer, pointer,
-                   pointer, i32, i32, i32, i32, i32});
-  } else {
-    if (loadsSegmentIds)
-      inputs.push_back(pointer);
-    inputs.append({i32, i32});
-    if (fusedMixed)
-      inputs.push_back(i32);
-  }
-  // The segment count that bounds the loaded segment IDs.
-  if (loadsSegmentIds)
-    inputs.push_back(i32);
+  // The task-ID, fused, and persistent kernels load segment IDs from a task
+  // buffer. The direct kernel uses the block index as the segment ID.
+  using swage_plan::KernelArgument;
+  swage_plan::KernelKind kind = swage_plan::KernelKind::Direct;
+  if (persistent)
+    kind = swage_plan::KernelKind::Persistent;
+  else if (fusedMixed)
+    kind = swage_plan::KernelKind::FusedMixed;
+  else if (useTaskIds)
+    kind = swage_plan::KernelKind::TaskIds;
+  const swage_plan::KernelLayout layout = swage_plan::kernelLayout(kind);
+  SmallVector<Type> inputs;
+  for (KernelArgument parameter : layout.arguments())
+    inputs.push_back(swage_plan::isBuffer(parameter) ? pointer : i32);
   auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel =
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
@@ -700,25 +696,21 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   }
 
   Block *entry = &kernel.getBody().front();
+  // The entry block may carry workgroup attributions after the parameters,
+  // so a parameter is found through the layout and never from the end.
+  auto argument = [&](KernelArgument parameter) {
+    return Value(entry->getArgument(layout.indexOf(parameter)));
+  };
   builder.setInsertionPointToStart(entry);
   Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
   Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
   Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
-  // Every ABI built here passes the value count as its first i32, directly
-  // after the pointers.
-  unsigned valueCountIndex = 3;
-  if (persistent)
-    valueCountIndex = 10;
-  else if (loadsSegmentIds)
-    valueCountIndex = 4;
-  Value valueCount = entry->getArgument(valueCountIndex);
-  // Every ABI built here passes the segment count as its last i32. The
-  // direct ABI compares it with the block index. The others bound each
-  // loaded segment ID with it. The entry block may carry workgroup
-  // attributions after the ABI arguments, so the index comes from the type.
-  Value segmentCount = entry->getArgument(inputs.size() - 1);
+  Value valueCount = argument(KernelArgument::ValueCount);
+  // The direct kernel compares the segment count with the block index. The
+  // others bound each loaded segment ID with it.
+  Value segmentCount = argument(KernelArgument::SegmentCount);
   auto loadTaskWord = [&](OpBuilder &body, Location bodyLoc, Value words,
                           Value wordIndex) {
     Value wordIndex64 =
@@ -753,8 +745,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       startIndex64 = arith::IndexCastOp::create(body, bodyLoc,
                                                 body.getI64Type(), startIndex);
     }
-    Value startAddress = LLVM::GEPOp::create(
-        body, bodyLoc, pointer, i32, entry->getArgument(1), startIndex64);
+    Value startAddress =
+        LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
+                            argument(KernelArgument::Offsets), startIndex64);
     Value startI32 = LLVM::LoadOp::create(body, bodyLoc, i32, startAddress);
     Value endIndex = arith::AddIOp::create(body, bodyLoc, segmentId, one);
     if (segmentInRange)
@@ -762,8 +755,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                          endIndex, zero);
     Value endIndex64 =
         arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), endIndex);
-    Value endAddress = LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
-                                           entry->getArgument(1), endIndex64);
+    Value endAddress =
+        LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
+                            argument(KernelArgument::Offsets), endIndex64);
     Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
     // The offsets come from the caller's buffer at launch time; bound them
     // here because host validation only saw an earlier snapshot.
@@ -782,8 +776,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               ValueRange accumulator) {
             Value index64 = arith::IndexCastOp::create(
                 loop, loopLoc, loop.getI64Type(), index);
-            Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                                entry->getArgument(0), index64);
+            Value address =
+                LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                    argument(KernelArgument::Values), index64);
             Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
             value = evaluateElement(loop, stage.element, value, results);
             scf::YieldOp::create(
@@ -821,9 +816,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
             arith::AndIOp::create(body, bodyLoc, mayStore, segmentInRange);
       scf::IfOp::create(
           body, bodyLoc, mayStore, [&](OpBuilder &store, Location storeLoc) {
-            Value outputAddress =
-                LLVM::GEPOp::create(store, storeLoc, pointer, f32,
-                                    entry->getArgument(2), segmentId64);
+            Value outputAddress = LLVM::GEPOp::create(
+                store, storeLoc, pointer, f32, argument(KernelArgument::Output),
+                segmentId64);
             LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
             scf::YieldOp::create(store, storeLoc);
           });
@@ -840,12 +835,14 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
         [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
           Value index64 = arith::IndexCastOp::create(loop, loopLoc,
                                                      loop.getI64Type(), index);
-          Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                              entry->getArgument(0), index64);
+          Value address =
+              LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                  argument(KernelArgument::Values), index64);
           Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
           value = evaluateElement(loop, program.mapStore, value, results);
-          Value outputAddress = LLVM::GEPOp::create(
-              loop, loopLoc, pointer, f32, entry->getArgument(2), index64);
+          Value outputAddress =
+              LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                  argument(KernelArgument::Output), index64);
           LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
           scf::YieldOp::create(loop, loopLoc);
         });
@@ -880,7 +877,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       Value counterOffset =
           arith::ConstantIntOp::create(body, claimLoc, counterIndex, 64);
       Value counterAddress = LLVM::GEPOp::create(
-          body, claimLoc, pointer, i32, entry->getArgument(9), counterOffset);
+          body, claimLoc, pointer, i32, argument(KernelArgument::Counters),
+          counterOffset);
       auto leaderClaim = scf::IfOp::create(body, claimLoc, TypeRange{i32},
                                            leader, /*withElseRegion=*/true);
       body.setInsertionPointToStart(&leaderClaim.getThenRegion().front());
@@ -912,7 +910,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // short-segment work. A CTA that observes the queue empty moves on while
     // another CTA may still be reducing its final long segment.
     Value firstCTA = claim(builder, loc, 1, firstThread, false, oneI32);
-    Value ctaTaskCount = entry->getArgument(12);
+    Value ctaTaskCount = argument(KernelArgument::CtaTaskCount);
     auto ctaLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                         ValueRange{firstCTA});
     Block *ctaBefore =
@@ -928,8 +926,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value ctaTask = ctaAfter->getArgument(0);
     Value ctaTaskIndex = arith::IndexCastOp::create(
         builder, loc, builder.getIndexType(), ctaTask);
-    emitTaskSegment(builder, loc, entry->getArgument(4), ctaTaskIndex, threadId,
-                    block, false);
+    emitTaskSegment(builder, loc, argument(KernelArgument::CtaIds),
+                    ctaTaskIndex, threadId, block, false);
     gpu::BarrierOp::create(builder, loc);
     Value nextCTA = claim(builder, loc, 1, firstThread, false, oneI32);
     scf::YieldOp::create(builder, loc, nextCTA);
@@ -944,7 +942,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // CTA observing the final completion performs the only merge and output
     // store for that dependency group, so workers never spin or deadlock.
     Value firstPartial = claim(builder, loc, 2, firstThread, false, fourI32);
-    Value partialTaskCount = entry->getArgument(13);
+    Value partialTaskCount = argument(KernelArgument::PartialCount);
     auto partialLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                             ValueRange{firstPartial});
     Block *partialBefore =
@@ -975,10 +973,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value partialBase = arith::MulIOp::create(builder, loc, partialIndex, two);
     Value partialEndIndex =
         arith::AddIOp::create(builder, loc, partialBase, one);
-    Value partialBeginI32 =
-        loadTaskWord(builder, loc, entry->getArgument(5), partialBase);
-    Value partialEndI32 =
-        loadTaskWord(builder, loc, entry->getArgument(5), partialEndIndex);
+    Value partialBeginI32 = loadTaskWord(
+        builder, loc, argument(KernelArgument::PartialRanges), partialBase);
+    Value partialEndI32 = loadTaskWord(
+        builder, loc, argument(KernelArgument::PartialRanges), partialEndIndex);
     // Partial ranges index the values buffer, so they take the same bound as
     // the direct ranges.
     Value partialBegin;
@@ -995,8 +993,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
             ValueRange accumulator) {
           Value index64 = arith::IndexCastOp::create(loop, loopLoc,
                                                      loop.getI64Type(), index);
-          Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                              entry->getArgument(0), index64);
+          Value address =
+              LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                  argument(KernelArgument::Values), index64);
           Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
           scf::YieldOp::create(loop, loopLoc,
                                combine(loop, loopLoc, ReductionKind::Sum,
@@ -1010,9 +1009,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
         builder, loc, firstThread, [&](OpBuilder &store, Location storeLoc) {
           Value partialIndex64 = arith::IndexCastOp::create(
               store, storeLoc, store.getI64Type(), partialIndex);
-          Value scratchAddress =
-              LLVM::GEPOp::create(store, storeLoc, pointer, f32,
-                                  entry->getArgument(8), partialIndex64);
+          Value scratchAddress = LLVM::GEPOp::create(
+              store, storeLoc, pointer, f32, argument(KernelArgument::Scratch),
+              partialIndex64);
           LLVM::StoreOp::create(store, storeLoc, partialTotal, scratchAddress);
           scf::YieldOp::create(store, storeLoc);
         });
@@ -1028,12 +1027,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // range updates no counter, reads no record, and publishes -1. This
     // branch runs in the leader alone and holds no barrier.
     Value completionSlot = one;
-    Value mergeCount = entry->getArgument(14);
+    Value mergeCount = argument(KernelArgument::MergeCount);
     scf::IfOp::create(
         builder, loc, firstThread,
         [&](OpBuilder &publish, Location publishLoc) {
-          Value mergeIdI32 = loadTaskWord(publish, publishLoc,
-                                          entry->getArgument(6), partialIndex);
+          Value mergeIdI32 = loadTaskWord(
+              publish, publishLoc, argument(KernelArgument::PartialMergeIds),
+              partialIndex);
           Value mergeInRange =
               isLoadedIndexInRange(publish, publishLoc, mergeIdI32, mergeCount);
           auto published = scf::IfOp::create(publish, publishLoc,
@@ -1048,9 +1048,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               publish, publishLoc, completionBase, mergeId);
           Value completionIndex64 = arith::IndexCastOp::create(
               publish, publishLoc, publish.getI64Type(), completionIndex);
-          Value completionAddress =
-              LLVM::GEPOp::create(publish, publishLoc, pointer, i32,
-                                  entry->getArgument(9), completionIndex64);
+          Value completionAddress = LLVM::GEPOp::create(
+              publish, publishLoc, pointer, i32,
+              argument(KernelArgument::Counters), completionIndex64);
 
           Value three = arith::ConstantIndexOp::create(publish, publishLoc, 3);
           Value mergeBase =
@@ -1060,9 +1060,11 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           Value mergeEndIndex =
               arith::AddIOp::create(publish, publishLoc, mergeBeginIndex, one);
           Value mergeBegin = loadTaskIndex(
-              publish, publishLoc, entry->getArgument(7), mergeBeginIndex);
+              publish, publishLoc, argument(KernelArgument::MergeRecords),
+              mergeBeginIndex);
           Value mergeEnd = loadTaskIndex(publish, publishLoc,
-                                         entry->getArgument(7), mergeEndIndex);
+                                         argument(KernelArgument::MergeRecords),
+                                         mergeEndIndex);
           Value expectedPartials =
               arith::SubIOp::create(publish, publishLoc, mergeEnd, mergeBegin);
           Value expectedPartialsI32 = arith::IndexCastOp::create(
@@ -1124,15 +1126,18 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           // store. The merge itself stays unconditional, which keeps its
           // all-reduce under the block-uniform guard alone.
           Value outputSegmentI32 =
-              loadTaskWord(merge, mergeLoc, entry->getArgument(7), mergeBase);
+              loadTaskWord(merge, mergeLoc,
+                           argument(KernelArgument::MergeRecords), mergeBase);
           Value outputInRange = isLoadedIndexInRange(
               merge, mergeLoc, outputSegmentI32, segmentCount);
           Value outputSegment = arith::IndexCastOp::create(
               merge, mergeLoc, merge.getIndexType(), outputSegmentI32);
           Value mergeBeginI32 = loadTaskWord(
-              merge, mergeLoc, entry->getArgument(7), mergeBeginIndex);
+              merge, mergeLoc, argument(KernelArgument::MergeRecords),
+              mergeBeginIndex);
           Value mergeEndI32 = loadTaskWord(
-              merge, mergeLoc, entry->getArgument(7), mergeEndIndex);
+              merge, mergeLoc, argument(KernelArgument::MergeRecords),
+              mergeEndIndex);
           // Merge ranges index scratch, which holds one slot per partial, so
           // the partial count bounds them.
           Value mergeBegin;
@@ -1150,9 +1155,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                   ValueRange accumulator) {
                 Value index64 = arith::IndexCastOp::create(
                     loop, loopLoc, loop.getI64Type(), index);
-                Value address =
-                    LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                        entry->getArgument(8), index64);
+                Value address = LLVM::GEPOp::create(
+                    loop, loopLoc, pointer, f32,
+                    argument(KernelArgument::Scratch), index64);
                 Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
                 scf::YieldOp::create(loop, loopLoc,
                                      combine(loop, loopLoc, ReductionKind::Sum,
@@ -1167,9 +1172,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
               [&](OpBuilder &store, Location storeLoc) {
                 Value outputIndex64 = arith::IndexCastOp::create(
                     store, storeLoc, store.getI64Type(), outputSegment);
-                Value outputAddress =
-                    LLVM::GEPOp::create(store, storeLoc, pointer, f32,
-                                        entry->getArgument(2), outputIndex64);
+                Value outputAddress = LLVM::GEPOp::create(
+                    store, storeLoc, pointer, f32,
+                    argument(KernelArgument::Output), outputIndex64);
                 LLVM::StoreOp::create(store, storeLoc, mergeTotal,
                                       outputAddress);
                 scf::YieldOp::create(store, storeLoc);
@@ -1190,7 +1195,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value firstLane = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, lane, zero);
     Value firstWarp = claim(builder, loc, 0, firstLane, true, eightI32);
-    Value warpTaskCount = entry->getArgument(11);
+    Value warpTaskCount = argument(KernelArgument::WarpTaskCount);
     auto warpLoop = scf::WhileOp::create(builder, loc, TypeRange{i32},
                                          ValueRange{firstWarp});
     Block *warpBefore =
@@ -1216,8 +1221,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                             warpBatchEndIndex, one);
     builder.setInsertionPointToStart(warpBatchLoop.getBody());
     Value warpTaskIndex = warpBatchLoop.getInductionVar();
-    emitTaskSegment(builder, loc, entry->getArgument(3), warpTaskIndex, lane,
-                    warp, true);
+    emitTaskSegment(builder, loc, argument(KernelArgument::WarpIds),
+                    warpTaskIndex, lane, warp, true);
     builder.setInsertionPointAfter(warpBatchLoop);
     Value nextWarp = claim(builder, loc, 0, firstLane, true, eightI32);
     scf::YieldOp::create(builder, loc, nextWarp);
@@ -1236,10 +1241,12 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     Value four = arith::ConstantIndexOp::create(builder, loc, slots);
     Value warp =
         arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
-    Value warpTaskCount = arith::IndexCastOp::create(
-        builder, loc, builder.getIndexType(), entry->getArgument(5));
-    Value ctaTaskCount = arith::IndexCastOp::create(
-        builder, loc, builder.getIndexType(), entry->getArgument(6));
+    Value warpTaskCount =
+        arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                   argument(KernelArgument::WarpTaskCount));
+    Value ctaTaskCount =
+        arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                   argument(KernelArgument::CtaTaskCount));
     Value roundedWarpTaskCount =
         arith::AddIOp::create(builder, loc, warpTaskCount, three);
     Value warpBlockCount =
@@ -1263,8 +1270,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
           scf::IfOp::create(warpBlock, warpLoc, inRange,
                             [&](OpBuilder &task, Location taskLoc) {
                               emitTaskSegment(task, taskLoc,
-                                              entry->getArgument(3), warpTaskId,
-                                              lane, warp, true);
+                                              argument(KernelArgument::TaskIds),
+                                              warpTaskId, lane, warp, true);
                               scf::YieldOp::create(task, taskLoc);
                             });
           scf::YieldOp::create(warpBlock, warpLoc);
@@ -1279,9 +1286,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                             [&](OpBuilder &task, Location taskLoc) {
                               Value mixedTaskId = arith::AddIOp::create(
                                   task, taskLoc, warpTaskCount, ctaTaskId);
-                              emitTaskSegment(
-                                  task, taskLoc, entry->getArgument(3),
-                                  mixedTaskId, threadId, block, false);
+                              emitTaskSegment(task, taskLoc,
+                                              argument(KernelArgument::TaskIds),
+                                              mixedTaskId, threadId, block,
+                                              false);
                               scf::YieldOp::create(task, taskLoc);
                             });
           scf::YieldOp::create(ctaBlock, ctaLoc);
@@ -1291,17 +1299,20 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     return;
   }
 
-  Value taskCount =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                 entry->getArgument(useTaskIds ? 5 : 4));
+  // One block per task with a task buffer, and one per segment without.
+  Value taskCount = arith::IndexCastOp::create(
+      builder, loc, builder.getIndexType(),
+      argument(useTaskIds ? KernelArgument::TaskCount
+                          : KernelArgument::SegmentCount));
   Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
                                         taskIndex, taskCount);
 
   scf::IfOp::create(
       builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
         if (useTaskIds)
-          emitTaskSegment(body, bodyLoc, entry->getArgument(3), taskIndex,
-                          threadId, block, blockSize == target.subgroupWidth);
+          emitTaskSegment(body, bodyLoc, argument(KernelArgument::TaskIds),
+                          taskIndex, threadId, block,
+                          blockSize == target.subgroupWidth);
         else
           emitSegment(body, bodyLoc, taskIndex, Value(), threadId, block,
                       false);
@@ -1327,12 +1338,16 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  SmallVector<Type> inputs{pointer, pointer, pointer, i32, i32};
-  // A merge loads its output segment from a record, so its ABI ends with the
-  // segment count that bounds it. A partial writes the scratch slot of its
-  // own block index.
-  if (merge)
-    inputs.push_back(i32);
+  // A merge loads its output segment from a record, so its parameters end
+  // with the segment count that bounds it. A partial writes the scratch slot
+  // of its own block index.
+  using swage_plan::KernelArgument;
+  const swage_plan::KernelLayout layout =
+      swage_plan::kernelLayout(merge ? swage_plan::KernelKind::SplitMerge
+                                     : swage_plan::KernelKind::SplitPartial);
+  SmallVector<Type> inputs;
+  for (KernelArgument parameter : layout.arguments())
+    inputs.push_back(swage_plan::isBuffer(parameter) ? pointer : i32);
   auto kernelType = FunctionType::get(module.getContext(), inputs, {});
   auto kernel = gpu::GPUFuncOp::create(
       builder, loc, source.getName().str() + suffix, kernelType);
@@ -1341,13 +1356,28 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
   target.pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
 
   Block *entry = &kernel.getBody().front();
+  auto argument = [&](KernelArgument parameter) {
+    return Value(entry->getArgument(layout.indexOf(parameter)));
+  };
+  // A partial reduces a range of values into scratch. A merge reduces a
+  // range of scratch into the output.
+  Value reduced =
+      argument(merge ? KernelArgument::Scratch : KernelArgument::Values);
+  Value reducedCount = argument(merge ? KernelArgument::PartialCount
+                                      : KernelArgument::ValueCount);
+  Value records = argument(merge ? KernelArgument::MergeRecords
+                                 : KernelArgument::PartialRanges);
+  Value sink =
+      argument(merge ? KernelArgument::Output : KernelArgument::Scratch);
   builder.setInsertionPointToStart(entry);
   Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
   Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
   Value taskCount = arith::IndexCastOp::create(
-      builder, loc, builder.getIndexType(), entry->getArgument(4));
+      builder, loc, builder.getIndexType(),
+      argument(merge ? KernelArgument::MergeCount
+                     : KernelArgument::PartialCount));
   Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
                                         taskIndex, taskCount);
 
@@ -1357,7 +1387,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
             arith::ConstantIndexOp::create(body, bodyLoc, merge ? 3 : 2);
         Value recordBase =
             arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
-        Value recordPointer = entry->getArgument(merge ? 2 : 1);
+        Value recordPointer = records;
         auto loadRecord = [&](int64_t field) {
           Value index = recordBase;
           if (field)
@@ -1380,21 +1410,22 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
         int64_t rangeField = 0;
         if (merge) {
           Value outputSegmentI32 = loadRecord(0);
-          outputInRange = isLoadedIndexInRange(body, bodyLoc, outputSegmentI32,
-                                               entry->getArgument(5));
+          outputInRange =
+              isLoadedIndexInRange(body, bodyLoc, outputSegmentI32,
+                                   argument(KernelArgument::SegmentCount));
           outputIndex = arith::IndexCastOp::create(
               body, bodyLoc, body.getIndexType(), outputSegmentI32);
           rangeField = 1;
         }
-        // Both split ABIs pass the buffer the range indexes as their first
-        // pointer and its length as their first i32: values and the value
-        // count for a partial, scratch and the partial count for a merge.
+        // The range indexes the buffer this kernel reduces, and that
+        // buffer's count bounds it: values and the value count for a
+        // partial, scratch and the partial count for a merge.
         Value beginI32 = loadRecord(rangeField);
         Value endI32 = loadRecord(rangeField + 1);
         Value begin;
         Value end;
         std::tie(begin, end) =
-            clampRange(body, bodyLoc, beginI32, endI32, entry->getArgument(3));
+            clampRange(body, bodyLoc, beginI32, endI32, reducedCount);
         Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
         Value identity = identityFor(body, bodyLoc, stage.kind);
         auto local = scf::ForOp::create(
@@ -1403,8 +1434,8 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
                 ValueRange accumulator) {
               Value index64 = arith::IndexCastOp::create(
                   loop, loopLoc, loop.getI64Type(), index);
-              Value address = LLVM::GEPOp::create(
-                  loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
+              Value address = LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
+                                                  reduced, index64);
               Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
               // Only input elements are transformed; scratch holds completed
               // partial reductions and must never run the element program.
@@ -1430,8 +1461,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
               Value outputIndex64 = arith::IndexCastOp::create(
                   store, storeLoc, store.getI64Type(), outputIndex);
               Value outputAddress = LLVM::GEPOp::create(
-                  store, storeLoc, pointer, f32,
-                  entry->getArgument(merge ? 1 : 2), outputIndex64);
+                  store, storeLoc, pointer, f32, sink, outputIndex64);
               LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
               scf::YieldOp::create(store, storeLoc);
             });
