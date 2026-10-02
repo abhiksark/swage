@@ -179,7 +179,9 @@ void buildPersistentProgram(ModuleOp module, func::FuncOp source,
     return Value(entry->getArgument(layout.indexOf(parameter)));
   };
   builder.setInsertionPointToStart(entry);
-  Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
+  // A resident block claims its tasks and never reads its block index. The
+  // operation stays because the kernel text is pinned by its digest.
+  gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
   Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
