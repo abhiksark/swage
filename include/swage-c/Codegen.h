@@ -22,6 +22,15 @@
 //   The dialects of the input itself (swage, func, arith, math, memref,
 //   vector) must already be loaded, which parsing the module ensures.
 //
+// Code generation
+//   A compile function lowers the clone to the LLVM dialect, translates it
+//   to LLVM IR, runs a fixed list of LLVM passes on that IR, and emits PTX
+//   with the NVPTX backend. The passes keep the kernel name, its parameters,
+//   its launch width, each barrier, warp shuffle, memory fence, and atomic,
+//   and the result bits of its floating-point arithmetic. The lowered module
+//   that loweredCallback receives is the MLIR before the translation, so the
+//   effect of the LLVM passes shows in the PTX and not in that text.
+//
 // Threads
 //   A call uses the context of its module the way a pass pipeline does:
 //   no other thread may use that context, or any IR in it, until the call
