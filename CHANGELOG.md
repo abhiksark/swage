@@ -151,6 +151,10 @@ semantic versioning (`0.x`; anything may change).
   host int32 buffer with no per-element Python work and parses each program
   once per process; the Python plan derivation is now a property test
   against the native classifier. The private path now needs numpy.
+- Private segmented preparation classifies each layout from the offsets
+  buffer without the module (`swageClassifySegments`), admits a program once
+  per pair of planning limits, uploads all task records in one copy, and
+  shares the segment ids of the pure policies across preparations.
 - The code generation C API states its contract in `swage-c/Codegen.h` and
   reports every failure with a diagnostic. The fixed-block lowering rejects
   scalable vectors and named memory spaces with a diagnostic, and several
