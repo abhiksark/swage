@@ -5,9 +5,10 @@
 Canonical segmented sum, max, and min execute through a sequential CPU
 oracle and a one-CTA GPU path. This page records the exact internal
 contracts; none of them is a public API. The public
-`swage.segment_reduce` runs the identity sum, max, and min through the
-planned path, over f32 or f64 values, and [Sum rounding](#sum-rounding) says
-which schedule it gets.
+`swage.segment_reduce` runs the identity sum, max, min, and mean through
+the planned path, over f32 or f64 values, and [Sum rounding](#sum-rounding)
+says which schedule it gets. A mean is a sum with a division, as
+[Mean](#mean) describes.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
@@ -88,6 +89,49 @@ Two programs stay f32 only:
 A compile-only test scans the PTX of every f64 kernel with the element type
 of the kernel: an instruction of the other width is a violation, as is a
 fused multiply-add, another rounding mode, and flush-to-zero.
+
+## Mean
+
+A mean is not a reduction kind. Its program is a `kind<sum>` reduction,
+`swage.extent` of the same segment, and one division, which
+[Textual Swage IR](../language/swage-ir.md#swageextent) shows. The division
+runs once per segment, after the threads of a task combined their sums:
+
+- **Task kernels and the oracle.** The extent is the clamped end of the
+  segment minus its clamped start. It is converted to the count type and
+  then to the element type, and it divides the combined sum. Every thread
+  computes the quotient, and the thread that stores the sum of a sum
+  program stores it.
+- **Split.** The partial kernel is the partial kernel of the sum: a chunk
+  stores its raw sum. The merge sums the partial sums and divides once. It
+  reads the extent of its segment from the range records of the partial
+  tasks, as [Split Execution](split-execution.md) describes, because its
+  bound range is scratch.
+- **Persistent execution** refuses a mean.
+
+The results follow from the composition:
+
+- A mean is the sum of the same schedule on the same batch divided by the
+  length as a value of the element type, bit for bit. The tests compare it
+  with the sum program on every static schedule and on the one-CTA path, in
+  both element types, at lengths that include 4097, 100,003, and 1,048,577.
+- An empty segment gives NaN, zero divided by zero. The tests compare it
+  with `isnan`, because the sign and the payload of that NaN are not
+  specified.
+- A NaN element gives NaN. A sum that overflows gives an infinite mean,
+  also when the exact mean is finite.
+- A mean lies within `(k + 1) * eps * sum(|x|) / n` of the exact mean, with
+  the `k` and the `eps` of [Error bound](#error-bound) and `n` the length.
+  The extra unit covers the division and the conversion of the length,
+  which is exact up to 16,777,216 elements in f32 and always exact in f64.
+  The bound holds when the sum does not overflow and the mean is not
+  subnormal. For the public call `k + 1` is at most 71. The tests compare
+  the public mean with the exactly rounded mean, formed in rational
+  arithmetic.
+- The schedule of a mean is the schedule of its sum: the division adds no
+  element work, so the selection rule treats both alike.
+
+All of this is measured on the RTX A6000 (`sm_86`).
 
 ## Sum rounding
 

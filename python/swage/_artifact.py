@@ -73,7 +73,7 @@ _BLOCK_WIDTHS = {
     "cta_block_threads": _CTA_BLOCK,
     "split_block_threads": _SPLIT_BLOCK,
 }
-def _reduction_kernels(scalar):
+def _reduction_kernels(scalar, reads_extent=False):
     """Return the kernels `segment_reduce` can request for one program.
 
     The pure warp kernel of the private prepared path is not among them: no
@@ -82,9 +82,13 @@ def _reduction_kernels(scalar):
     Args:
         scalar: The C type of one element of the values, the scratch, and
             the output: `"float"` for an f32 program, `"double"` for f64.
+        reads_extent: Whether the program divides by the extent of its
+            segment, as a mean does. Its merge kernel then takes the
+            partial range records as a fourth buffer.
     """
     values = ("values", f"const {scalar}*")
     output = ("output", f"{scalar}*")
+    ranges = ("partial_ranges", "const int32_t*")
     return (
         _Kernel(
             "cta",
@@ -127,7 +131,7 @@ def _reduction_kernels(scalar):
             "__partial",
             (
                 values,
-                ("partial_ranges", "const int32_t*"),
+                ranges,
                 ("scratch", f"{scalar}*"),
                 _VALUE_COUNT,
                 _PARTIAL_COUNT,
@@ -143,6 +147,7 @@ def _reduction_kernels(scalar):
                 ("scratch", f"const {scalar}*"),
                 output,
                 ("merge_records", "const int32_t*"),
+                *((ranges,) if reads_extent else ()),
                 _PARTIAL_COUNT,
                 ("merge_count", "int32_t"),
                 _SEGMENT_COUNT,
@@ -153,6 +158,8 @@ def _reduction_kernels(scalar):
 
 _REDUCTION_KERNELS = _reduction_kernels("float")
 _REDUCTION_KERNELS_F64 = _reduction_kernels("double")
+_MEAN_KERNELS = _reduction_kernels("float", reads_extent=True)
+_MEAN_KERNELS_F64 = _reduction_kernels("double", reads_extent=True)
 # The one kernel `segment_softmax` launches. Its value count is the length
 # of the shorter of the values and output buffers.
 _SOFTMAX_KERNELS = (
@@ -172,9 +179,11 @@ _PROGRAMS = {
     "segmented_sum": _REDUCTION_KERNELS,
     "segmented_max": _REDUCTION_KERNELS,
     "segmented_min": _REDUCTION_KERNELS,
+    "segmented_mean": _MEAN_KERNELS,
     "segmented_sum_f64": _REDUCTION_KERNELS_F64,
     "segmented_max_f64": _REDUCTION_KERNELS_F64,
     "segmented_min_f64": _REDUCTION_KERNELS_F64,
+    "segmented_mean_f64": _MEAN_KERNELS_F64,
     "ragged_softmax": _SOFTMAX_KERNELS,
 }
 

@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; steps 1 to 3 of the migration sequence are implemented
+- Status: accepted; steps 1 to 4 of the migration sequence are implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end
@@ -89,19 +89,19 @@ The reasons for a composition:
 
 By layer:
 
-- Admission would learn `swage.extent` and a scalar epilogue of exactly
+- Admission admits `swage.extent` and a scalar epilogue of exactly
   `arith.index_cast`, `arith.sitofp`, and `arith.divf` after the
   reductions.
 - The regions of `swage_plan.tasks`, `swage_plan.fused_tasks`, and
-  `swage_plan.merge_tasks` would take an optional second argument, the
-  extent of the semantic segment of the task. `swage_plan.partial_tasks`
-  never takes it: a partial task yields the raw sum, and the merge sums the
-  partial results and divides once.
-- A merge would get its extent from the partial range records, through one
+  `swage_plan.merge_tasks` take an optional second argument, the extent of
+  the semantic segment of the task. `swage_plan.partial_tasks` never takes
+  it: a partial task yields the raw sum, and the merge sums the partial
+  results and divides once.
+- A merge gets its extent from the partial range records, through one
   optional operand on `merge_tasks`. The chunks of a split segment are
   consecutive records, so the extent is the end of the last minus the begin
   of the first. No existing kernel, record, or launch argument list
-  changes.
+  changed.
 - An empty segment gives NaN, from zero divided by zero, as
   `torch.segment_reduce` returns.
 
@@ -346,7 +346,55 @@ What the first runs on a device showed, on the RTX A6000 (`sm_86`):
 
 Nothing the device showed contradicts the decision.
 
-Step 4. `mean`, both dtypes, rank one. Not implemented.
+Step 4. `mean`, both dtypes, rank one. Implemented.
+
+- Admission collects `swage.extent` and the three operations of the
+  epilogue and admits one shape: the extent of the segment of the function,
+  cast to the count type, converted to the element type, divides one
+  reduction result, and the quotient is what the function stores.
+- The plan regions of `tasks`, `fused_tasks`, and `merge_tasks` take the
+  extent as a second argument and may then hold the epilogue after their
+  consumers. `merge_tasks` has the optional operand `ranges`, tied by its
+  verifier to the extent argument. The regions of `partial_tasks` and of
+  the persistent queue kernel take neither, and the planner refuses a mean
+  on the persistent schedule.
+- The planner absorbs `swage.extent` into the region argument, moves the
+  epilogue behind the reductions, leaves it out of a partial task, and
+  writes a copy of it into the merge region. The merge kernel of such a
+  program has the layout `SplitMergeExtent`: scratch, output, merge
+  records, and range records, then the three counts of a merge.
+- The conversions give a task region its extent as the clamped end minus
+  the clamped start of the segment, and a merge region the end of its last
+  range record minus the begin of its first, read through the clamped
+  range of partials, or zero for an empty one.
+- `swage.segment_reduce` takes `kind="mean"`. The runner passes the merge
+  kernel of a mean the pointer of the range records, which it already
+  uploads. The artifact holds `segmented_mean` and `segmented_mean_f64`.
+- `test/Conversion/SwageToPlan/segmented-mean.mlir` requires the division
+  in the task, fused, and merge regions and refuses any arithmetic in the
+  partial region. The files of the same name under `SwageToCPU`, with a
+  runner file, and `SwageToGPU` pin the oracle and the kernels.
+- The digest matrix gains 28 pairs, the f32 and the f64 mean on `sm_80`
+  and `sm_86`. The 790 pairs before it did not move.
+
+What was built against what was proposed for step 4:
+
+- The proposal let the epilogue be any sequence of the three operations
+  over reduction results, the extent, and earlier epilogue results.
+  Admission accepts the one sequence of a mean. A merge has to rebuild the
+  epilogue from partial results, and a fixed shape makes that a copy with
+  two substitutions. The plan verifier is wider than admission: it admits
+  the three operations after the consumers of a region that takes an
+  extent, in any number.
+- The proposal stated the bound of a mean without a condition. A mean lies
+  within `(k + 1) * eps * sum(|x|) / n` of the exact mean when its sum does
+  not overflow and the mean is not subnormal: a sum that overflows gives an
+  infinite mean, and a quotient in the subnormal range is rounded to a
+  subnormal. The user guide states both conditions.
+- On the device a mean equals the sum of the same schedule divided by the
+  length, bit for bit, on every static schedule and on the one-CTA path in
+  both element types. The PTX holds one `cvt.rn` from i32 and one `div.rn`
+  per task region, in the element type, and none in the partial kernel.
 
 Step 5. Rank-two reductions. Not implemented.
 
@@ -359,8 +407,9 @@ Step 6. Rank-two softmax, f32. Not implemented.
 | A new kind falls into the branch of another kind | The switches without a default; `unittests/EmissionTest.cpp`; the `segmented-min.mlir` files; exact comparison with PyTorch |
 | An f32 identity in an f64 kernel | The f64 lit files; the verifier after the conversion; `unittests/EmissionTest.cpp`; the typed PTX scan; exact f64 results on values that are not f32 values |
 | f64 `exp2` reaches NVPTX and aborts the process | The admission rule; a negative lit case; a compile-only Python test |
-| A mean of partial means, or a wrong divisor | A plan check on `arith.divf`; a bitwise `sum / length` test on split lengths |
-| The merge reads a range record out of bounds | A stray-record case with canaries |
+| A mean of partial means, or a wrong divisor | The plan check on `arith.divf` in `test/Conversion/SwageToPlan/segmented-mean.mlir`; the bitwise `sum / length` tests on split lengths |
+| The extent taken as the end minus the first element of a thread | `test/Conversion/SwageToGPU/segmented-mean.mlir`; the result alone cannot show it, because the thread that stores starts at the start of the segment |
+| The merge reads a range record out of bounds | The stray-record case of `python/tests/mlir/test_segmented_bounds.py`, with range records between guards |
 | int64 wraps on narrowing | The refusal of `[0, 2**32 + 3, 5]` |
 | The private offsets copy is freed early | A lifetime test |
 | A column reads a neighbor or writes past `[S, D]` | Position-dependent values; canaries; bounds lit |

@@ -111,13 +111,16 @@ scf + arith + memref
 ## Private SwagePlan branch
 
 For a capture-free, single-stage sum, max, or min over f32 or f64 values,
-planning admission accepts the program without changing the module. Validated host metadata is
-then classified and materialized into direct IDs or split records. Private
-lowering factories produce the direct, partial, and merge kernels used by the
-qualification runtime. Element programs and single-consumer map chains are
-reused by direct and partial kernels; merge kernels combine only the partial
-results. The public `swage.segment_reduce` launches the identity sum and
-the identity max through this branch with the default limits.
+planning admission accepts the program without changing the module. A
+program may also divide its sum by the extent of its segment, which makes it
+a mean. Validated host metadata is then classified and materialized into
+direct IDs or split records. Private lowering factories produce the direct,
+partial, and merge kernels used by the qualification runtime. Element
+programs and single-consumer map chains are reused by direct and partial
+kernels; merge kernels combine only the partial results, and the merge of a
+mean divides the combined sum once. The public `swage.segment_reduce`
+launches the identity sum, maximum, minimum, and mean through this branch
+with the default limits.
 
 This branch implements narrow rule-based classification and split task
 decomposition. One private experimental lowering consumes those materialized

@@ -83,6 +83,14 @@ Numerical claims have their own evidence in
   and no f32 instruction, and an f64 `math.exp2` is refused with a
   diagnostic by every compile function
   (`python/tests/mlir/test_segmented_codegen.py`).
+- Mean: on every static schedule and on the one-CTA path, in both element
+  types, a mean equals the sum of the same schedule divided by the length,
+  bit for bit, at lengths that include 4097, 100,003, and 1,048,577, and an
+  empty segment gives NaN. The public mean also stays within
+  `(k + 1) * eps * sum(|x|) / n` of the exactly rounded mean, which
+  `python/tests/mlir/test_public_segments.py` forms in rational arithmetic.
+  The PTX of every mean kernel holds one conversion and one division per
+  task region, and the partial kernel holds neither.
 - Softmax accuracy: every output stays within a relative bound that grows
   linearly with logit spread, at spreads 8, 20, 50, and 80, and
   `ex2.approx.f32` is measured on its own.

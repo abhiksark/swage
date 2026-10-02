@@ -38,9 +38,11 @@ _PROGRAMS = (
     "sum",
     "max",
     "min",
+    "mean",
     "sum_f64",
     "max_f64",
     "min_f64",
+    "mean_f64",
     "softmax",
 )
 

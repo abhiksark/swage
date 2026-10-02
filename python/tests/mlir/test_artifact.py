@@ -51,7 +51,7 @@ _needs_cuda = pytest.mark.skipif(
 _SENTINEL = -5.0
 _CHILD = pathlib.Path(__file__).with_name("artifact_child.py")
 # The kinds of the reduction. Each is a program per element type.
-_KINDS = ("sum", "max", "min")
+_KINDS = ("sum", "max", "min", "mean")
 _PROGRAMS = {
     **{
         qualification._reduction_kernel(kind, element): (
@@ -66,9 +66,11 @@ _PROGRAM_NAMES = (
     "segmented_sum",
     "segmented_max",
     "segmented_min",
+    "segmented_mean",
     "segmented_sum_f64",
     "segmented_max_f64",
     "segmented_min_f64",
+    "segmented_mean_f64",
     "ragged_softmax",
 )
 
@@ -129,7 +131,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write twenty-five kernels, the library, and what describes them."""
+    """Write thirty-three kernels, the library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -139,7 +141,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 25
+    assert len(_kernel_ids()) == 33
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -323,6 +325,12 @@ def test_the_manifest_describes_each_kernel_as_its_ptx_declares_it(
     assert {f"const {scalar}*", f"{scalar}*"} <= types
     roles = [argument["role"] for argument in entry["arguments"]]
     assert len(set(roles)) == len(roles)
+    # The merge of a mean, and of no other program, takes the range records
+    # of the partial tasks, after its merge records.
+    reads_extent = program.startswith("segmented_mean") and role == "merge"
+    assert ("partial_ranges" in roles) == (reads_extent or role == "partial")
+    if reads_extent:
+        assert roles[2:4] == ["merge_records", "partial_ranges"]
 
 
 @pytest.mark.parametrize("processor", _ADMITTED)
@@ -353,7 +361,7 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         "format_version: 2",
         "target: sm_86",
         "programs: " + ", ".join(_PROGRAM_NAMES),
-        "kernels: 25",
+        "kernels: 33",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -1106,6 +1114,7 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     lengths = [4097 + index for index in range(blocks)]
     selected = torch.tensor(_offsets(lengths), dtype=torch.int32).cuda()
     swage.segment_reduce(torch.ones(sum(lengths)).cuda(), selected, "max")
+    swage.segment_reduce(values, offsets, "mean")
     torch.cuda.synchronize()
 
     def stated(program, role):
@@ -1129,7 +1138,13 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
         stated("segmented_sum", "merge"),
         stated("ragged_softmax", "cta"),
         stated("segmented_max", "cta"),
+        stated("segmented_mean", "mixed"),
+        stated("segmented_mean", "partial"),
+        stated("segmented_mean", "merge"),
     ]
+    # The merge of a mean takes one pointer more than the merge of a sum.
+    assert stated("segmented_mean", "merge")[1:] == (4, 3)
+    assert stated("segmented_sum", "merge")[1:] == (3, 3)
 
 
 @_needs_cuda

@@ -208,12 +208,13 @@ Parameters
     values. Values past the final offset belong to no segment. int64
     offsets are checked as 64-bit values and then narrowed on the host; the
     kernels read a private int32 copy that the call uploads.
-:   `kind`: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment is
-    `0.0`, its maximum is negative infinity, and its minimum is positive
-    infinity. A maximum or a minimum over a NaN is NaN, and both are exact.
-    A sum follows IEEE-754 addition in the dtype of `values`, and its
-    rounding depends on the schedule the call selects. No argument pins the
-    schedule.
+:   `kind`: `"sum"`, `"max"`, `"min"`, or `"mean"`. The sum of an empty
+    segment is `0.0`, its maximum is negative infinity, its minimum is
+    positive infinity, and its mean is NaN. A maximum or a minimum over a
+    NaN is NaN, and both are exact. A sum follows IEEE-754 addition in the
+    dtype of `values`, and its rounding depends on the schedule the call
+    selects. A mean is that sum divided once by the length of the segment,
+    converted to the dtype of `values`. No argument pins the schedule.
 :   `out`: an optional result tensor, keyword-only. A contiguous rank-one
     tensor of the dtype of `values`, on the device of `values`, with
     exactly one element per segment, which shares no memory with `values`
@@ -264,6 +265,7 @@ offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
 totals = swage.segment_reduce(values, offsets, "sum")  # [3, 0, 12, 6]
 maxima = swage.segment_reduce(values, offsets, "max")  # [2, -inf, 5, 6]
 minima = swage.segment_reduce(values, offsets, "min")  # [1, inf, 3, 6]
+means = swage.segment_reduce(values, offsets, "mean")  # [1.5, nan, 4, 6]
 ```
 
 Related: [Segmented Calls](../user-guide/segmented-calls.md),
@@ -367,10 +369,11 @@ Options
 :   `--target`: the NVPTX processor of the device that will run the
     kernels, such as `sm_86`. Required.
 :   `--output`: the directory to create. It must not exist. Required.
-:   `--program`: a program to include: `sum`, `max`, `min`, `sum_f64`,
-    `max_f64`, `min_f64`, or `softmax`. A kind alone names the reduction
-    over float32 values, and the kind with `_f64` the one over float64
-    values. It may be repeated. All seven are included without it.
+:   `--program`: a program to include: `sum`, `max`, `min`, `mean`,
+    `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, or `softmax`. A kind alone
+    names the reduction over float32 values, and the kind with `_f64` the
+    one over float64 values. It may be repeated. All nine are included
+    without it.
 :   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
     of the native build, for a serving host of another machine.
 

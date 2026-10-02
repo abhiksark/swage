@@ -5,8 +5,8 @@
 Two functions run a fixed program over every segment of a ragged batch:
 
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` returns one
-  result per segment, in the dtype of `values`: a sum, a maximum, or a
-  minimum of float32 or float64 values.
+  result per segment, in the dtype of `values`: a sum, a maximum, a
+  minimum, or a mean of float32 or float64 values.
 - `swage.segment_softmax(values, offsets, *, out=None)` returns one float32
   result per value, the softmax within its segment.
 
@@ -39,6 +39,7 @@ offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
 totals = swage.segment_reduce(values, offsets, "sum")  # [3, 0, 12, 6]
 maxima = swage.segment_reduce(values, offsets, "max")  # [2, -inf, 5, 6]
 minima = swage.segment_reduce(values, offsets, "min")  # [1, inf, 3, 6]
+means = swage.segment_reduce(values, offsets, "mean")  # [1.5, nan, 4, 6]
 weights = swage.segment_softmax(values, offsets)       # six weights
 ```
 
@@ -135,6 +136,17 @@ A minimum is its mirror:
 - A positive infinity among finite elements gives the smallest finite
   element.
 
+A mean is the sum divided by the length of the segment:
+
+- An empty segment gives NaN, zero divided by zero. A mean has no identity
+  to return instead.
+- A NaN element gives NaN, and an infinity gives what its sum gives.
+- A sum that overflows gives an infinite mean, also when the exact mean of
+  the values is finite.
+- The length is converted to the dtype of `values` once and divides the sum
+  once. A float32 length above 16,777,216 is rounded to nearest by that
+  conversion.
+
 A batch with no segment, whose offsets are the single entry `0`, returns a
 tensor of no elements and needs no kernel.
 [Ragged Data](ragged-data.md#empty-segments-and-nan) shows how to replace
@@ -150,7 +162,7 @@ segment:
   element.
 - No segment affects the results of another.
 
-A maximum and a minimum involve no rounding and are exact. The other two
+A maximum and a minimum involve no rounding and are exact. The other
 results are rounded:
 
 - A sum lies within `k * eps * sum(|x|)` of the exact sum of its segment,
@@ -159,6 +171,12 @@ results are rounded:
   calls `k` is at most 70 for a segment of up to 2,097,152 elements, which
   is `8.3e-06 * sum(|x|)` for float32 and `1.6e-14 * sum(|x|)` for float64.
   The bound is relative to the sum of magnitudes, not to the sum.
+- A mean lies within `(k + 1) * eps * sum(|x|) / n` of the exact mean of a
+  segment of `n` elements, with the `k` of its sum, so `k + 1` is at most
+  71. The extra unit covers the division and the conversion of the length.
+  The bound holds when the sum does not overflow and the mean is not
+  subnormal. A mean is the sum of the same call on the same batch divided
+  by the length, bit for bit.
 - A softmax output has a relative error bound that grows with the distance
   of its logit below the segment maximum.
   [Ragged Softmax](../internals/ragged-softmax.md#accuracy) states it.
@@ -167,7 +185,8 @@ results are rounded:
 
 The bits of a sum depend on the order of the additions, for float32 and
 for float64 values, and a call selects that order from the batch it is
-given. The dtype has no part in the selection:
+given. The dtype has no part in the selection. A mean adds in the order of
+the sum, so everything in this section holds for it too:
 
 - A segment of at most 32 elements is added by a 32-lane tree.
 - A segment of 33 to 4096 elements is added by a 128-lane tree.

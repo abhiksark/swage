@@ -1003,6 +1003,87 @@ def test_f64_sums_stay_within_the_tree_bound_of_the_exact_sum(seed):
     assert len(patterns) > 1
 
 
+# Lengths of a mean: empty, on both sides of the warp and chunk limits,
+# and the split lengths of one chunk and one element, of 25 chunks, and of
+# 257 chunks under the default limits.
+MEAN_LENGTHS = [0, 1, 31, 32, 33, 4096, 4097, 0, 8193, 100_003, 1_048_577]
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["float32", "float64"]
+)
+@pytest.mark.parametrize("path", [*STATIC_POLICIES, "one-cta"])
+def test_mean_is_the_sum_of_its_schedule_divided_by_the_length(path, dtype):
+    """A mean equals the sum of the same schedule over the length, bit for bit.
+
+    The sum is the one the sum program returns on the same batch and
+    schedule, so the comparison holds whatever the order of the additions.
+    The division is one IEEE-754 division by the length as a value of the
+    dtype, which a host division reproduces.
+
+    The split schedule divides in the merge: a mean of partial means, or a
+    division by the number of partials, would fail at 4097 elements, which
+    are a chunk of 4096 and a chunk of one under the default limits, and at
+    every length under the 16-element chunks of the `split` policy. An
+    empty segment gives NaN, which is compared with `isnan`.
+    """
+    generator = torch.Generator().manual_seed(len(MEAN_LENGTHS))
+    host_values = torch.randn(
+        sum(MEAN_LENGTHS), dtype=dtype, generator=generator
+    )
+    host_offsets = torch.tensor(_offsets(MEAN_LENGTHS), dtype=torch.int32)
+    lengths = torch.tensor(MEAN_LENGTHS, dtype=dtype)
+
+    (total,) = _run_sum(path, host_values, host_offsets, kind="sum")
+    (mean,) = _run_sum(path, host_values, host_offsets, kind="mean")
+
+    expected = total / lengths
+    empty = lengths == 0
+    assert mean.dtype == dtype
+    assert mean[empty].isnan().all()
+    assert not mean[~empty].isnan().any()
+    assert _bits(mean[~empty]) == _bits(expected[~empty])
+
+
+@pytest.mark.parametrize("target", ["sm_80", "sm_86"])
+@pytest.mark.parametrize("element", ["f32", "f64"])
+def test_mean_kernels_divide_once_per_task_and_never_per_chunk(
+    element, target
+):
+    """A mean kernel adds one conversion and one division per task region.
+
+    The count of the segment is converted with `cvt.rn` from i32, and the
+    sum is divided with `div.rn`: both rounded to nearest, in the element
+    type of the kernel. The fused kernel holds a warp region and a block
+    region, so it holds two of each. The partial kernel of a split holds
+    neither: a chunk yields its raw sum.
+    """
+    convert, divide = f"cvt.rn.{element}.s32", f"div.rn.{element}"
+    for label, compiler, options in _SUM_KERNELS:
+        if label == "persistent":
+            continue
+        with ir.Context() as context:
+            swage_dialect.register_dialects(context)
+            module = ir.Module.parse(
+                reduction_module("mean", "identity", element)
+            )
+            _, ptx = getattr(native_swage, compiler)(
+                module,
+                kernel_name=_reduction_kernel("mean", element),
+                target=target,
+                **options,
+            )
+
+        violations, counts = _float_arithmetic(ptx, element)
+
+        assert not violations, f"{label}: {violations}"
+        regions = {"split-partial": 0, "fused-mixed": 2}.get(label, 1)
+        assert counts.get(convert, 0) == regions, label
+        assert counts.get(divide, 0) == regions, label
+        assert counts.get(f"add.rn.{element}", 0) > 0, label
+
+
 @_needs_cuda
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("policy", [*STATIC_POLICIES, "one-cta"])

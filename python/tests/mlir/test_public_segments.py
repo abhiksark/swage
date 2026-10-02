@@ -21,6 +21,7 @@ This file pins what the wrapper adds and what a caller can rely on:
 """
 
 import collections
+import fractions
 import gc
 import importlib.util
 import math
@@ -75,7 +76,7 @@ DISTRIBUTIONS = sorted(_distributions._NAMES)
 # longest segment grows with the count, and at this count it passes the
 # 4096-element chunk limit and the 8192-element selection limit.
 _SEGMENT_COUNTS = {name: 257 for name in DISTRIBUTIONS} | {"power-law": 2048}
-KINDS = ["sum", "max", "min"]
+KINDS = ["sum", "max", "min", "mean"]
 DTYPES = [torch.float32, torch.float64]
 _DTYPE_IDS = ["float32", "float64"]
 
@@ -107,6 +108,94 @@ def _exact_sums(values, offsets):
     )
 
 
+def _exact_means(values, offsets):
+    """Return the exactly rounded float64 mean of every segment.
+
+    The sum of a segment is formed in rational arithmetic and divided by
+    its length before anything is rounded, so the result is the float64
+    nearest to the exact mean. `math.fsum` divided by the length would
+    round twice. An empty segment has no mean and gives NaN.
+    """
+    bounds = offsets.tolist()
+    host = [fractions.Fraction(value) for value in values.double().tolist()]
+    return torch.tensor(
+        [
+            float(sum(host[begin:end], fractions.Fraction()) / (end - begin))
+            if end > begin
+            else float("nan")
+            for begin, end in pairwise(bounds)
+        ],
+        dtype=torch.float64,
+    )
+
+
+def _assert_same_results(actual, expected):
+    """Require the same NaN positions and the same bits everywhere else.
+
+    Two NaN results may differ in sign and payload, which the IEEE-754
+    standard leaves open for an invalid operation.
+    """
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual.isnan(), expected.isnan())
+    finite = ~expected.isnan()
+    assert _bits(actual[finite]) == _bits(expected[finite])
+
+
+def _assert_mean_matches(host_values, host_offsets, actual):
+    """Compare one public mean with its sum, a bound, and PyTorch.
+
+    A mean is the sum of the call on the same batch, divided once by the
+    length of the segment as a value of the dtype: the two results must be
+    equal bit for bit. An empty segment gives NaN, zero divided by zero.
+
+    The mean also lies within `(k + 1) * eps * sum(|x|) / n` of the exactly
+    rounded mean, with the `k` of the sum: the extra unit covers the
+    division and the conversion of the length. The bound is checked for a
+    batch whose sums are finite, because a sum that overflows gives an
+    infinite mean, and with the smallest subnormal of the dtype added,
+    because a division that underflows is rounded to a subnormal.
+    """
+    lengths = host_offsets[1:] - host_offsets[:-1]
+    final = int(host_offsets[-1])
+    covered = host_values[:final]
+    total = _reduce("sum", host_values, host_offsets)
+    _assert_same_results(actual, total / lengths.to(host_values.dtype))
+    empty = lengths == 0
+    assert actual[empty].isnan().all()
+    assert not actual[~empty].isnan().any() or not covered.isfinite().all()
+
+    theirs = torch.segment_reduce(
+        covered.cuda(), "mean", lengths=lengths.long().cuda()
+    ).cpu()
+    assert torch.equal(actual.isnan(), theirs.isnan())
+    if not (covered.isfinite().all() and total.isfinite().all()):
+        return
+    reference = _exact_means(covered, host_offsets.long())
+    magnitude = _exact_sums(covered.abs(), host_offsets.long())
+    eps = _EPS64 if host_values.dtype == torch.float64 else _EPS32
+    depth = torch.tensor(
+        [_public_depth(length) for length in lengths.tolist()],
+        dtype=torch.float64,
+    )
+    count = lengths.clamp(min=1).double()
+    kept = ~empty
+    underflow = torch.finfo(host_values.dtype).tiny * eps
+    error = (actual.double() - reference).abs()[kept]
+    bound = ((depth + 1) * eps * magnitude / count + underflow)[kept]
+    assert (error <= bound).all(), (
+        f"largest error {(error / bound).nan_to_num().max()} of the mean "
+        "bound"
+    )
+    sequential = (lengths - 1).clamp(min=0).double()
+    difference = (actual.double() - theirs.double()).abs()[kept]
+    assert (
+        difference
+        <= (
+            (depth + sequential + 2) * eps * magnitude / count + 2 * underflow
+        )[kept]
+    ).all()
+
+
 def _public_depth(length):
     """Bound the rounding additions of a public sum of one segment.
 
@@ -131,7 +220,12 @@ def _assert_reduction_matches(kind, host_values, host_offsets, actual):
 
     The reference of a float32 sum is the float64 sum. The reference of a
     float64 sum is the exactly rounded sum of `math.fsum`.
+
+    A mean is compared by `_assert_mean_matches`.
     """
+    if kind == "mean":
+        _assert_mean_matches(host_values, host_offsets, actual)
+        return
     lengths = host_offsets[1:] - host_offsets[:-1]
     final = int(host_offsets[-1])
     covered = host_values[:final]
@@ -214,13 +308,13 @@ def test_public_package_exports_exactly_the_two_segmented_calls():
     assert public - {"compile", "env", "language"} == set(swage.__all__)
 
 
-@pytest.mark.parametrize("kind", ["mean", "prod", "SUM", "", None, 0, b"sum"])
+@pytest.mark.parametrize("kind", ["prod", "SUM", "Mean", "", None, 0, b"sum"])
 def test_segment_reduce_rejects_an_unsupported_kind(kind):
-    """Admit only the three kinds the kernels implement."""
+    """Admit only the kinds the kernels implement, by their exact names."""
     values, offsets = _host_segments()
 
     with pytest.raises(
-        ValueError, match="^kind must be 'sum', 'max', or 'min', got"
+        ValueError, match="^kind must be 'sum', 'max', 'min', or 'mean', got"
     ):
         swage.segment_reduce(values, offsets, kind)
 
@@ -876,6 +970,80 @@ def test_segment_reduce_reduces_one_long_segment(length, kind, dtype):
 
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("length", [4097, 100_003, 1_048_577])
+def test_a_split_mean_divides_the_merged_sum_once(length, dtype):
+    """Divide the sum of a split segment by its length, not by its chunks.
+
+    A segment of 4097 elements is a chunk of 4096 and a chunk of one, so a
+    mean of the chunk means, or a division by the number of chunks, is far
+    from the mean. The batch holds a short segment, an empty one, and two
+    split ones, so the merge reads the extent of more than one segment
+    from the range records. `_assert_mean_matches` requires the bits of
+    the sum of the same call divided by the length.
+    """
+    generator = torch.Generator().manual_seed(length)
+    lengths = [5, length, 0, length + 4099]
+    host_values, host_offsets = _host_case(lengths, generator, dtype)
+
+    actual = _reduce("mean", host_values, host_offsets)
+
+    _assert_reduction_matches("mean", host_values, host_offsets, actual)
+    chunks = -(-length // 4096)
+    total = _reduce("sum", host_values, host_offsets)
+    assert actual[1] != total[1] / chunks
+
+
+@_needs_cuda
+def test_a_mean_divides_by_the_length_as_a_value_of_the_dtype():
+    """Divide by the float32 nearest to a length that float32 cannot hold.
+
+    A segment of 2**24 + 1 elements has a length that rounds to 2**24 in
+    float32. The kernel converts the length once, to nearest, and divides
+    by that value, as a float32 division on the host does.
+    """
+    length = 2**24 + 1
+    generator = torch.Generator().manual_seed(24)
+    host_values = torch.rand(length, generator=generator)
+    host_offsets = torch.tensor([0, length], dtype=torch.int32)
+    divisor = torch.tensor(length, dtype=torch.float32)
+    assert float(divisor) == 2.0**24
+
+    total = _reduce("sum", host_values, host_offsets)
+    mean = _reduce("mean", host_values, host_offsets)
+
+    assert _bits(mean) == _bits(total / divisor)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("case", SPECIAL_CASES)
+def test_a_mean_of_special_values_is_their_sum_divided(case, dtype):
+    """Follow the sum on NaN, infinities, overflow, and subnormals.
+
+    A mean is the sum divided by the length. A sum that overflows gives an
+    infinite mean, although the exact mean of those values is finite. The
+    subnormal cases pin a division that is rounded once and not flushed.
+    """
+    host_values = torch.cat(
+        [_special_segment(case, length, dtype) for length in SPECIAL_LENGTHS]
+    )
+    host_offsets = torch.tensor(_offsets(SPECIAL_LENGTHS), dtype=torch.int32)
+    sums = torch.tensor(
+        [SPECIAL_CASES[case](length, dtype) for length in SPECIAL_LENGTHS],
+        dtype=torch.float64,
+    ).to(dtype)
+    expected = sums / torch.tensor(SPECIAL_LENGTHS, dtype=dtype)
+
+    actual = _reduce("mean", host_values, host_offsets)
+
+    _assert_same_results(actual, expected)
+    if case == "overflow":
+        assert (actual == float("inf")).all()
+    _assert_reduction_matches("mean", host_values, host_offsets, actual)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("value_count", [0, 5])
 def test_segment_reduce_returns_an_empty_result_for_an_empty_batch(
@@ -901,7 +1069,9 @@ def test_segment_reduce_gives_empty_segments_their_identity(lengths, dtype):
     """Return 0.0 for an empty sum and an infinity for an empty extreme.
 
     An empty maximum is negative infinity and an empty minimum is positive
-    infinity, the identity of each kind.
+    infinity, the identity of each kind. A mean has no identity: an empty
+    mean is NaN, zero divided by zero, and is compared with `isnan`,
+    because the sign and the payload of that NaN are not specified.
     """
     host_values, host_offsets = _host_segments(lengths)
     host_values = host_values.to(dtype)
@@ -910,12 +1080,16 @@ def test_segment_reduce_gives_empty_segments_their_identity(lengths, dtype):
     total = _reduce("sum", host_values, host_offsets)
     maximum = _reduce("max", host_values, host_offsets)
     minimum = _reduce("min", host_values, host_offsets)
+    mean = _reduce("mean", host_values, host_offsets)
 
     assert _bits(total[empty]) == _bits(
         torch.zeros(int(empty.sum()), dtype=dtype)
     )
     assert torch.all(maximum[empty] == float("-inf"))
     assert torch.all(minimum[empty] == float("inf"))
+    assert mean[empty].isnan().all()
+    assert not mean[~empty].isnan().any()
+    _assert_reduction_matches("mean", host_values, host_offsets, mean)
     _assert_reduction_matches("sum", host_values, host_offsets, total)
     _assert_reduction_matches("max", host_values, host_offsets, maximum)
     _assert_reduction_matches("min", host_values, host_offsets, minimum)
@@ -934,6 +1108,7 @@ def test_segment_reduce_ignores_values_past_the_final_offset(kind):
         "sum": [1.0, 5.0],
         "max": [1.0, 3.0],
         "min": [1.0, 2.0],
+        "mean": [1.0, 2.5],
     }[kind]
     assert actual.tolist() == expected
     _assert_reduction_matches(kind, host_values, host_offsets, actual)
@@ -1243,8 +1418,12 @@ def _assert_equals_the_prepared_launch(kind, host_values, host_offsets):
 
     actual = swage.segment_reduce(values, offsets, kind).cpu()
 
-    assert not actual.isnan().any()
-    assert _bits(actual) == _bits(expected)
+    # The prepared launch poisons its output with NaN, so a NaN result is
+    # one it never wrote, except for an empty mean, which is NaN.
+    empty = host_offsets[1:] == host_offsets[:-1]
+    written_nan = empty if kind == "mean" else torch.zeros_like(empty)
+    assert torch.equal(actual.isnan(), written_nan)
+    _assert_same_results(actual, expected)
 
 
 @_needs_cuda

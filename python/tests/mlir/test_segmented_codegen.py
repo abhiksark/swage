@@ -54,6 +54,20 @@ def test_direct_cta_element_work_guard(transform, eligible):
         assert _has_small_element_program(module) is eligible
 
 
+def test_the_division_of_a_mean_is_no_element_work():
+    """A mean has the element work of its sum and stays a small program.
+
+    The division runs once per segment, outside every element region, so
+    the schedule selection treats a mean as it treats the sum.
+    """
+    for transform, work in (("identity", 0), ("square", 1)):
+        with ir.Context() as context:
+            swage.register_dialects(context)
+            module = ir.Module.parse(reduction_module("mean", transform))
+            assert native_swage._element_work(module) == work
+            assert _has_small_element_program(module) is True
+
+
 @pytest.mark.parametrize(
     ("transform", "work"),
     [
@@ -121,13 +135,15 @@ module {
 
 
 @pytest.mark.parametrize("element", ["f32", "f64"])
-@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 def test_static_schedules_share_reduction_program(kind, transform, element):
     """One admitted program compiles unchanged through every static path.
 
-    The plan of a program does not depend on its element type: an f64
-    program has the task records of the f32 program.
+    The plan of a program does not depend on its element type or on its
+    kind: an f64 program and a mean have the task records of the f32 sum.
+    A mean divides in every kernel but the partial one, whose chunks yield
+    raw sums, and no other kind divides.
     """
     kernel_name = _reduction_kernel(kind, element)
     with ir.Context() as context:
@@ -170,9 +186,11 @@ def test_static_schedules_share_reduction_program(kind, transform, element):
             )
             lowered, ptx = first
             merge = name == "_compile_split_merge_reduction_ptx"
+            partial = name == "_compile_split_partial_reduction_ptx"
             assert ("llvm.fmul" in lowered) == (
                 transform != "identity" and not merge
             )
+            assert ("llvm.fdiv" in lowered) == (kind == "mean" and not partial)
             assert "swage." not in lowered
             assert ".entry segmented_" in ptx
             other = "f32" if element == "f64" else "f64"
@@ -209,6 +227,7 @@ def test_persistent_execution_refuses_f64_values():
         ("max", "square"),
         ("max", "maps"),
         ("min", "identity"),
+        ("mean", "identity"),
     ],
 )
 def test_persistent_admission_remains_identity_sum(kind, transform):

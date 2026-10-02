@@ -664,6 +664,92 @@ def test_split_merge_kernel_clamps_plan_ranges():
 
 
 @requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_mean_merge_kernel_reads_range_records_inside_the_partial_count(
+    stray_ids,
+):
+    """Read the extent of a split segment from the clamped range of partials.
+
+    The merge of a mean takes the range records of the partial tasks as a
+    fourth buffer and reads two of them per task: the begin of the first
+    partial of its segment and the end of the last. Both are addressed
+    through the range of partials after its clamp to the partial count, so
+    a merge record that names partials outside the plan reads no record
+    outside the buffer, and an empty range of partials reads none.
+
+    The range records sit between guards that hold a large word. A record
+    read from a guard would change the divisor, and so the mean. The
+    scratch sits between NaN guards, and the output between canaries: a
+    merge record whose segment names no segment stores nothing.
+    """
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    # Six chunks of uneven lengths, as [begin, end] pairs of value indices.
+    host_ranges = [(0, 5), (5, 9), (9, 20), (20, 21), (21, 40), (40, 47)]
+    partials = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+        (0, partial_count),
+        (2, 3),
+    ]
+    segment_count = 4
+    stray = stray_ids(segment_count)
+    segments = [0, 1, 2, 3, stray[0], stray[1]]
+    scratch = _guarded(host_scratch)
+    ranges, _ = _canaried(
+        torch.tensor(
+            [bound for bounds in host_ranges for bound in bounds],
+            dtype=torch.int32,
+        ),
+        1 << 20,
+    )
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, partials, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    output, output_buffer = _canaried_output(segment_count)
+    function = _load(
+        "_compile_split_merge_reduction_ptx",
+        entry="segmented_mean__merge",
+        module_text=_semantic_module("mean"),
+        kernel_name="segmented_mean",
+    )
+
+    _runtime._get_driver().launch_segmented_tasks(
+        function,
+        (len(partials),),
+        512,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            scratch.data_ptr(),
+            output.data_ptr(),
+            records.data_ptr(),
+            ranges.data_ptr(),
+            partial_count,
+            len(partials),
+            segment_count,
+        ),
+    )
+
+    # The first segment merges partials [0, 3) and the second [3, 6). The
+    # third and the fourth have no partial after the clamp: zero divided
+    # by zero.
+    sums = _clamped_sums(host_scratch, partials)
+    first = sums[0] / (host_ranges[2][1] - host_ranges[0][0])
+    second = sums[1] / (host_ranges[5][1] - host_ranges[3][0])
+    torch.cuda.synchronize()
+    stored = output.cpu()
+    assert torch.equal(stored[:2], torch.stack([first, second]))
+    assert stored[2:].isnan().all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
 @pytest.mark.parametrize("block_size", [32, 128])
 def test_softmax_store_stays_inside_the_validated_output(block_size):
     """Bound the map_store write by the output the host validated.

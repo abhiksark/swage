@@ -12,7 +12,7 @@ from . import _artifact, _runtime
 from . import _segmented_qualification as _qualification
 from ._frontend import _INSTALLATION
 
-_KINDS = ("sum", "max", "min")
+_KINDS = ("sum", "max", "min", "mean")
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
@@ -43,13 +43,14 @@ def segment_reduce(values, offsets, kind, *, out=None):
             empty segment. int64 offsets are checked and narrowed on the
             host, and the kernels read a private int32 copy that the call
             uploads.
-        kind: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment
-            is `0.0`, its maximum is negative infinity, and its minimum is
-            positive infinity. A maximum or a minimum over a NaN is NaN,
-            and a sum follows IEEE-754 addition. A maximum and a minimum
-            are exact. The rounding of a sum depends on the schedule the
-            call selects from the segment lengths, the batch, and the
-            device, and no argument pins it.
+        kind: `"sum"`, `"max"`, `"min"`, or `"mean"`. The sum of an empty
+            segment is `0.0`, its maximum is negative infinity, its minimum
+            is positive infinity, and its mean is NaN. A maximum or a
+            minimum over a NaN is NaN, and a sum follows IEEE-754 addition.
+            A maximum and a minimum are exact. The rounding of a sum
+            depends on the schedule the call selects from the segment
+            lengths, the batch, and the device, and no argument pins it. A
+            mean is that sum divided once by the length of the segment.
         out: Optional result tensor: contiguous, rank one, of the dtype of
             `values`, on the device of `values`, with exactly one element
             per segment, sharing no memory with `values` or `offsets`, and
@@ -80,7 +81,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
         raise ValueError(
-            f"kind must be 'sum', 'max', or 'min', got {kind!r}"
+            f"kind must be 'sum', 'max', 'min', or 'mean', got {kind!r}"
         )
     _require_inputs(torch, values, offsets)
     segment_count = max(offsets.numel() - 1, 0)

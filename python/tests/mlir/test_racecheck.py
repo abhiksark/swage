@@ -143,11 +143,20 @@ def _case():
 
 
 def _exact(launch, output, expected):
-    """Launch once on a poisoned output and compare without a tolerance."""
+    """Launch once on a poisoned output and compare without a tolerance.
+
+    Where `expected` is NaN, which is the mean of an empty segment, the
+    output must be NaN too. Everywhere else it must hold the same value.
+    """
     output.fill_(float("nan"))
     launch()
     torch.cuda.synchronize()
-    return torch.equal(output.cpu(), expected)
+    actual = output.cpu()
+    stored = ~expected.isnan()
+    return bool(
+        torch.equal(actual[stored], expected[stored])
+        and actual[~stored].isnan().all()
+    )
 
 
 def _run_static_kernels(results, element, values, offsets, expected):
@@ -161,7 +170,10 @@ def _run_static_kernels(results, element, values, offsets, expected):
         expected: The exact results of each kind, of the dtype of `element`.
     """
     output = torch.empty(len(_LENGTHS), dtype=values.dtype, device="cuda")
-    for kind in ("sum", "max", "min"):
+    # The sums are exact, so a mean is its sum divided once by the length.
+    lengths = torch.tensor(_LENGTHS, dtype=values.dtype)
+    expected = dict(expected, mean=expected["sum"] / lengths)
+    for kind in ("sum", "max", "min", "mean"):
         label = f"{kind} {element}"
         for block_size in (33, 100, 128, 512):
             results[f"direct {label} block {block_size}"] = _exact(
@@ -326,9 +338,10 @@ def test_segmented_kernels_have_no_shared_memory_hazard(tmp_path):
     assert completed.returncode == 0, f"{report}\n{completed.stderr}"
     assert counts == (0, 0, 0), report
     results = json.loads(completed.stdout.splitlines()[-1])
-    assert len(results) > 70
-    # Ten static launches of each of three kinds over f64 values.
-    assert sum(" f64" in name for name in results) == 30
+    assert len(results) > 90
+    # Ten static launches of each of four kinds over f64 values.
+    assert sum(" f64" in name for name in results) == 40
+    assert any(" mean " in name for name in results)
     assert all(results.values()), results
 
 

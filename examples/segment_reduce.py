@@ -17,6 +17,7 @@ def main():
     totals = swage.segment_reduce(values, offsets, "sum")
     maxima = swage.segment_reduce(values, offsets, "max")
     minima = swage.segment_reduce(values, offsets, "min")
+    means = swage.segment_reduce(values, offsets, "mean")
     weights = swage.segment_softmax(values, offsets)
 
     # Each call returns after it enqueued its kernels. Reading a result, as
@@ -24,10 +25,12 @@ def main():
     print("sum:", totals.tolist())
     print("max:", maxima.tolist())
     print("min:", minima.tolist())
+    print("mean:", means.tolist())
     print("softmax:", [round(weight, 4) for weight in weights.tolist()])
 
     # torch.segment_reduce takes int64 offsets and gives the same values,
-    # including 0.0 and the two infinities for the empty segment.
+    # including 0.0 and the two infinities for the empty segment, and NaN
+    # for its mean.
     long_offsets = offsets.long()
     torch.testing.assert_close(
         totals, torch.segment_reduce(values, "sum", offsets=long_offsets)
@@ -37,6 +40,11 @@ def main():
     )
     torch.testing.assert_close(
         minima, torch.segment_reduce(values, "min", offsets=long_offsets)
+    )
+    torch.testing.assert_close(
+        means,
+        torch.segment_reduce(values, "mean", offsets=long_offsets),
+        equal_nan=True,
     )
     for begin, end in pairwise(offsets.tolist()):
         torch.testing.assert_close(

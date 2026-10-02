@@ -15,8 +15,8 @@ whether one segment-local program can support different fixed GPU work shapes
 as runtime segment lengths change.
 
 Segments are usable from Python through two calls with fixed programs:
-`swage.segment_reduce` computes a sum, a maximum, or a minimum per segment,
-and `swage.segment_softmax` computes a softmax within each segment, over
+`swage.segment_reduce` computes a sum, a maximum, a minimum, or a mean per
+segment, and `swage.segment_softmax` computes a softmax within each segment, over
 rank-one values and int32 or int64 offsets on one CUDA device. A reduction
 takes f32 or f64 values, and the softmax takes f32 values. Both are newer
 than the released wheel. They need a native build, or an artifact directory
@@ -41,7 +41,7 @@ release, except for the items marked as completed after it.
   to compiler contributors.
 - Not part of `v0.5.1`, completed after that release: two segmented calls.
   `swage.segment_reduce(values, offsets, kind, *, out=None)` returns the
-  sum, the maximum, or the minimum of every segment, and
+  sum, the maximum, the minimum, or the mean of every segment, and
   `swage.segment_softmax(values, offsets, *, out=None)` returns the softmax
   within every segment. They take rank-one values and int32 or int64
   offsets on the current CUDA device: f32 or f64 values for a reduction,

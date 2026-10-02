@@ -30,9 +30,11 @@ PROGRAM_TEXTS = {
     "segmented_sum": qualification._semantic_module("sum"),
     "segmented_max": qualification._semantic_module("max"),
     "segmented_min": qualification._semantic_module("min"),
+    "segmented_mean": qualification._semantic_module("mean"),
     "segmented_sum_f64": qualification._semantic_module("sum", "f64"),
     "segmented_max_f64": qualification._semantic_module("max", "f64"),
     "segmented_min_f64": qualification._semantic_module("min", "f64"),
+    "segmented_mean_f64": qualification._semantic_module("mean", "f64"),
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
@@ -309,6 +311,22 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         )
     ]
 
+    # The merge of a mean reads the extent of each split segment from the
+    # range records of the partial tasks, its fourth buffer. Its other
+    # kernels are those of any reduction.
+    merge = reduction[3]
+    mean = [
+        *reduction[:3],
+        (
+            *merge[:5],
+            (
+                *merge[5][:3],
+                ("partial_ranges", "const int32_t*"),
+                *merge[5][3:],
+            ),
+        ),
+    ]
+
     def typed(kernels):
         """Return the same kernels for f64 values, scratch, and output."""
         return [
@@ -329,11 +347,14 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         "segmented_sum": reduction,
         "segmented_max": reduction,
         "segmented_min": reduction,
+        "segmented_mean": mean,
         "segmented_sum_f64": typed(reduction),
         "segmented_max_f64": typed(reduction),
         "segmented_min_f64": typed(reduction),
+        "segmented_mean_f64": typed(mean),
         "ragged_softmax": softmax,
     }
+    assert len(mean[3][5]) == len(reduction[3][5]) + 1
     # An f64 program differs from its f32 program in the element pointers
     # and in nothing else.
     assert typed(reduction) != reduction
@@ -425,6 +446,9 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
                 if program == "ragged_softmax"
                 else layout_of[kernel.role]
             )
+            # The merge of a mean reads the extent of its split segments.
+            if program.startswith("segmented_mean") and kernel.role == "merge":
+                layout = "splitMergeExtent"
             assert [role for role, _ in kernel.arguments] == layouts[layout]
 
 
@@ -1074,8 +1098,8 @@ def test_a_request_outside_the_table_is_refused(artifact_dir, monkeypatch):
             r"holds no kernel 'segmented_sum' \(_compile_segmented_reduction"
             r"_ptx, block_size=64, use_task_ids=True\); it holds the "
             "programs segmented_sum, segmented_max, segmented_min, "
-            "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
-            "ragged_softmax"
+            "segmented_mean, segmented_sum_f64, segmented_max_f64, "
+            "segmented_min_f64, segmented_mean_f64, ragged_softmax"
         ),
     ):
         artifact.kernel(compiler, text, {**options, "block_size": 64})
@@ -1157,7 +1181,8 @@ def test_admission_refuses_a_program_the_build_host_did_not_plan(
         f"the artifact at {artifact_dir} holds no planned program with the "
         f"text of this call (SHA-256 {_digest(text)}); it holds the planned "
         "programs segmented_sum, segmented_max, segmented_min, "
-        "segmented_sum_f64, segmented_max_f64, segmented_min_f64. The "
+        "segmented_mean, segmented_sum_f64, segmented_max_f64, "
+        "segmented_min_f64, segmented_mean_f64. The "
         "artifact was written without this program, or from another "
         "program text than this swage runs. Nothing was compiled or "
         "launched"
@@ -1186,9 +1211,11 @@ def test_the_manifest_is_kept_for_reports(artifact_dir, monkeypatch):
         "segmented_sum",
         "segmented_max",
         "segmented_min",
+        "segmented_mean",
         "segmented_sum_f64",
         "segmented_max_f64",
         "segmented_min_f64",
+        "segmented_mean_f64",
         "ragged_softmax",
     )
 
@@ -1509,9 +1536,10 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 25 kernels of "
-        "segmented_sum, segmented_max, segmented_min, segmented_sum_f64, "
-        "segmented_max_f64, segmented_min_f64, ragged_softmax, written by "
+        f"{artifact_dir} (format 2, target sm_86, 33 kernels of "
+        "segmented_sum, segmented_max, segmented_min, segmented_mean, "
+        "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
+        "segmented_mean_f64, ragged_softmax, written by "
         "swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"

@@ -182,22 +182,26 @@ values, index = values[order], index[order]
 
 ## Empty segments and NaN
 
-The public calls and the private qualification path fix five results:
+The public calls and the private qualification path fix seven results:
 
 - The sum of an empty segment is `0.0`.
 - The maximum of an empty segment is negative infinity.
 - The maximum of a segment that contains a NaN is NaN.
 - The minimum of an empty segment is positive infinity.
 - The minimum of a segment that contains a NaN is NaN.
+- The mean of an empty segment is NaN, zero divided by zero.
+- The mean of a segment that contains a NaN is NaN.
 
-The tests pin all five. On PyTorch 2.12,
+The tests pin all seven. On PyTorch 2.12,
 `torch.segment_reduce` returns the same values, and
 `torch.nn.functional.embedding_bag` with `mode="max"` differs on the two
-maximum results: it returns `0.0` for an empty bag and skips a NaN member. No option
-changes the empty value. To get zero for empty segments, replace by length
-after the call, not by value, because a segment whose values are all
-negative infinity has the same maximum, and one whose values are all
-positive infinity the same minimum:
+maximum results: it returns `0.0` for an empty bag and skips a NaN member.
+With `mode="mean"` it returns `0.0` for an empty bag, where these calls
+return NaN. No option changes the empty value. To get zero for empty
+segments, replace by length after the call, not by value, because a segment
+whose values are all negative infinity has the same maximum, one whose
+values are all positive infinity the same minimum, and one that holds a NaN
+the same mean:
 
 ```python
 empty = offsets[1:] == offsets[:-1]

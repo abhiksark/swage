@@ -723,18 +723,42 @@ def _program_element(module_text):
     return match[1]
 
 
+def _reads_extent(module_text):
+    """Return whether a segment program reads the extent of its segment.
+
+    Such a program divides its reduction by the extent, so the merge kernel
+    of its split segments takes the partial range records as a fourth
+    buffer and reads the extent of each segment from them.
+    """
+    return "swage.extent" in module_text
+
+
 def _semantic_module(kind, element="f32"):
     """Return the canonical private qualification module.
 
+    A mean is a sum, the extent of the segment, and one division: the
+    reduction kind of its program is `sum`, and the division runs once per
+    segment, after the reduction.
+
     Args:
-        kind: `"sum"`, `"max"`, or `"min"`.
+        kind: `"sum"`, `"max"`, `"min"`, or `"mean"`.
         element: The element type of the values and the result, `"f32"` or
             `"f64"`.
     """
-    if kind not in {"sum", "max", "min"}:
-        raise ValueError("reduction kind must be 'sum', 'max', or 'min'")
+    if kind not in {"sum", "max", "min", "mean"}:
+        raise ValueError(
+            "reduction kind must be 'sum', 'max', 'min', or 'mean'"
+        )
     if element not in _ELEMENTS:
         raise ValueError("reduction element type must be 'f32' or 'f64'")
+    reduced, epilogue, stored = kind, "", "%result"
+    if kind == "mean":
+        reduced, stored = "sum", "%mean"
+        epilogue = f"""
+    %extent = swage.extent %segment : !swage.segment<{element}>
+    %count = arith.index_cast %extent : index to i32
+    %divisor = arith.sitofp %count : i32 to {element}
+    %mean = arith.divf %result, %divisor : {element}"""
     return f"""
 module {{
   func.func @{_reduction_kernel(kind, element)}(
@@ -746,16 +770,67 @@ module {{
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?x{element}>, memref<?xi32>, index -> !swage.segment<{element}>
-    %result = swage.reduce %segment kind<{kind}>
+    %result = swage.reduce %segment kind<{reduced}>
         : !swage.segment<{element}> -> {element} {{
     ^bb0(%value: {element}):
       swage.yield %value : {element}
-    }}
-    memref.store %result, %output[%sid] : memref<?x{element}>
+    }}{epilogue}
+    memref.store {stored}, %output[%sid] : memref<?x{element}>
     return
   }}
 }}
 """
+
+
+def _enqueue_merge(
+    driver,
+    function,
+    block_threads,
+    stream,
+    *,
+    scratch,
+    output,
+    merges,
+    ranges,
+    partial_count,
+    merge_count,
+    segment_count,
+):
+    """Enqueue the merge kernel of the split segments of one batch.
+
+    Args:
+        driver: The CUDA driver wrapper.
+        function: The loaded merge kernel.
+        block_threads: The launch width of the split kernels.
+        stream: The CUDA stream handle to enqueue on.
+        scratch: Pointer of the partial results.
+        output: Pointer of the output.
+        merges: Pointer of the merge records.
+        ranges: Pointer of the partial range records for a program that
+            reads the extent of its segment, and None for any other. The
+            merge kernel of such a program takes the records as a fourth
+            buffer, after the merge records.
+        partial_count: Number of partial tasks.
+        merge_count: Number of split segments.
+        segment_count: Number of segments of the batch.
+    """
+    counts = (partial_count, merge_count, segment_count)
+    if ranges is None:
+        driver.launch_segmented(
+            function,
+            (merge_count,),
+            block_threads,
+            stream,
+            (scratch, output, merges, *counts),
+        )
+    else:
+        driver.launch_segmented_tasks(
+            function,
+            (merge_count,),
+            block_threads,
+            stream,
+            (scratch, output, merges, ranges, *counts),
+        )
 
 
 _SOFTMAX_MODULE = """
@@ -1396,6 +1471,7 @@ def _prepare_planned_reduction(
         )
     device = offsets.device
     device_index = device.index
+    reads_extent = _reads_extent(module_text)
     all_tasks = _identity_ids(torch, device, segment_count)
     # One upload carries every record the mixed policy launches. The fused
     # kernel reads the warp ids and then the CTA ids at the start of the
@@ -1552,19 +1628,18 @@ def _prepare_planned_reduction(
             )
             for tensor in (values, offsets, task_records, scratch):
                 tensor.record_stream(stream)
-            driver.launch_segmented(
+            _enqueue_merge(
+                driver,
                 merge_function,
-                (merge_count,),
                 blocks.split_block_threads,
                 stream.cuda_stream,
-                (
-                    scratch.data_ptr(),
-                    output_pointer,
-                    merge_pointer,
-                    partial_count,
-                    merge_count,
-                    segment_count,
-                ),
+                scratch=scratch.data_ptr(),
+                output=output_pointer,
+                merges=merge_pointer,
+                ranges=partial_pointer if reads_extent else None,
+                partial_count=partial_count,
+                merge_count=merge_count,
+                segment_count=segment_count,
             )
             for tensor in (offsets, output, task_records, scratch):
                 tensor.record_stream(stream)
@@ -1801,19 +1876,20 @@ def _launch_planned_reduction(
                     partial_count,
                 ),
             )
-            driver.launch_segmented(
+            _enqueue_merge(
+                driver,
                 merge_function,
-                (merge_count,),
                 blocks.split_block_threads,
                 stream.cuda_stream,
-                (
-                    scratch.data_ptr(),
-                    output_pointer,
-                    merge_pointer,
-                    partial_count,
-                    merge_count,
-                    segment_count,
+                scratch=scratch.data_ptr(),
+                output=output_pointer,
+                merges=merge_pointer,
+                ranges=(
+                    partial_pointer if _reads_extent(module_text) else None
                 ),
+                partial_count=partial_count,
+                merge_count=merge_count,
+                segment_count=segment_count,
             )
     for tensor in retained:
         tensor.record_stream(stream)

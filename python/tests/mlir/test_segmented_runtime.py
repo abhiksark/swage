@@ -765,6 +765,39 @@ def test_cpu_oracle_round_trips_every_float64_class(kind):
     assert _bits(actual) == _bits(values)
 
 
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["float32", "float64"]
+)
+@pytest.mark.parametrize("lengths", CASES)
+def test_cpu_mean_oracle_is_the_sequential_sum_over_the_length(lengths, dtype):
+    """The oracle of a mean divides the oracle of the sum, bit for bit.
+
+    The division is one IEEE-754 division by the length as a value of the
+    dtype. The values are exactly summable, so the quotient is also the
+    correctly rounded mean. An empty segment gives NaN.
+    """
+    values, offsets = _case(lengths)
+    values = values.to(dtype)
+    counts = torch.tensor(lengths, dtype=dtype)
+
+    mean = cpu_oracle(values, offsets, "mean")
+
+    expected = cpu_oracle(values, offsets, "sum") / counts
+    empty = counts == 0
+    assert mean.dtype == dtype
+    assert mean[empty].isnan().all()
+    assert _bits(mean[~empty]) == _bits(expected[~empty])
+    exact = torch.tensor(
+        [
+            values[begin:end].double().sum() / (end - begin)
+            for begin, end in pairwise(offsets.tolist())
+            if end > begin
+        ],
+        dtype=torch.float64,
+    )
+    assert _bits(mean[~empty]) == _bits(exact.to(dtype))
+
+
 def test_cpu_softmax_oracle_is_bit_exact_for_equal_logits():
     """Three equal logits normalize to the float32 nearest one third.
 

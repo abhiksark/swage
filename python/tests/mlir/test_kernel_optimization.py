@@ -100,7 +100,9 @@ def _segmented_kernels():
         block = _for_element(_ONE_BLOCK_REDUCTION, element)
         warp = _for_element(_ONE_WARP_REDUCTION, element)
         fused = _for_element(_FUSED, element)
-        for kind in ("sum", "max", "min"):
+        # A mean adds a division after the combination of each task and
+        # nothing to the synchronization.
+        for kind in ("sum", "max", "min", "mean"):
             text = _semantic_module(kind, element)
             name = _reduction_kernel(kind, element)
             label = f"{kind}{suffix}"

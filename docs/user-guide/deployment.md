@@ -60,8 +60,8 @@ PYTHONPATH=build/python_packages \
 artifact: /srv/swage/sm_86
 format_version: 2
 target: sm_86
-programs: segmented_sum, segmented_max, segmented_min, segmented_sum_f64, segmented_max_f64, segmented_min_f64, ragged_softmax
-kernels: 25
+programs: segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, ragged_softmax
+kernels: 33
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -72,7 +72,7 @@ The command takes these options:
 |---|---|
 | `--target` | The NVPTX processor to compile for, one of the processors [Runtime and Environment](../reference/runtime-environment.md#launch-lifecycle) lists. Required. |
 | `--output` | The directory to create. It must not exist, and its parent must. Required. |
-| `--program` | `sum`, `max`, `min`, `sum_f64`, `max_f64`, `min_f64`, or `softmax`. A kind alone names the reduction over float32 values, and the kind with `_f64` the one over float64 values. Repeat it to include several. Without it, all seven are included. |
+| `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, or `softmax`. A kind alone names the reduction over float32 values, and the kind with `_f64` the one over float64 values. Repeat it to include several. Without it, all nine are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one of the native build. See [The runtime library](#the-runtime-library). |
 
 These rules hold for every run:
@@ -106,7 +106,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 25 kernels of segmented_sum, segmented_max, segmented_min, segmented_sum_f64, segmented_max_f64, segmented_min_f64, ragged_softmax, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 33 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, ragged_softmax, written by swage 0.5.1 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -138,16 +138,19 @@ still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
-An artifact for all seven programs holds twenty-seven files:
+An artifact for all nine programs holds thirty-five files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: four roles for each of the six reductions, which are `segmented_sum`, `segmented_max`, and `segmented_min` over float32 values and the same three names with `_f64` over float64 values, and one for `ragged_softmax` |
+| `<program>.<role>.ptx` | One kernel: four roles for each of the eight reductions, which are `segmented_sum`, `segmented_max`, `segmented_min`, and `segmented_mean` over float32 values and the same four names with `_f64` over float64 values, and one for `ragged_softmax` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
 The roles of a reduction are `cta` for the pure CTA schedule, `mixed` for
-the fused kernel, and `partial` and `merge` for split segments. The softmax
+the fused kernel, and `partial` and `merge` for split segments. The `merge`
+kernel of a mean takes one buffer more than that of the other reductions:
+the range records of the partial tasks, from which it reads the length of
+each split segment. The softmax
 has one `cta` kernel. These are the kernels a call can launch, and the
 loader requires each of them for every program the artifact lists.
 
@@ -321,11 +324,11 @@ For a serving host of another machine, such as an AArch64 host with an
   an artifact in a process that cannot import `mlir_swage`, checks that the
   process maps no LLVM or MLIR library, compares the results with
   `torch.segment_reduce`, `torch.softmax`, and float64 references, and
-  requires the bits of the compiled path. The cases include the three
-  float64 reductions, whose sums are compared with exactly rounded ones. A
-  second process, in which `mlir_swage` is importable, runs both calls from
-  the artifact with no LLVM or MLIR library mapped and then launches the
-  fixed vector add.
+  requires the bits of the compiled path. The cases include the mean and
+  the float64 reductions, whose sums are compared with exactly rounded
+  ones. A second process, in which `mlir_swage` is importable, runs both
+  calls from the artifact with no LLVM or MLIR library mapped and then
+  launches the fixed vector add.
 - `tests/python/test_artifact.py` covers selection, every refusal, and the
   trust rule, without the native build.
 - `unittests/RuntimeTest.cpp` and

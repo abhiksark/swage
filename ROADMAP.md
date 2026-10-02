@@ -31,11 +31,12 @@ The private static paths now also support capture-free, single-stage f32
 sum/max element programs and map chains across warp, CTA, mixed, and split
 execution (ADR-0019). This composition extension leaves the historical gates
 and frozen benchmark unchanged. `kind<min>` and f64 values run through the
-same paths since ADR-0022; persistent execution stays an f32 sum.
+same paths since ADR-0022, and so does a mean, written as a sum divided by
+the extent of its segment; persistent execution stays an f32 sum.
 
 The phrase "no public segmented launch" in the M7 and M8 rows records the
 boundary at those gates. Since then two public calls, `swage.segment_reduce`
-for sum, max, and min and `swage.segment_softmax`, run fixed programs
+for sum, max, min, and mean and `swage.segment_softmax`, run fixed programs
 through the M4 to M8 paths with default limits: the reductions over f32 or
 f64 values, and the softmax over f32 values. They belong to no phase gate above
 and are not part of a release yet. The same holds for the ahead-of-time

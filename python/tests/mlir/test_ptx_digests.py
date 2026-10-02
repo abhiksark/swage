@@ -113,7 +113,7 @@ _PERSISTENT_VARIANT = (
     "persistent", "_compile_persistent_segmented_reduction_ptx", {},
 )
 
-# The reduction programs: a kind, an element transform of
+# The reduction programs: a kind of `segment_reduce`, an element transform of
 # `reduction_programs.reduction_module`, an element type, and the processors
 # each is compiled for. Together they cover every admitted kind and element
 # type, a region with arithmetic, a chain of maps, and `math.exp2`.
@@ -136,6 +136,10 @@ _REDUCTIONS = (
     ("min", "identity", "f64", _NEWER_PROCESSORS),
     ("sum", "square", "f64", _NEWER_PROCESSORS),
     ("max", "maps", "f64", _NEWER_PROCESSORS),
+    # A mean is a sum with a division after the combination of each task.
+    # Its merge kernel also reads the range records of the partial tasks.
+    ("mean", "identity", "f32", _NEWER_PROCESSORS),
+    ("mean", "identity", "f64", _NEWER_PROCESSORS),
 )
 
 
