@@ -1639,11 +1639,18 @@ def test_prepared_sum_supports_cuda_graph_replay(policy):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+@pytest.mark.parametrize("slow", ["record upload", "segment id fill"])
 def test_prepared_sum_waits_for_task_initialization_across_streams(
-    monkeypatch, policy
+    monkeypatch, policy, slow
 ):
-    """Order asynchronous task initialization before another stream launches."""
+    """Order asynchronous task initialization before another stream launches.
+
+    A preparation leaves two kinds of task storage that may still be filling
+    when it returns: the uploaded records, and segment ids past the shared
+    tensor, which are filled on the device. Either one is made slow here.
+    """
     from swage import _runtime
+    from swage import _segmented_qualification as qualification
 
     preparation_stream = torch.cuda.Stream()
     launch_stream = torch.cuda.Stream()
@@ -1669,14 +1676,20 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     monkeypatch.setattr(_runtime, "_get_driver", _Driver)
 
     def asynchronous_arange(*_args, **_kwargs):
-        torch.cuda._sleep(2_000_000_000)
+        if slow == "segment id fill":
+            torch.cuda._sleep(2_000_000_000)
         return all_task_storage
 
     def asynchronous_tensor(_data, *, dtype, device):
         assert dtype == torch.int32
         assert device == offsets.device
+        if slow == "record upload":
+            torch.cuda._sleep(2_000_000_000)
         return mixed_task_storage
 
+    if slow == "segment id fill":
+        # Two segments are past this limit, so their ids are filled here.
+        monkeypatch.setattr(qualification, "_IDENTITY_LIMIT", 1)
     monkeypatch.setattr(torch, "arange", asynchronous_arange)
     monkeypatch.setattr(torch, "tensor", asynchronous_tensor)
     with torch.cuda.stream(preparation_stream):
@@ -1981,16 +1994,18 @@ def test_split_allocation_failure_precedes_launch(monkeypatch):
         )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    values = torch.ones(4097, device="cuda")
+    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+    # The records are the task storage a preparation allocates; the segment
+    # ids are shared and already on the device.
     monkeypatch.setattr(
         torch,
-        "arange",
+        "tensor",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             MemoryError("task allocation failed")
         ),
     )
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
 
     with pytest.raises(MemoryError, match="task allocation failed"):
         _prepare_planned_sum(values, offsets, output)

@@ -370,6 +370,45 @@ def _target(torch, device_index):
     return target
 
 
+# The segment ids 0, 1, 2, ... of each CUDA device index, which a launch of
+# one task per segment reads as its task list. They depend on the segment
+# count only, so one tensor per device serves every preparation: it is
+# uploaded once, complete when the upload returns, and only read afterwards.
+# It holds 4 MiB of device memory per device for as long as the process runs.
+_IDENTITY_LIMIT = 1 << 20
+_identity_memo = {}
+
+
+def _identity_ids(torch, device, count):
+    """Return a tensor that starts with the segment ids 0 to `count - 1`.
+
+    Args:
+        torch: The PyTorch module.
+        device: CUDA device of the prepared tensors.
+        count: Number of ids a launch reads, the segment count of the
+            preparation.
+
+    Returns:
+        An int32 tensor on the device with at least `count` ascending ids.
+        Up to `_IDENTITY_LIMIT` ids it is the shared tensor of the device,
+        which needs no kernel and no wait. A longer list is filled on the
+        device for this preparation alone, asynchronously, on the current
+        stream.
+    """
+    if count > _IDENTITY_LIMIT:
+        return torch.arange(count, dtype=torch.int32, device=device)
+    ids = _identity_memo.get(device.index)
+    if ids is None:
+        import numpy
+
+        ids = _identity_memo[device.index] = torch.tensor(
+            numpy.arange(_IDENTITY_LIMIT, dtype=numpy.int32),
+            dtype=torch.int32,
+            device=device,
+        )
+    return ids
+
+
 def _compile_once(compile_ptx, module_text, *, module=None, **options):
     """Compile one kernel at most once per process and return its PTX.
 
@@ -1022,7 +1061,7 @@ def _prepare_planned_reduction(
         )
     device = offsets.device
     device_index = device.index
-    all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
+    all_tasks = _identity_ids(torch, device, segment_count)
     # One upload carries every record the mixed policy launches. The fused
     # kernel reads the warp ids and then the CTA ids at the start of the
     # buffer; the partial ranges and the merge records follow them. The
@@ -1060,27 +1099,26 @@ def _prepare_planned_reduction(
         else:
             stream.wait_event(tasks_ready)
 
-    def submit(function, block_size, task_ids, stream, storage):
-        task_count = task_ids.numel()
-        if task_count == 0:
-            return None
+    def submit(function, block_size, stream, storage):
+        # One task per segment, in segment order: the task list is the
+        # first `segment_count` ids of `all_tasks`.
         wait_for_tasks(stream)
         driver.launch_segmented_tasks(
             function,
-            (task_count,),
+            (segment_count,),
             block_size,
             stream.cuda_stream,
             (
                 storage[0],
                 storage[3],
                 storage[6],
-                task_ids.data_ptr(),
+                all_tasks.data_ptr(),
                 value_count,
-                task_count,
+                segment_count,
                 segment_count,
             ),
         )
-        for tensor in (values, offsets, output, task_ids):
+        for tensor in (values, offsets, output, all_tasks):
             tensor.record_stream(stream)
         return None
 
@@ -1113,26 +1151,14 @@ def _prepare_planned_reduction(
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            warp_function,
-            _WARP_BLOCK,
-            all_tasks,
-            current_stream(),
-            storage,
-        )
+        return submit(warp_function, _WARP_BLOCK, current_stream(), storage)
 
     def cta():
         _require_unchanged_offsets(offsets, offsets_version)
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            cta_function,
-            _CTA_BLOCK,
-            all_tasks,
-            current_stream(),
-            storage,
-        )
+        return submit(cta_function, _CTA_BLOCK, current_stream(), storage)
 
     def mixed():
         _require_unchanged_offsets(offsets, offsets_version)

@@ -935,3 +935,59 @@ def test_later_preparations_repeat_no_device_or_program_lookup(monkeypatch):
 
     assert len(capability.calls) == 1
 
+
+@requires_cuda
+def test_segment_ids_are_uploaded_once_and_shared_by_preparations(monkeypatch):
+    """Read the task list of the pure policies from one tensor per device."""
+    cases = [_integer_case(lengths) for lengths in ([1, 33, 5000], [40] * 7)]
+    monkeypatch.setattr(qualification, "_identity_memo", {})
+    uploads = _capture_uploads(monkeypatch)
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("segment ids up to the limit are not filled per layout")
+
+    monkeypatch.setattr(torch, "arange", fail)
+    prepared = []
+    for values, offsets, expected in cases:
+        output = torch.full((len(expected),), float("nan"), device="cuda")
+        prepared.append((
+            qualification._prepare_planned_sum(
+                values.cuda(), offsets.cuda(), output
+            ),
+            output,
+            expected,
+        ))
+    monkeypatch.undo()
+
+    limit = qualification._IDENTITY_LIMIT
+    assert [len(data) for data in uploads] == [limit, 9, 7]
+    assert numpy.array_equal(uploads[0], numpy.arange(limit))
+    for policies, output, expected in prepared:
+        for launch in policies:
+            output.fill_(float("nan"))
+            launch()
+            torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@requires_cuda
+def test_segment_ids_past_the_shared_tensor_are_filled_per_preparation(
+    monkeypatch,
+):
+    """Fall back to a device fill for more segments than the shared ids."""
+    values, offsets, expected = _integer_case([1, 33, 5000, 2, 40])
+    output = torch.full((5,), float("nan"), device="cuda")
+    fills = _CountingCalls(torch.arange)
+    monkeypatch.setattr(qualification, "_IDENTITY_LIMIT", 4)
+    monkeypatch.setattr(torch, "arange", fills)
+
+    prepared = qualification._prepare_planned_sum(
+        values.cuda(), offsets.cuda(), output
+    )
+
+    monkeypatch.undo()
+    assert len(fills.calls) == 1
+    for launch in prepared:
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
