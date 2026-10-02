@@ -330,9 +330,11 @@ void initializeNVPTX() {
 ///   - instcombine again, on what rotation and hoisting exposed.
 ///
 /// What is left out, and why:
-///   - Loop unrolling: it would repeat the barriers, shuffles, and atomics of
-///     the persistent queue loops, and a reduction loop has one accumulator
-///     that cannot be split without reassociating.
+///   - Loop unrolling: the queue loops of the persistent kernel hold
+///     barriers, shuffles, and atomics that must not be repeated, and a
+///     reduction loop has one accumulator that cannot be split without
+///     reassociating. A trial with the full and the runtime unroller after
+///     this list changed no kernel.
 ///   - Reassociation, vectorization, and anything else that needs a fast-math
 ///     flag. No pass here adds such a flag or contracts a multiply and an
 ///     add, so the bits of every result are those of the unoptimized kernel.

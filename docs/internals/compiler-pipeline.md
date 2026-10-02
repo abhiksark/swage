@@ -109,8 +109,9 @@ passes must leave three things exactly as the lowering produced them:
 - **Synchronization.** Each barrier, warp shuffle, memory fence, and atomic
   of the lowering reaches the PTX once. A default pipeline for this target
   narrows the thread-index ranges from the launch width and then deletes
-  shuffle paths for small block sizes, and loop unrolling would repeat the
-  synchronization inside the persistent queue loops. Neither runs.
+  shuffle paths for small block sizes, so no default pipeline runs. Loop
+  unrolling does not run either: the persistent queue loops hold
+  synchronization that must not be repeated.
 - **Floating-point results.** No pass adds a fast-math flag, reassociates,
   or contracts a multiply and an add. Each f32 operation stays the
   round-to-nearest operation of the semantic program, in the same order, so
