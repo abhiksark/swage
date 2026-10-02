@@ -431,6 +431,107 @@ def test_long_sums_stay_within_the_tree_bound(suite, seed):
         )
 
 
+# The longest segment the page bounds for the pinned mixed schedule, and
+# the longest one that automatic selection moves to the CTA schedule.
+_PINNED_MIXED_LIMIT = 2_097_152
+_SELECTED_CTA_LIMIT = 8192
+_SUM_ROUNDING_PAGE = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "docs"
+    / "internals"
+    / "segmented-reductions.md"
+)
+
+
+def _mixed_depth_limits():
+    """Return the largest k of `mixed`, pinned and under selection.
+
+    Pinned, `mixed` picks the tree from the length alone, and k is largest
+    at the end of one of its three length classes. The scan also samples
+    every class in case that stops being true. Under selection `mixed` is
+    the CTA schedule for segments of 4097 to 8192 elements.
+    """
+    lengths = {1, 32, 33, 4096, 4097, _PINNED_MIXED_LIMIT}
+    lengths.update(range(1, _PINNED_MIXED_LIMIT + 1, 257))
+    pinned = max(_summation_depth("mixed", length) for length in lengths)
+    selected = max(
+        _summation_depth("cta", length)
+        for length in range(4097, _SELECTED_CTA_LIMIT + 1)
+    )
+    return pinned, selected
+
+
+def test_sum_rounding_page_states_both_mixed_depth_limits():
+    """Keep the documented bound of the default schedule equal to the trees.
+
+    The page quotes one k for `mixed` with `select_schedule=False` and a
+    larger one for the batches in which automatic selection, the default,
+    makes `mixed` the CTA schedule. Both come from _summation_depth, which
+    the float64 bound tests use, so the page cannot state a bound that the
+    tests do not check.
+    """
+    pinned, selected = _mixed_depth_limits()
+    page = " ".join(_SUM_ROUNDING_PAGE.read_text().split())
+
+    assert (pinned, selected) == (38, 70)
+    for depth in (pinned, selected):
+        assert f"at most {depth}" in page
+        assert f"`{depth * _EPS32:.1e} * sum(|x|)`" in page
+
+
+@_needs_cuda
+@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("suite", LONG_SUITES)
+def test_selected_schedule_stays_within_the_cta_tree_bound(suite, seed):
+    """Bound the default `mixed` on a batch that automatic selection moves.
+
+    With `select_schedule=True`, the default, a batch of as many
+    8192-element segments as the device has SMs runs the CTA schedule
+    instead of the split one. Its bound is therefore the CTA one,
+    k = ceil(8192 / 128) + 6 = 70, and not the 38 that holds for `mixed`
+    with a pinned schedule. test_schedule_selection_changes_bits_and_
+    pinned_schedules_do_not compares the bits of this batch; this test
+    compares its sums with float64.
+    """
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    lengths = [_SELECTED_CTA_LIMIT] * count
+    generator = torch.Generator().manual_seed(seed)
+    host_values = torch.cat(
+        [_long_values(suite, length, generator) for length in lengths]
+    )
+    assert host_values.dtype == torch.float32
+    reference = torch.segment_reduce(
+        host_values.double(), "sum", lengths=torch.tensor(lengths)
+    )
+    magnitude = torch.segment_reduce(
+        host_values.double().abs(), "sum", lengths=torch.tensor(lengths)
+    )
+    values = host_values.cuda()
+    offsets = torch.tensor(_offsets(lengths), dtype=torch.int32, device="cuda")
+    output = torch.full((count,), float("nan"), device="cuda")
+
+    prepared = _prepare_planned_reduction(
+        values,
+        offsets,
+        output,
+        module_text=reduction_module("sum", "identity"),
+        kernel_name="segmented_sum",
+    )
+    prepared.mixed()
+
+    pinned, selected = _mixed_depth_limits()
+    assert prepared.mixed is prepared.cta
+    assert _summation_depth("cta", _SELECTED_CTA_LIMIT) == selected > pinned
+    error = (output.cpu().double() - reference).abs()
+    assert (error <= selected * _EPS32 * magnitude).all(), (
+        f"error {error.tolist()} exceeds {selected} * eps32 * sum(|x|)"
+    )
+    measured = error / (_EPS32 * magnitude)
+    assert (measured <= _MEASURED_SUM_EPS).all(), (
+        f"error is {measured.tolist()} eps32 * sum(|x|)"
+    )
+
+
 _DENORMAL = 2.0**-149
 
 SPECIAL_LENGTHS = [2, 32, 33, 4096, 4097, 8193]

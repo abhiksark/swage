@@ -108,16 +108,29 @@ k * eps32 * sum(|x|)
 of the exact sum of the f32 values it adds, where `eps32` is `2**-23`, `k`
 is the entry of the table above, and `x` are the results of the element
 program. This is the worst case of a summation tree with `k` rounding
-additions on its longest path. Under the default limits `mixed` has `k` of
-at most 38 for any segment up to 2,097,152 elements, which is
-`4.5e-06 * sum(|x|)`. The bound is relative to the sum of magnitudes, not
-to the sum: when the values cancel, the relative error of the result is
-larger by the factor `sum(|x|) / |sum(x)|`.
+additions on its longest path. The bound is relative to the sum of
+magnitudes, not to the sum: when the values cancel, the relative error of
+the result is larger by the factor `sum(|x|) / |sum(x)|`.
+
+Under the default limits, the bound of `mixed` depends on whether automatic
+selection is on:
+
+- With `select_schedule=False`, `mixed` has `k` of at most 38 for any
+  segment up to 2,097,152 elements, which is `4.5e-06 * sum(|x|)`. The
+  largest `k` belongs to a 4096-element segment on the CTA schedule.
+- With `select_schedule=True`, which is the default of
+  `_prepare_planned_reduction`, a batch that meets the selection rule runs
+  the CTA schedule on segments of up to 8192 elements. There `k` is at most
+  70, which is `8.3e-06 * sum(|x|)`. A batch that does not meet the rule
+  has the bound of the first case.
 
 A seeded test checks the bound against a float64 reference at 100,003,
 300,001, and 1,048,577 elements, on mixed-sign values spread over 80
 binades and on values whose sum is below `1e-12` of the sum of their
-magnitudes. The largest error it measures on the RTX A6000 is
+magnitudes. A second test checks the bound of the selected CTA schedule on
+a batch of 8192-element segments that meets the selection rule, and a third
+keeps the two `k` limits above equal to the trees the tests use. The
+largest error the first test measures on the RTX A6000 is
 `0.12 * eps32 * sum(|x|)`, and the test also fails above
 `eps32 * sum(|x|)` on those inputs. That second limit is a regression guard
 on the measurement, not a guarantee for other values.

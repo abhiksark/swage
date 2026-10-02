@@ -53,8 +53,10 @@ Numerical claims have their own evidence in
   when the batch reaches the SM count of the device, and the pinned
   schedules do not.
 - Sum accuracy: every schedule stays within `k * eps32 * sum(|x|)` of a
-  float64 reference at 100,003 to 1,048,577 elements, and propagates NaN,
-  infinities, and subnormal values.
+  float64 reference at 100,003 to 1,048,577 elements, as does the CTA
+  schedule that automatic selection substitutes on a batch of 8192-element
+  segments, and every schedule propagates NaN, infinities, and subnormal
+  values.
 - Code generation: the PTX of every sum kernel and of the softmax kernel
   uses round-to-nearest f32 operations with no fused multiply-add and no
   flush-to-zero. This check needs no GPU.
