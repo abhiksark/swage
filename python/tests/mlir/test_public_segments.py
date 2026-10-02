@@ -575,11 +575,14 @@ def test_segment_reduce_max_propagates_nan_and_orders_infinities(length):
         "positive-infinity": ramp.clone(),
         "all-negative-infinity": torch.full((length,), float("-inf")),
         "negative-infinity": ramp.clone(),
+        "opposite-infinities": ramp.clone(),
     }
     segments["nan-first"][0] = float("nan")
     segments["nan-last"][-1] = float("nan")
     segments["positive-infinity"][length // 2] = float("inf")
     segments["negative-infinity"][-1] = float("-inf")
+    segments["opposite-infinities"][0] = float("-inf")
+    segments["opposite-infinities"][-1] = float("inf")
     host_values = torch.cat(list(segments.values()))
     host_offsets = torch.tensor(
         _offsets([length] * len(segments)), dtype=torch.int32
@@ -596,6 +599,7 @@ def test_segment_reduce_max_propagates_nan_and_orders_infinities(length):
         float("inf"),
         float("-inf"),
         float(length - 2),
+        float("inf"),
     ]
     assert _bits(actual[2:]) == _bits(theirs[2:])
 
@@ -966,6 +970,49 @@ def test_segmented_calls_launch_on_the_current_stream(function, monkeypatch):
     assert streams
     assert set(streams) == {side.cuda_stream}
     assert _bits(result.cpu()) == _bits(expected)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_prepare_on_every_call_and_wait_for_nothing_else(
+    function,
+):
+    """Copy the offsets to the host once per call and synchronize nowhere.
+
+    No layout is kept between calls: a second call with the same offsets
+    tensor copies it to the host again. That copy is where a warm call
+    waits for the device. The call asks for no other synchronization, also
+    not after it enqueued its kernels.
+    """
+    host_values, host_offsets = _host_segments([3, 40, 0, 4100])
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    expected = _call(function, values, offsets).cpu()
+    torch.cuda.synchronize()
+    copied = []
+    to_host = torch.Tensor.cpu
+
+    def counting(tensor, *arguments, **keywords):
+        if tensor.is_cuda:
+            copied.append(tensor.data_ptr())
+        return to_host(tensor, *arguments, **keywords)
+
+    def refuse(*arguments, **keywords):
+        raise AssertionError("a segmented call synchronized with the device")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(torch.Tensor, "cpu", counting)
+        patch.setattr(torch.Tensor, "item", refuse)
+        patch.setattr(torch.Tensor, "tolist", refuse)
+        patch.setattr(torch.cuda, "synchronize", refuse)
+        patch.setattr(torch.cuda.Stream, "synchronize", refuse)
+        patch.setattr(torch.cuda.Event, "synchronize", refuse)
+        patch.setattr(torch.cuda.Event, "wait", refuse)
+        first = _call(function, values, offsets)
+        second = _call(function, values, offsets)
+
+    assert copied == [offsets.data_ptr()] * 2
+    assert _bits(first.cpu()) == _bits(expected)
+    assert _bits(second.cpu()) == _bits(expected)
 
 
 @_needs_cuda

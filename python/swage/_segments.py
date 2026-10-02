@@ -24,7 +24,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
 
     Every call repeats the host work, also when the offsets are the ones of
     the call before, so a call costs more than its kernels. Compiled kernels
-    are kept for the life of the process.
+    are kept in the process and reused by later calls.
 
     Args:
         values: Contiguous rank-one `torch.float32` CUDA tensor on the
