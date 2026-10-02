@@ -355,11 +355,10 @@ guards of a prepared launch are therefore not part of a call:
 
 Everything else is checked on every call: the shared validation of step 6,
 with the offsets on a host copy, and the refusals below. A write to the
-offsets from another thread, or by a kernel on another stream, between the
-host copy and the enqueue is not detected, as a prepared launch does not
-detect a write that PyTorch does not count. The kernels clamp every range
-they load to the buffer it indexes, so such a write cannot move an access
-outside the buffers.
+offsets by another thread, or by a kernel on another stream, between the
+host copy and the enqueue is not detected, and the result is then not a
+validated one. The kernels clamp every range they load to the buffer it
+indexes, so such a write cannot move an access outside the buffers.
 
 Three conditions are refused with an error instead of being handled:
 

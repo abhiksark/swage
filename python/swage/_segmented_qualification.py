@@ -1469,11 +1469,10 @@ def _launch_planned_reduction(
     - No event orders the task records before the kernels. They are
       uploaded and read on the one stream that is current at this call.
 
-    A write to the offsets from another thread or from a kernel on another
-    stream, between the host copy and the enqueue, is not detected here,
-    as a prepared launch does not detect a write PyTorch does not count.
-    The kernels clamp every range they load, so such a write cannot move
-    an access outside the buffers.
+    A write to the offsets by another thread or by a kernel on another
+    stream, between the host copy and the enqueue, is not detected. The
+    result is then not a validated one. The kernels clamp every range they
+    load, so such a write cannot move an access outside the buffers.
 
     Args:
         values: Contiguous rank-one CUDA f32 input tensor.
