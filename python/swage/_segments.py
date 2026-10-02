@@ -145,7 +145,7 @@ def segment_softmax(values, offsets, *, out=None):
         output,
         value_count,
         segment_count,
-        _qualification._CTA_BLOCK,
+        _qualification._target_description().cta_block_threads,
     )
     return output
 

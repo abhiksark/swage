@@ -479,3 +479,48 @@ def test_a_compile_does_not_stall_other_python_threads():
         sys.setswitchinterval(interval)
 
     assert paused < 0.5 * elapsed, (paused, elapsed)
+
+
+def test_target_description_holds_the_values_the_lowerings_read():
+    """Expose the compiler's target description to the host as plain values."""
+    assert native_swage._target_description() == {
+        "name": "nvidia",
+        "triple": "nvptx64-nvidia-cuda",
+        "processor_prefix": "sm_",
+        "processors": (80, 86, 87, 88, 89, 90, 100, 101, 103, 110, 120, 121),
+        "subgroup_width": 32,
+        "max_block_threads": 1024,
+        "cta_block_threads": 128,
+        "split_block_threads": 512,
+        "persistent_block_threads": 512,
+        "persistent_partial_claim": 4,
+        "persistent_warp_claim": 8,
+        "default_warp_max_elements": 32,
+        "default_cta_chunk_elements": 4096,
+    }
+
+
+def test_the_runner_takes_its_block_widths_from_the_target_description(
+    monkeypatch,
+):
+    """Read block widths and planning defaults from the compiler, lazily."""
+    from swage import _segmented_qualification as qualification
+
+    description = qualification._target_description()
+    assert vars(description) == native_swage._target_description()
+    assert qualification._target_description() is description
+    assert qualification._planning_limits(None, None) == (32, 4096)
+    assert qualification._planning_limits(8, None) == (8, 4096)
+    assert qualification._planning_limits(None, 64) == (32, 64)
+
+    # The runner holds no copy of its own: another description changes what
+    # an omitted limit and the warp rule resolve to.
+    narrow = dict(native_swage._target_description())
+    narrow.update(subgroup_width=16, default_cta_chunk_elements=2048)
+    monkeypatch.setattr(
+        qualification, "_target_record", type(description)(**narrow)
+    )
+    assert qualification._planning_limits(None, None) == (32, 2048)
+    qualification._validate_warp_count(16)
+    with pytest.raises(ValueError, match="power-of-two warp count, got 48"):
+        qualification._validate_warp_count(48)

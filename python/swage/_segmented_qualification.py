@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import threading
+import types
 import weakref
 from collections.abc import Callable
 from typing import NamedTuple
@@ -14,11 +15,43 @@ from typing import NamedTuple
 from . import _runtime
 
 _I32_LIMIT = 1 << 31
-_WARP_BLOCK = 32
-_CTA_BLOCK = 128
-_SPLIT_BLOCK = 512
-_PERSISTENT_BLOCK = 512
-_CTA_CHUNK_ELEMENTS = 4096
+_target_record = None
+
+
+def _target_description():
+    """Return the target description of the compiler, read once per process.
+
+    Block widths, the subgroup width, claim batches, and the planning
+    defaults live in the native target description, which the lowerings and
+    the code generation C API read too, so the host cannot disagree with a
+    kernel. The native package is imported here and not when this module is,
+    which keeps `import swage` free of it.
+
+    Returns:
+        A namespace with one attribute per field of the description, for
+        example `subgroup_width`, `cta_block_threads`, and
+        `default_cta_chunk_elements`.
+    """
+    global _target_record
+    if _target_record is None:
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native_swage,
+        )
+
+        _target_record = types.SimpleNamespace(
+            **native_swage._target_description()
+        )
+    return _target_record
+
+
+def _planning_limits(warp_max_elements, cta_chunk_elements):
+    """Replace each omitted planning limit with the default of the target."""
+    target = _target_description()
+    if warp_max_elements is None:
+        warp_max_elements = target.default_warp_max_elements
+    if cta_chunk_elements is None:
+        cta_chunk_elements = target.default_cta_chunk_elements
+    return warp_max_elements, cta_chunk_elements
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
     "convert-arith-to-llvm),"
@@ -275,7 +308,8 @@ def _validate_warp_count(block_size):
     combination is complete in every participating lane only for a
     power-of-two number of warps. A partly filled last warp is admitted.
     """
-    warp_count = (block_size + _WARP_BLOCK - 1) // _WARP_BLOCK
+    width = _target_description().subgroup_width
+    warp_count = (block_size + width - 1) // width
     if warp_count & (warp_count - 1):
         raise ValueError(
             f"block size must give a power-of-two warp count, got {block_size}"
@@ -639,14 +673,17 @@ class _PreparedPersistentSum(NamedTuple):
     merge_tasks: int
 
 
-def launch_gpu(values, offsets, output, kind, block_size=128):
+def launch_gpu(values, offsets, output, kind, block_size=None):
     """Launch one internally qualified segmented reduction.
 
     The kernel is compiled once per kind, block size, and target, and loaded
-    once per CUDA context.
+    once per CUDA context. An omitted block size is the CTA block of the
+    target description.
     """
     torch = _runtime._import_torch()
     value_count, segment_count = _validate_tensors(values, offsets, output)
+    if block_size is None:
+        block_size = _target_description().cta_block_threads
     if type(block_size) is not int or block_size <= 0:
         raise ValueError("block size must be a positive integer")
     _validate_warp_count(block_size)
@@ -725,8 +762,12 @@ def _launch_segmented_sum_tasks(
         0 <= host_task_ids.min() and host_task_ids.max() < segment_count
     ):
         raise ValueError("task_ids must contain valid segment IDs")
-    if block_size not in {_WARP_BLOCK, _CTA_BLOCK}:
-        raise ValueError("task block size must be 32 or 128")
+    blocks = _target_description()
+    if block_size not in {blocks.subgroup_width, blocks.cta_block_threads}:
+        raise ValueError(
+            f"task block size must be {blocks.subgroup_width} or "
+            f"{blocks.cta_block_threads}"
+        )
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if block_size > properties.max_threads_per_block:
         raise ValueError(
@@ -780,8 +821,8 @@ def _prepare_planned_sum(
     offsets,
     output,
     *,
-    warp_max_elements=32,
-    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    warp_max_elements=None,
+    cta_chunk_elements=None,
 ):
     """Prepare the canonical identity sum used by existing qualification."""
     return _prepare_planned_reduction(
@@ -981,8 +1022,8 @@ def _prepare_planned_reduction(
     *,
     module_text,
     kernel_name,
-    warp_max_elements=32,
-    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    warp_max_elements=None,
+    cta_chunk_elements=None,
     select_schedule=True,
 ):
     """Prepare static policies for one private capture-free sum/max module.
@@ -1019,6 +1060,12 @@ def _prepare_planned_reduction(
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
+    warp_max_elements, cta_chunk_elements = _planning_limits(
+        warp_max_elements, cta_chunk_elements
+    )
+    blocks = _target_description()
+    # A fused block serves one warp task per subgroup.
+    warp_slots = blocks.cta_block_threads // blocks.subgroup_width
     validate, classification = _classifying_validator(
         warp_max_elements, cta_chunk_elements
     )
@@ -1070,7 +1117,7 @@ def _prepare_planned_reduction(
     use_direct_cta = (
         select_schedule
         and segment_count > 0
-        and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
+        and cta_chunk_elements == blocks.default_cta_chunk_elements
         and merge_count == segment_count
         and int((host_offsets[1:] - host_offsets[:-1]).max())
         <= 2 * cta_chunk_elements
@@ -1094,7 +1141,7 @@ def _prepare_planned_reduction(
         native_swage._compile_segmented_reduction_ptx,
         module_text,
         kernel_name=kernel_name,
-        block_size=_WARP_BLOCK,
+        block_size=blocks.subgroup_width,
         target=target,
         use_task_ids=True,
     )
@@ -1102,7 +1149,7 @@ def _prepare_planned_reduction(
         native_swage._compile_segmented_reduction_ptx,
         module_text,
         kernel_name=kernel_name,
-        block_size=_CTA_BLOCK,
+        block_size=blocks.cta_block_threads,
         target=target,
         use_task_ids=True,
     )
@@ -1243,14 +1290,18 @@ def _prepare_planned_reduction(
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(warp_function, _WARP_BLOCK, current_stream(), storage)
+        return submit(
+            warp_function, blocks.subgroup_width, current_stream(), storage
+        )
 
     def cta():
         _require_unchanged_offsets(offsets, offsets_version)
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(cta_function, _CTA_BLOCK, current_stream(), storage)
+        return submit(
+            cta_function, blocks.cta_block_threads, current_stream(), storage
+        )
 
     def mixed():
         _require_unchanged_offsets(offsets, offsets_version)
@@ -1263,8 +1314,11 @@ def _prepare_planned_reduction(
         if direct_count:
             driver.launch_segmented_mixed(
                 mixed_function,
-                ((direct_warp_count + 3) // 4 + direct_cta_count,),
-                _CTA_BLOCK,
+                (
+                    (direct_warp_count + warp_slots - 1) // warp_slots
+                    + direct_cta_count,
+                ),
+                blocks.cta_block_threads,
                 stream.cuda_stream,
                 (
                     values_pointer,
@@ -1283,7 +1337,7 @@ def _prepare_planned_reduction(
             driver.launch_segmented(
                 partial_function,
                 (partial_count,),
-                _SPLIT_BLOCK,
+                blocks.split_block_threads,
                 stream.cuda_stream,
                 (
                     values_pointer,
@@ -1298,7 +1352,7 @@ def _prepare_planned_reduction(
             driver.launch_segmented(
                 merge_function,
                 (merge_count,),
-                _SPLIT_BLOCK,
+                blocks.split_block_threads,
                 stream.cuda_stream,
                 (
                     scratch.data_ptr(),
@@ -1322,8 +1376,8 @@ def _prepare_persistent_sum(
     offsets,
     output,
     *,
-    warp_max_elements=32,
-    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    warp_max_elements=None,
+    cta_chunk_elements=None,
     resident_blocks=None,
 ):
     """Prepare a private resident kernel with split completion handling.
@@ -1346,6 +1400,9 @@ def _prepare_persistent_sum(
     ):
         raise ValueError("resident_blocks must be a positive u32")
     torch = _runtime._import_torch()
+    warp_max_elements, cta_chunk_elements = _planning_limits(
+        warp_max_elements, cta_chunk_elements
+    )
     validate, classification = _classifying_validator(
         warp_max_elements, cta_chunk_elements
     )
@@ -1402,14 +1459,16 @@ def _prepare_persistent_sum(
         target=target,
     )
 
-    warp_slots = _PERSISTENT_BLOCK // _WARP_BLOCK
+    blocks = _target_description()
+    persistent_block = blocks.persistent_block_threads
+    warp_slots = persistent_block // blocks.subgroup_width
     work_groups = (
         cta_count + partial_count + (warp_count + warp_slots - 1) // warp_slots
     )
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if _PERSISTENT_BLOCK > properties.max_threads_per_block:
+    if persistent_block > properties.max_threads_per_block:
         raise ValueError(
-            f"persistent block size {_PERSISTENT_BLOCK} exceeds device limit "
+            f"persistent block size {persistent_block} exceeds device limit "
             f"{properties.max_threads_per_block}"
         )
     if resident_blocks is None:
@@ -1520,7 +1579,7 @@ def _prepare_persistent_sum(
             driver.launch_persistent(
                 function,
                 (active_blocks,),
-                _PERSISTENT_BLOCK,
+                persistent_block,
                 stream.cuda_stream,
                 (
                     values_pointer,
@@ -1569,16 +1628,19 @@ def _prepare_persistent_sum(
     )
 
 
-def launch_softmax_gpu(values, offsets, output, block_size=128):
+def launch_softmax_gpu(values, offsets, output, block_size=None):
     """Launch the internally qualified ragged softmax.
 
     The kernel is compiled once per block size and target, and loaded once
-    per CUDA context.
+    per CUDA context. An omitted block size is the CTA block of the target
+    description.
     """
     torch = _runtime._import_torch()
     value_count, segment_count = _validate_softmax_tensors(
         values, offsets, output
     )
+    if block_size is None:
+        block_size = _target_description().cta_block_threads
     return _enqueue_softmax(
         torch, values, offsets, output, value_count, segment_count, block_size
     )
