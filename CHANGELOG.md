@@ -59,6 +59,8 @@ semantic versioning (`0.x`; anything may change).
 - A compile-only test covers every admitted processor, including `sm_87`.
   `ci-cpp` gains a clang-format check and an ASan and UBSan job.
 - `THIRD_PARTY_NOTICES.md` lists what a native build contains.
+- An opt-in NVIDIA Compute Sanitizer racecheck of the private segmented
+  kernels (`SWAGE_RACECHECK=1`); no workflow runs it.
 
 ### Changed
 
@@ -184,6 +186,16 @@ semantic versioning (`0.x`; anything may change).
   output. Interpreter exit and `os.fork()` wait for a compile in flight.
   `launch()` works on a thread that has not used CUDA. A failed module
   unload is retried and never fails a load.
+- `launch()` rejects a tensor that requires grad with a `ValueError`; a
+  launch records no gradient, so pass `tensor.detach()`. Every launch,
+  public and private, advances the version counter of its output after the
+  enqueue, so a backward pass that saved the output raises instead of using
+  overwritten values. A replayed CUDA graph does not advance it. `launch()`
+  requires `torch.autograd.graph.increment_version`, which PyTorch 2.6
+  provides.
+- `python -m swage.env` reports `revision` only when the package is
+  `python/swage` of a Swage checkout that holds `cmake/llvm-version.txt`. A
+  copy vendored inside another repository reports `None`.
 - Documentation: the landing page, diagrams, reference, and internals pages
   match the merged runtime, frontend, CI, and benchmark changes;
   `installation.md` lists what the released `0.5.1` wheel lacks.
@@ -198,6 +210,8 @@ semantic versioning (`0.x`; anything may change).
   segments. It now returns an empty result.
 - A contiguous negation view passed to `launch()` was read with the
   opposite sign. It is now rejected.
+- The documented sum bound of the default `mixed` schedule now covers the
+  batches that automatic selection moves to the CTA schedule.
 - An atomic cache write closed its file descriptor twice when the publish
   failed, which could close a descriptor owned by another thread.
 - A prepared static launch on a thread with no CUDA context failed with an
