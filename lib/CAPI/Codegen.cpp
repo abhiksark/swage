@@ -41,7 +41,11 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Threading.h"
@@ -297,6 +301,83 @@ void initializeNVPTX() {
   });
 }
 
+/// The LLVM passes that run on every kernel before NVPTX code generation,
+/// in the syntax of `opt -passes`.
+///
+/// The list is curated instead of a default O2 or O3 pipeline because a
+/// kernel's synchronization structure must come out exactly as the lowering
+/// built it: the same barriers, shuffles, fences, and atomics. A default
+/// pipeline built for this target starts with NVVMIntrRange, which narrows
+/// the thread-index ranges from the launch width and lets later passes delete
+/// shuffle paths for small block sizes. Removing those paths is a job for
+/// the lowering, where the block size is a constant.
+///
+/// What runs, and why:
+///   - early-cse: one value per repeated subexpression of an element program.
+///   - instcombine: folds casts, comparisons, and index arithmetic. Fixpoint
+///     verification is off, because it aborts the process when one iteration
+///     does not reach a fixpoint.
+///   - simplifycfg: merges blocks and turns small branches into selects. It
+///     runs with its default options, which neither hoist nor sink common
+///     code, and it never duplicates a block that holds a convergent call.
+///   - loop-rotate: gives each reduction loop one conditional branch per
+///     iteration instead of a test at the top and a jump at the bottom. It
+///     does not rotate a loop whose header holds a convergent call.
+///   - licm: hoists loop-invariant arithmetic, which in the persistent kernel
+///     is the thread geometry of each block reduction inside a queue loop. It
+///     does not hoist or sink a convergent call, and it does not move a load
+///     or a store across a barrier or a fence, which are opaque calls.
+///   - instcombine again, on what rotation and hoisting exposed.
+///
+/// What is left out, and why:
+///   - Loop unrolling: it would repeat the barriers, shuffles, and atomics of
+///     the persistent queue loops, and a reduction loop has one accumulator
+///     that cannot be split without reassociating.
+///   - Reassociation, vectorization, and anything else that needs a fast-math
+///     flag. No pass here adds such a flag or contracts a multiply and an
+///     add, so the bits of every result are those of the unoptimized kernel.
+///   - GVN, dead store elimination, and memcpy optimization: their gain is
+///     reasoning about memory, and shared and global memory is how the
+///     threads of these kernels talk to each other.
+///   - Jump threading, value propagation, and SCCP: they restructure control
+///     flow from value ranges and change nothing in today's kernels.
+///   - Every module and call-graph pass: a module holds one kernel, whose
+///     signature is its launch ABI and whose shared buffers must stay as
+///     lowered.
+constexpr llvm::StringLiteral midEndPipeline =
+    "function("
+    "early-cse,"
+    "instcombine<no-verify-fixpoint>,"
+    "simplifycfg,"
+    "loop-mssa(loop-rotate,licm),"
+    "instcombine<no-verify-fixpoint>)";
+
+/// Run the mid-end pipeline on a translated kernel module. The target
+/// machine supplies the cost model and the address-space alias analysis; its
+/// pipeline-start callbacks are not used, because no default pipeline is
+/// built.
+LogicalResult optimizeKernel(ModuleOp source, llvm::Module &llvmModule,
+                             llvm::TargetMachine &machine) {
+  llvm::PassBuilder builder(&machine);
+  llvm::LoopAnalysisManager loopAnalyses;
+  llvm::FunctionAnalysisManager functionAnalyses;
+  llvm::CGSCCAnalysisManager callGraphAnalyses;
+  llvm::ModuleAnalysisManager moduleAnalyses;
+  builder.registerModuleAnalyses(moduleAnalyses);
+  builder.registerCGSCCAnalyses(callGraphAnalyses);
+  builder.registerFunctionAnalyses(functionAnalyses);
+  builder.registerLoopAnalyses(loopAnalyses);
+  builder.crossRegisterProxies(loopAnalyses, functionAnalyses,
+                               callGraphAnalyses, moduleAnalyses);
+
+  llvm::ModulePassManager passes;
+  if (llvm::Error error = builder.parsePassPipeline(passes, midEndPipeline))
+    return source.emitError("failed to build the LLVM pass pipeline '")
+           << midEndPipeline << "': " << llvm::toString(std::move(error));
+  passes.run(llvmModule, moduleAnalyses);
+  return success();
+}
+
 LogicalResult emitPTX(ModuleOp source, gpu::GPUModuleOp gpuModule,
                       llvm::StringRef target, std::string &ptx) {
   constexpr llvm::StringLiteral triple = "nvptx64-nvidia-cuda";
@@ -317,6 +398,8 @@ LogicalResult emitPTX(ModuleOp source, gpu::GPUModuleOp gpuModule,
     return source.emitError("failed to create the requested NVPTX target");
   llvmModule->setDataLayout(machine->createDataLayout());
   llvmModule->setTargetTriple(machine->getTargetTriple());
+  if (failed(optimizeKernel(source, *llvmModule, *machine)))
+    return failure();
   FailureOr<llvm::SmallString<0>> generated =
       LLVM::ModuleToObject::translateModuleToISA(*llvmModule, *machine, [&]() {
         return source.emitError("failed to emit PTX");
