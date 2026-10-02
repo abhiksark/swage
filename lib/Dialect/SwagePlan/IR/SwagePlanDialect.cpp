@@ -67,7 +67,7 @@ static bool isKernelParameterType(Type type) {
     return true;
   auto memref = dyn_cast<MemRefType>(type);
   return memref && (memref.getRank() == 1 || memref.getRank() == 2) &&
-         memref.getNumDynamicDims() == memref.getRank() &&
+         llvm::all_of(memref.getShape(), ShapedType::isDynamic) &&
          memref.getLayout().isIdentity() && !memref.getMemorySpace() &&
          (memref.getElementType().isSignlessInteger() ||
           isa<FloatType>(memref.getElementType()));
