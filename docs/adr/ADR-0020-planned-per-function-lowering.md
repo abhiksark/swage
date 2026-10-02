@@ -843,7 +843,8 @@ Each point is also stated where its subject is described:
   and the symbol clash.
 - Fixed-block lowering. The symbol checks of step 2 cover the segmented
   lowerings, the planner, and the conversion. `--swage-fixed-block-to-gpu`
-  does not have them yet.
+  got the same checks in a commit of its own after step 5, with
+  `invalid-fixed-kernel-symbols.mlir`.
 - Semantic ABI predicate. `hasCanonicalSemanticABI` accepted the five
   arguments in any order from step 2, because roles free the order, until
   step 4 removed it with `swage_plan.classify`.

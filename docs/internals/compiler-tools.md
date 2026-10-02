@@ -97,7 +97,8 @@ pass requires that nothing in the module refers to the function, that
 not defined. The planner applies the same rules before it writes a plan
 function, and the conversion applies them to every plan function, including
 one written by hand. The sequential schedule plans and lowers a function in
-place, so a function it lowers may have callers.
+place, so a function it lowers may have callers. `--swage-fixed-block-to-gpu`
+applies the two rules to its one kernel function.
 
 The code generation C API passes its `kernelName` as `function` and then
 selects the `gpu.module` named `<kernel>_module`, so a module with several

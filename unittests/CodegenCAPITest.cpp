@@ -617,9 +617,8 @@ TEST(CodegenCAPITest, RejectsANamedMemorySpaceWithoutAborting) {
 }
 
 TEST(CodegenCAPITest, RejectsAModuleThatDefinesTheSymbolOfTheKernelModule) {
+  // Every lowering, the fixed-block one included.
   for (const EntryPoint &entryPoint : entryPoints()) {
-    if (entryPoint.program != segmentedSum)
-      continue;
     SCOPED_TRACE(entryPoint.name);
     Session session;
     MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
@@ -630,11 +629,12 @@ TEST(CodegenCAPITest, RejectsAModuleThatDefinesTheSymbolOfTheKernelModule) {
     Compiled compiled = session.compile(
         entryPoint.compile,
         session.parse(beforeFirstFunction(
-            segmentedSum, "gpu.module @" + symbol + " {\n  }\n  ")),
-        "segmented_sum", "sm_86");
+            entryPoint.program, "gpu.module @" + symbol + " {\n  }\n  ")),
+        entryPoint.kernelName, "sm_86");
 
     expectRejected(compiled, session,
-                   "lowering @segmented_sum creates @" + symbol +
+                   std::string("lowering @") + entryPoint.kernelName +
+                       " creates @" + symbol +
                        ", which the module already defines");
   }
 }
