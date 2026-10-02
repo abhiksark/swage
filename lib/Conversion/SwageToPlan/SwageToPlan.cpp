@@ -72,9 +72,59 @@ unsigned sourceIndexOf(const SegmentABI &abi, ArgumentRole role) {
 /// the segment id, the segment construction, and the scalar store. The
 /// reductions move into the task region in program order, and a map store
 /// follows them, which is the order the kernel runs them in.
+/// Move the consumers of an admitted program into the region of its task
+/// operation and end the region. The reductions come first, in program
+/// order, and a map store follows them, which is the order every lowering
+/// runs them in.
+void fillTaskRegion(swage_plan::TasksOp tasks, SegmentProgramAnalysis &analysis,
+                    Value output) {
+  Location loc = tasks.getLoc();
+  MakeSegmentOp segment = analysis.segments.front();
+  OpBuilder builder(tasks.getContext());
+  Block *body = builder.createBlock(&tasks.getBody(), {},
+                                    {segment.getResult().getType()}, {loc});
+  for (ReduceOp reduction : analysis.reductions)
+    reduction->moveBefore(body, body->end());
+  for (MapStoreOp mapStore : analysis.mapStores) {
+    mapStore->moveBefore(body, body->end());
+    mapStore.getOutputMutable().assign(output);
+  }
+  segment.getResult().replaceAllUsesWith(body->getArgument(0));
+  swage_plan::YieldOp::create(builder, loc,
+                              analysis.mapStores.empty()
+                                  ? analysis.storedReduction.getResult()
+                                  : Value());
+}
+
+/// Plan an admitted segment function for the CPU oracle, in place. The
+/// function keeps its signature, its roles, and its callers. Its segment
+/// id, segment construction, and scalar store become one sequential task
+/// operation ahead of the return.
+void buildSequentialPlan(func::FuncOp function,
+                         SegmentProgramAnalysis &analysis) {
+  fuseAdmittedMaps(analysis);
+
+  const SegmentABI &abi = analysis.abi;
+  Value output = function.getArgument(abi.output);
+  OpBuilder builder(function.getContext());
+  builder.setInsertionPoint(analysis.returns.front());
+  auto tasks = swage_plan::TasksOp::create(
+      builder, function.getLoc(), function.getArgument(abi.values),
+      function.getArgument(abi.offsets), function.getArgument(abi.valueCount),
+      function.getArgument(abi.segmentCount), Value(), Value(),
+      analysis.mapStores.empty() ? output : Value(), TaskPolicy::Sequential);
+  fillTaskRegion(tasks, analysis, output);
+  for (memref::StoreOp store : analysis.stores)
+    store.erase();
+  analysis.segments.front().erase();
+  analysis.segmentIds.front().erase();
+}
+
 void buildPlanFunction(func::FuncOp source, SegmentProgramAnalysis &analysis,
                        const PlanOptions &options,
                        const TargetDescription &target) {
+  if (options.schedule == PlanSchedule::Sequential)
+    return buildSequentialPlan(source, analysis);
   fuseAdmittedMaps(analysis);
 
   MLIRContext *context = source.getContext();
@@ -127,20 +177,7 @@ void buildPlanFunction(func::FuncOp source, SegmentProgramAnalysis &analysis,
       useTaskIds ? argument(KernelArgument::TaskCount) : Value(),
       storesScalar ? argument(KernelArgument::Output) : Value(), policy);
   func::ReturnOp::create(builder, loc);
-
-  MakeSegmentOp segment = analysis.segments.front();
-  Block *body = builder.createBlock(&tasks.getBody(), {},
-                                    {segment.getResult().getType()}, {loc});
-  for (ReduceOp reduction : analysis.reductions)
-    reduction->moveBefore(body, body->end());
-  for (MapStoreOp mapStore : analysis.mapStores) {
-    mapStore->moveBefore(body, body->end());
-    mapStore.getOutputMutable().assign(argument(KernelArgument::Output));
-  }
-  segment.getResult().replaceAllUsesWith(body->getArgument(0));
-  swage_plan::YieldOp::create(
-      builder, loc,
-      storesScalar ? analysis.storedReduction.getResult() : Value());
+  fillTaskRegion(tasks, analysis, argument(KernelArgument::Output));
   source.erase();
 }
 
@@ -149,6 +186,8 @@ LogicalResult parseSchedule(StringRef text, PlanSchedule &schedule) {
     schedule = PlanSchedule::Direct;
   else if (text == "task-ids")
     schedule = PlanSchedule::TaskIds;
+  else if (text == "sequential")
+    schedule = PlanSchedule::Sequential;
   else
     return failure();
   return success();
@@ -179,8 +218,9 @@ public:
   void runOnOperation() final {
     PlanOptions options;
     if (failed(parseSchedule(schedule, options.schedule))) {
-      getOperation().emitError() << "schedule must be direct or task-ids, got '"
-                                 << schedule.getValue() << "'";
+      getOperation().emitError()
+          << "schedule must be direct, task-ids, or sequential, got '"
+          << schedule.getValue() << "'";
       return signalPassFailure();
     }
     options.blockThreads = blockThreads;
@@ -192,12 +232,14 @@ public:
 private:
   Option<std::string> schedule{
       *this, "schedule",
-      llvm::cl::desc("The kernel to plan: direct (one block per segment) or "
-                     "task-ids (one block per task of a task buffer)"),
+      llvm::cl::desc("The kernel to plan: direct (one block per segment), "
+                     "task-ids (one block per task of a task buffer), or "
+                     "sequential (no kernel: the CPU oracle)"),
       llvm::cl::init("direct")};
   Option<int64_t> blockThreads{
       *this, "block-threads",
-      llvm::cl::desc("Launch width of the kernel in threads"),
+      llvm::cl::desc("Launch width of the kernel in threads; not read for "
+                     "the sequential schedule"),
       llvm::cl::init(nvidiaTarget().ctaBlockThreads)};
   Option<std::string> selectedFunction{
       *this, "function",
@@ -209,7 +251,8 @@ private:
 
 LogicalResult planSegmentFunctions(ModuleOp module, const PlanOptions &options,
                                    const TargetDescription &target) {
-  if (!target.admitsBlockThreads(options.blockThreads))
+  bool sequential = options.schedule == PlanSchedule::Sequential;
+  if (!sequential && !target.admitsBlockThreads(options.blockThreads))
     return module.emitError()
            << "block-threads must be a launch width the target admits, from "
               "1 to "
@@ -231,7 +274,9 @@ LogicalResult planSegmentFunctions(ModuleOp module, const PlanOptions &options,
     if (options.schedule == PlanSchedule::TaskIds &&
         failed(verifyPlanningProgram(analysis)))
       return failure();
-    if (failed(verifyKernelSymbols(module, function, "")))
+    // A kernel replaces its function. The oracle keeps it, so its callers
+    // stay and no symbol is created.
+    if (!sequential && failed(verifyKernelSymbols(module, function, "")))
       return failure();
   }
   for (auto [function, analysis] : llvm::zip(*functions, analyses))

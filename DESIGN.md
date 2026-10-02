@@ -92,7 +92,7 @@ pipeline and links to exact references live in
 meaning have different invariants. It holds what a kernel lowering consumes:
 a plan function, whose signature is the parameter list of a kernel and whose
 launch width is an attribute, and a task operation that takes every buffer
-and every device bound as an operand. The direct and task-id kernels are
+and every device bound as an operand. The direct and task-id kernels and the sequential CPU oracle are
 planned and then converted; the fused mixed, split, and persistent kernels
 are still emitted by their lowerings without a plan stage
 ([ADR-0020](docs/adr/ADR-0020-planned-per-function-lowering.md)). The

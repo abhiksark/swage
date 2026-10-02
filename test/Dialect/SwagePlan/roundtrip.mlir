@@ -56,6 +56,27 @@ module {
     return
   }
 
+  // The oracle: no launch width, and no task buffer.
+  // CHECK-LABEL: func.func @sequential(
+  // CHECK-SAME: %{{.*}}: i32) {
+  // CHECK-NEXT: swage_plan.tasks policy<sequential> segments({{.*}}) value_count({{.*}}) segment_count({{.*}}) into(%{{.*}} : memref<?xf32>) {
+  func.func @sequential(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    swage_plan.tasks policy<sequential>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+
   // CHECK-LABEL: func.func @map_store(
   // CHECK: swage_plan.tasks policy<cta> segments({{.*}}) value_count({{.*}}) segment_count(%{{.*}} : i32) {
   // CHECK-NEXT: ^bb0(%[[SEGMENT:.*]]: !swage.segment<f32>):

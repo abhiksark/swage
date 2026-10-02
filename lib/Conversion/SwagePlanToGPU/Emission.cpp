@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
 #include "swage/Target/TargetDescription.h"
@@ -116,9 +117,13 @@ BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
   return {{values, first, end, stride}, segmentId64};
 }
 
-/// Load the element at `index` of the buffer at `base`.
+/// Load the element at `index` of the buffer `base`. A pointer is addressed
+/// through `index64`, which is set to the index as i64 for a later store at
+/// the same position. A memref is indexed directly.
 static Value loadElement(OpBuilder &builder, Location loc, Type elementType,
                          Value base, Value index, Value &index64) {
+  if (isa<MemRefType>(base.getType()))
+    return memref::LoadOp::create(builder, loc, base, index);
   Type pointer = LLVM::LLVMPointerType::get(builder.getContext());
   index64 =
       arith::IndexCastOp::create(builder, loc, builder.getI64Type(), index);
@@ -128,9 +133,10 @@ static Value loadElement(OpBuilder &builder, Location loc, Type elementType,
 }
 
 Value emitReductionStage(OpBuilder &builder, Location loc,
-                         const TargetDescription &target, ReductionKind kind,
+                         const TargetDescription *target, ReductionKind kind,
                          Type elementType, const SegmentBinding &segment,
-                         bool useWarpShuffle, ElementProgramFn element) {
+                         ThreadCombination combination,
+                         ElementProgramFn element) {
   Value identity = identityFor(builder, loc, kind);
   auto local = scf::ForOp::create(
       builder, loc, segment.first, segment.end, segment.stride,
@@ -146,11 +152,13 @@ Value emitReductionStage(OpBuilder &builder, Location loc,
             combine(loop, loopLoc, kind, accumulator.front(), value));
       });
   Value total = local.getResult(0);
-  if (useWarpShuffle) {
-    for (int32_t offset = 1; offset < target.subgroupWidth; offset <<= 1) {
+  if (combination == ThreadCombination::None)
+    return total;
+  if (combination == ThreadCombination::Subgroup) {
+    for (int32_t offset = 1; offset < target->subgroupWidth; offset <<= 1) {
       auto shuffled =
           gpu::ShuffleOp::create(builder, loc, total, offset,
-                                 target.subgroupWidth, gpu::ShuffleMode::XOR);
+                                 target->subgroupWidth, gpu::ShuffleMode::XOR);
       total = combine(builder, loc, kind, total, shuffled.getShuffleResult());
     }
     return total;
@@ -182,7 +190,6 @@ void emitScalarStore(OpBuilder &builder, Location loc, Value total,
 void emitMapStore(OpBuilder &builder, Location loc, Type elementType,
                   const SegmentBinding &segment, Value output,
                   ElementProgramFn element) {
-  Type pointer = LLVM::LLVMPointerType::get(builder.getContext());
   // Guard-free on purpose: every thread runs the same block-stride loop it
   // ran for each reduction stage, and an empty segment makes it zero-trip.
   // A thread-dependent guard here would put a predicate around code the
@@ -195,9 +202,14 @@ void emitMapStore(OpBuilder &builder, Location loc, Type elementType,
         Value value = loadElement(loop, loopLoc, elementType, segment.base,
                                   index, index64);
         value = element(loop, value);
-        Value outputAddress = LLVM::GEPOp::create(
-            loop, loopLoc, pointer, value.getType(), output, index64);
-        LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
+        if (isa<MemRefType>(output.getType())) {
+          memref::StoreOp::create(loop, loopLoc, value, output, index);
+        } else {
+          Type pointer = LLVM::LLVMPointerType::get(loop.getContext());
+          Value outputAddress = LLVM::GEPOp::create(
+              loop, loopLoc, pointer, value.getType(), output, index64);
+          LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
+        }
         scf::YieldOp::create(loop, loopLoc);
       });
 }

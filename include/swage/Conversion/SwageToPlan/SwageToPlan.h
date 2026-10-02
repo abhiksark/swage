@@ -30,11 +30,14 @@ enum class PlanSchedule {
   Direct,
   /// One block of threads per task; a task buffer names the segment.
   TaskIds,
+  /// No kernel: one thread visits the segments in order. The CPU oracle.
+  Sequential,
 };
 
 struct PlanOptions {
   PlanSchedule schedule = PlanSchedule::Direct;
-  /// The launch width of the kernel, in threads.
+  /// The launch width of the kernel, in threads. Not read for the
+  /// sequential schedule, which has no kernel.
   int64_t blockThreads = 0;
   /// Plan only the function of this name. Empty plans every function that
   /// holds Swage operations.
@@ -45,6 +48,10 @@ struct PlanOptions {
 /// function with the parameter list of the kernel, a
 /// `swage_plan.block_threads` attribute, and one task operation that holds
 /// the reductions and stores of the program.
+///
+/// The sequential schedule plans a function in place: it keeps its
+/// signature, its roles, and its callers, has no launch width, and its body
+/// becomes one task operation of `policy<sequential>`.
 ///
 /// Every function is admitted before any is changed, so `module` is
 /// unchanged when this fails. Other functions are left as they are.

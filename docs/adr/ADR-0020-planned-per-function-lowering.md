@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 to 4 of the migration sequence are implemented
+- Status: accepted; steps 0 to 5 of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
@@ -13,7 +13,8 @@ target description), step 2 (argument roles, the kernel layouts,
 admission per function, any number of segment functions in a module, and
 the symbol checks before mutation), step 3 (map fusion), and step 4 (the
 plan stage and the conversion for the direct and task-id schedules, softmax
-included). Not implemented: steps 5 to 10. Until
+included), and step 5 (the CPU oracle on the shared patterns). Not
+implemented: steps 6 to 10. Until
 its step lands, a part of the design is written in the conditional below,
 and the segmented lowering works as "Context" describes, except where an
 implemented step replaced it.
@@ -423,8 +424,10 @@ Notes on the operations:
 - `policy` reuses the `#swage_plan.policy` attribute. The task-id schedule
   uses `warp` exactly when `block_threads` equals the subgroup width. The
   direct schedule always uses `cta`.
-- `policy` would gain a third case, `sequential`, for the oracle (step 5).
-  The host classifier would never produce it.
+- `policy` has a third case, `sequential`, for the oracle (step 5). The
+  host classifier never produces it. A sequential task operation takes no
+  task buffer, and a function with a launch width cannot hold one; the
+  dialect verifies both.
 
 One function to one or more kernels: the planner replaces the semantic
 function by the plan function of the requested kernel. With a list of
@@ -438,7 +441,7 @@ schedules it would clone the function once per kernel.
 | `split-partial` | `@f__partial` | `partial_tasks` | target value (512) | step 6 |
 | `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | step 8 |
 | `persistent` | `@f` | `persistent_tasks` | target value (512) | step 9 |
-| `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | step 5 |
+| `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | yes |
 
 - `schedule` defaults to `direct` and `block-threads` to the block-task
   width of the target, 128.
@@ -585,6 +588,27 @@ Failure behavior:
   the admitted operations and kinds, and the kernel symbols. These checks
   matter for plan IR written by hand; the planner produces only plan
   functions that pass. `SwagePlanToGPU/invalid.mlir` holds the cases.
+
+The oracle (`--swage-plan-to-scf`, `lib/Conversion/SwagePlanToSCF/`),
+implemented in step 5:
+
+- The sequential schedule plans a function in place: it keeps its
+  signature, its roles, and its callers and gets no launch width.
+- `SequentialTasksPattern` emits one loop over the segments, reads the
+  range of each segment from the offsets without a clamp, binds the segment
+  to the values memref, and legalizes and moves the consumers as the kernel
+  pattern does.
+- `ReducePattern` and `MapStorePattern` are the ones the kernel conversion
+  uses, in `ConsumerPatterns.cpp`. The emission functions load and store
+  through a memref or a pointer by the type of the buffer they are given,
+  and `policy<sequential>` combines nothing across threads.
+- The conversion removes the `swage.role` attributes of the function, so
+  its output parses without the Swage dialects. `buildSequentialProgram` is
+  deleted, and `--swage-segmented-reduction-to-scf` runs the planner and
+  this conversion.
+- The conversion checks the element and word types and the element
+  programs of every sequential task operation before it changes anything,
+  as the kernel conversion does.
 
 C API (`lib/CAPI/Codegen.cpp`):
 
@@ -918,9 +942,11 @@ included).
 Step 5. Oracle onto the shared patterns.
 
 - Files: new `lib/Conversion/SwagePlanToSCF/` (a `tasks policy<sequential>`
-  pattern; `ReducePattern` and `MapStorePattern` dispatch on a memref or
-  pointer base); `buildSequentialProgram` deleted.
-- Emitted IR: none.
+  pattern; `ReducePattern` and `MapStorePattern` move to
+  `ConsumerPatterns.cpp` and dispatch on a memref or pointer base); the
+  sequential schedule in the planner; `buildSequentialProgram` deleted.
+- Emitted IR: none. The oracle output of every lit input is byte-identical
+  to the output before the step.
 - Gate: all of `SwageToCPU/`, the four runner tests,
   `test_segmented_numerics.py`.
 

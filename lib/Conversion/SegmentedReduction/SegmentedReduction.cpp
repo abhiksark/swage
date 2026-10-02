@@ -9,6 +9,7 @@
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Conversion/SwagePlanToGPU/Emission.h"
 #include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
+#include "swage/Conversion/SwagePlanToSCF/SwagePlanToSCF.h"
 #include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 
@@ -136,78 +137,6 @@ Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
   return inlineRegion(builder, *element.region, arguments);
 }
 
-void buildSequentialProgram(func::FuncOp function, const SegmentABI &abi,
-                            const SegmentProgram &program) {
-  Block &entry = function.getBody().front();
-  Value values = function.getArgument(abi.values);
-  Value offsets = function.getArgument(abi.offsets);
-  Value output = function.getArgument(abi.output);
-  while (!entry.empty())
-    entry.back().erase();
-
-  OpBuilder builder(function.getContext());
-  Location loc = function.getLoc();
-  builder.setInsertionPointToEnd(&entry);
-  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
-  Value one = arith::ConstantIndexOp::create(builder, loc, 1);
-  Value segmentCount =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                 function.getArgument(abi.segmentCount));
-  scf::ForOp::create(
-      builder, loc, zero, segmentCount, one, ValueRange(),
-      [&](OpBuilder &outer, Location outerLoc, Value segmentId, ValueRange) {
-        Value startI32 =
-            memref::LoadOp::create(outer, outerLoc, offsets, segmentId);
-        Value next = arith::AddIOp::create(outer, outerLoc, segmentId, one);
-        Value endI32 = memref::LoadOp::create(outer, outerLoc, offsets, next);
-        Value start = arith::IndexCastOp::create(
-            outer, outerLoc, outer.getIndexType(), startI32);
-        Value end = arith::IndexCastOp::create(outer, outerLoc,
-                                               outer.getIndexType(), endI32);
-        SmallVector<Value> results;
-        for (const ReductionStage &stage : program.reductions) {
-          Value identity = identityFor(outer, outerLoc, stage.kind);
-          auto reduction = scf::ForOp::create(
-              outer, outerLoc, start, end, one, ValueRange(identity),
-              [&](OpBuilder &inner, Location innerLoc, Value index,
-                  ValueRange accumulator) {
-                Value value =
-                    memref::LoadOp::create(inner, innerLoc, values, index);
-                value = evaluateElement(inner, stage.element, value, results);
-                scf::YieldOp::create(inner, innerLoc,
-                                     combine(inner, innerLoc, stage.kind,
-                                             accumulator.front(), value));
-              });
-          results.push_back(reduction.getResult(0));
-        }
-        if (program.terminal == TerminalKind::ScalarStore) {
-          memref::StoreOp::create(outer, outerLoc,
-                                  results[program.storedReduction], output,
-                                  segmentId);
-        } else {
-          scf::ForOp::create(
-              outer, outerLoc, start, end, one, ValueRange(),
-              [&](OpBuilder &inner, Location innerLoc, Value index,
-                  ValueRange) {
-                Value value =
-                    memref::LoadOp::create(inner, innerLoc, values, index);
-                value =
-                    evaluateElement(inner, program.mapStore, value, results);
-                memref::StoreOp::create(inner, innerLoc, value, output, index);
-                scf::YieldOp::create(inner, innerLoc);
-              });
-        }
-        scf::YieldOp::create(outer, outerLoc);
-      });
-  func::ReturnOp::create(builder, loc);
-  // The roles are consumed. What remains is ordinary upstream IR, which a
-  // tool that does not know the Swage dialect must be able to parse.
-  for (unsigned index = 0; index < function.getNumArguments(); ++index)
-    function.removeArgAttr(index,
-                           StringAttr::get(function.getContext(),
-                                           SwageDialect::getRoleAttrName()));
-}
-
 /// Emit the fused mixed kernel, or the persistent kernel when `persistent`
 /// is set. The direct and task-id kernels come from the plan conversion.
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
@@ -282,7 +211,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     SmallVector<Value> results;
     for (const ReductionStage &stage : program.reductions)
       results.push_back(emitReductionStage(
-          body, bodyLoc, target, stage.kind, f32, bound.segment, useWarpShuffle,
+          body, bodyLoc, &target, stage.kind, f32, bound.segment,
+          useWarpShuffle ? ThreadCombination::Subgroup
+                         : ThreadCombination::Block,
           [&](OpBuilder &loop, Value value) {
             return evaluateElement(loop, stage.element, value, results);
           }));
@@ -910,28 +841,19 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
-    registry.insert<arith::ArithDialect, func::FuncDialect,
-                    memref::MemRefDialect, scf::SCFDialect>();
+    registry
+        .insert<arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
+                scf::SCFDialect, swage_plan::SwagePlanDialect>();
   }
 
   void runOnOperation() final {
-    FailureOr<SmallVector<func::FuncOp>> functions =
-        findSegmentFunctions(getOperation(), selectedFunction);
-    if (failed(functions))
-      return signalPassFailure();
-    // Every function is admitted before any is changed, so a rejected module
-    // is left as it was.
-    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
-    for (auto [function, analysis] : llvm::zip(*functions, analyses))
-      if (failed(analyzeSegmentProgram(function, analysis)))
-        return signalPassFailure();
-    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
-      // The owner must outlive the program, which points into it.
-      RegionOwner owner;
-      SegmentProgram program;
-      detachSegmentProgram(analysis, owner, program);
-      buildSequentialProgram(function, analysis.abi, program);
-    }
+    // The oracle is planned and then converted, like a kernel.
+    PlanOptions options;
+    options.schedule = PlanSchedule::Sequential;
+    options.function = selectedFunction;
+    if (failed(planSegmentFunctions(getOperation(), options, nvidiaTarget())) ||
+        failed(convertPlanToSCF(getOperation())))
+      signalPassFailure();
   }
 
 private:

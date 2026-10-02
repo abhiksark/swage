@@ -19,6 +19,7 @@ add_mlir_conversion_library(MLIRSwageSegmentedReduction
   MLIRSwage
   MLIRSwagePlan
   MLIRSwagePlanToGPU
+  MLIRSwagePlanToSCF
   MLIRSwageToPlan
   MLIRSwageTransforms
   MLIRSwageTarget

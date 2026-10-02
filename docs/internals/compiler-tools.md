@@ -43,15 +43,17 @@ functions of the C API and not registered passes.
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
 | `--swage-fuse-maps` | none | Fuse each `swage.map` that has one consumer into that consumer, in every function |
-| `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations |
+| `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations, by planning the sequential schedule and converting it |
 | `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512; optional `function` | Lower every admitted private segment function to a GPU kernel module. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
-| `--swage-to-plan` | `schedule`, `direct` (default) or `task-ids`; `block-threads`, default 128, a launch width the target admits; optional `function` | Replace every admitted segment function by the plan function of the kernel the schedule selects. `task-ids` admits a capture-free, single-stage f32 sum or max |
+| `--swage-to-plan` | `schedule`, `direct` (default), `task-ids`, or `sequential`; `block-threads`, default 128, a launch width the target admits, not read for `sequential`; optional `function` | Replace every admitted segment function by the plan function of the kernel the schedule selects, or plan it in place for the sequential oracle. `task-ids` admits a capture-free, single-stage f32 sum or max |
 | `--swage-plan-to-gpu` | none | Convert every plan function to a `gpu.module` that holds its kernel, and leave every other operation as it is |
+| `--swage-plan-to-scf` | none | Convert every sequential task operation to loops over its memrefs, remove the roles of its function, and leave every other operation as it is |
 | `--swage-split-segmented-reduction-to-gpu` | optional `merge`; optional `function` | Lower every admitted private capture-free, single-stage f32 sum or max function to the split partial kernel, or to the split merge kernel when `merge` is set |
 
-The planner and the conversion are the two halves of the direct and
-task-id lowerings, and `--swage-segmented-reduction-to-gpu` runs both for
-those two schedules:
+The planner and a conversion are the two halves of the direct and task-id
+lowerings and of the oracle. `--swage-segmented-reduction-to-gpu` runs both
+for those two schedules, and `--swage-segmented-reduction-to-scf` runs the
+sequential schedule and `--swage-plan-to-scf`:
 
 ```bash
 ./build/bin/swage-opt input.mlir \
@@ -94,8 +96,8 @@ pass requires that nothing in the module refers to the function, that
 `<kernel>_module` is not defined, and, for a split stage, that `<kernel>` is
 not defined. The planner applies the same rules before it writes a plan
 function, and the conversion applies them to every plan function, including
-one written by hand. The sequential lowering rewrites a function in place, so a
-function it lowers may have callers.
+one written by hand. The sequential schedule plans and lowers a function in
+place, so a function it lowers may have callers.
 
 The code generation C API passes its `kernelName` as `function` and then
 selects the `gpu.module` named `<kernel>_module`, so a module with several
@@ -141,7 +143,7 @@ under `lib/cmake/swage`. A consumer loads it with
 
 - The imported targets are `MLIRSwage`, `MLIRSwageTransforms`,
   `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageToPlan`,
-  `MLIRSwagePlanToGPU`, `MLIRSwageFixedBlockToGPU`,
+  `MLIRSwagePlanToGPU`, `MLIRSwagePlanToSCF`, `MLIRSwageFixedBlockToGPU`,
   `MLIRSwageSegmentedReduction`, and `SwageCAPI`.
 - The targets carry no include directories, as the MLIR targets do not, so
   the consumer adds `SWAGE_INCLUDE_DIRS`, `MLIR_INCLUDE_DIRS`, and

@@ -18,10 +18,14 @@ include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.td"
 
 def SwagePlan_TaskPolicyWarp : I32EnumAttrCase<"Warp", 0, "warp">;
 def SwagePlan_TaskPolicyCTA : I32EnumAttrCase<"CTA", 1, "cta">;
+// The policy of the CPU oracle. Host classification never produces it.
+def SwagePlan_TaskPolicySequential
+    : I32EnumAttrCase<"Sequential", 2, "sequential">;
 
 def SwagePlan_TaskPolicy
     : I32EnumAttr<"TaskPolicy", "task execution policy",
-                  [SwagePlan_TaskPolicyWarp, SwagePlan_TaskPolicyCTA]> {
+                  [SwagePlan_TaskPolicyWarp, SwagePlan_TaskPolicyCTA,
+                   SwagePlan_TaskPolicySequential]> {
   let cppNamespace = "::mlir::swage_plan";
   let genSpecializedAttr = 0;
 }
@@ -61,6 +65,11 @@ def SwagePlan_TasksOp
     `policy` says how the threads of a task combine their partial results:
     `cta` across the whole block, `warp` within one subgroup. The launch
     width is the `swage_plan.block_threads` attribute of the function.
+
+    `policy<sequential>` is the CPU oracle: one thread visits the segments
+    in order and runs the region on each. It takes no task buffer, its
+    function has no launch width and keeps its callers, and it lowers to
+    loops over the memrefs instead of to a kernel.
 
     Example:
 

@@ -101,6 +101,11 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
            << "a plan function holds one task operation followed by a return, "
               "found "
            << llvm::range_size(body) << " operations";
+  if (cast<TasksOp>(body.front()).getPolicy() == TaskPolicy::Sequential)
+    return op->emitError()
+           << name << " gives the launch width of a kernel, and "
+           << "policy<sequential> runs on one thread without a kernel; a "
+              "function has one or the other";
   return success();
 }
 
@@ -119,6 +124,9 @@ LogicalResult TasksOp::verify() {
     return emitOpError("ids and task_count are given together: the ids name "
                        "the segment of each task, and task_count bounds the "
                        "task index");
+  if (getIds() && getPolicy() == TaskPolicy::Sequential)
+    return emitOpError("policy<sequential> visits every segment in order and "
+                       "takes no ids");
   if (getIds() &&
       (failed(requireWord("task_count", getTaskCount().getType())) ||
        failed(

@@ -17,7 +17,8 @@ The dialect holds what a kernel lowering consumes:
   segment per task, with or without a task buffer;
 - `swage_plan.yield`, the terminator of a task region;
 - `#swage_plan.policy<warp>` and `#swage_plan.policy<cta>`, which say how
-  the threads of a task combine their partial results.
+  the threads of a task combine their partial results, and
+  `#swage_plan.policy<sequential>`, the policy of the CPU oracle.
 
 A plan function has the parameter list of its kernel as its signature and
 one task operation, followed by a return, as its body:
@@ -67,9 +68,15 @@ What is not in the dialect:
 - Packed-warp policies, queues, dependency execution, and a general task
   graph.
 
-`--swage-to-plan` writes plan functions for the direct and task-id
-schedules, and `--swage-plan-to-gpu` converts every plan function to a
-`gpu.module` that holds its kernel. There is no public
+The CPU oracle is planned too. A task operation of `policy<sequential>`
+visits every segment in order on one thread. Its function has no launch
+width, keeps its signature and its callers, and takes no task buffer, and
+`--swage-plan-to-scf` lowers it to loops over the memrefs. The consumers of
+the region are lowered by the same patterns on both backends.
+
+`--swage-to-plan` writes plan functions for the direct, task-id, and
+sequential schedules, and `--swage-plan-to-gpu` converts every plan function
+of a kernel to a `gpu.module` that holds it. There is no public
 `mlir_swage.dialects.swage_plan` Python module contract. The classification
 buckets and task lists that the host produces are drawn in
 [Task Planning](planning.md).

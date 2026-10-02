@@ -25,6 +25,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "swage/Conversion/SwagePlanToGPU/ConsumerPatterns.h"
 #include "swage/Conversion/SwagePlanToGPU/Emission.h"
 #include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
@@ -47,37 +48,6 @@ IntegerAttr blockThreadsOf(Operation *op) {
     return IntegerAttr();
   return op->getAttrOfType<IntegerAttr>(
       SwagePlanDialect::getBlockThreadsAttrName());
-}
-
-/// The operations of `block`, collected so that a pattern can legalize them
-/// while they still sit under their parent and move the results afterwards.
-SmallVector<Operation *> operationsOf(Block &block) {
-  SmallVector<Operation *> operations;
-  for (Operation &operation : block)
-    operations.push_back(&operation);
-  return operations;
-}
-
-/// Legalize `operations` in place, in order. A nested pattern moves the
-/// insertion point of the shared rewriter, so it is restored on return.
-LogicalResult legalizeInPlace(ConversionPatternRewriter &rewriter,
-                              ArrayRef<Operation *> operations) {
-  OpBuilder::InsertionGuard guard(rewriter);
-  for (Operation *operation : operations)
-    if (failed(rewriter.legalize(operation)))
-      return failure();
-  return success();
-}
-
-/// Move what the patterns created in `source` to the end of `destination`,
-/// in order. The plan operations of `source` stay behind: they are replaced,
-/// and they leave with their parent.
-template <typename... PlanOps>
-void moveConvertedOperations(ConversionPatternRewriter &rewriter, Block &source,
-                             Block *destination) {
-  for (Operation &operation : llvm::make_early_inc_range(source))
-    if (!isa<PlanOps...>(operation))
-      rewriter.moveOpBefore(&operation, destination, destination->end());
 }
 
 /// A plan function becomes a `gpu.module` named after it that holds the
@@ -228,90 +198,6 @@ public:
   }
 };
 
-/// The four values of the bound segment a consumer reads, from the operand
-/// the task pattern replaced.
-std::optional<SegmentBinding> boundSegmentOf(ValueRange segment) {
-  if (segment.size() != 4)
-    return std::nullopt;
-  return SegmentBinding{segment[0], segment[1], segment[2], segment[3]};
-}
-
-/// The capture operands of a consumer, one value each.
-std::optional<SmallVector<Value>> capturesOf(ArrayRef<ValueRange> captures) {
-  SmallVector<Value> values;
-  for (ValueRange capture : captures) {
-    if (capture.size() != 1)
-      return std::nullopt;
-    values.push_back(capture.front());
-  }
-  return values;
-}
-
-/// A reduction of the bound segment becomes one reduction stage: every
-/// thread folds its elements through the element program, then the threads
-/// combine their results as the policy of the task operation says.
-class ReducePattern : public OpConversionPattern<ReduceOp> {
-public:
-  ReducePattern(MLIRContext *context, const TargetDescription &target)
-      : OpConversionPattern(context), target(target) {}
-
-  LogicalResult
-  matchAndRewrite(ReduceOp reduce, OneToNOpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    std::optional<TaskPolicy> policy =
-        swage_plan::policyOfRegion(reduce->getParentRegion());
-    std::optional<SegmentBinding> segment =
-        boundSegmentOf(adaptor.getSegment());
-    std::optional<SmallVector<Value>> captures =
-        capturesOf(adaptor.getCaptures());
-    if (!policy || !segment || !captures)
-      return rewriter.notifyMatchFailure(reduce, "not in a task region");
-    Type element =
-        cast<SegmentType>(reduce.getSegment().getType()).getElementType();
-    Value total = emitReductionStage(
-        rewriter, reduce.getLoc(), target, reduce.getKind(), element, *segment,
-        *policy == TaskPolicy::Warp, [&](OpBuilder &loop, Value value) {
-          SmallVector<Value> arguments{value};
-          arguments.append(*captures);
-          return inlineRegion(loop, reduce.getBody(), arguments);
-        });
-    rewriter.replaceOp(reduce, total);
-    return success();
-  }
-
-private:
-  const TargetDescription &target;
-};
-
-/// A store of the bound segment becomes the loop that writes every element
-/// program result to the same index of the output.
-class MapStorePattern : public OpConversionPattern<MapStoreOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(MapStoreOp mapStore, OneToNOpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    std::optional<SegmentBinding> segment =
-        boundSegmentOf(adaptor.getSegment());
-    std::optional<SmallVector<Value>> captures =
-        capturesOf(adaptor.getCaptures());
-    if (!segment || !captures || adaptor.getOutput().size() != 1)
-      return rewriter.notifyMatchFailure(mapStore, "not in a task region");
-    Type element =
-        cast<SegmentType>(mapStore.getSegment().getType()).getElementType();
-    emitMapStore(rewriter, mapStore.getLoc(), element, *segment,
-                 adaptor.getOutput().front(),
-                 [&](OpBuilder &loop, Value value) {
-                   SmallVector<Value> arguments{value};
-                   arguments.append(*captures);
-                   return inlineRegion(loop, mapStore.getBody(), arguments);
-                 });
-    rewriter.eraseOp(mapStore);
-    return success();
-  }
-};
-
 class SwagePlanToGPUPass
     : public PassWrapper<SwagePlanToGPUPass, OperationPass<ModuleOp>> {
 public:
@@ -349,27 +235,15 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
            << " threads with a power-of-two subgroup count, got " << threads;
 
   auto tasks = cast<TasksOp>(function.getBody().front().front());
-  Type element = cast<MemRefType>(tasks.getValues().getType()).getElementType();
-  Type word = cast<MemRefType>(tasks.getOffsets().getType()).getElementType();
-  if (!isAdmittedElementType(element) || !isAdmittedIndexType(word))
-    return tasks.emitError()
-           << "the conversion lowers f32 values with i32 offsets and counts, "
-              "got values of "
-           << element << " and offsets of " << word;
+  if (failed(verifyTaskConsumers(tasks, tasks.getValues().getType(),
+                                 tasks.getOffsets().getType(),
+                                 tasks.getBody().front())))
+    return failure();
   // A warp task reduces within one subgroup, so its block is one subgroup.
   if (tasks.getPolicy() == TaskPolicy::Warp && threads != target.subgroupWidth)
     return tasks.emitError()
            << "policy<warp> requires " << name << " to be the subgroup width, "
            << target.subgroupWidth << ", got " << threads;
-  SegmentProgramAnalysis consumers;
-  for (Operation &operation : tasks.getBody().front().without_terminator()) {
-    if (auto reduction = dyn_cast<ReduceOp>(operation))
-      consumers.reductions.push_back(reduction);
-    else
-      consumers.mapStores.push_back(cast<MapStoreOp>(operation));
-  }
-  if (failed(verifyConsumerPrograms(consumers)))
-    return failure();
   return verifyKernelSymbols(module, function, "");
 }
 
@@ -398,10 +272,9 @@ LogicalResult convertPlanToGPU(ModuleOp module,
   legality.addIllegalDialect<SwageDialect, SwagePlanDialect>();
 
   RewritePatternSet patterns(module.getContext());
-  patterns.add<PlanKernelFuncPattern, ReducePattern>(module.getContext(),
-                                                     target);
-  patterns.add<PlanKernelReturnPattern, TasksPattern, MapStorePattern>(
-      module.getContext());
+  patterns.add<PlanKernelFuncPattern>(module.getContext(), target);
+  patterns.add<PlanKernelReturnPattern, TasksPattern>(module.getContext());
+  populateSegmentConsumerPatterns(patterns, &target);
   return applyFullConversion(module, legality, std::move(patterns));
 }
 

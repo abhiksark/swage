@@ -40,6 +40,11 @@ Every bound a kernel needs is an operand, so a plan cannot omit one:
 `cta` across the whole block, `warp` within one subgroup. The launch
 width is the `swage_plan.block_threads` attribute of the function.
 
+`policy<sequential>` is the CPU oracle: one thread visits the segments
+in order and runs the region on each. It takes no task buffer, its
+function has no launch width and keeps its callers, and it lowers to
+loops over the memrefs instead of to a kernel.
+
 Example:
 
 ```mlir
