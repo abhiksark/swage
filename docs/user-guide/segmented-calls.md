@@ -247,7 +247,8 @@ totals = swage.segment_reduce(rows, offsets, "sum")
 `segment_softmax` normalizes each column over the rows of its segment, as
 `torch.softmax(values[a:b], dim=0)` does for the rows `a` to `b` of a
 segment. Its offsets start at zero and end at `N`, and the result is
-`[N, D]`, the shape of the values. Rows are float32, as for scalars.
+`[N, D]`, the shape of the values. The values are float32, as for
+scalars.
 
 ```python
 weights = swage.segment_softmax(rows, offsets)

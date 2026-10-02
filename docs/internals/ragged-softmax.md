@@ -13,8 +13,9 @@ every value. For rank-two values it launches the column kernel that
 [Verification](verification.md) and
 [ADR-0013](../adr/ADR-0013-fusion-and-map-store-abi.md).*
 
-The softmax path retains the five-argument ABI defined in
-[Segmented Reductions](segmented-reductions.md). It admits ordered f32
+Over rank-one values the softmax path retains the five-argument ABI
+defined in [Segmented Reductions](segmented-reductions.md). Over rank-two
+values it takes the sixth argument of the column kernel. It admits ordered f32
 reduction captures,
 single-consumer map chains, and exactly one scalar store or map-store
 terminal. The stable softmax module performs maximum, shifted exponential
