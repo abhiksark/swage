@@ -67,7 +67,10 @@ specialization, cache, module loading, stream, and retention behavior live in
 ## Private direct segmented branches
 
 Canonical segmented sum, max, and stable ragged-softmax modules enter through
-native qualification, not the public Python frontend. One conversion creates
+native qualification, not the public Python frontend. A segment function
+declares its arguments with `swage.role` attributes, a module may hold any
+number of segment functions, and each conversion lowers every one of them
+or the one its `function` option names. One conversion creates
 a sequential CPU correctness oracle. Another creates one CTA per segment and
 continues through upstream GPU, NVVM, LLVM, and NVPTX stages. The public
 `swage.segment_softmax` launches the softmax module on that GPU path.

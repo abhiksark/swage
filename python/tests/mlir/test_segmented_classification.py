@@ -135,6 +135,7 @@ def _native_plan(module, offsets, warp_max_elements, cta_chunk_elements):
     """Classify host offsets through the buffer form of the binding."""
     return native_swage._materialize_segmented_plan(
         module,
+        "segmented_sum",
         offsets=_i32(offsets),
         value_count=offsets[-1],
         segment_count=len(offsets) - 1,
@@ -278,7 +279,11 @@ def test_other_offset_buffers_are_rejected_without_conversion(
     """Refuse a buffer that would need a cast, a copy, or element access."""
     with pytest.raises(TypeError):
         native_swage._materialize_segmented_plan(
-            sum_module, offsets=offsets, value_count=1, segment_count=1
+            sum_module,
+            "segmented_sum",
+            offsets=offsets,
+            value_count=1,
+            segment_count=1,
         )
 
 
@@ -286,7 +291,11 @@ def test_buffer_offsets_keep_native_diagnostics(sum_module):
     """Report native classification failures as before, with their text."""
     with pytest.raises(ValueError, match="offsets must be nondecreasing"):
         native_swage._materialize_segmented_plan(
-            sum_module, offsets=_i32([0, 2, 1]), value_count=2, segment_count=2
+            sum_module,
+            "segmented_sum",
+            offsets=_i32([0, 2, 1]),
+            value_count=2,
+            segment_count=2,
         )
     with pytest.raises(ValueError, match="planning limits must satisfy"):
         _native_plan(sum_module, [0, 1], 33, 32)
@@ -381,7 +390,7 @@ def test_classification_without_a_module_reports_the_classifier_reason(
     if "warp_max_elements" not in arguments:
         with pytest.raises(ValueError, match=message):
             native_swage._materialize_segmented_plan(
-                sum_module, offsets=_i32(offsets), **arguments
+                sum_module, "segmented_sum", offsets=_i32(offsets), **arguments
             )
 
 

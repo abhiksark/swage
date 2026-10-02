@@ -195,33 +195,39 @@ void registerCodegenInterfaces(MLIRContext &context) {
   context.appendDialectRegistry(registry);
 }
 
+/// Add the lowering of one kernel. A segmented lowering is restricted to
+/// the function `kernelName` names, so other segment functions of the module
+/// stay as they are. The fixed-block lowering recognizes its one function
+/// itself.
 void addKernelLoweringPass(PassManager &manager, KernelKind kind,
-                           int64_t blockSize, bool useTaskIds,
-                           bool fusedMixed) {
+                           llvm::StringRef kernelName, int64_t blockSize,
+                           bool useTaskIds, bool fusedMixed) {
   switch (kind) {
   case KernelKind::FixedBlock:
     manager.addPass(swage::createFixedBlockToGPUPass(blockSize));
     return;
   case KernelKind::SegmentedReduction:
     manager.addPass(swage::createSegmentedReductionToGPUPass(
-        blockSize, useTaskIds, fusedMixed));
+        blockSize, useTaskIds, fusedMixed, kernelName));
     return;
   case KernelKind::PersistentSegmentedReduction:
-    manager.addPass(swage::createPersistentSegmentedReductionToGPUPass());
+    manager.addPass(
+        swage::createPersistentSegmentedReductionToGPUPass(kernelName));
     return;
   case KernelKind::SplitPartialReduction:
-    manager.addPass(swage::createSplitPartialReductionToGPUPass());
+    manager.addPass(swage::createSplitPartialReductionToGPUPass(kernelName));
     return;
   case KernelKind::SplitMergeReduction:
-    manager.addPass(swage::createSplitMergeReductionToGPUPass());
+    manager.addPass(swage::createSplitMergeReductionToGPUPass(kernelName));
     return;
   }
 }
 
 void configureCodegenPasses(PassManager &manager, KernelKind kind,
-                            int64_t blockSize, bool useTaskIds,
-                            bool fusedMixed) {
-  addKernelLoweringPass(manager, kind, blockSize, useTaskIds, fusedMixed);
+                            llvm::StringRef kernelName, int64_t blockSize,
+                            bool useTaskIds, bool fusedMixed) {
+  addKernelLoweringPass(manager, kind, kernelName, blockSize, useTaskIds,
+                        fusedMixed);
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
@@ -229,24 +235,7 @@ void configureCodegenPasses(PassManager &manager, KernelKind kind,
   gpuManager.addPass(createConvertGpuOpsToNVVMOps(options));
 }
 
-FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
-                                       KernelKind kind, int64_t blockSize,
-                                       bool useTaskIds, bool fusedMixed) {
-  PassManager manager(module.getContext());
-  configureCodegenPasses(manager, kind, blockSize, useTaskIds, fusedMixed);
-  if (failed(manager.run(module)))
-    return failure();
-
-  auto gpuModules = module.getOps<gpu::GPUModuleOp>();
-  auto gpuModuleCount = std::distance(gpuModules.begin(), gpuModules.end());
-  if (gpuModuleCount != 1) {
-    source.emitError() << "lowering did not produce exactly one GPU module, "
-                       << "found " << gpuModuleCount;
-    return failure();
-  }
-  return *gpuModules.begin();
-}
-
+/// The name of the kernel a compile produces for the function `kernelName`.
 std::string expectedKernelName(llvm::StringRef kernelName, KernelKind kind) {
   std::string expected = kernelName.str();
   if (kind == KernelKind::SplitPartialReduction)
@@ -256,18 +245,30 @@ std::string expectedKernelName(llvm::StringRef kernelName, KernelKind kind) {
   return expected;
 }
 
-LogicalResult verifyCompiledKernel(ModuleOp source, gpu::GPUModuleOp gpuModule,
-                                   llvm::StringRef kernelName,
-                                   KernelKind kind) {
-  llvm::StringRef compiledKernel;
-  for (LLVM::LLVMFuncOp function : gpuModule.getOps<LLVM::LLVMFuncOp>())
-    if (!function.isExternal())
-      compiledKernel = function.getName();
-  if (compiledKernel != expectedKernelName(kernelName, kind))
-    return source.emitError("kernel_name '")
-           << kernelName << "' does not match the compiled kernel '"
-           << compiledKernel << "'";
-  return success();
+/// Lower `module` and return the `gpu.module` of the requested kernel. A
+/// lowering names the module it creates `<kernel>_module`, so the module is
+/// found by its symbol, and it must hold the kernel.
+FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
+                                       llvm::StringRef kernelName,
+                                       KernelKind kind, int64_t blockSize,
+                                       bool useTaskIds, bool fusedMixed) {
+  PassManager manager(module.getContext());
+  configureCodegenPasses(manager, kind, kernelName, blockSize, useTaskIds,
+                         fusedMixed);
+  if (failed(manager.run(module)))
+    return failure();
+
+  std::string kernel = expectedKernelName(kernelName, kind);
+  auto gpuModule = module.lookupSymbol<gpu::GPUModuleOp>(kernel + "_module");
+  if (!gpuModule ||
+      !SymbolTable::lookupSymbolIn(gpuModule.getOperation(), kernel)) {
+    source.emitError() << "kernel_name '" << kernelName
+                       << "' does not name the compiled kernel: lowering "
+                          "produced no kernel @"
+                       << kernel << " in a gpu.module @" << kernel << "_module";
+    return failure();
+  }
+  return gpuModule;
 }
 
 void printLoweredModule(ModuleOp module, std::string &lowered) {
@@ -407,15 +408,12 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   OwningOpRef<ModuleOp> module = source.clone();
   MLIRContext *context = module->getContext();
   registerCodegenInterfaces(*context);
-  FailureOr<gpu::GPUModuleOp> loweredGPU =
-      lowerToGPU(source, *module, kind, blockSize, useTaskIds, fusedMixed);
+  FailureOr<gpu::GPUModuleOp> loweredGPU = lowerToGPU(
+      source, *module, kernelName, kind, blockSize, useTaskIds, fusedMixed);
   if (failed(loweredGPU))
     return failure();
   gpu::GPUModuleOp gpuModule = *loweredGPU;
-  // The passes compile the function containing swage operations, not the
-  // function kernelName selected; reject a mismatch before module loading.
-  if (failed(verifyCompiledKernel(source, gpuModule, kernelName, kind)) ||
-      failed(replaceLibdeviceCalls(gpuModule)))
+  if (failed(replaceLibdeviceCalls(gpuModule)))
     return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
       context, {NVVM::NVVMTargetAttr::get(
@@ -573,10 +571,11 @@ MlirLogicalResult swageCompileSplitMergeReductionToPTX(
 }
 
 MlirLogicalResult swageMaterializeSegmentedPlan(
-    MlirModule module, const int64_t *offsets, intptr_t offsetCount,
-    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
-    int64_t ctaChunkElements, SwageTaskIdsCallback warpCallback,
-    void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
+    MlirModule module, MlirStringRef kernelName, const int64_t *offsets,
+    intptr_t offsetCount, int64_t valueCount, int64_t segmentCount,
+    int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskIdsCallback warpCallback, void *warpUserData,
+    SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData) {
   if (mlirModuleIsNull(module) || offsetCount < 0 ||
@@ -589,18 +588,27 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
     return mlirLogicalResultFailure();
   OwningOpRef<ModuleOp> planned = source.clone();
   PassManager manager(source.getContext());
+  llvm::StringRef kernel = unwrap(kernelName);
+  if (!source.lookupSymbol<func::FuncOp>(kernel)) {
+    source.emitError() << "kernel_name '" << kernel
+                       << "' does not name a function of the module";
+    return mlirLogicalResultFailure();
+  }
   manager.addPass(
-      swage::createSwageToPlanPass(warpMaxElements, ctaChunkElements));
+      swage::createSwageToPlanPass(warpMaxElements, ctaChunkElements, kernel));
   if (failed(manager.run(*planned)))
     return mlirLogicalResultFailure();
 
+  // The pass planned the one function `kernel` names, so the classifier of
+  // that kernel is the one it added.
   SmallVector<swage_plan::ClassifyOp> classifiers;
   planned->walk([&](swage_plan::ClassifyOp classify) {
-    classifiers.push_back(classify);
+    if (classify.getKernel() == kernel)
+      classifiers.push_back(classify);
   });
   if (classifiers.size() != 1) {
-    source.emitError(
-        "planning did not produce exactly one swage_plan.classify");
+    source.emitError() << "planning must produce one swage_plan.classify of @"
+                       << kernel << ", found " << classifiers.size();
     return mlirLogicalResultFailure();
   }
 

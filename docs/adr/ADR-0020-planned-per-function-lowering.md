@@ -1,17 +1,20 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 and 1 of the migration sequence are implemented
+- Status: accepted; steps 0 to 2 of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
 
 The design is built one migration step at a time, and this page says which
 steps exist. Implemented: step 0 (the digest gate, dialect extensions in
-`swage-opt`, and a lit test of the nested NVVM pipeline) and step 1 (the
-target description). Not implemented: steps 2 to 10. Until its step lands, a
-part of the design is written in the conditional below, and the segmented
-lowering works as "Context" describes.
+`swage-opt`, and a lit test of the nested NVVM pipeline), step 1 (the
+target description), and step 2 (argument roles, the kernel layouts,
+admission per function, any number of segment functions in a module, and
+the symbol checks before mutation). Not implemented: steps 3 to 10. Until
+its step lands, a part of the design is written in the conditional below,
+and the segmented lowering works as "Context" describes, except where an
+implemented step replaced it.
 
 Byte-identical emission is the acceptance criterion of every step through
 step 9: the committed digests of the lowered MLIR and of the PTX must not
@@ -245,7 +248,7 @@ vector-add recognizer, are out of scope.
 
 ### ABI declaration: `swage.role`
 
-Spelling: a new enum attribute in
+Implemented in step 2. The role is an enum attribute in
 `include/swage/Dialect/Swage/IR/SwageOps.td` (`Swage_ArgumentRole`,
 mnemonic `role`), attached as an argument attribute:
 
@@ -258,7 +261,7 @@ func.func @segmented_sum(
     %segment_count: i32 {swage.role = #swage.role<segment_count>})
 ```
 
-The contract of each role, to be stated in the ODS description:
+The contract of each role, stated in the dialect description:
 
 - `values` and `offsets` are the buffers `swage.make_segment` binds.
 - `output` is the buffer of the terminal.
@@ -270,17 +273,19 @@ The contract of each role, to be stated in the ODS description:
 
 Verification:
 
-- `SwageDialect::verifyRegionArgAttribute` would reject a role on the wrong
-  type and a duplicated role. Negative cases would go in
-  `test/Dialect/Swage/invalid.mlir`.
-- Admission (`SegmentABI::fromFunction`) would require every argument to
-  carry a role and each role exactly once. There would be no positional
-  default.
+- `SwageDialect::verifyRegionArgAttribute` rejects a role on the wrong
+  type and a duplicated role. The negative cases are in
+  `test/Dialect/Swage/invalid-roles.mlir`.
+- Admission (`readSegmentABI` in `SegmentedReduction.cpp`) requires every
+  argument to carry a role and each role exactly once. There is no
+  positional default, and the argument order is free:
+  `roles-reordered.mlir` lowers a function with its arguments reversed to
+  the same kernel.
 
-Types: the element type would come from the `values` argument. The index
-word type would come from the `offsets` element type, and the count types
-would have to equal it. The admitted set would stay f32 and i32, expressed
-as two small tables instead of a signature comparison.
+Types: the element type comes from the `values` argument. The index word
+type comes from the `offsets` element type, and the count types have to
+equal it. The admitted set stays f32 and i32, expressed as two small
+predicates instead of a signature comparison.
 
 Why the counts are declared and the buffers are declared too: no operation
 refers to the counts, so they cannot be derived. The buffers could be
@@ -288,9 +293,30 @@ derived from `make_segment` and the terminal. Declaring them too gives
 closed-world admission and lets the existing binding diagnostics keep their
 text.
 
-The SCF lowering would remove the role attributes it consumed. The runner
+The SCF lowering removes the role attributes it consumed. The runner
 tests pipe its output into upstream `mlir-opt`, which does not know the
 Swage dialect.
+
+### Functions, kernel layouts, and symbols
+
+Implemented in step 2, in the passes that exist before the plan stage.
+
+- A pass lowers every function that holds a Swage operation and leaves the
+  other functions as they are. A module without a segment function is left
+  unchanged. `function=<symbol>` restricts a pass to one function.
+- A pass admits every function it will lower before it changes any of them.
+- A GPU lowering requires that the function has no symbol use and that the
+  names it creates are free: `<kernel>_module`, and `<kernel>` when it
+  differs from the function name, which is the case for the split stages.
+  `invalid-kernel-symbols.mlir` and `invalid-split-kernel-symbols.mlir`
+  hold the negative cases, and `two-kernels.mlir` the positive ones.
+- The emitters find each kernel parameter through
+  `include/swage/Dialect/SwagePlan/IR/KernelLayout.h`, which holds the six
+  parameter layouts of the context section, so no emitter reads a parameter
+  by position.
+- The C API passes `kernelName` as `function` and selects the `gpu.module`
+  by the symbol `<kernel>_module`. `swageMaterializeSegmentedPlan` takes a
+  `kernelName` as well, so no entry point keeps a one-function rule.
 
 ### The plan stage
 
@@ -392,14 +418,14 @@ function once per requested kernel and replace it.
   `schedule=split-partial,split-merge`, which gives two plan functions and
   later two `gpu.module` operations.
 - Two kernels that would both be named `@f` would be a diagnostic.
-- A `function=<symbol>` option would restrict planning to one function.
-  Without it every function with segment operations would be planned, and
-  bystanders would be untouched.
+- A `function=<symbol>` option restricts planning to one function. Without
+  it every function with segment operations is planned, and bystanders are
+  untouched. The passes of step 2 already work this way.
 - Module and kernel names would be unchanged (`<kernel>_module`).
 
-Admission additions: for GPU schedules, the function would have to have no
-symbol uses, and `<kernel>` and `<kernel>_module` would have to be free.
-Both would be diagnosed before any mutation.
+Admission additions, implemented in step 2: for GPU schedules, the function
+has no symbol uses, and `<kernel>` and `<kernel>_module` are free. Both are
+diagnosed before any mutation.
 
 Removed under this proposal: `swage_plan.classify`,
 `!swage_plan.task_range`, the companion, and `hasCanonicalSemanticABI`. If

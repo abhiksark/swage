@@ -15,7 +15,10 @@ terminate with either one scalar per segment or one value per segment element.
 ## Decision
 
 The internal segmented lowering admits one fail-closed program shape. A module
-contains exactly one single-block function with Swage segment operations,
+contains exactly one single-block function with Swage segment operations
+(a rule that [ADR-0020](ADR-0020-planned-per-function-lowering.md) later
+replaced: a module holds any number of segment functions, and each declares
+its arguments with `swage.role`),
 using the existing five-argument ABI: rank-one f32 values, rank-one i32
 offsets, rank-one f32 output, i32 value count, and i32 segment count. It
 contains one axis-zero `segment_id`, one `make_segment`, at least one `reduce`,

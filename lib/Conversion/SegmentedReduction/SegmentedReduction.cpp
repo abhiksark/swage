@@ -194,25 +194,82 @@ private:
   SmallVector<std::unique_ptr<Region>> owned;
 };
 
-FailureOr<func::FuncOp> findSegmentedReduction(ModuleOp module) {
-  SmallVector<func::FuncOp> candidates;
-  for (func::FuncOp function : module.getOps<func::FuncOp>()) {
-    bool hasSwageOperation = false;
-    function.walk([&](Operation *operation) {
-      hasSwageOperation |=
-          isa_and_nonnull<SwageDialect>(operation->getDialect());
-    });
-    if (hasSwageOperation)
-      candidates.push_back(function);
+/// Whether `function` holds an operation of the Swage dialect.
+bool holdsSwageOperation(func::FuncOp function) {
+  bool found = false;
+  function.walk([&](Operation *operation) {
+    found |= isa_and_nonnull<SwageDialect>(operation->getDialect());
+  });
+  return found;
+}
+
+/// The functions a pass lowers: every function that holds a Swage operation,
+/// or the one function that `selected` names. A module without a segment
+/// function gives an empty list, and the pass leaves it as it is.
+FailureOr<SmallVector<func::FuncOp>> findSegmentFunctions(ModuleOp module,
+                                                          StringRef selected) {
+  SmallVector<func::FuncOp> functions;
+  if (selected.empty()) {
+    for (func::FuncOp function : module.getOps<func::FuncOp>())
+      if (holdsSwageOperation(function))
+        functions.push_back(function);
+    return functions;
   }
-  if (candidates.size() != 1) {
-    module.emitError()
-        << "expected exactly one function containing Swage segment operations, "
-           "found "
-        << candidates.size();
+  auto function = module.lookupSymbol<func::FuncOp>(selected);
+  if (!function) {
+    module.emitError() << "function names @" << selected
+                       << ", which is not a function of the module";
     return failure();
   }
-  return candidates.front();
+  if (!holdsSwageOperation(function)) {
+    function.emitError() << "function names @" << selected
+                         << ", which holds no Swage segment operation";
+    return failure();
+  }
+  functions.push_back(function);
+  return functions;
+}
+
+/// A GPU lowering replaces a segment function by a `gpu.module` named after
+/// its kernel, so nothing may refer to the function, and the names it
+/// creates must be free. Checked before any function is changed.
+LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
+                                  StringRef kernelSuffix) {
+  std::optional<SymbolTable::UseRange> uses = SymbolTable::getSymbolUses(
+      function.getOperation(), module.getOperation());
+  if (!uses)
+    return function.emitError()
+           << "cannot tell whether @" << function.getName()
+           << " is referenced; lowering it to a GPU kernel removes it, so the "
+              "module must hold only operations with known symbol uses";
+  if (!uses->empty()) {
+    InFlightDiagnostic diagnostic =
+        function.emitError()
+        << "segment function @" << function.getName() << " is referenced "
+        << llvm::size(*uses)
+        << " times; lowering it to a GPU kernel removes it, so it must have no "
+           "symbol use";
+    diagnostic.attachNote(uses->begin()->getUser()->getLoc())
+        << "referenced here";
+    return diagnostic;
+  }
+  std::string kernel = (function.getName() + kernelSuffix).str();
+  SmallVector<std::string, 2> created = {kernel + "_module"};
+  if (!kernelSuffix.empty())
+    created.push_back(kernel);
+  for (const std::string &name : created) {
+    Operation *existing =
+        SymbolTable::lookupSymbolIn(module.getOperation(), name);
+    if (!existing)
+      continue;
+    InFlightDiagnostic diagnostic = function.emitError()
+                                    << "lowering @" << function.getName()
+                                    << " creates @" << name
+                                    << ", which the module already defines";
+    diagnostic.attachNote(existing->getLoc()) << "defined here";
+    return diagnostic;
+  }
+  return success();
 }
 
 /// Walk back through fused maps to the root segment, collecting them in
@@ -1581,11 +1638,17 @@ class SegmentedReductionToSCFPass
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SegmentedReductionToSCFPass)
 
+  SegmentedReductionToSCFPass() = default;
+  SegmentedReductionToSCFPass(const SegmentedReductionToSCFPass &other)
+      : PassWrapper(other) {
+    selectedFunction = other.selectedFunction.getValue();
+  }
+
   StringRef getArgument() const final {
     return "swage-segmented-reduction-to-scf";
   }
   StringRef getDescription() const final {
-    return "Lower one segment program to sequential SCF loops";
+    return "Lower every segment function to sequential SCF loops";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1594,18 +1657,30 @@ public:
   }
 
   void runOnOperation() final {
-    FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
-    if (failed(function))
+    FailureOr<SmallVector<func::FuncOp>> functions =
+        findSegmentFunctions(getOperation(), selectedFunction);
+    if (failed(functions))
       return signalPassFailure();
-    SegmentProgramAnalysis analysis;
-    if (failed(analyzeSegmentProgram(*function, analysis)))
-      return signalPassFailure();
-    // The owner must outlive the program, which points into it.
-    RegionOwner owner;
-    SegmentProgram program;
-    detachSegmentProgram(analysis, owner, program);
-    buildSequentialProgram(*function, analysis.abi, program);
+    // Every function is admitted before any is changed, so a rejected module
+    // is left as it was.
+    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
+    for (auto [function, analysis] : llvm::zip(*functions, analyses))
+      if (failed(analyzeSegmentProgram(function, analysis)))
+        return signalPassFailure();
+    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
+      // The owner must outlive the program, which points into it.
+      RegionOwner owner;
+      SegmentProgram program;
+      detachSegmentProgram(analysis, owner, program);
+      buildSequentialProgram(function, analysis.abi, program);
+    }
   }
+
+private:
+  Option<std::string> selectedFunction{
+      *this, "function",
+      llvm::cl::desc("Lower only this function instead of every function "
+                     "that holds Swage operations")};
 };
 
 class SegmentedReductionToGPUPass
@@ -1620,25 +1695,27 @@ public:
     useTaskIds = other.useTaskIds.getValue();
     fusedMixed = other.fusedMixed.getValue();
     persistent = other.persistent.getValue();
+    selectedFunction = other.selectedFunction.getValue();
   }
   SegmentedReductionToGPUPass(const TargetDescription &target,
                               int64_t requestedBlockSize, bool requestedTaskIds,
                               bool requestedFusedMixed,
-                              bool requestedPersistent = false)
+                              bool requestedPersistent, StringRef function)
       : target(&target) {
     blockSize = requestedBlockSize;
     useTaskIds = requestedTaskIds;
     fusedMixed = requestedFusedMixed;
     persistent = requestedPersistent;
+    selectedFunction = function.str();
   }
 
   StringRef getArgument() const final {
     return "swage-segmented-reduction-to-gpu";
   }
   StringRef getDescription() const final {
-    return "Lower one segment program to a GPU kernel: one block per segment, "
-           "or the task-id, fused mixed, or persistent schedule an option "
-           "selects";
+    return "Lower every segment function to a GPU kernel: one block per "
+           "segment, or the task-id, fused mixed, or persistent schedule an "
+           "option selects";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1695,22 +1772,32 @@ public:
           << " (" << target->subgroupCount(requested) << " warps)";
       return signalPassFailure();
     }
-    FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
-    if (failed(function))
+    ModuleOp module = getOperation();
+    FailureOr<SmallVector<func::FuncOp>> functions =
+        findSegmentFunctions(module, selectedFunction);
+    if (failed(functions))
       return signalPassFailure();
-    SegmentProgramAnalysis analysis;
-    if (failed(analyzeSegmentProgram(*function, analysis)))
-      return signalPassFailure();
-    if ((useTaskIds || fusedMixed || persistent) &&
-        failed(verifyPlanningProgram(analysis)))
-      return signalPassFailure();
-    if (persistent && failed(verifyPersistentProgram(analysis)))
-      return signalPassFailure();
-    RegionOwner owner;
-    SegmentProgram program;
-    detachSegmentProgram(analysis, owner, program);
-    buildGPUProgram(getOperation(), *function, program, *target, blockSize,
-                    useTaskIds, fusedMixed, persistent);
+    // Every function is admitted before any is changed, so a rejected module
+    // is left as it was.
+    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
+    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
+      if (failed(analyzeSegmentProgram(function, analysis)))
+        return signalPassFailure();
+      if ((useTaskIds || fusedMixed || persistent) &&
+          failed(verifyPlanningProgram(analysis)))
+        return signalPassFailure();
+      if (persistent && failed(verifyPersistentProgram(analysis)))
+        return signalPassFailure();
+      if (failed(verifyKernelSymbols(module, function, "")))
+        return signalPassFailure();
+    }
+    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
+      RegionOwner owner;
+      SegmentProgram program;
+      detachSegmentProgram(analysis, owner, program);
+      buildGPUProgram(module, function, program, *target, blockSize, useTaskIds,
+                      fusedMixed, persistent);
+    }
   }
 
 private:
@@ -1731,6 +1818,10 @@ private:
       llvm::cl::desc("Emit the experimental private persistent queue kernel; "
                      "requires block-size 512"),
       llvm::cl::init(false)};
+  Option<std::string> selectedFunction{
+      *this, "function",
+      llvm::cl::desc("Lower only this function instead of every function "
+                     "that holds Swage operations")};
 };
 
 class SplitSegmentedReductionToGPUPass
@@ -1744,16 +1835,19 @@ public:
       const SplitSegmentedReductionToGPUPass &other)
       : PassWrapper(other) {
     merge = other.merge.getValue();
+    selectedFunction = other.selectedFunction.getValue();
   }
-  explicit SplitSegmentedReductionToGPUPass(bool requestedMerge) {
+  SplitSegmentedReductionToGPUPass(bool requestedMerge, StringRef function) {
     merge = requestedMerge;
+    selectedFunction = function.str();
   }
 
   StringRef getArgument() const final {
     return "swage-split-segmented-reduction-to-gpu";
   }
   StringRef getDescription() const final {
-    return "Lower one capture-free sum or max to a private split stage";
+    return "Lower every capture-free sum or max function to a private split "
+           "stage";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1762,18 +1856,27 @@ public:
   }
 
   void runOnOperation() final {
-    FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
-    if (failed(function))
+    ModuleOp module = getOperation();
+    FailureOr<SmallVector<func::FuncOp>> functions =
+        findSegmentFunctions(module, selectedFunction);
+    if (failed(functions))
       return signalPassFailure();
-    SegmentProgramAnalysis analysis;
-    if (failed(analyzeSegmentProgram(*function, analysis)) ||
-        failed(verifyPlanningProgram(analysis)))
-      return signalPassFailure();
-    RegionOwner owner;
-    SegmentProgram program;
-    detachSegmentProgram(analysis, owner, program);
-    buildSplitGPUProgram(getOperation(), *function, program.reductions.front(),
-                         nvidiaTarget(), merge);
+    // Every function is admitted before any is changed, so a rejected module
+    // is left as it was.
+    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
+    for (auto [function, analysis] : llvm::zip(*functions, analyses))
+      if (failed(analyzeSegmentProgram(function, analysis)) ||
+          failed(verifyPlanningProgram(analysis)) ||
+          failed(verifyKernelSymbols(module, function,
+                                     merge ? "__merge" : "__partial")))
+        return signalPassFailure();
+    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
+      RegionOwner owner;
+      SegmentProgram program;
+      detachSegmentProgram(analysis, owner, program);
+      buildSplitGPUProgram(module, function, program.reductions.front(),
+                           nvidiaTarget(), merge);
+    }
   }
 
 private:
@@ -1782,6 +1885,10 @@ private:
       llvm::cl::desc("Emit the merge stage over scratch partials instead of "
                      "the partial stage over input ranges"),
       llvm::cl::init(false)};
+  Option<std::string> selectedFunction{
+      *this, "function",
+      llvm::cl::desc("Lower only this function instead of every function "
+                     "that holds Swage operations")};
 };
 
 class SwageToPlanPass
@@ -1793,16 +1900,19 @@ public:
   SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
     warpMaxElements = other.warpMaxElements.getValue();
     ctaChunkElements = other.ctaChunkElements.getValue();
+    selectedFunction = other.selectedFunction.getValue();
   }
   SwageToPlanPass(int64_t requestedWarpMaxElements,
-                  int64_t requestedCtaChunkElements) {
+                  int64_t requestedCtaChunkElements, StringRef function) {
     warpMaxElements = requestedWarpMaxElements;
     ctaChunkElements = requestedCtaChunkElements;
+    selectedFunction = function.str();
   }
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
-    return "Add runtime classification for one capture-free sum or max";
+    return "Add runtime classification for every capture-free sum or max "
+           "function";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -1819,27 +1929,28 @@ public:
       return signalPassFailure();
     }
 
-    SmallVector<func::FuncOp> functions(module.getOps<func::FuncOp>());
-    if (functions.size() != 1) {
-      module.emitError() << "planning requires exactly one function, found "
-                         << functions.size();
+    FailureOr<SmallVector<func::FuncOp>> functions =
+        findSegmentFunctions(module, selectedFunction);
+    if (failed(functions))
       return signalPassFailure();
+    // Every function is admitted before any companion is added, so a
+    // rejected module is left as it was.
+    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
+    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
+      std::string companionName = function.getName().str() + "__swage_plan";
+      if (SymbolTable::lookupSymbolIn(module.getOperation(), companionName)) {
+        module.emitError() << "planning companion symbol @" << companionName
+                           << " already exists";
+        return signalPassFailure();
+      }
+      if (failed(analyzeSegmentProgram(function, analysis)) ||
+          failed(verifyPlanningProgram(analysis)))
+        return signalPassFailure();
     }
-    func::FuncOp function = functions.front();
-    std::string companionName = function.getName().str() + "__swage_plan";
-    if (SymbolTable::lookupSymbolIn(module.getOperation(), companionName)) {
-      module.emitError() << "planning companion symbol @" << companionName
-                         << " already exists";
-      return signalPassFailure();
-    }
-    SegmentProgramAnalysis analysis;
-    if (failed(analyzeSegmentProgram(function, analysis)) ||
-        failed(verifyPlanningProgram(analysis)))
-      return signalPassFailure();
-
-    buildPlanningCompanion(module, function, analysis.abi,
-                           static_cast<int32_t>(warpMaxElements),
-                           static_cast<int32_t>(ctaChunkElements));
+    for (auto [function, analysis] : llvm::zip(*functions, analyses))
+      buildPlanningCompanion(module, function, analysis.abi,
+                             static_cast<int32_t>(warpMaxElements),
+                             static_cast<int32_t>(ctaChunkElements));
   }
 
 private:
@@ -1851,6 +1962,10 @@ private:
       *this, "cta-chunk-elements",
       llvm::cl::desc("Maximum input elements in one CTA task"),
       llvm::cl::init(nvidiaTarget().defaultCtaChunkElements)};
+  Option<std::string> selectedFunction{
+      *this, "function",
+      llvm::cl::desc("Plan only this function instead of every function that "
+                     "holds Swage operations")};
 };
 
 } // namespace
@@ -1861,36 +1976,40 @@ std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
 
 std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
                                                         bool useTaskIds,
-                                                        bool fusedMixed) {
-  return createSegmentedReductionToGPUPass(blockSize, useTaskIds, fusedMixed,
-                                           nvidiaTarget());
+                                                        bool fusedMixed,
+                                                        StringRef function) {
+  return std::make_unique<SegmentedReductionToGPUPass>(
+      nvidiaTarget(), blockSize, useTaskIds, fusedMixed, false, function);
 }
 
 std::unique_ptr<Pass>
 createSegmentedReductionToGPUPass(int64_t blockSize, bool useTaskIds,
                                   bool fusedMixed,
                                   const TargetDescription &target) {
-  return std::make_unique<SegmentedReductionToGPUPass>(target, blockSize,
-                                                       useTaskIds, fusedMixed);
+  return std::make_unique<SegmentedReductionToGPUPass>(
+      target, blockSize, useTaskIds, fusedMixed, false, "");
 }
 
-std::unique_ptr<Pass> createPersistentSegmentedReductionToGPUPass() {
+std::unique_ptr<Pass>
+createPersistentSegmentedReductionToGPUPass(StringRef function) {
   const TargetDescription &target = nvidiaTarget();
   return std::make_unique<SegmentedReductionToGPUPass>(
-      target, target.persistentBlockThreads, false, false, true);
+      target, target.persistentBlockThreads, false, false, true, function);
 }
 
-std::unique_ptr<Pass> createSplitPartialReductionToGPUPass() {
-  return std::make_unique<SplitSegmentedReductionToGPUPass>(false);
+std::unique_ptr<Pass> createSplitPartialReductionToGPUPass(StringRef function) {
+  return std::make_unique<SplitSegmentedReductionToGPUPass>(false, function);
 }
 
-std::unique_ptr<Pass> createSplitMergeReductionToGPUPass() {
-  return std::make_unique<SplitSegmentedReductionToGPUPass>(true);
+std::unique_ptr<Pass> createSplitMergeReductionToGPUPass(StringRef function) {
+  return std::make_unique<SplitSegmentedReductionToGPUPass>(true, function);
 }
 
 std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements,
-                                            int64_t ctaChunkElements) {
-  return std::make_unique<SwageToPlanPass>(warpMaxElements, ctaChunkElements);
+                                            int64_t ctaChunkElements,
+                                            StringRef function) {
+  return std::make_unique<SwageToPlanPass>(warpMaxElements, ctaChunkElements,
+                                           function);
 }
 
 void registerSegmentedReductionPasses() {

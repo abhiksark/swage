@@ -114,6 +114,23 @@ module {
 }
 )mlir";
 
+/// Two segment functions in one module: `@segmented_sum` and a copy of it
+/// named `@other_sum`.
+std::string twoKernels() {
+  std::string first = segmentedSum;
+  std::string second = first.substr(first.find("  func.func"));
+  first.erase(first.rfind('}'));
+  std::string name = "@segmented_sum";
+  second.replace(second.find(name), name.size(), "@other_sum");
+  return first + second;
+}
+
+/// `program` with `text` inserted before its first function.
+std::string beforeFirstFunction(std::string program, const std::string &text) {
+  program.insert(program.find("func.func"), text);
+  return program;
+}
+
 MlirStringRef ref(const std::string &text) {
   return mlirStringRefCreate(text.data(), text.size());
 }
@@ -481,16 +498,47 @@ TEST(CodegenCAPITest, RejectsAKernelNameTheModuleDoesNotDefine) {
   }
 }
 
-TEST(CodegenCAPITest, RejectsAKernelNameThatIsNotTheCompiledKernel) {
+TEST(CodegenCAPITest, RejectsAKernelNameThatIsNotASegmentFunction) {
   Session session;
 
   Compiled compiled = session.compile(swageCompileFusedSegmentedReductionToPTX,
                                       session.parse(segmentedSumWithBystander),
                                       "bystander", "sm_86");
 
-  expectRejected(compiled, session,
-                 "kernel_name 'bystander' does not match the compiled kernel "
-                 "'segmented_sum'");
+  expectRejected(
+      compiled, session,
+      "function names @bystander, which holds no Swage segment operation");
+}
+
+TEST(CodegenCAPITest, CompilesTheNamedKernelOfAModuleWithSeveral) {
+  for (const EntryPoint &entryPoint : entryPoints()) {
+    if (entryPoint.program != segmentedSum)
+      continue;
+    SCOPED_TRACE(entryPoint.name);
+    Session session;
+    MlirModule module = session.parse(twoKernels());
+    ASSERT_FALSE(mlirModuleIsNull(module));
+    std::string entry = entryPoint.entry;
+    std::string otherEntry = entry;
+    otherEntry.replace(0, std::strlen("segmented_sum"), "other_sum");
+
+    Compiled alone = session.compile(entryPoint);
+    Compiled first =
+        session.compile(entryPoint.compile, module, "segmented_sum", "sm_86");
+    Compiled second =
+        session.compile(entryPoint.compile, module, "other_sum", "sm_86");
+
+    ASSERT_TRUE(first.succeeded) << joined(session.diagnostics);
+    ASSERT_TRUE(second.succeeded) << joined(session.diagnostics);
+    // The kernel does not depend on what else the module holds.
+    EXPECT_EQ(first.ptx, alone.ptx);
+    EXPECT_FALSE(contains(first.ptx, "other_sum"));
+    EXPECT_TRUE(contains(second.ptx, ".entry " + otherEntry + "("));
+    EXPECT_FALSE(contains(second.ptx, "segmented_sum"));
+    // The function that was not named stays in the lowered module as it was.
+    EXPECT_TRUE(contains(first.lowered, "func.func @other_sum("));
+    EXPECT_TRUE(contains(first.lowered, "swage.reduce"));
+  }
 }
 
 TEST(CodegenCAPITest, RejectsFunctionNamesPTXCannotPrint) {
@@ -557,20 +605,71 @@ TEST(CodegenCAPITest, RejectsANamedMemorySpaceWithoutAborting) {
                  "'memref<?xf32, \"device\">'");
 }
 
-TEST(CodegenCAPITest, RejectsAModuleThatAlreadyHoldsAGPUModule) {
+TEST(CodegenCAPITest, RejectsAModuleThatDefinesTheSymbolOfTheKernelModule) {
+  for (const EntryPoint &entryPoint : entryPoints()) {
+    if (entryPoint.program != segmentedSum)
+      continue;
+    SCOPED_TRACE(entryPoint.name);
+    Session session;
+    MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
+    mlirDialectHandleRegisterDialect(gpu, session.context);
+    mlirDialectHandleLoadDialect(gpu, session.context);
+    std::string symbol = std::string(entryPoint.entry) + "_module";
+
+    Compiled compiled = session.compile(
+        entryPoint.compile,
+        session.parse(beforeFirstFunction(
+            segmentedSum, "gpu.module @" + symbol + " {\n  }\n  ")),
+        "segmented_sum", "sm_86");
+
+    expectRejected(compiled, session,
+                   "lowering @segmented_sum creates @" + symbol +
+                       ", which the module already defines");
+  }
+}
+
+TEST(CodegenCAPITest, RejectsAKernelThatTheModuleRefersTo) {
   Session session;
-  MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
-  mlirDialectHandleRegisterDialect(gpu, session.context);
-  mlirDialectHandleLoadDialect(gpu, session.context);
-  std::string program = fixedVectorAdd;
-  program.insert(program.find("func.func"), "gpu.module @earlier {\n  }\n  ");
+  std::string program = segmentedSum;
+  program.insert(program.rfind('}'), R"mlir(
+  func.func @caller(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    call @segmented_sum(
+        %values, %offsets, %output, %value_count, %segment_count)
+        : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
+    return
+  }
+)mlir");
 
   Compiled compiled =
-      session.compile(entryPoints().front().compile, session.parse(program),
-                      "add_kernel", "sm_86");
+      session.compile(swageCompileFusedSegmentedReductionToPTX,
+                      session.parse(program), "segmented_sum", "sm_86");
 
   expectRejected(compiled, session,
-                 "lowering did not produce exactly one GPU module, found 2");
+                 "segment function @segmented_sum is referenced 1 times; "
+                 "lowering it to a GPU kernel removes it, so it must have no "
+                 "symbol use");
+}
+
+TEST(CodegenCAPITest, SelectsTheKernelModuleBesideAnotherGPUModule) {
+  for (const EntryPoint &entryPoint : entryPoints()) {
+    SCOPED_TRACE(entryPoint.name);
+    Session session;
+    MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
+    mlirDialectHandleRegisterDialect(gpu, session.context);
+    mlirDialectHandleLoadDialect(gpu, session.context);
+
+    Compiled compiled = session.compile(
+        entryPoint.compile,
+        session.parse(beforeFirstFunction(entryPoint.program,
+                                          "gpu.module @earlier {\n  }\n  ")),
+        entryPoint.kernelName, "sm_86");
+
+    ASSERT_TRUE(compiled.succeeded) << joined(session.diagnostics);
+    EXPECT_TRUE(
+        contains(compiled.ptx, std::string(".entry ") + entryPoint.entry));
+  }
 }
 
 /// What one plan call reported back, one flat record list per callback.
@@ -605,14 +704,16 @@ struct PlanCallbacks {
 
 Plan materialize(Session &session, const int64_t *offsets, intptr_t offsetCount,
                  int64_t valueCount, int64_t segmentCount,
-                 PlanCallbacks callbacks = {}) {
+                 PlanCallbacks callbacks = {},
+                 const std::string &program = segmentedSum,
+                 const std::string &kernelName = "segmented_sum") {
   Plan plan;
   RecordSink warp{&plan.warp, &plan.calls};
   RecordSink cta{&plan.cta, &plan.calls};
   RecordSink partial{&plan.partial, &plan.calls};
   RecordSink merge{&plan.merge, &plan.calls};
   plan.succeeded = mlirLogicalResultIsSuccess(swageMaterializeSegmentedPlan(
-      session.parse(segmentedSum), offsets, offsetCount, valueCount,
+      session.parse(program), ref(kernelName), offsets, offsetCount, valueCount,
       segmentCount, 32, 4096, callbacks.warp, &warp, callbacks.cta, &cta,
       callbacks.partial, &partial, callbacks.merge, &merge));
   return plan;
@@ -678,14 +779,50 @@ TEST(CodegenCAPITest, APlanCallReportsRejectedArguments) {
   }
 }
 
+TEST(CodegenCAPITest, APlanCallAdmitsTheNamedKernelOfAModuleWithSeveral) {
+  const int64_t offsets[] = {0, 32, 132};
+  for (const char *kernel : {"segmented_sum", "other_sum"}) {
+    SCOPED_TRACE(kernel);
+    Session session;
+
+    Plan plan =
+        materialize(session, offsets, 3, 132, 2, {}, twoKernels(), kernel);
+
+    ASSERT_TRUE(plan.succeeded) << joined(session.diagnostics);
+    EXPECT_EQ(plan.warp, (std::vector<int32_t>{0}));
+    EXPECT_EQ(plan.cta, (std::vector<int32_t>{1}));
+  }
+}
+
+TEST(CodegenCAPITest, APlanCallRejectsAKernelNameThatIsNotASegmentFunction) {
+  const int64_t offsets[] = {0, 4};
+  {
+    Session session;
+    expectRejected(materialize(session, offsets, 2, 4, 1, {},
+                               segmentedSumWithBystander, "bystander"),
+                   session,
+                   "function names @bystander, which holds no Swage segment "
+                   "operation");
+  }
+  {
+    Session session;
+    expectRejected(materialize(session, offsets, 2, 4, 1, {},
+                               segmentedSumWithBystander, "absent"),
+                   session,
+                   "kernel_name 'absent' does not name a function of the "
+                   "module");
+  }
+}
+
 TEST(CodegenCAPITest, APlanCallOnANullModuleFailsWithoutACrash) {
   const int64_t offsets[] = {0, 4};
   Plan plan;
   RecordSink sink{&plan.warp, &plan.calls};
 
   plan.succeeded = mlirLogicalResultIsSuccess(swageMaterializeSegmentedPlan(
-      MlirModule{nullptr}, offsets, 2, 4, 1, 32, 4096, storeRecords, &sink,
-      storeRecords, &sink, storeRecords, &sink, storeRecords, &sink));
+      MlirModule{nullptr}, ref("segmented_sum"), offsets, 2, 4, 1, 32, 4096,
+      storeRecords, &sink, storeRecords, &sink, storeRecords, &sink,
+      storeRecords, &sink));
 
   EXPECT_FALSE(plan.succeeded);
   EXPECT_EQ(plan.calls, 0);

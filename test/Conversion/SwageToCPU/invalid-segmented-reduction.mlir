@@ -314,56 +314,6 @@ module {
 
 // -----
 
-// The lowering compiles the one function that holds Swage operations. A
-// module with none has nothing to lower.
-// expected-error@+1 {{expected exactly one function containing Swage segment operations, found 0}}
-module {
-  func.func @bystander() {
-    return
-  }
-}
-
-// -----
-
-// Two segment functions leave the choice of kernel open, so both are refused.
-// expected-error@+1 {{expected exactly one function containing Swage segment operations, found 2}}
-module {
-  func.func @first(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
-    ^bb0(%value: f32):
-      swage.yield %value : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-  func.func @second(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
-    ^bb0(%value: f32):
-      swage.yield %value : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
 // An unreachable second block is still a second block.
 module {
   // expected-error@+1 {{segmented reduction requires one block, got 2 blocks}}

@@ -11,11 +11,15 @@ path, and [Sum rounding](#sum-rounding) says which schedule it gets.
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
 
-The admitted semantic module has one axis-zero segment ID, one segment over
+An admitted segment function has one axis-zero segment ID, one segment over
 rank-one f32 values and rank-one i32 offsets, one capture-free
 reduction of kind `sum` or `max`, with an optional element expression and
 single-consumer map chains, one rank-one f32 output, and explicit i32
-value and segment counts.
+value and segment counts. A module may hold any number of segment functions
+next to other functions. A lowering turns each segment function into a
+kernel of its own, as
+[Compiler Tools and Passes](compiler-tools.md#functions-and-symbols)
+describes, and the runtime compiles the one it names.
 
 The function declares what each argument is with a `swage.role` argument
 attribute, as [Textual Swage IR](../language/swage-ir.md#argument-roles)

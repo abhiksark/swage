@@ -42,10 +42,10 @@ functions of the C API and not registered passes.
 | Pass argument | Options | Current admitted purpose |
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
-| `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
-| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512 | Lower an admitted private segmented program to GPU form. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
-| `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for a capture-free, single-stage f32 sum or max |
-| `--swage-split-segmented-reduction-to-gpu` | optional `merge` | Lower an admitted private capture-free, single-stage f32 sum or max to the split partial kernel, or to the split merge kernel when `merge` is set |
+| `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations |
+| `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512; optional `function` | Lower every admitted private segment function to a GPU kernel module. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
+| `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096; optional `function` | Add one private planning companion for every capture-free, single-stage f32 sum or max function |
+| `--swage-split-segmented-reduction-to-gpu` | optional `merge`; optional `function` | Lower every admitted private capture-free, single-stage f32 sum or max function to the split partial kernel, or to the split merge kernel when `merge` is set |
 
 Planning limits must satisfy:
 
@@ -53,9 +53,37 @@ Planning limits must satisfy:
 0 < warp-max-elements <= cta-chunk-elements <= INT32_MAX
 ```
 
-The planning pass preserves the admitted semantic function and adds one
-private companion with `swage_plan.classify`. It does not lower a general
-task graph or inspect runtime offset contents.
+The planning pass preserves each admitted semantic function and adds one
+private companion with `swage_plan.classify` for it. It does not lower a
+general task graph or inspect runtime offset contents.
+
+## Functions and symbols
+
+A segment function is a `func.func` that holds an operation of the `swage`
+dialect and declares its arguments with `swage.role`, as
+[Textual Swage IR](../language/swage-ir.md#argument-roles) describes. The
+four segmented passes treat a module the same way:
+
+- A pass lowers every segment function of the module and leaves the other
+  functions as they are. A module without a segment function is left
+  unchanged.
+- `function=<name>` restricts a pass to the function of that name. The pass
+  fails when the name is not a function of the module or names a function
+  without Swage operations.
+- A pass admits every function it will lower before it changes any of them,
+  so a module that is rejected is left as it was.
+
+A GPU lowering replaces a segment function by a `gpu.module` named
+`<kernel>_module`, where `<kernel>` is the function name, followed by
+`__partial` or `__merge` for a split stage. Before it changes anything, the
+pass requires that nothing in the module refers to the function, that
+`<kernel>_module` is not defined, and, for a split stage, that `<kernel>` is
+not defined. The sequential lowering rewrites a function in place, so a
+function it lowers may have callers.
+
+The code generation C API passes its `kernelName` as `function` and then
+selects the `gpu.module` named `<kernel>_module`, so a module with several
+segment functions compiles one kernel per call.
 
 ## Private segmented modes
 

@@ -12,11 +12,12 @@ from reduction_programs import reduction_module
 from swage._segmented_qualification import _has_small_element_program
 
 
-def _plan(module, offsets, **arguments):
+def _plan(module, kernel_name, offsets, **arguments):
     """Classify host offsets through the native plan and return lists.
 
     Args:
         module: Parsed semantic module to plan.
+        kernel_name: Name of the segment function in the module to admit.
         offsets: Offsets as Python integers. They cross into native code as
             one host int32 buffer, the only form the binding accepts.
         **arguments: The value count, the segment count, and any limit.
@@ -27,6 +28,7 @@ def _plan(module, offsets, **arguments):
     """
     records = native_swage._materialize_segmented_plan(
         module,
+        kernel_name,
         offsets=numpy.asarray(offsets, dtype=numpy.int32),
         **arguments,
     )
@@ -97,6 +99,7 @@ def test_static_schedules_share_reduction_program(kind, transform):
         original = module.operation.get_asm(enable_debug_info=False)
         assert _plan(
             module,
+            f"segmented_{kind}",
             [0, 1, 34, 4131],
             value_count=4131,
             segment_count=3,
@@ -580,6 +583,7 @@ def test_materializes_stable_policy_segment_ids_without_mutating_source():
 
         warp, cta, partial, merge = _plan(
             module,
+            "segmented_sum",
             [0, 0, 32, 65, 65, 66],
             value_count=66,
             segment_count=5,
@@ -602,6 +606,7 @@ def test_materializes_split_ranges_and_compact_merge_records():
 
         warp, cta, partial, merge = _plan(
             module,
+            "segmented_sum",
             [0, 32, 65, 4162, 12354],
             value_count=12354,
             segment_count=4,
@@ -624,6 +629,7 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         with pytest.raises(ValueError, match="offsets must be nondecreasing"):
             _plan(
                 module,
+                "segmented_sum",
                 [0, 2, 1],
                 value_count=2,
                 segment_count=2,
@@ -633,6 +639,7 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         with pytest.raises(ValueError, match="planning limits must satisfy"):
             _plan(
                 module,
+                "segmented_sum",
                 [0, 1],
                 value_count=1,
                 segment_count=1,
@@ -645,6 +652,7 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         with pytest.raises(ValueError, match="capture-free maps"):
             _plan(
                 transformed,
+                "ragged_softmax",
                 [0, 1],
                 value_count=1,
                 segment_count=1,
@@ -812,13 +820,14 @@ BYSTANDER_MODULE = SEGMENTED_SUM.rstrip().removesuffix("}") + """
 """
 
 
-def test_kernel_name_must_match_the_compiled_kernel():
-    """Reject a name mismatch at compile time, not at module load."""
+def test_kernel_name_must_name_a_segment_function():
+    """Reject a function without Swage operations at compile time."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(BYSTANDER_MODULE)
         with pytest.raises(
-            ValueError, match="does not match the compiled kernel"
+            ValueError,
+            match="function names @bystander, which holds no Swage segment",
         ):
             native_swage._compile_segmented_reduction_ptx(
                 module,

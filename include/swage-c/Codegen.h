@@ -83,9 +83,15 @@ typedef void (*SwageTaskIdsCallback)(const int32_t *taskIds, intptr_t taskCount,
 
 // Arguments shared by the compile functions below.
 //
-//   kernelName      names the function to compile. It must be the function of
-//                   the module that holds the Swage operations; the kernel in
-//                   the PTX carries the same name unless noted.
+//   kernelName      names the function to compile, which must hold Swage
+//                   operations. A segmented compile lowers that function and
+//                   leaves every other function of the module as it is, so a
+//                   module may hold several segment functions. The lowering
+//                   creates a gpu.module named `<kernel>_module`, where
+//                   `<kernel>` is the name of the kernel in the PTX: that
+//                   symbol must be free and nothing in the module may refer
+//                   to the function. The kernel carries the name of the
+//                   function unless noted.
 //   target          is an NVPTX processor: sm_80, sm_86, sm_87, sm_88, sm_89,
 //                   sm_90, sm_100, sm_101, sm_103, sm_110, sm_120, or sm_121.
 //   loweredCallback receives the lowered module as MLIR text.
@@ -139,14 +145,18 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData);
 
-// Callback counts below are flat i32 element counts. Partial records use
-// [begin, end] pairs; merge records use
-// [segment_id, partial_begin, partial_end] triples.
+/// Admits the function `kernelName` names for planning and classifies the
+/// offsets into one record list per callback. The function must hold a
+/// capture-free sum or max; other functions of the module are not looked at.
+/// Callback counts are flat i32 element counts. Partial records use
+/// [begin, end] pairs; merge records use
+/// [segment_id, partial_begin, partial_end] triples.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
-    MlirModule module, const int64_t *offsets, intptr_t offsetCount,
-    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
-    int64_t ctaChunkElements, SwageTaskIdsCallback warpCallback,
-    void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
+    MlirModule module, MlirStringRef kernelName, const int64_t *offsets,
+    intptr_t offsetCount, int64_t valueCount, int64_t segmentCount,
+    int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskIdsCallback warpCallback, void *warpUserData,
+    SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData);
 

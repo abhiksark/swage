@@ -245,7 +245,7 @@ compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
 
 std::tuple<std::vector<int32_t>, std::vector<int32_t>, std::vector<int32_t>,
            std::vector<int32_t>>
-materializeSegmentedPlan(nb::object moduleObject,
+materializeSegmentedPlan(nb::object moduleObject, const std::string &kernelName,
                          const std::vector<int64_t> &offsets,
                          int64_t valueCount, int64_t segmentCount,
                          int64_t warpMaxElements, int64_t ctaChunkElements) {
@@ -265,7 +265,8 @@ materializeSegmentedPlan(nb::object moduleObject,
       tasks.assign(taskIds, taskIds + taskCount);
   };
   MlirLogicalResult result = swageMaterializeSegmentedPlan(
-      module, offsets.data(), static_cast<intptr_t>(offsets.size()), valueCount,
+      module, mlirStringRefCreate(kernelName.data(), kernelName.size()),
+      offsets.data(), static_cast<intptr_t>(offsets.size()), valueCount,
       segmentCount, warpMaxElements, ctaChunkElements, store, &warp, store,
       &cta, store, &partial, store, &merge);
   if (mlirLogicalResultIsFailure(result))
@@ -294,15 +295,16 @@ PlanRecords takePlanRecords(std::vector<int32_t> &&records) {
 /// host int32 buffer and the four record arrays leave as buffers. The C API
 /// classifies int64 offsets, so they are widened here in one pass.
 std::tuple<PlanRecords, PlanRecords, PlanRecords, PlanRecords>
-materializeSegmentedPlanBuffers(nb::object moduleObject, PlanOffsets offsets,
-                                int64_t valueCount, int64_t segmentCount,
-                                int64_t warpMaxElements,
+materializeSegmentedPlanBuffers(nb::object moduleObject,
+                                const std::string &kernelName,
+                                PlanOffsets offsets, int64_t valueCount,
+                                int64_t segmentCount, int64_t warpMaxElements,
                                 int64_t ctaChunkElements) {
   std::vector<int64_t> wideOffsets(offsets.data(),
                                    offsets.data() + offsets.shape(0));
-  auto [warp, cta, partial, merge] =
-      materializeSegmentedPlan(std::move(moduleObject), wideOffsets, valueCount,
-                               segmentCount, warpMaxElements, ctaChunkElements);
+  auto [warp, cta, partial, merge] = materializeSegmentedPlan(
+      std::move(moduleObject), kernelName, wideOffsets, valueCount,
+      segmentCount, warpMaxElements, ctaChunkElements);
   return {takePlanRecords(std::move(warp)), takePlanRecords(std::move(cta)),
           takePlanRecords(std::move(partial)),
           takePlanRecords(std::move(merge))};
@@ -522,8 +524,9 @@ NB_MODULE(_swageDialectsNanobind, m) {
   // back as four int32 arrays. Nothing is converted: a list, a tuple, or a
   // buffer of another dtype, rank, or layout is a TypeError.
   swageM.def("_materialize_segmented_plan", &materializeSegmentedPlanBuffers,
-             nb::arg("module"), nb::arg("offsets").noconvert(),
-             nb::arg("value_count"), nb::arg("segment_count"),
+             nb::arg("module"), nb::arg("kernel_name"),
+             nb::arg("offsets").noconvert(), nb::arg("value_count"),
+             nb::arg("segment_count"),
              nb::arg("warp_max_elements") = target.defaultWarpMaxElements,
              nb::arg("cta_chunk_elements") = target.defaultCtaChunkElements);
   // The same offsets buffer and limits without a module. A program is

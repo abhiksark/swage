@@ -406,7 +406,11 @@ def test_a_plan_call_keeps_off_a_context_that_is_compiling():
             thread.start()
             compiling.wait()
             records = native_swage._materialize_segmented_plan(
-                module, offsets=offsets, value_count=8325, segment_count=3
+                module,
+                options["kernel_name"],
+                offsets=offsets,
+                value_count=8325,
+                segment_count=3,
             )
             thread.join()
 

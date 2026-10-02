@@ -926,7 +926,9 @@ def _parsed_module(module_text):
     return entry
 
 
-def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
+def _admit_program(
+    module_text, kernel_name, warp_max_elements, cta_chunk_elements
+):
     """Admit one program for planning under one pair of limits, once.
 
     The planning pass decides whether a program can be classified and
@@ -937,6 +939,7 @@ def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
 
     Args:
         module_text: Semantic module text that identifies the program.
+        kernel_name: Name of the segment function in the module to admit.
         warp_max_elements: Largest segment assigned to direct warp work.
         cta_chunk_elements: Largest input range assigned to one CTA task.
 
@@ -947,7 +950,7 @@ def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
         ValueError: The planning pass rejects the program or the limits. A
             rejection is not kept, so every preparation raises it again.
     """
-    key = (module_text, warp_max_elements, cta_chunk_elements)
+    key = (module_text, kernel_name, warp_max_elements, cta_chunk_elements)
     small_element_program = _admitted.get(key)
     if small_element_program is None:
         import numpy
@@ -958,6 +961,7 @@ def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
         module, small_element_program = _parsed_module(module_text)
         native_swage._materialize_segmented_plan(
             module,
+            kernel_name,
             offsets=numpy.zeros(1, dtype=numpy.int32),
             value_count=0,
             segment_count=0,
@@ -1040,7 +1044,7 @@ def _prepare_planned_reduction(
             change in place after preparation; values may.
         output: Disjoint contiguous CUDA f32 output, one value per segment.
         module_text: Native qualification MLIR with the semantic program.
-        kernel_name: Name of its single semantic function.
+        kernel_name: Name of the segment function in the module.
         warp_max_elements: Largest segment assigned to direct warp work.
         cta_chunk_elements: Largest input range assigned to one CTA task.
         select_schedule: Allow a conservative direct-CTA choice for batches
@@ -1092,7 +1096,7 @@ def _prepare_planned_reduction(
 
     target = _target(torch, torch.cuda.current_device())
     small_element_program = _admit_program(
-        module_text, warp_max_elements, cta_chunk_elements
+        module_text, kernel_name, warp_max_elements, cta_chunk_elements
     )
     if not classification:
         # The classifier refused offsets that are valid. The program and
@@ -1430,7 +1434,9 @@ def _prepare_persistent_sum(
     target = _target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
-    _admit_program(module_text, warp_max_elements, cta_chunk_elements)
+    _admit_program(
+        module_text, kernel_name, warp_max_elements, cta_chunk_elements
+    )
     if not classification:
         # The classifier refused offsets that are valid. The program and
         # the limits are admitted, so this raises its reason.
