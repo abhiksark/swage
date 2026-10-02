@@ -53,8 +53,10 @@ Numerical claims have their own evidence in
   when the batch reaches the SM count of the device, and the pinned
   schedules do not.
 - Sum accuracy: every schedule stays within `k * eps32 * sum(|x|)` of a
-  float64 reference at 100,003 to 1,048,577 elements, and propagates NaN,
-  infinities, and subnormal values.
+  float64 reference at 100,003 to 1,048,577 elements, as does the CTA
+  schedule that automatic selection substitutes on a batch of 8192-element
+  segments, and every schedule propagates NaN, infinities, and subnormal
+  values.
 - Code generation: the PTX of every sum kernel and of the softmax kernel
   uses round-to-nearest f32 operations with no fused multiply-add and no
   flush-to-zero. This check needs no GPU.
@@ -76,6 +78,17 @@ evidence but cannot establish a new GPU result without executing that
 workflow or an equivalent recorded qualification. Recorded evidence is a
 citation status, not a boundary status: the snapshot row upgrades nothing,
 and its numbers are presented on [Benchmarks](benchmarks.md).
+
+One check is opt-in and no workflow runs it.
+`python/tests/mlir/test_racecheck.py` runs the direct, task-ID, fused mixed,
+split partial and merge, persistent, and softmax kernels under the
+racecheck tool of NVIDIA Compute Sanitizer, beside a deliberately racy
+kernel that the tool must report. It runs only when `SWAGE_RACECHECK=1` is
+set, CUDA is available, and `compute-sanitizer` is found on `PATH` or in the
+`compute-sanitizer` directory under `CUDA_HOME`, `CUDA_PATH`, or
+`/usr/local/cuda`, where the development machine has version 2023.3 of it;
+otherwise it is skipped. No row above relies on it, and this page claims no
+result for it.
 
 The hosted `ci-cpp` workflow also defines two jobs that no row above relies
 on: a `clang-format` check of the C and C++ sources, and a job that runs the

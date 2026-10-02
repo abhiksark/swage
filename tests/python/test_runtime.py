@@ -220,6 +220,7 @@ class _Tensor:
         pointer=0x1000,
         negative=False,
         conjugate=False,
+        requires_grad=False,
     ):
         self.layout = torch.strided
         self.dtype = torch.float32 if dtype is None else dtype
@@ -230,6 +231,7 @@ class _Tensor:
         self._pointer = pointer
         self._negative = negative
         self._conjugate = conjugate
+        self.requires_grad = requires_grad
         self.recorded_streams = []
 
     def dim(self):
@@ -292,6 +294,16 @@ def _fake_torch(
     )
     torch.version = types.SimpleNamespace(cuda="13.0")
     torch.Tensor = _Tensor
+    # Each entry is a tensor whose version a launch advanced, with the
+    # streams that had retained it by then.
+    torch.advanced = []
+    torch.autograd = types.SimpleNamespace(
+        graph=types.SimpleNamespace(
+            increment_version=lambda tensor: torch.advanced.append(
+                (tensor, list(tensor.recorded_streams))
+            )
+        )
+    )
     return torch, stream
 
 
@@ -341,6 +353,38 @@ def test_launch_uses_current_stream_and_raw_abi(monkeypatch):
     ]
     for tensor in tuple(arguments.values())[:3]:
         assert tensor.recorded_streams == [stream]
+
+
+def test_launch_advances_the_version_of_the_output_only(monkeypatch):
+    """Tell autograd the output was written, after it is retained."""
+    torch, stream = _fake_torch()
+    arguments = _arguments(torch)
+    _install_launch_fakes(monkeypatch, torch)
+
+    for _ in range(2):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    output = arguments["output_ptr"]
+    assert torch.advanced == [(output, [stream]), (output, [stream] * 2)]
+
+
+def test_launch_without_work_advances_no_version(monkeypatch):
+    """Leave the counter alone when nothing is enqueued or written."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+
+    add_kernel.launch(
+        arguments=_arguments(torch, n=0), constexprs={"BLOCK": 128}, grid=(0,)
+    )
+    with pytest.raises(ValueError, match="grid must equal"):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(3,)
+        )
+
+    assert driver.launches == []
+    assert torch.advanced == []
 
 
 def test_repeated_launch_reuses_loaded_function_without_retaining_tensors(
@@ -462,6 +506,27 @@ def test_launch_rejects_lazy_views(monkeypatch, name, view, reason):
     assert driver.loads == driver.launches == []
 
 
+@pytest.mark.parametrize("name", ["x_ptr", "y_ptr", "output_ptr"])
+def test_launch_rejects_tensors_that_require_grad(monkeypatch, name):
+    """Reject a tensor autograd tracks, because a launch records nothing."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    arguments[name] = _Tensor(
+        torch, pointer=arguments[name].data_ptr(), requires_grad=True
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"'{name}' must not require grad.*pass tensor.detach\\(\\)",
+    ):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
 # Each fake tensor holds 129 four-byte elements: 0x204 bytes.
 @pytest.mark.parametrize(
     ("pointers", "overlapped"),
@@ -573,6 +638,34 @@ def test_launch_rejects_a_pytorch_without_record_stream(monkeypatch):
     ):
         add_kernel.launch(
             arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+@pytest.mark.parametrize("missing", ["autograd", "graph", "function"])
+def test_launch_rejects_a_pytorch_without_increment_version(
+    monkeypatch, missing
+):
+    """Fail before the enqueue when the output cannot be marked written."""
+    torch, _ = _fake_torch(version="2.6.0")
+    driver = _install_launch_fakes(monkeypatch, torch)
+    if missing == "autograd":
+        del torch.autograd
+    elif missing == "graph":
+        torch.autograd = types.SimpleNamespace()
+    else:
+        torch.autograd.graph = types.SimpleNamespace()
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "requires torch.autograd.graph.increment_version.*found "
+            "PyTorch 2.6.0"
+        ),
+    ):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
         )
 
     assert driver.loads == driver.launches == []
@@ -3093,6 +3186,114 @@ def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
     fake = _identity(revision="r")
     monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
     assert _runtime._cached_identity() == fake
+
+
+def _git(root, *arguments):
+    """Run git in `root` with an identity that needs no user configuration."""
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Swage Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            *arguments,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _committed_package(repository, package, *, pin):
+    """Commit a `swage` package at `package` inside a new git repository.
+
+    Args:
+        repository: Directory that becomes the root of the repository.
+        package: Path of the package below `repository`.
+        pin: Directory below `repository` that receives
+            `cmake/llvm-version.txt`, or None for no pin file.
+
+    Returns:
+        The package directory and the HEAD of the repository.
+    """
+    directory = repository / package
+    directory.mkdir(parents=True)
+    (directory / "__init__.py").write_text("VERSION = 1\n")
+    if pin is not None:
+        (repository / pin / "cmake").mkdir(parents=True)
+        (repository / pin / "cmake" / "llvm-version.txt").write_text(
+            "llvmorg-test\n"
+        )
+    _git(repository, "init", "--quiet")
+    _git(repository, "add", "--all")
+    _git(repository, "commit", "--quiet", "--message", "initial")
+    return directory, _git(repository, "rev-parse", "HEAD")
+
+
+def _identity_of(monkeypatch, package):
+    """Return the compiler identity of a package at `package`."""
+    from swage import _runtime
+
+    monkeypatch.setattr(_runtime, "_package_dir", lambda: package)
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: None)
+    return _runtime._compiler_identity()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_revision_names_the_swage_checkout_of_the_package(
+    tmp_path, monkeypatch
+):
+    """Report HEAD for `python/swage` of a checkout that holds the pin."""
+    package, head = _committed_package(
+        tmp_path, pathlib.Path("python", "swage"), pin="."
+    )
+
+    clean = _identity_of(monkeypatch, package)
+    (package / "__init__.py").write_text("VERSION = 2\n")
+    dirty = _identity_of(monkeypatch, package)
+
+    assert (clean["revision"], clean["clean"]) == (head, True)
+    assert (dirty["revision"], dirty["clean"]) == (head, False)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+@pytest.mark.parametrize(
+    ("package", "pin"),
+    [
+        pytest.param(("src", "swage"), None, id="vendored-under-src"),
+        pytest.param(("src", "swage"), ".", id="vendored-beside-a-pin"),
+        pytest.param(("python", "swage"), None, id="layout-without-pin"),
+        pytest.param(("python", "other"), ".", id="another-package-name"),
+        pytest.param(
+            ("vendor", "swage", "python", "swage"),
+            "vendor/swage",
+            id="whole-tree-vendored",
+        ),
+    ],
+)
+def test_revision_is_absent_for_a_package_in_another_repository(
+    tmp_path, monkeypatch, package, pin
+):
+    """Do not report the HEAD of a repository that is not Swage's own.
+
+    A copy of the package vendored into an application repository sits
+    under that repository's root. Its HEAD is the application's commit and
+    would name the wrong project in a bug report.
+    """
+    directory, head = _committed_package(
+        tmp_path, pathlib.Path(*package), pin=pin
+    )
+
+    identity = _identity_of(monkeypatch, directory)
+
+    assert len(head) == 40
+    assert (identity["revision"], identity["clean"]) == (None, False)
 
 
 def test_warm_launch_emits_mlir_only_once(monkeypatch):

@@ -16,8 +16,8 @@ tensor, `BLOCK` is a positive integer within the active device limit, and
 parameter names and ordered ABI before reading pointers or starting compiler
 work.
 
-The kernel reads and writes tensor storage through raw pointers, so two more
-checks apply to the tensors:
+The kernel reads and writes tensor storage through raw pointers, so three
+more checks apply to the tensors:
 
 - No tensor may be a lazy negation view or a lazy conjugate view
   (`is_neg()` or `is_conj()`). Such a view shares the storage of its base
@@ -28,12 +28,16 @@ checks apply to the tensors:
   of each tensor, not only the first `n` elements. The two inputs may share
   memory with each other. The check cannot see two virtual mappings of one
   physical allocation.
+- No tensor may require grad. A launch records no gradient, so a result
+  computed from such a tensor would be cut from the autograd graph without
+  an error. Pass `tensor.detach()` to launch without gradients.
 
 A launch requires PyTorch 2.6 or newer, the floor that the `pytorch` extra
-declares, and a `torch.Tensor.record_stream` method. Both are checked before
-validation, so an older PyTorch fails with a `RuntimeError` that names the
-version found, and no kernel is compiled or enqueued. No newer release is
-refused. Compile-only emission does not run this check.
+declares, a `torch.Tensor.record_stream` method, and the
+`torch.autograd.graph.increment_version` function. All three are checked
+before validation, so an older PyTorch fails with a `RuntimeError` that
+names the version found, and no kernel is compiled or enqueued. No newer
+release is refused. Compile-only emission does not run this check.
 
 For `n == 0`, the required grid is `(0,)`, and the validated launch returns
 without compilation, cache access, module loading, or enqueue. Other launches
@@ -60,6 +64,25 @@ A launch that loads a kernel can synchronize the context once;
 [Module lifetime](#module-lifetime) states when. Loaded functions are reused
 per specialization and CUDA context. Tensor storage remains owned by
 PyTorch, and submitted tensors are retained through `record_stream()`.
+
+Autograd sees neither what a kernel reads nor what it stores. Two rules keep
+that from giving a wrong gradient without an error:
+
+- A tensor that requires grad is rejected, as stated above.
+- After the enqueue, a launch advances the version counter of its output
+  through `torch.autograd.graph.increment_version`, as an in-place PyTorch
+  operation does. A backward pass that saved the output before the launch
+  then raises instead of using the overwritten values. The counters of the
+  inputs are not advanced.
+
+The private qualification helpers apply both rules to their values and
+output. The advance changes host metadata only: it enqueues nothing and
+does not wait for the device. It has two limits:
+
+- A replayed CUDA graph runs no host code. The launch call that was
+  captured advances the counter once, and a replay does not.
+- An inference tensor has no version counter, so nothing is advanced for an
+  output created under `torch.inference_mode()`.
 
 Emitted kernels also pin their own launch width: the PTX carries a
 `.reqntid` directive matching the specialized block size, so a launch
@@ -93,6 +116,33 @@ version counter for such a rebind, so the offsets check alone does not see
 it. The comparison is host work only. It cannot see storage that was freed
 and allocated again at the prepared address with the prepared count and
 dtype.
+
+A prepared private launch also compares the version counter of the offsets
+tensor with the one recorded at preparation and raises a `RuntimeError`
+when it moved, because the plan was built from the offsets as they were
+then. The comparison is one host attribute read. It has these limits:
+
+- Offsets created under `torch.inference_mode()` have no version counter.
+  Preparation rejects them with a `ValueError`. Offsets created outside the
+  context, or cloned outside it, are admitted, also when the launch is
+  prepared and run inside it. The one-shot helpers `launch_gpu` and
+  `launch_softmax_gpu` compare no counter and accept inference tensors.
+- A write that PyTorch does not count is not detected: an in-place write
+  through `offsets.data`, a write through a DLPack alias, and a write
+  through a raw pointer by another library or another kernel. The launch
+  proceeds without a diagnostic. The device-side bounds keep every access
+  inside the buffers. A segment that the plan runs as one task is reduced
+  over the new offsets, and a segment that the plan split keeps the ranges
+  recorded at preparation, so the output can mix the old and the new
+  layout.
+- A write to another view of the same tensor is refused although the
+  offsets did not change, because every view of a tensor shares one version
+  counter. A launch into such a view counts as a write, since a launch
+  advances the version counter of its output. The output of the prepared
+  launch itself is exempt: preparation advances the version counter of the
+  output once, sees whether the offsets counter moved with it, and allows
+  for that at every launch.
+- A replayed CUDA graph runs no host check.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -428,9 +478,12 @@ compile_on_miss: allowed
 
 Five fields identify the code and the native build:
 
-- `revision` is the abbreviated git HEAD of the checkout that `swage` was
-  imported from, with `-dirty` appended when tracked files are modified. It
-  is `None` outside a git checkout, for example in a wheel install.
+- `revision` is the abbreviated git HEAD of the Swage checkout that `swage`
+  was imported from, with `-dirty` appended when tracked files are
+  modified. It is reported only when the package is the `python/swage`
+  directory of a git checkout that also holds `cmake/llvm-version.txt`.
+  Otherwise it is `None`: in a wheel install, and for a copy of the package
+  vendored inside another repository, whose HEAD is not a Swage commit.
 - `swage_file` is the `__init__.py` that `swage` was imported from. It
   tells two checkouts, or a checkout and a wheel install, apart.
 - `llvm_linked` is the LLVM version compiled into the `mlir_swage` extension.

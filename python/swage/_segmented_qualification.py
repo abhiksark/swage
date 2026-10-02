@@ -304,6 +304,24 @@ def _require_unchanged_offsets(offsets, version):
         raise RuntimeError("offsets changed after preparation; prepare again")
 
 
+def _output_version_step(torch, offsets, output):
+    """Return how far one advance of the output version moves offsets.
+
+    Every launch advances the version counter of its output. Views of one
+    tensor share one counter, also views of another dtype that share no
+    byte, so that advance can move the offsets version as well. A prepared
+    launch would then read its own output write as changed offsets.
+
+    Returns:
+        1 when offsets and output share a version counter and 0 otherwise,
+        found by advancing the output version once. A prepared launch adds
+        it to the offsets version it expects each time it launches.
+    """
+    before = offsets._version
+    _runtime._advance_version(torch, output)
+    return offsets._version - before
+
+
 def _storage_binding(values, offsets, output):
     """Return what ties a prepared launch to the storage of its tensors.
 
@@ -624,6 +642,7 @@ def launch_gpu(values, offsets, output, kind, block_size=128):
     )
     for tensor in (values, offsets, output):
         tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
     return None
 
 
@@ -704,6 +723,7 @@ def _launch_segmented_sum_tasks(
     )
     for tensor in (values, offsets, output, task_ids):
         tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
     return None
 
 
@@ -840,7 +860,9 @@ def _prepare_planned_reduction(
         writes to values and output are fine, and a tensor that was given
         another data pointer, element count, or dtype since, for example
         through `tensor.data = other`, raises RuntimeError before anything
-        is enqueued. Kernels are compiled once per kernel and target and
+        is enqueued. Each launch advances the version counter of output,
+        and preparation advances it once to learn whether offsets share
+        that counter. Kernels are compiled once per kernel and target and
         loaded once per CUDA context, so a preparation compiles and loads
         only the kernels the process has not already compiled and loaded.
     """
@@ -851,6 +873,9 @@ def _prepare_planned_reduction(
         values, offsets, output, _validate_offsets
     )
     offsets_version = _offsets_version(offsets)
+    # A launch advances the output version, which the offsets may share.
+    version_step = _output_version_step(torch, offsets, output)
+    offsets_version += version_step
     # Each launch builds this record again and compares the two. The record
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
@@ -987,6 +1012,11 @@ def _prepare_planned_reduction(
 
     tasks_ready_complete = False
 
+    def wrote_output():
+        nonlocal offsets_version
+        _runtime._advance_version(torch, output)
+        offsets_version += version_step
+
     def wait_for_tasks(stream):
         nonlocal tasks_ready_complete
         if tasks_ready_complete:
@@ -1025,6 +1055,7 @@ def _prepare_planned_reduction(
         )
         for tensor in (values, offsets, output, task_ids):
             tensor.record_stream(stream)
+        wrote_output()
         return None
 
     current_context = getattr(driver, "current_context", None)
@@ -1136,6 +1167,7 @@ def _prepare_planned_reduction(
             )
             for tensor in (offsets, output, merge_ranges, scratch):
                 tensor.record_stream(stream)
+        wrote_output()
         return None
 
     return _PreparedReduction(warp, cta, cta if use_direct_cta else mixed)
@@ -1158,8 +1190,10 @@ def _prepare_persistent_sum(
     preparation: in-place writes to values and output are fine, and a
     tensor that was given another data pointer, element count, or dtype
     since, for example through `tensor.data = other`, raises RuntimeError
-    before anything is enqueued. The kernel is compiled once per target and
-    loaded once per CUDA context.
+    before anything is enqueued. Each launch advances the version counter
+    of output, and preparation advances it once to learn whether offsets
+    share that counter. The kernel is compiled once per target and loaded
+    once per CUDA context.
     """
     if resident_blocks is not None and (
         type(resident_blocks) is not int
@@ -1172,6 +1206,9 @@ def _prepare_persistent_sum(
         values, offsets, output, _validate_offsets
     )
     offsets_version = _offsets_version(offsets)
+    # A launch advances the output version, which the offsets may share.
+    version_step = _output_version_step(torch, offsets, output)
+    offsets_version += version_step
     # Each launch builds this record again and compares the two. The record
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
@@ -1329,7 +1366,7 @@ def _prepare_persistent_sum(
             stream.wait_event(tasks_ready)
 
     def launch():
-        nonlocal in_flight_stream
+        nonlocal in_flight_stream, offsets_version
         _require_unchanged_offsets(offsets, offsets_version)
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
@@ -1386,6 +1423,8 @@ def _prepare_persistent_sum(
             if not capturing:
                 in_flight.record(stream)
                 in_flight_stream = stream.cuda_stream
+            _runtime._advance_version(torch, output)
+            offsets_version += version_step
         finally:
             launching.release()
         return None
@@ -1455,6 +1494,7 @@ def launch_softmax_gpu(values, offsets, output, block_size=128):
     )
     for tensor in (values, offsets, output):
         tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
     return None
 
 

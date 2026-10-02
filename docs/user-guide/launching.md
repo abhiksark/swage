@@ -11,7 +11,9 @@ is normative when the two disagree.
 ## Fail closed before anything else
 
 The launch first requires PyTorch 2.6 or newer with
-`torch.Tensor.record_stream`, the method that retains submitted tensors.
+`torch.Tensor.record_stream`, the method that retains submitted tensors,
+and `torch.autograd.graph.increment_version`, which marks the output as
+written.
 It then checks each of the following before anything else happens:
 
 - the canonical parameter names and order;
@@ -20,6 +22,7 @@ It then checks each of the following before anything else happens:
   reads the storage of the base tensor;
 - that the output shares no memory with either input, which also rules out
   in-place use;
+- that no tensor requires grad, because a launch records no gradient;
 - the `n` bound, the `BLOCK` limit, and the required grid.
 
 A launch that fails any of these performs no allocation, no compilation,

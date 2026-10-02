@@ -998,6 +998,109 @@ def test_in_place_offsets_change_stops_an_empty_prepared_launch():
             launch()
 
 
+def _write_through_data(offsets, new_offsets):
+    offsets.data.copy_(new_offsets)
+
+
+def _write_through_dlpack(offsets, new_offsets):
+    torch.from_dlpack(offsets.__dlpack__()).copy_(new_offsets)
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+@pytest.mark.parametrize(
+    "write",
+    [_write_through_data, _write_through_dlpack],
+    ids=["data", "dlpack"],
+)
+def test_uncounted_offsets_write_is_not_detected(policy, write):
+    """Pin the documented limit of the stale-offsets check.
+
+    PyTorch does not count a write through `.data` or through a DLPack
+    alias, so the version counter stays put and the launch proceeds. A
+    segment that the plan runs as one task is reduced over the new offsets.
+    A segment that the plan split keeps its prepared ranges, so the output
+    of `mixed` and of the persistent kernel matches neither layout. The
+    kernels clamp every range, which test_segmented_bounds.py covers.
+    """
+    old_lengths, new_lengths = [10, 5000, 20, 3], [5000, 10, 3, 20]
+    values, offsets, old = _case(old_lengths)
+    _, new_offsets, new = _case(new_lengths)
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+    version = offsets._version
+
+    write(offsets, new_offsets)
+    launch()
+
+    torch.cuda.synchronize()
+    assert offsets._version == version
+    assert torch.equal(offsets, new_offsets)
+    result = output.cpu()
+    # Segment 1 has 5000 elements at preparation and is the only split one.
+    split = policy in ("mixed", "persistent")
+    expected = new["sum"].clone()
+    if split:
+        expected[1] = old["sum"][1]
+        assert not torch.equal(result, new["sum"])
+    assert not torch.equal(result, old["sum"])
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_write_to_a_sibling_view_stops_the_launch(policy):
+    """Pin the documented false refusal of the stale-offsets check.
+
+    Views of one tensor share one version counter. A write to another view
+    therefore stops the launch although the offsets did not change, and a
+    clone of the offsets, which has a counter of its own, does not.
+    """
+    values, host_offsets, expected = _case([1, 33, 4097, 2])
+    arena = torch.zeros(10, dtype=torch.int32, device="cuda")
+    arena[:5] = host_offsets
+    offsets, sibling = arena[:5], arena[5:]
+    output = torch.full((4,), _SENTINEL, device="cuda")
+    launch = _prepared_launch(policy, values, offsets, output)
+    own_output = torch.full((4,), _SENTINEL, device="cuda")
+    own_launch = _prepared_launch(policy, values, offsets.clone(), own_output)
+
+    sibling.fill_(7)
+
+    assert torch.equal(offsets, host_offsets)
+    with pytest.raises(RuntimeError, match=_STALE):
+        launch()
+    own_launch()
+    torch.cuda.synchronize()
+    assert output.cpu().tolist() == [_SENTINEL] * 4
+    torch.testing.assert_close(
+        own_output.cpu(), expected["sum"], rtol=0, atol=0
+    )
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "persistent"])
+def test_offsets_from_outside_inference_mode_launch_inside_it(policy):
+    """Admit normal offsets in inference mode, also as a clone made outside.
+
+    Only a tensor created under `torch.inference_mode()` lacks a version
+    counter. Preparing and launching inside the context is fine.
+    """
+    with torch.inference_mode():
+        values, inference_offsets, expected = _case([1, 33, 4097, 2])
+        output = torch.full((4,), _SENTINEL, device="cuda")
+    offsets = inference_offsets.clone()
+    assert inference_offsets.is_inference() and not offsets.is_inference()
+
+    with torch.inference_mode():
+        launch = _prepared_launch(policy, values, offsets, output)
+        launch()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+
 _GUARD = 8
 
 
@@ -1112,6 +1215,118 @@ def test_in_place_writes_to_values_and_output_still_launch(policy):
         torch.testing.assert_close(
             output.cpu(), expected["sum"] * scale, rtol=0, atol=0
         )
+
+
+def _one_shot_launch(path, values, offsets, output):
+    """Return a launch of one unprepared private entry point."""
+    if path == "one-cta":
+        return lambda: qualification.launch_gpu(values, offsets, output, "sum")
+    if path == "softmax":
+        return lambda: qualification.launch_softmax_gpu(
+            values, offsets, output
+        )
+    assert path == "tasks"
+    task_ids = torch.arange(
+        offsets.numel() - 1, dtype=torch.int32, device="cuda"
+    )
+    return lambda: qualification._launch_segmented_sum_tasks(
+        values, offsets, output, task_ids, block_size=32
+    )
+
+
+_PREPARED = ["warp", "cta", "mixed", "persistent"]
+_ONE_SHOT = ["one-cta", "softmax", "tasks"]
+
+
+@_requires_cuda
+@pytest.mark.parametrize("path", [*_PREPARED, *_ONE_SHOT])
+def test_every_launch_advances_the_output_version_only(path):
+    """Tell autograd that the output was written, on every private path.
+
+    PyTorch cannot see a kernel store. Without the advance, a backward pass
+    that saved the output would use the overwritten values and return a
+    wrong gradient without an error. The counters of values and offsets
+    must stay put: the offsets counter is what a prepared launch compares.
+    """
+    values, offsets, expected = _case([1, 33, 4097, 2])
+    size = values.numel() if path == "softmax" else 4
+    output = torch.zeros(size, device="cuda")
+    if path in _PREPARED:
+        launch = _prepared_launch(path, values, offsets, output)
+        # Preparation advances it once, to see whether offsets share it.
+        assert output._version == 1
+    else:
+        launch = _one_shot_launch(path, values, offsets, output)
+        assert output._version == 0
+    weights = torch.ones(size, device="cuda", requires_grad=True)
+    kept = [values._version, offsets._version]
+
+    for _ in range(3):
+        loss = (weights * output).sum()
+        version = output._version
+        launch()
+        torch.cuda.synchronize()
+        assert output._version > version
+        with pytest.raises(
+            RuntimeError, match="modified by an inplace operation"
+        ):
+            loss.backward()
+
+    assert [values._version, offsets._version] == kept
+    if path != "softmax":
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", _PREPARED)
+def test_offsets_that_share_the_output_version_counter_still_launch(policy):
+    """Do not read the launch's own output write as changed offsets.
+
+    Views of one tensor share one version counter, also views of another
+    dtype that share no byte. Advancing the output version then advances
+    the offsets version, which must not stop the next launch, while a
+    write to the offsets must still stop it.
+    """
+    values, host_offsets, expected = _case([1, 33, 4097, 2])
+    arena = torch.zeros(9, device="cuda")
+    offsets = arena[:5].view(torch.int32)
+    offsets.copy_(host_offsets)
+    output = arena[5:]
+    launch = _prepared_launch(policy, values, offsets, output)
+
+    for _ in range(3):
+        version = offsets._version
+        launch()
+        torch.cuda.synchronize()
+        assert offsets._version == output._version > version
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+    offsets[1] += 1
+    with pytest.raises(RuntimeError, match=_STALE):
+        launch()
+
+
+@_requires_cuda
+@pytest.mark.parametrize("path", _ONE_SHOT)
+def test_one_shot_launch_accepts_inference_tensors(path):
+    """Launch on tensors that have no version counter to advance."""
+    with torch.inference_mode():
+        values, offsets, expected = _case([1, 33, 4097, 2])
+        size = values.numel() if path == "softmax" else 4
+        output = torch.zeros(size, device="cuda")
+        assert output.is_inference()
+
+        _one_shot_launch(path, values, offsets, output)()
+
+        torch.cuda.synchronize()
+        if path != "softmax":
+            torch.testing.assert_close(
+                output.cpu(), expected["sum"], rtol=0, atol=0
+            )
 
 
 @_requires_cuda
