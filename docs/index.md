@@ -39,6 +39,11 @@ qualification machinery or planned work.
   their offsets on the host at every call.
   [Segmented Calls](user-guide/segmented-calls.md) states the contract and
   the cost.
+- `python -m swage.compile`, which writes the kernels of those two calls
+  ahead of time, and `SWAGE_ARTIFACT_DIR`, which makes a process run the
+  calls from such a directory without the native bindings.
+  [Running Without the Compiler](user-guide/deployment.md) states what
+  that delivers and what it does not.
 - `python -m swage.env` environment diagnostics.
 - Native `swage` MLIR parsing, verification, and registered compiler tools.
 

@@ -5,7 +5,9 @@
 Swage has two installation boundaries. The published `swage-compiler` wheel
 contains the pure Python `swage` package. Compiler emission and execution also
 require the native `mlir_swage` package, from a build tree or from a native
-wheel built on the same machine. No native wheel is published.
+wheel built on the same machine. No native wheel is published. The two
+segmented calls can also run without that package, from an artifact
+directory that a host with the native package wrote ahead of time.
 
 ## Install the Python package
 
@@ -39,8 +41,9 @@ bindings, or the native `mlir_swage` package. No native wheel is published;
 [Build a native wheel](#build-a-native-wheel) describes how to build one
 from a checkout. A wheel-only install can import `swage`, report package and
 environment facts, capture kernel source, and check a kernel against the
-kernel language. It cannot emit MLIR, launch a kernel, or run a segmented
-call.
+kernel language. It cannot emit MLIR or launch a kernel, and it runs a
+segmented call only from an artifact directory;
+[Run from an artifact](#run-from-an-artifact) describes that install.
 
 These pages describe the current source tree. The released `0.5.1` wheel
 predates part of them:
@@ -210,7 +213,8 @@ needs it.
 The native wheel has these properties:
 
 - It holds the `mlir_swage` package: the MLIR Python bindings, the Swage
-  dialect bindings, and the compiler library they share. It also holds
+  dialect bindings, the compiler library they share, and the runtime
+  library that `python -m swage.compile` ships in an artifact. It also holds
   `LICENSE` and
   [`THIRD_PARTY_NOTICES.md`](https://github.com/abhiksark/swage/blob/main/THIRD_PARTY_NOTICES.md),
   because the libraries contain LLVM, MLIR, and nanobind code.
@@ -251,6 +255,36 @@ These limits apply:
 A build-tree package can still be used in place as the previous section
 describes. It is not relocatable: `build/python_packages/mlir_swage` holds
 absolute symbolic links into the LLVM install and into the checkout.
+
+## Run from an artifact
+
+A host that only serves `swage.segment_reduce` and `swage.segment_softmax`
+needs no native package. It needs three things:
+
+- The pure `swage` package, from the same source revision as the host that
+  wrote the artifact. The released `0.5.1` wheel has no segmented calls and
+  does not read artifacts.
+- PyTorch 2.6 or newer with CUDA, and `numpy`.
+- An artifact directory for the processor of its GPU, written on a host
+  with the native package:
+
+    ```bash
+    python -m swage.compile --target sm_86 --output /path/to/artifact
+    ```
+
+On the serving host, name the directory and check it:
+
+```bash
+export SWAGE_ARTIFACT_DIR=/path/to/artifact
+python -m swage.env
+```
+
+The report ends with an `artifact` line that names the directory, or gives
+the reason it is rejected. Emitting MLIR and launching the fixed vector add
+still need the native package.
+[Running Without the Compiler](../user-guide/deployment.md) states what an
+artifact holds, the rule for its permissions, and its limits, among them
+that its runtime library has been built for Linux x86-64 only.
 
 Installation is complete when the relevant build and test commands succeed.
 Continue with the [Quickstart](quickstart.md), or use

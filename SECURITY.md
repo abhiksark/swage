@@ -34,6 +34,25 @@ Within that model, the project still commits to:
   entry and staging directories that the current user owns. With
   `SWAGE_CACHE_READ_ONLY=1` a process reads verified entries and never
   creates, publishes, removes, or evicts anything under the cache root.
+- Artifact directories: `SWAGE_ARTIFACT_DIR` names a directory of kernels
+  that were compiled ahead of time, with a runtime library and a manifest.
+  A process executes both: the PTX on the GPU and the library in the
+  process. Naming the directory is the trust decision, as putting a
+  directory on `PYTHONPATH` is, so the rule differs from the cache rule
+  above. The owner of the directory is not compared with the current user,
+  because an artifact is normally written by one account and read by
+  another, and a read-only directory is admitted. The loader refuses a
+  directory, a manifest, a kernel file, or a runtime library that has the
+  group-write or the other-write permission bit. It follows symbolic links
+  and applies that rule to what they lead to. It accepts only plain file
+  names from the manifest, and it verifies the SHA-256 digest of every
+  kernel and of the library against the manifest before it loads anything.
+  These checks detect damage, a partial copy, and a file that an account
+  other than its owner and root could change. They do not authenticate an
+  artifact: the manifest is not signed, so whoever can write the directory
+  or one of its parent directories can replace the artifact as a whole. The
+  loader does not check the parent directories and does not read access
+  control lists. Keep an artifact where only its owner and root can write.
 - CI secrets are not exposed to untrusted pull requests.
 
 ## Reporting a vulnerability
