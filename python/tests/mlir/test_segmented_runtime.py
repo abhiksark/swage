@@ -1850,12 +1850,15 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     assert merge[2:4] == ((2,), 512)
     assert merge[5][3:5] == (4, 2)
     # One upload holds the direct ids, then the partial ranges, then the
-    # merge records, and each phase reads its list at its place in it.
+    # merge records, and each phase reads its list at its place in it. The
+    # merge of every partial task follows; only the persistent kernel reads
+    # that list.
     assert [data for data, _ in descriptor_tensors] == [
         [
             *[0, 4, 1],
             *[34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],
             *[2, 0, 2, 3, 2, 4],
+            *[0, 0, 1, 1],
         ]
     ]
     records = descriptor_tensors[0][1].data_ptr()

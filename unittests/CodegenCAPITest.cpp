@@ -707,7 +707,7 @@ void storeClassification(const int32_t *records, intptr_t warpCount,
                          intptr_t mergeCount, void *userData) {
   auto *classification = static_cast<Classification *>(userData);
   classification->records.assign(records, records + warpCount + ctaCount +
-                                              2 * partialCount +
+                                              3 * partialCount +
                                               3 * mergeCount);
   classification->counts = {warpCount, ctaCount, partialCount, mergeCount};
   ++classification->recordCalls;
@@ -759,10 +759,12 @@ TEST(CodegenCAPITest, AClassifyCallGivesTheRecordsOfThePlanWithoutAModule) {
   expected.insert(expected.end(), plan.cta.begin(), plan.cta.end());
   expected.insert(expected.end(), plan.partial.begin(), plan.partial.end());
   expected.insert(expected.end(), plan.merge.begin(), plan.merge.end());
+  // The three partial tasks belong to the one merge.
+  expected.insert(expected.end(), {0, 0, 0});
   EXPECT_EQ(classification.records, expected);
-  EXPECT_EQ(
-      classification.records,
-      (std::vector<int32_t>{0, 1, 132, 4228, 4228, 8324, 8324, 8325, 2, 0, 3}));
+  EXPECT_EQ(classification.records,
+            (std::vector<int32_t>{0, 1, 132, 4228, 4228, 8324, 8324, 8325, 2, 0,
+                                  3, 0, 0, 0}));
 }
 
 TEST(CodegenCAPITest, AClassifyCallOfNoSegmentsGivesNoRecords) {

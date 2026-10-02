@@ -304,7 +304,8 @@ materializeSegmentedPlanBuffers(nb::object moduleObject, PlanOffsets offsets,
 }
 
 /// The Python entry point of swageClassifySegments: the records of one
-/// layout in one int32 array, then the warp, CTA, partial, and merge counts.
+/// layout in one int32 array, laid out as SwageTaskRecordsCallback states,
+/// then the warp, CTA, partial, and merge counts.
 /// It takes no module and touches no MLIR context, so it needs no ContextUse.
 /// The GIL stays held. The call lasts microseconds, and the classifier reads
 /// the offsets twice, to count and then to write, so they must not change in
@@ -324,7 +325,7 @@ classifySegments(PlanOffsets offsets, int64_t valueCount, int64_t segmentCount,
                   intptr_t partialCount, intptr_t mergeCount, void *output) {
     auto &result = *static_cast<Classification *>(output);
     result.records.assign(records, records + warpCount + ctaCount +
-                                       2 * partialCount + 3 * mergeCount);
+                                       3 * partialCount + 3 * mergeCount);
     result.warpCount = warpCount;
     result.ctaCount = ctaCount;
     result.partialCount = partialCount;

@@ -144,16 +144,18 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
 /// Receives the records of one classification in one buffer: `warpCount`
 /// warp segment ids, then `ctaCount` CTA segment ids, then `partialCount`
 /// [begin, end] pairs, then `mergeCount`
-/// [segment_id, partial_begin, partial_end] triples. The counts are in ids,
-/// pairs, and triples, so the buffer holds
-/// `warpCount + ctaCount + 2 * partialCount + 3 * mergeCount` values.
+/// [segment_id, partial_begin, partial_end] triples, then for each of the
+/// `partialCount` partial tasks the index of its merge triple. The counts
+/// are in ids, pairs, and triples, so the buffer holds
+/// `warpCount + ctaCount + 3 * partialCount + 3 * mergeCount` values.
 typedef void (*SwageTaskRecordsCallback)(const int32_t *records,
                                          intptr_t warpCount, intptr_t ctaCount,
                                          intptr_t partialCount,
                                          intptr_t mergeCount, void *userData);
 
 /// Classifies segment offsets into the records swageMaterializeSegmentedPlan
-/// produces for the same offsets and limits, without a module.
+/// produces for the same offsets and limits, without a module, and adds the
+/// merge index of every partial task, which follows from those records.
 ///
 /// A program is admitted for planning by swageMaterializeSegmentedPlan, which
 /// runs the planning pass on its module and checks the two limits against

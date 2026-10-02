@@ -155,9 +155,21 @@ def _native_records(offsets, warp_max_elements, cta_chunk_elements):
 
 
 def _split_records(records, warp_count, cta_count, partial_count, merge_count):
-    """Cut one record buffer into its warp, CTA, partial, and merge arrays."""
+    """Cut one record buffer into its five lists.
+
+    Returns:
+        The warp ids, the CTA ids, the partial ranges, the merge records,
+        and the merge of every partial task.
+    """
     bounds = numpy.cumsum(
-        [0, warp_count, cta_count, 2 * partial_count, 3 * merge_count]
+        [
+            0,
+            warp_count,
+            cta_count,
+            2 * partial_count,
+            3 * merge_count,
+            partial_count,
+        ]
     )
     assert len(records) == bounds[-1]
     return [records[begin:end] for begin, end in pairwise(bounds)]
@@ -181,7 +193,9 @@ def test_native_classification_matches_the_python_reference(
     assert max(lengths) >= 3 * chunk
 
     plan = _native_plan(sum_module, offsets, warp_max, chunk)
-    records = _split_records(*_native_records(offsets, warp_max, chunk))
+    *records, merge_of_partial = _split_records(
+        *_native_records(offsets, warp_max, chunk)
+    )
 
     assert _matches_reference(plan, offsets, warp_max, chunk)
     assert _matches_reference(records, offsets, warp_max, chunk)
@@ -189,6 +203,7 @@ def test_native_classification_matches_the_python_reference(
     assert sorted([*warp, *cta, *merge[0::3]]) == list(range(len(lengths)))
     partial_merges = _reference_partial_merges(merge, len(partial) // 2)
     assert partial_merges == sorted(partial_merges)
+    assert merge_of_partial.tolist() == partial_merges
 
 
 @pytest.mark.parametrize(
@@ -290,6 +305,7 @@ def test_classification_without_a_module_returns_one_buffer_and_counts():
         1,
         *[65, 4161, 4161, 4162, 4162, 8258, 8258, 12354],
         *[2, 0, 2, 3, 2, 4],
+        *[0, 0, 1, 1],
     ]
 
 
@@ -571,8 +587,9 @@ def test_planned_preparation_uploads_the_reference_plan_in_one_array(
 
     assert all(isinstance(data, numpy.ndarray) for data in uploads)
     assert all(data.dtype == numpy.int32 for data in uploads)
+    partial_merges = _reference_partial_merges(merge, len(partial) // 2)
     assert [data.tolist() for data in uploads] == [
-        [*warp, *cta, *partial, *merge]
+        [*warp, *cta, *partial, *merge, *partial_merges]
     ]
     monkeypatch.undo()
     for launch in prepared:
@@ -719,53 +736,6 @@ def test_task_launch_rejects_segment_ids_outside_the_layout(task_ids):
         )
 
 
-@requires_cuda
-@pytest.mark.parametrize(
-    ("merge", "message"),
-    [
-        ([0, 0, 2], "partial task has no merge dependency"),
-        ([0, 1, 3], "partial task has no merge dependency"),
-        ([0, 0, 2, 0, 1, 3], "partial task belongs to multiple merges"),
-        ([0, 0, 4], "partial task belongs to multiple merges"),
-    ],
-    ids=["uncovered-tail", "uncovered-head", "overlap", "past-the-end"],
-)
-def test_persistent_preparation_rejects_merges_that_do_not_partition(
-    monkeypatch, merge, message
-):
-    """Refuse merge ranges that leave a partial task without one merge.
-
-    The resident kernel indexes the merge of every partial task unchecked,
-    so the ranges are checked before any private state is allocated.
-    """
-    from swage import _runtime
-
-    def fail(*_args, **_kwargs):
-        pytest.fail("malformed merge records must not continue")
-
-    values = torch.ones(8193, device="cuda")
-    offsets = torch.tensor([0, 8193], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
-    partial = [0, 4096, 4096, 8192, 8192, 8193]
-    monkeypatch.setattr(
-        native_swage,
-        "_classify_segments",
-        lambda *_args, **_kwargs: (
-            _i32([*partial, *merge]),
-            0,
-            0,
-            len(partial) // 2,
-            len(merge) // 3,
-        ),
-    )
-    monkeypatch.setattr(torch, "tensor", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
-
-    with pytest.raises(RuntimeError) as error:
-        qualification._prepare_persistent_sum(values, offsets, output)
-    assert str(error.value) == message
-
-
 class _CountingModule:
     """Stand in for ir.Module and record every text that is parsed."""
 
@@ -889,9 +859,8 @@ def test_a_refused_program_or_limit_is_refused_at_every_preparation(
     monkeypatch.setattr(qualification, "_admitted", {})
 
     def fail(*_args, **_kwargs):
-        pytest.fail("a refused preparation must not classify or compile")
+        pytest.fail("a refused preparation must not compile")
 
-    monkeypatch.setattr(native_swage, "_classify_segments", fail)
     monkeypatch.setattr(qualification, "_compile_once", fail)
     for _ in range(2):
         with pytest.raises(ValueError, match="planning limits must satisfy"):
@@ -960,7 +929,7 @@ def test_segment_ids_are_uploaded_once_and_shared_by_preparations(monkeypatch):
     monkeypatch.undo()
 
     limit = qualification._IDENTITY_LIMIT
-    assert [len(data) for data in uploads] == [limit, 9, 7]
+    assert [len(data) for data in uploads] == [limit, 11, 7]
     assert numpy.array_equal(uploads[0], numpy.arange(limit))
     for policies, output, expected in prepared:
         for launch in policies:
@@ -990,4 +959,74 @@ def test_segment_ids_past_the_shared_tensor_are_filled_per_preparation(
         output.fill_(float("nan"))
         launch()
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+_INVALID_LAYOUTS = [
+    ([1, 6], 2, "offsets must start at zero"),
+    ([0, -1, 6], 2, "offsets must not be negative"),
+    ([0, 4, 2, 6], 3, "offsets must be nondecreasing"),
+    ([0, 2, 7], 2, "final offset 7 exceeds value count 6"),
+    ([0, 1, 2, 6], 2, "output has 2 elements for 3 segments"),
+]
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    ("prepare", "policy"),
+    [
+        (qualification._prepare_planned_sum, "mixed"),
+        (qualification._prepare_persistent_sum, "launch"),
+    ],
+    ids=["planned", "persistent"],
+)
+def test_preparation_validates_offsets_by_classifying_them(
+    monkeypatch, prepare, policy
+):
+    """Walk valid offsets once, in the classifier, and keep every message."""
+    values = torch.ones(6, device="cuda")
+    output = torch.empty(2, device="cuda")
+
+    for offsets, _, message in _INVALID_LAYOUTS:
+        with pytest.raises(ValueError) as error:
+            prepare(
+                values,
+                torch.tensor(offsets, dtype=torch.int32, device="cuda"),
+                output,
+            )
+        assert str(error.value) == message
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("valid offsets are validated by the classifier alone")
+
+    monkeypatch.setattr(qualification, "_validate_offsets", fail)
+    monkeypatch.setattr(qualification, "_validate_offset_sequence", fail)
+    offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    getattr(prepare(values, offsets, output), policy)()
+    assert output.tolist() == [2.0, 4.0]
+
+
+@requires_cuda
+def test_preparation_keeps_the_order_of_its_errors():
+    """Name the offsets first, then an overlap, then the planning limits."""
+    values = torch.ones(8, device="cuda")
+    output = torch.empty(2, device="cuda")
+    valid = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    decreasing = torch.tensor([0, 6, 2], dtype=torch.int32, device="cuda")
+    bad_limits = {"warp_max_elements": 33, "cta_chunk_elements": 32}
+
+    def prepare(offsets, output=output, **limits):
+        return qualification._prepare_planned_sum(
+            values, offsets, output, **limits
+        )
+
+    with pytest.raises(ValueError, match="offsets must be nondecreasing"):
+        prepare(decreasing, **bad_limits)
+    with pytest.raises(ValueError, match="offsets must be nondecreasing"):
+        prepare(decreasing, output=values.narrow(0, 0, 2))
+    with pytest.raises(ValueError, match="must not overlap the values"):
+        prepare(valid, output=values.narrow(0, 0, 2), **bad_limits)
+    with pytest.raises(ValueError, match="planning limits must satisfy"):
+        prepare(valid, **bad_limits)
+    with pytest.raises(TypeError):
+        prepare(valid, warp_max_elements=32.5)
 

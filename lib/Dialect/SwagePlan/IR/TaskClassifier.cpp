@@ -223,12 +223,14 @@ llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
   result.partialCount = static_cast<int32_t>(partialCount);
   result.mergeCount = static_cast<int32_t>(mergeCount);
   result.records.resize_for_overwrite(static_cast<size_t>(
-      warpCount + ctaCount + 2 * partialCount + 3 * mergeCount));
+      warpCount + ctaCount + 3 * partialCount + 3 * mergeCount));
   int32_t *warp = result.records.data();
   int32_t *cta = warp + warpCount;
   int32_t *partial = cta + ctaCount;
   int32_t *merge = partial + 2 * partialCount;
+  int32_t *partialMerge = merge + 3 * mergeCount;
   int32_t scratchIndex = 0;
+  int32_t mergeIndex = 0;
   begin = 0;
   for (int64_t segmentId = 0; segmentId < segmentCount; ++segmentId) {
     const int64_t end = data[segmentId + 1];
@@ -245,9 +247,11 @@ llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
         *partial++ = static_cast<int32_t>(chunkBegin);
         *partial++ =
             static_cast<int32_t>(std::min(end, chunkBegin + ctaChunkElements));
+        *partialMerge++ = mergeIndex;
         ++scratchIndex;
       }
       *merge++ = scratchIndex;
+      ++mergeIndex;
     }
     begin = end;
   }

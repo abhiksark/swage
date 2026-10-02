@@ -28,8 +28,10 @@ classifyTasks(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
 
 /// The launch records of one classification in one buffer: the warp segment
 /// ids, then the CTA segment ids, then one [begin, end] pair per partial
-/// task, then one [segment_id, partial_begin, partial_end] triple per merge.
-/// The counts are in ids, pairs, and triples.
+/// task, then one [segment_id, partial_begin, partial_end] triple per merge,
+/// then the index of the merge of each partial task. The counts are in ids,
+/// pairs, and triples, so the buffer holds
+/// `warpCount + ctaCount + 3 * partialCount + 3 * mergeCount` values.
 struct TaskRecords {
   llvm::SmallVector<int32_t, 0> records;
   int32_t warpCount = 0;
@@ -43,7 +45,8 @@ struct TaskRecords {
 /// messages, and returns the records its descriptors regroup to: a warp
 /// descriptor gives a warp id, a CTA descriptor of an unsplit segment a CTA
 /// id, a CTA descriptor of a split segment a partial pair, and a stage-one
-/// descriptor a merge triple.
+/// descriptor a merge triple. The merge index of a partial task is the
+/// position of the merge triple whose range holds it.
 llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
                                                 int64_t valueCount,
                                                 int64_t segmentCount,

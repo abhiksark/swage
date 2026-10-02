@@ -902,6 +902,58 @@ def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
     return small_element_program
 
 
+def _classifying_validator(warp_max_elements, cta_chunk_elements):
+    """Return an offsets validator that classifies the offsets it admits.
+
+    The native classifier checks everything `_validate_offsets` checks about
+    a host int32 array, so a preparation walks valid offsets once, there,
+    instead of once to validate and once to classify. The classifier runs at
+    the point where `_validate_shapes` validates the offsets, which keeps
+    the order of every error.
+
+    When the classifier refuses, `_validate_offsets` runs and raises its own
+    message for offsets it refuses too. Offsets it admits were refused for
+    the planning limits or for the size of the plan; the classification is
+    then left out, and the caller classifies again after it has admitted
+    the program, which reports the limits first.
+
+    Args:
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+
+    Returns:
+        The validator, with the signature of `_validate_offsets`, and a list
+        that holds the result of `_classify_segments` once the validator
+        has admitted and classified the offsets.
+    """
+    classification = []
+
+    def validate(host_offsets, value_count, output_count):
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native_swage,
+        )
+
+        segment_count = len(host_offsets) - 1
+        try:
+            classification.append(
+                native_swage._classify_segments(
+                    host_offsets,
+                    value_count=value_count,
+                    segment_count=segment_count,
+                    warp_max_elements=warp_max_elements,
+                    cta_chunk_elements=cta_chunk_elements,
+                )
+            )
+        except (TypeError, ValueError):
+            return _validate_offsets(host_offsets, value_count, output_count)
+        if type(output_count) is not int or output_count < segment_count:
+            classification.clear()
+            return _validate_offsets(host_offsets, value_count, output_count)
+        return segment_count
+
+    return validate, classification
+
+
 def _prepare_planned_reduction(
     values,
     offsets,
@@ -945,15 +997,17 @@ def _prepare_planned_reduction(
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
+    validate, classification = _classifying_validator(
+        warp_max_elements, cta_chunk_elements
+    )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, _validate_offsets
+        values, offsets, output, validate
     )
     offsets_version = _offsets_version(offsets)
     # Each launch builds this record again and compares the two. The record
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
 
-    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
@@ -962,21 +1016,27 @@ def _prepare_planned_reduction(
     small_element_program = _admit_program(
         module_text, warp_max_elements, cta_chunk_elements
     )
-    # One buffer holds the warp ids, the CTA ids, the partial ranges, and
-    # the merge records, in that order.
+    if not classification:
+        # The classifier refused offsets that are valid. The program and
+        # the limits are admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
+        )
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, the
+    # merge records, and the merge of every partial task, in that order.
     (
         records,
         direct_warp_count,
         direct_cta_count,
         partial_count,
         merge_count,
-    ) = native_swage._classify_segments(
-        host_offsets,
-        value_count=value_count,
-        segment_count=segment_count,
-        warp_max_elements=warp_max_elements,
-        cta_chunk_elements=cta_chunk_elements,
-    )
+    ) = classification[0]
     direct_count = direct_warp_count + direct_cta_count
     # ponytail: a measured two-chunk rule, not a general cost model.
     # Retain splitting for sparse batches, larger tails, or mixed lengths.
@@ -987,7 +1047,8 @@ def _prepare_planned_reduction(
         and segment_count > 0
         and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
         and merge_count == segment_count
-        and int(numpy.diff(host_offsets).max()) <= 2 * cta_chunk_elements
+        and int((host_offsets[1:] - host_offsets[:-1]).max())
+        <= 2 * cta_chunk_elements
         and segment_count
         >= torch.cuda.get_device_properties(
             values.device
@@ -1251,15 +1312,17 @@ def _prepare_persistent_sum(
     ):
         raise ValueError("resident_blocks must be a positive u32")
     torch = _runtime._import_torch()
+    validate, classification = _classifying_validator(
+        warp_max_elements, cta_chunk_elements
+    )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, _validate_offsets
+        values, offsets, output, validate
     )
     offsets_version = _offsets_version(offsets)
     # Each launch builds this record again and compares the two. The record
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
 
-    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
@@ -1268,18 +1331,23 @@ def _prepare_persistent_sum(
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
     _admit_program(module_text, warp_max_elements, cta_chunk_elements)
-    # One buffer holds the warp ids, the CTA ids, the partial ranges, and
-    # the merge records, in that order.
-    records, warp_count, cta_count, partial_count, merge_count = (
-        native_swage._classify_segments(
-            host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
+    if not classification:
+        # The classifier refused offsets that are valid. The program and
+        # the limits are admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
         )
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, the
+    # merge records, and the merge of every partial task, in that order.
+    records, warp_count, cta_count, partial_count, merge_count = (
+        classification[0]
     )
-    merge_records = records[len(records) - 3 * merge_count:]
     if segment_count == 0:
 
         def no_launch():
@@ -1311,32 +1379,14 @@ def _prepare_persistent_sum(
         resident_blocks = properties.multi_processor_count * 2
     active_blocks = min(resident_blocks, work_groups)
 
-    # A merge record is [segment_id, partial_begin, partial_end]. The
-    # partial ranges must follow one another from zero to the partial count;
-    # repeating each merge id by the length of its range then gives the
-    # merge of every partial task, which the kernel indexes unchecked.
-    range_begins = numpy.append(merge_records[1::3], partial_count)
-    range_ends = numpy.append(0, merge_records[2::3])
-    if (range_begins < range_ends).any():
-        raise RuntimeError("partial task belongs to multiple merges")
-    if (range_begins > range_ends).any():
-        raise RuntimeError("partial task has no merge dependency")
-    partial_merge_ids = numpy.repeat(
-        numpy.arange(merge_count, dtype=numpy.int32),
-        merge_records[2::3] - merge_records[1::3],
-    )
-
     driver = _runtime._get_driver()
     _, function = _load_once(driver, ptx, kernel_name)
     device = offsets.device
     device_index = device.index
-    # One upload carries the classification records and, behind them, the
-    # merge of every partial task. The kernel takes one pointer per list.
-    task_records = torch.tensor(
-        numpy.concatenate((records, partial_merge_ids)),
-        dtype=torch.int32,
-        device=device,
-    )
+    # One upload carries every record. The kernel takes one pointer per
+    # list; the classifier wrote the merge of every partial task behind the
+    # merge records.
+    task_records = torch.tensor(records, dtype=torch.int32, device=device)
     warp_pointer = task_records.data_ptr()
     cta_pointer = warp_pointer + 4 * warp_count
     partial_pointer = cta_pointer + 4 * cta_count

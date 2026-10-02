@@ -31,10 +31,17 @@ program and the two limits only, so the private runner runs the planning pass
 once per program and pair of limits, on a layout without segments. Each
 preparation then classifies its offsets through `swageClassifySegments`, which
 takes the offsets buffer and the limits, uses no module and no MLIR context,
-and writes the warp ids, the CTA ids, the partial ranges, and the merge
-records into one buffer in a single allocation. The descriptor classifier
-stays the reference: unit tests require the records to equal the regrouped
-descriptors and every rejection to carry the same message.
+and writes the warp ids, the CTA ids, the partial ranges, the merge records,
+and the merge of every partial task into one buffer in a single allocation.
+The descriptor classifier stays the reference: unit tests require the records
+to equal the regrouped descriptors and every rejection to carry the same
+message.
+
+The classifier checks what the Python validation of a host offsets array
+checks, so a preparation walks valid offsets once, in the classifier, at the
+point where the offsets are validated. When the classifier refuses, the
+Python validation runs and raises its own message, so the exception types,
+the messages, and their order are unchanged.
 
 The private `_prepare_planned_reduction` helper can select the existing pure
 CTA implementation after validating the native plan. With default 4096-element

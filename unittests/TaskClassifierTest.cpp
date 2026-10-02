@@ -287,6 +287,13 @@ void expectRecordsMatchDescriptors(const std::vector<int64_t> &offsets,
   flat.insert(flat.end(), expected.cta.begin(), expected.cta.end());
   flat.insert(flat.end(), expected.partial.begin(), expected.partial.end());
   flat.insert(flat.end(), expected.merge.begin(), expected.merge.end());
+  // The merge of a partial task is the merge whose range holds it, and the
+  // ranges follow one another, so each merge repeats over its range.
+  for (size_t merge = 0; merge < expected.merge.size() / 3; ++merge)
+    flat.insert(flat.end(),
+                static_cast<size_t>(expected.merge[3 * merge + 2] -
+                                    expected.merge[3 * merge + 1]),
+                static_cast<int32_t>(merge));
   EXPECT_EQ(
       std::vector<int32_t>(records->records.begin(), records->records.end()),
       flat);
@@ -314,8 +321,10 @@ TEST(TaskRecordsTest, LaysOutWarpCtaPartialAndMergeRecordsInOneBuffer) {
   EXPECT_EQ(records->mergeCount, 2);
   EXPECT_EQ(
       std::vector<int32_t>(records->records.begin(), records->records.end()),
-      (std::vector<int32_t>{0, 3, 1, 132, 4228, 4228, 8324, 8324, 8325, 8325,
-                            12421, 12421, 16517, 2, 0, 3, 4, 3, 5}));
+      // The last five values are the merge of each partial task.
+      (std::vector<int32_t>{0,    3,    1,     132,   4228,  4228, 8324, 8324,
+                            8325, 8325, 12421, 12421, 16517, 2,    0,    3,
+                            4,    3,    5,     0,     0,     0,    1,    1}));
 }
 
 TEST(TaskRecordsTest, EmitsNoRecordsForZeroSegments) {
