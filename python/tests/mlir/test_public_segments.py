@@ -21,6 +21,7 @@ import collections
 import gc
 import importlib.util
 import pathlib
+import sys
 import threading
 import weakref
 from itertools import pairwise
@@ -411,6 +412,27 @@ def test_segmented_calls_reject_host_tensors_after_validating_them(function):
         _call(function, values, offsets, out=out)
 
     assert torch.all(out == _SENTINEL)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_name_numpy_when_it_cannot_be_imported(
+    function, monkeypatch
+):
+    """Raise for a missing numpy before the result is allocated."""
+    values, offsets = _host_segments()
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    monkeypatch.setattr(
+        torch, "empty", lambda *a, **k: pytest.fail("a result was allocated")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^Swage {function.__name__}\\(\\) requires numpy, which "
+            "cannot be imported; nothing was launched"
+        ),
+    ):
+        _call(function, values, offsets)
 
 
 @_needs_cuda

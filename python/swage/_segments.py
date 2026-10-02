@@ -76,6 +76,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
     segment_count = max(offsets.numel() - 1, 0)
     _require_out(torch, out, segment_count, "segment", values, offsets)
     _require_bindings("segment_reduce")
+    _require_numpy("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
     output = _result(torch, out, segment_count, values)
     _qualification._launch_planned_reduction(
@@ -135,6 +136,7 @@ def segment_softmax(values, offsets, *, out=None):
     value_count = values.numel()
     _require_out(torch, out, value_count, "value", values, offsets)
     _require_bindings("segment_softmax")
+    _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
     output = _result(torch, out, value_count, values)
     value_count, segment_count, _ = _qualification._validate_shapes(
@@ -247,6 +249,24 @@ def _require_bindings(call):
             f"Swage {call}() requires the build-tree mlir_swage bindings, "
             "which the swage-compiler wheel does not include; nothing was "
             f"launched. See {_INSTALLATION} for the native build"
+        ) from error
+
+
+def _require_numpy(call):
+    """Require numpy, which holds the host copy of the offsets.
+
+    The offsets are validated and classified as a numpy array, with the
+    bindings and with an artifact. Without this check a missing numpy
+    surfaces inside PyTorch, in words that name neither the call nor what
+    to install.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError as error:
+        raise RuntimeError(
+            f"Swage {call}() requires numpy, which cannot be imported; "
+            "nothing was launched. Install 'swage-compiler[pytorch]', which "
+            f"declares it. See {_INSTALLATION} for the requirements"
         ) from error
 
 

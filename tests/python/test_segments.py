@@ -8,6 +8,7 @@ that cannot run a segmented call.
 """
 
 import inspect
+import pathlib
 import re
 import subprocess
 import sys
@@ -205,6 +206,70 @@ def test_segmented_calls_name_the_installation_page_without_bindings(
             ),
         ):
             _call(function, values, offsets, **keywords)
+
+
+def _importable_bindings(monkeypatch):
+    """Make the import that the bindings check performs succeed."""
+    native = types.ModuleType("mlir_swage._mlir_libs._swageDialectsNanobind")
+    native.swage = types.SimpleNamespace()
+    libraries = types.ModuleType("mlir_swage._mlir_libs")
+    libraries._swageDialectsNanobind = native
+    package = types.ModuleType("mlir_swage")
+    package._mlir_libs = libraries
+    for module in (package, libraries, native):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_name_numpy_when_it_is_missing(function, monkeypatch):
+    """Say that numpy is required, before any device work.
+
+    The calls copy the offsets into a numpy array on the host. An install
+    with PyTorch and the bindings and without numpy would otherwise fail
+    inside PyTorch, with a message that names neither the call nor a
+    remedy.
+    """
+    torch = _fake_torch(monkeypatch)
+    values, offsets = _inputs(torch)
+    _importable_bindings(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^Swage {function.__name__}\\(\\) requires numpy, which "
+            "cannot be imported; nothing was launched. Install "
+            "'swage-compiler\\[pytorch\\]', which declares it. See "
+            "docs/getting-started/installation.md in "
+            "https://github.com/abhiksark/swage for the requirements$"
+        ),
+    ):
+        _call(function, values, offsets)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_missing_bindings_are_reported_before_missing_numpy(
+    function, monkeypatch
+):
+    """Name the native build first: its requirements bring numpy along."""
+    torch = _fake_torch(monkeypatch)
+    values, offsets = _inputs(torch)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    with pytest.raises(RuntimeError, match="requires the build-tree"):
+        _call(function, values, offsets)
+
+
+def test_the_pytorch_extra_declares_numpy():
+    """Install numpy with the extra that the calls name."""
+    project = pathlib.Path(__file__).parents[2] / "pyproject.toml"
+    extra = re.search(r"^pytorch = \[(.*)\]$", project.read_text(), re.M)
+
+    assert extra is not None
+    assert [name.strip() for name in extra[1].split(",")] == [
+        '"torch>=2.6"',
+        '"numpy"',
+    ]
 
 
 @pytest.mark.parametrize("kind", ["mean", "min", "prod", "", None, 1])
