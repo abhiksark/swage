@@ -108,6 +108,19 @@ Value isLoadedIndexInRange(OpBuilder &builder, Location loc, Value word,
 Value loadTaskWord(OpBuilder &builder, Location loc, Value words,
                    Value wordIndex);
 
+/// Load one field of a task record: the i32 word at index
+/// `recordBase + field` of the task buffer `records`, where `recordBase` is
+/// the word index of the record. The fields of each record are in
+/// `TaskRecords.h`.
+Value loadRecordField(OpBuilder &builder, Location loc, Value records,
+                      Value recordBase, unsigned field);
+
+/// Store `total` at `sink[slot]` from the thread whose `threadId` is zero,
+/// and only when `slotInRange`, if given, holds. `slot` is an index; the
+/// thread that stores converts it.
+void emitLeaderStore(OpBuilder &builder, Location loc, Value total, Value sink,
+                     Value slot, Value threadId, Value zero, Value slotInRange);
+
 /// Bind segment `segmentId` for the thread `logicalThreadId`: load its range
 /// from `offsets`, clamp it to `valueCount`, and give the thread its first
 /// element.

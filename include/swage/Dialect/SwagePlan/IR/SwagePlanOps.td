@@ -113,8 +113,61 @@ def SwagePlan_TasksOp
   let hasRegionVerifier = 1;
 }
 
+def SwagePlan_PartialTasksOp
+    : SwagePlan_Op<"partial_tasks", [SingleBlock, RecursiveMemoryEffects]> {
+  let summary = "Reduce one chunk of a long segment per task into scratch";
+  let description = [{
+    The body of the first stage of a split reduction. Task `t` is the block
+    of threads with index `t`. It binds the half-open range of values that
+    record `t` of `ranges` names, runs the region on it, and stores the
+    yielded scalar at `scratch[t]`. A record is a `[begin, end]` pair of
+    words, written by host classification.
+
+    The region holds the `swage.reduce` of the program, which applies the
+    element program to every element of the chunk, and ends in
+    `swage_plan.yield` with its result. The threads of a task combine their
+    partial results across the whole block.
+
+    Every bound the kernel needs is an operand: a loaded range is clamped to
+    `value_count`, and a task index is compared with `partial_count`.
+
+    Example:
+
+    ```mlir
+    swage_plan.partial_tasks values(%values : memref<?xf32>)
+        value_count(%value_count : i32) ranges(%ranges : memref<?xi32>)
+        partial_count(%partial_count : i32) into(%scratch : memref<?xf32>) {
+    ^bb0(%chunk: !swage.segment<f32>):
+      %sum = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    ```
+  }];
+  let arguments = (ins
+    Arg<SwagePlan_Buffer, "chunk values", [MemRead]>:$values,
+    AnySignlessInteger:$value_count,
+    Arg<SwagePlan_WordBuffer, "one range record per task", [MemRead]>:$ranges,
+    AnySignlessInteger:$partial_count,
+    Arg<SwagePlan_Buffer, "one scalar per task", [MemWrite]>:$scratch);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `values` `(` $values `:` type($values) `)`
+    `value_count` `(` $value_count `:` type($value_count) `)`
+    `ranges` `(` $ranges `:` type($ranges) `)`
+    `partial_count` `(` $partial_count `:` type($partial_count) `)`
+    `into` `(` $scratch `:` type($scratch) `)`
+    attr-dict-with-keyword $body
+  }];
+  let hasVerifier = 1;
+  let hasRegionVerifier = 1;
+}
+
 def SwagePlan_YieldOp
-    : SwagePlan_Op<"yield", [Pure, Terminator, HasParent<"TasksOp">]> {
+    : SwagePlan_Op<"yield", [Pure, Terminator,
+                             ParentOneOf<["TasksOp", "PartialTasksOp"]>]> {
   let summary = "End a task region, with the scalar result of the segment";
   let description = [{
     Terminates the region of a task operation. With an operand, the value is

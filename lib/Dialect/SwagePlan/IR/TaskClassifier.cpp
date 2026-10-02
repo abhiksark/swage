@@ -1,6 +1,8 @@
 // lib/Dialect/SwagePlan/IR/TaskClassifier.cpp
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
 
+#include "swage/Dialect/SwagePlan/IR/TaskRecords.h"
+
 #include "llvm/ADT/Twine.h"
 
 #include <algorithm>
@@ -235,13 +237,16 @@ llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
   result.ctaCount = static_cast<int32_t>(ctaCount);
   result.partialCount = static_cast<int32_t>(partialCount);
   result.mergeCount = static_cast<int32_t>(mergeCount);
+  // A partial task has its range record and, in the last list, the index of
+  // its merge.
   result.records.resize_for_overwrite(static_cast<size_t>(
-      warpCount + ctaCount + 3 * partialCount + 3 * mergeCount));
+      warpCount + ctaCount + (partial_record::Words + 1) * partialCount +
+      merge_record::Words * mergeCount));
   int32_t *warp = result.records.data();
   int32_t *cta = warp + warpCount;
   int32_t *partial = cta + ctaCount;
-  int32_t *merge = partial + 2 * partialCount;
-  int32_t *partialMerge = merge + 3 * mergeCount;
+  int32_t *merge = partial + partial_record::Words * partialCount;
+  int32_t *partialMerge = merge + merge_record::Words * mergeCount;
   int32_t scratchIndex = 0;
   int32_t mergeIndex = 0;
   int64_t begin = 0;

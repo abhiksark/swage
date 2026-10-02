@@ -41,8 +41,12 @@ void SwagePlanDialect::initialize() {
 }
 
 std::optional<TaskPolicy> mlir::swage_plan::policyOfRegion(Region *region) {
-  if (auto tasks = dyn_cast_or_null<TasksOp>(region->getParentOp()))
+  Operation *task = region->getParentOp();
+  if (auto tasks = dyn_cast_or_null<TasksOp>(task))
     return tasks.getPolicy();
+  // The threads of a partial task combine across the whole block.
+  if (isa_and_nonnull<PartialTasksOp>(task))
+    return TaskPolicy::CTA;
   return std::nullopt;
 }
 
@@ -95,13 +99,15 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
   if (function.isExternal() || !function.getBody().hasOneBlock())
     return op->emitError("a plan function has a body of one block");
   Block &body = function.getBody().front();
-  if (llvm::range_size(body) != 2 || !isa<TasksOp>(body.front()) ||
+  if (llvm::range_size(body) != 2 ||
+      !isa<TasksOp, PartialTasksOp>(body.front()) ||
       !isa<func::ReturnOp>(body.back()))
     return op->emitError()
            << "a plan function holds one task operation followed by a return, "
               "found "
            << llvm::range_size(body) << " operations";
-  if (cast<TasksOp>(body.front()).getPolicy() == TaskPolicy::Sequential)
+  auto tasks = dyn_cast<TasksOp>(body.front());
+  if (tasks && tasks.getPolicy() == TaskPolicy::Sequential)
     return op->emitError()
            << name << " gives the launch width of a kernel, and "
            << "policy<sequential> runs on one thread without a kernel; a "
@@ -136,41 +142,94 @@ LogicalResult TasksOp::verify() {
   return success();
 }
 
-LogicalResult TasksOp::verifyRegions() {
-  Block &body = getBody().front();
-  Type element = cast<MemRefType>(getValues().getType()).getElementType();
+/// Verify what every task region shares: one argument, the bound segment,
+/// with the element type of the buffer it is bound from; consumers that read
+/// that argument; and a `swage_plan.yield` at the end. `buffer` names the
+/// buffer in a diagnostic, and `allowStores` admits `swage.map_store`.
+static LogicalResult verifyTaskRegion(Operation *task, Region &region,
+                                      Type element, StringRef buffer,
+                                      bool allowStores) {
+  Block &body = region.front();
   auto segment =
       body.getNumArguments() == 1
           ? dyn_cast<swage::SegmentType>(body.getArgument(0).getType())
           : swage::SegmentType();
   if (!segment)
-    return emitOpError("region takes the bound segment as its one argument, "
-                       "of type !swage.segment<T>");
+    return task->emitOpError(
+        "region takes the bound segment as its one argument, of type "
+        "!swage.segment<T>");
   if (segment.getElementType() != element)
-    return emitOpError() << "region binds a segment of " << element
-                         << ", the element type of the values, got "
-                         << body.getArgument(0).getType();
+    return task->emitOpError() << "region binds a segment of " << element
+                               << ", the element type of the " << buffer
+                               << ", got " << body.getArgument(0).getType();
   if (!body.mightHaveTerminator() || !isa<YieldOp>(body.getTerminator()))
-    return emitOpError("region must end in swage_plan.yield");
+    return task->emitOpError("region must end in swage_plan.yield");
   for (Operation &operation : body.without_terminator()) {
-    if (!isa<swage::ReduceOp, swage::MapStoreOp>(operation))
-      return operation.emitOpError(
-          "is not allowed in a task region; the region holds swage.reduce "
-          "and swage.map_store operations and ends in swage_plan.yield");
+    bool admitted = allowStores
+                        ? isa<swage::ReduceOp, swage::MapStoreOp>(operation)
+                        : isa<swage::ReduceOp>(operation);
+    if (!admitted)
+      return operation.emitOpError()
+             << "is not allowed in the region of '" << task->getName()
+             << "'; the region holds "
+             << (allowStores ? "swage.reduce and swage.map_store operations"
+                             : "swage.reduce operations")
+             << " and ends in swage_plan.yield";
     if (operation.getOperand(0) != body.getArgument(0))
       return operation.emitOpError(
           "must read the bound segment, the argument of the task region");
   }
-  auto yield = cast<YieldOp>(body.getTerminator());
+  return success();
+}
+
+/// Require that the region of `task` yields a scalar of the element type of
+/// `into`, the buffer that receives it.
+static LogicalResult verifyYieldedScalar(Operation *task, Region &region,
+                                         Value into) {
+  auto yield = cast<YieldOp>(region.front().getTerminator());
+  Type slot = cast<MemRefType>(into.getType()).getElementType();
+  if (!yield.getValue() || yield.getValue().getType() != slot) {
+    InFlightDiagnostic diagnostic =
+        task->emitOpError() << "region must yield " << slot
+                            << ", the element type of the into buffer, got ";
+    if (yield.getValue())
+      diagnostic << yield.getValue().getType();
+    else
+      diagnostic << "no value";
+    return diagnostic;
+  }
+  return success();
+}
+
+LogicalResult TasksOp::verifyRegions() {
+  Type element = cast<MemRefType>(getValues().getType()).getElementType();
+  if (failed(verifyTaskRegion(getOperation(), getBody(), element, "values",
+                              /*allowStores=*/true)))
+    return failure();
+  auto yield = cast<YieldOp>(getBody().front().getTerminator());
   if (static_cast<bool>(yield.getValue()) != static_cast<bool>(getOutput()))
     return emitOpError("into and a yielded scalar are given together: the "
                        "scalar of each segment is stored in the into buffer");
-  if (getOutput()) {
-    Type slot = cast<MemRefType>(getOutput().getType()).getElementType();
-    if (yield.getValue().getType() != slot)
-      return emitOpError() << "region must yield " << slot
-                           << ", the element type of the into buffer, got "
-                           << yield.getValue().getType();
-  }
+  if (getOutput())
+    return verifyYieldedScalar(getOperation(), getBody(), getOutput());
   return success();
+}
+
+LogicalResult PartialTasksOp::verify() {
+  Type word = cast<MemRefType>(getRanges().getType()).getElementType();
+  for (auto [name, type] :
+       {std::pair("value_count", getValueCount().getType()),
+        std::pair("partial_count", getPartialCount().getType())})
+    if (type != word)
+      return emitOpError() << name << " must have the element type of the "
+                           << "ranges, " << word << ", got " << type;
+  return success();
+}
+
+LogicalResult PartialTasksOp::verifyRegions() {
+  Type element = cast<MemRefType>(getValues().getType()).getElementType();
+  if (failed(verifyTaskRegion(getOperation(), getBody(), element, "values",
+                              /*allowStores=*/false)))
+    return failure();
+  return verifyYieldedScalar(getOperation(), getBody(), getScratch());
 }

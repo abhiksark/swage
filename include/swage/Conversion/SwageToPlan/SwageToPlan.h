@@ -9,6 +9,7 @@
 #ifndef SWAGE_CONVERSION_SWAGETOPLAN_SWAGETOPLAN_H
 #define SWAGE_CONVERSION_SWAGETOPLAN_SWAGETOPLAN_H
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/LogicalResult.h"
 
@@ -30,22 +31,27 @@ enum class PlanSchedule {
   Direct,
   /// One block of threads per task; a task buffer names the segment.
   TaskIds,
+  /// One block of threads per chunk of a long segment: the first stage of a
+  /// split reduction, whose kernel is named `<function>__partial`.
+  SplitPartial,
   /// No kernel: one thread visits the segments in order. The CPU oracle.
   Sequential,
 };
 
 struct PlanOptions {
-  PlanSchedule schedule = PlanSchedule::Direct;
-  /// The launch width of the kernel, in threads. Not read for the
-  /// sequential schedule, which has no kernel.
+  /// The kernels to plan, one plan function each, in this order. Each
+  /// kernel is named once, and the sequential schedule stands alone.
+  llvm::SmallVector<PlanSchedule, 2> schedules;
+  /// The launch width of the direct and task-id kernels, in threads. The
+  /// target fixes the width of every other kernel.
   int64_t blockThreads = 0;
   /// Plan only the function of this name. Empty plans every function that
   /// holds Swage operations.
   llvm::StringRef function;
 };
 
-/// Replace each selected segment function of `module` by a plan function: a
-/// function with the parameter list of the kernel, a
+/// Replace each selected segment function of `module` by one plan function
+/// per schedule: a function with the parameter list of the kernel, a
 /// `swage_plan.block_threads` attribute, and one task operation that holds
 /// the reductions and stores of the program.
 ///

@@ -79,6 +79,35 @@ Value loadTaskWord(OpBuilder &builder, Location loc, Value words,
   return LLVM::LoadOp::create(builder, loc, i32, wordAddress);
 }
 
+Value loadRecordField(OpBuilder &builder, Location loc, Value records,
+                      Value recordBase, unsigned field) {
+  Value index = recordBase;
+  if (field)
+    index = arith::AddIOp::create(
+        builder, loc, recordBase,
+        arith::ConstantIndexOp::create(builder, loc, field));
+  return loadTaskWord(builder, loc, records, index);
+}
+
+void emitLeaderStore(OpBuilder &builder, Location loc, Value total, Value sink,
+                     Value slot, Value threadId, Value zero,
+                     Value slotInRange) {
+  Type pointer = LLVM::LLVMPointerType::get(builder.getContext());
+  Value mayStore = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
+                                         threadId, zero);
+  if (slotInRange)
+    mayStore = arith::AndIOp::create(builder, loc, mayStore, slotInRange);
+  scf::IfOp::create(
+      builder, loc, mayStore, [&](OpBuilder &store, Location storeLoc) {
+        Value slot64 = arith::IndexCastOp::create(store, storeLoc,
+                                                  store.getI64Type(), slot);
+        Value address = LLVM::GEPOp::create(store, storeLoc, pointer,
+                                            total.getType(), sink, slot64);
+        LLVM::StoreOp::create(store, storeLoc, total, address);
+        scf::YieldOp::create(store, storeLoc);
+      });
+}
+
 BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
                                 Value offsets, Value valueCount,
                                 Value segmentId, Value segmentInRange,

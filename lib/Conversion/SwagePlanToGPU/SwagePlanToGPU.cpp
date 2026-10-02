@@ -32,11 +32,13 @@
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
+#include "swage/Dialect/SwagePlan/IR/TaskRecords.h"
 #include "swage/Target/TargetDescription.h"
 
 namespace mlir::swage {
 namespace {
 
+using swage_plan::PartialTasksOp;
 using swage_plan::SwagePlanDialect;
 using swage_plan::TaskPolicy;
 using swage_plan::TasksOp;
@@ -93,7 +95,8 @@ public:
       rewriter.replaceAllUsesWith(argument, parameter);
     if (failed(legalizeInPlace(rewriter, operationsOf(body))))
       return failure();
-    moveConvertedOperations<TasksOp, func::ReturnOp>(rewriter, body, entry);
+    moveConvertedOperations<TasksOp, PartialTasksOp, func::ReturnOp>(
+        rewriter, body, entry);
     rewriter.eraseOp(function);
     return success();
   }
@@ -219,6 +222,74 @@ public:
   }
 };
 
+/// One block of threads per chunk of a split segment: the kernel prelude,
+/// the guard on the task index, the range of the chunk loaded from its
+/// record and clamped to the value count, the reduction of the region, and
+/// the store of its result in the scratch slot of the task.
+class PartialTasksPattern : public OpConversionPattern<PartialTasksOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(PartialTasksOp tasks, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    IntegerAttr threads = blockThreadsOf(tasks->getParentOp());
+    if (!threads)
+      return rewriter.notifyMatchFailure(tasks, "not in a plan function");
+    Location loc = tasks.getLoc();
+
+    Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value block =
+        arith::ConstantIndexOp::create(rewriter, loc, threads.getInt());
+    Value taskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getPartialCount());
+    Value inRange = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::slt, taskIndex, taskCount);
+
+    Block &region = tasks.getBody().front();
+    auto yield = cast<swage_plan::YieldOp>(region.getTerminator());
+    bool converted = true;
+    scf::IfOp::create(
+        rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
+          using namespace swage_plan::partial_record;
+          Value fields = arith::ConstantIndexOp::create(body, bodyLoc, Words);
+          Value recordBase =
+              arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
+          Value beginWord = loadRecordField(body, bodyLoc, adaptor.getRanges(),
+                                            recordBase, Begin);
+          Value endWord = loadRecordField(body, bodyLoc, adaptor.getRanges(),
+                                          recordBase, End);
+          // The range indexes the values, so the value count bounds it.
+          Value begin;
+          Value end;
+          std::tie(begin, end) = clampRange(body, bodyLoc, beginWord, endWord,
+                                            adaptor.getValueCount());
+          Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
+          rewriter.replaceAllUsesWith(
+              region.getArgument(0),
+              ValueRange{adaptor.getValues(), first, end, block});
+
+          SmallVector<Operation *> consumers = operationsOf(region);
+          consumers.pop_back();
+          converted = succeeded(legalizeInPlace(rewriter, consumers));
+          if (converted) {
+            moveConvertedOperations<ReduceOp, swage_plan::YieldOp>(
+                rewriter, region, body.getInsertionBlock());
+            emitLeaderStore(
+                body, bodyLoc, rewriter.getRemappedValue(yield.getValue()),
+                adaptor.getScratch(), taskIndex, threadId, zero, Value());
+          }
+          scf::YieldOp::create(body, bodyLoc);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
+  }
+};
+
 /// What the patterns rely on and the dialect verifier does not promise,
 /// checked before anything is changed. The planner produces only plan
 /// functions that pass; this is for plan IR that was written by hand. A
@@ -234,7 +305,15 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
            << target.maxBlockThreads
            << " threads with a power-of-two subgroup count, got " << threads;
 
-  auto tasks = cast<TasksOp>(function.getBody().front().front());
+  Operation *task = &function.getBody().front().front();
+  if (auto partial = dyn_cast<PartialTasksOp>(task)) {
+    if (failed(verifyTaskConsumers(partial, partial.getValues().getType(),
+                                   partial.getRanges().getType(),
+                                   partial.getBody().front())))
+      return failure();
+    return verifyKernelSymbols(module, function, "");
+  }
+  auto tasks = cast<TasksOp>(task);
   if (failed(verifyTaskConsumers(tasks, tasks.getValues().getType(),
                                  tasks.getOffsets().getType(),
                                  tasks.getBody().front())))
@@ -273,7 +352,8 @@ LogicalResult convertPlanToGPU(ModuleOp module,
 
   RewritePatternSet patterns(module.getContext());
   patterns.add<PlanKernelFuncPattern>(module.getContext(), target);
-  patterns.add<PlanKernelReturnPattern, TasksPattern>(module.getContext());
+  patterns.add<PlanKernelReturnPattern, TasksPattern, PartialTasksPattern>(
+      module.getContext());
   populateSegmentConsumerPatterns(patterns, &target);
   return applyFullConversion(module, legality, std::move(patterns));
 }

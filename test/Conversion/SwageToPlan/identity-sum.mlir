@@ -49,7 +49,7 @@
 // CTA: attributes {swage_plan.block_threads = 128 : i32} {
 // CTA-NEXT: swage_plan.tasks policy<cta> segments({{.*}}) ids(%{{.*}} : memref<?xi32>) task_count(%{{.*}} : i32) into(
 
-// BAD-SCHEDULE: error: schedule must be direct, task-ids, or sequential, got 'fused'
+// BAD-SCHEDULE: error: schedule must be direct, task-ids, split-partial, or sequential, got 'fused'
 // BAD-THREADS: error: block-threads must be a launch width the target admits, from 1 to 1024 threads with a power-of-two subgroup count, got [[THREADS]]
 
 module {

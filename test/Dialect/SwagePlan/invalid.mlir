@@ -332,7 +332,7 @@ module {
         segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
         value_count(%value_count : i32) segment_count(%segment_count : i32) {
     ^bb0(%segment: !swage.segment<f32>):
-      // expected-error@+1 {{'swage.extent' op is not allowed in a task region; the region holds swage.reduce and swage.map_store operations and ends in swage_plan.yield}}
+      // expected-error@+1 {{'swage.extent' op is not allowed in the region of 'swage_plan.tasks'; the region holds swage.reduce and swage.map_store operations and ends in swage_plan.yield}}
       %length = swage.extent %segment : !swage.segment<f32>
       swage_plan.yield
     }
@@ -480,7 +480,7 @@ module {
 
 module {
   func.func @yield_outside_a_task_region() {
-    // expected-error@+1 {{'swage_plan.yield' op expects parent op 'swage_plan.tasks'}}
+    // expected-error@+1 {{'swage_plan.yield' op expects parent op to be one of 'swage_plan.tasks, swage_plan.partial_tasks'}}
     swage_plan.yield
   }
 }

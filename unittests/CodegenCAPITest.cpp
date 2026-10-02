@@ -849,6 +849,38 @@ TEST(CodegenCAPITest, APlanCallReportsInvalidMetadata) {
                  "offsets must be nondecreasing");
 }
 
+TEST(CodegenCAPITest, APlanCallReportsOffsetsOutsideI32) {
+  const int64_t wide = int64_t{1} << 40;
+  {
+    // The plan call takes i64 offsets and classifies i32 records, so an
+    // offset that does not fit is refused before it is narrowed.
+    Session session;
+    const int64_t offsets[] = {0, wide};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
+  {
+    Session session;
+    const int64_t offsets[] = {0, -wide};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
+  {
+    // The first invalid offset decides, as it does for offsets that fit.
+    Session session;
+    const int64_t offsets[] = {0, 4, 2, wide};
+    expectRejected(materialize(session, offsets, 4, 4, 3), session,
+                   "offsets must be nondecreasing");
+  }
+  {
+    // A value that would wrap to a valid i32 is still refused.
+    Session session;
+    const int64_t offsets[] = {0, (int64_t{1} << 32) + 4};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
+}
+
 /// What one swageClassifySegments call left with its two callbacks.
 struct Classification {
   bool succeeded = false;

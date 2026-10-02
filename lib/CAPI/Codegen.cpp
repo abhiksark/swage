@@ -40,8 +40,8 @@
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
+#include "swage/Dialect/SwagePlan/IR/TaskRecords.h"
 #include "swage/Target/TargetDescription.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
@@ -607,41 +607,46 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
   if (failed(swage::admitTaskProgram(source, kernel)))
     return mlirLogicalResultFailure();
 
-  auto tasks = swage_plan::classifyTasks(
-      ArrayRef(offsets, static_cast<size_t>(offsetCount)), valueCount,
-      segmentCount, warpMaxElements, ctaChunkElements);
-  if (!tasks) {
-    source.emitError(llvm::toString(tasks.takeError()));
+  // The record classifier reads i32 offsets. An offset outside i32 is
+  // invalid metadata, and the descriptor classifier, which reads i64, names
+  // it with the precedence the two classifiers share.
+  ArrayRef<int64_t> wide(offsets, static_cast<size_t>(offsetCount));
+  if (llvm::any_of(wide, [](int64_t offset) {
+        return offset < std::numeric_limits<int32_t>::min() ||
+               offset > std::numeric_limits<int32_t>::max();
+      })) {
+    auto tasks = swage_plan::classifyTasks(wide, valueCount, segmentCount,
+                                           warpMaxElements, ctaChunkElements);
+    source.emitError(tasks ? std::string("offset must be a nonnegative i32 "
+                                         "value")
+                           : llvm::toString(tasks.takeError()));
+    return mlirLogicalResultFailure();
+  }
+  llvm::SmallVector<int32_t, 0> narrow;
+  narrow.reserve(wide.size());
+  for (int64_t offset : wide)
+    narrow.push_back(static_cast<int32_t>(offset));
+  auto records = swage_plan::classifyTaskRecords(
+      narrow, valueCount, segmentCount, warpMaxElements, ctaChunkElements);
+  if (!records) {
+    source.emitError(llvm::toString(records.takeError()));
     return mlirLogicalResultFailure();
   }
 
-  std::vector<int32_t> warp;
-  std::vector<int32_t> cta;
-  std::vector<int32_t> partial;
-  std::vector<int32_t> merge;
-  llvm::SmallDenseSet<int32_t, 8> splitSegments;
-  for (const swage_plan::TaskDescriptor &task : *tasks)
-    if (task.stage == 1)
-      splitSegments.insert(task.segment_id);
-  warp.reserve(tasks->size());
-  cta.reserve(tasks->size());
-  for (const swage_plan::TaskDescriptor &task : *tasks) {
-    if (task.stage == 1) {
-      merge.insert(merge.end(), {task.segment_id, task.begin, task.end});
-    } else if (task.policy == swage_plan::TaskPolicy::Warp) {
-      warp.push_back(task.segment_id);
-    } else if (splitSegments.contains(task.segment_id)) {
-      partial.insert(partial.end(), {task.begin, task.end});
-    } else {
-      cta.push_back(task.segment_id);
-    }
-  }
-  warpCallback(warp.data(), static_cast<intptr_t>(warp.size()), warpUserData);
-  ctaCallback(cta.data(), static_cast<intptr_t>(cta.size()), ctaUserData);
-  partialCallback(partial.data(), static_cast<intptr_t>(partial.size()),
-                  partialUserData);
-  mergeCallback(merge.data(), static_cast<intptr_t>(merge.size()),
-                mergeUserData);
+  // One buffer holds the four lists in callback order; `TaskRecords.h` gives
+  // the words of a partial and of a merge record.
+  const int32_t *warp = records->records.data();
+  const int32_t *cta = warp + records->warpCount;
+  const int32_t *partial = cta + records->ctaCount;
+  intptr_t partialWords =
+      static_cast<intptr_t>(swage_plan::partial_record::Words) *
+      records->partialCount;
+  intptr_t mergeWords = static_cast<intptr_t>(swage_plan::merge_record::Words) *
+                        records->mergeCount;
+  warpCallback(warp, records->warpCount, warpUserData);
+  ctaCallback(cta, records->ctaCount, ctaUserData);
+  partialCallback(partial, partialWords, partialUserData);
+  mergeCallback(partial + partialWords, mergeWords, mergeUserData);
   return mlirLogicalResultSuccess();
 }
 
