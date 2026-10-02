@@ -20,6 +20,8 @@ from swage._segmented_qualification import (
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _prepare_planned_sum,
+    _program_element,
+    _reduction_kernel,
     _runner_module,
     _validate_counts,
     _validate_offsets,
@@ -270,7 +272,7 @@ def test_exact_values_stay_exact_for_the_longest_compared_segments():
 def _pytorch_reference(values, offsets, kind):
     """Compute the PyTorch reference while preserving empty identities."""
     if len(offsets) < 2:
-        return torch.empty(0, dtype=torch.float32)
+        return torch.empty(0, dtype=values.dtype)
     results = []
     for index in range(len(offsets) - 1):
         segment = values[offsets[index] : offsets[index + 1]]
@@ -280,7 +282,7 @@ def _pytorch_reference(values, offsets, kind):
             results.append(segment.max() if kind == "max" else segment.min())
         else:
             identity = float("-inf") if kind == "max" else float("inf")
-            results.append(torch.tensor(identity, dtype=torch.float32))
+            results.append(torch.tensor(identity, dtype=values.dtype))
     return torch.stack(results)
 
 
@@ -324,25 +326,29 @@ def _assert_tolerance_sees_every_element(values, offsets, kind):
             assert segment.abs().min() > allowed
 
 
+@pytest.mark.parametrize("element", ["f32", "f64"])
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
-def test_composable_reduction_cpu_oracle(kind, transform):
+def test_composable_reduction_cpu_oracle(kind, transform, element):
     """The same native program supplies a sequential composition oracle."""
     values, offsets = _case([0, 1, 2, 3, 5, 6, 10, 11])
+    dtype = torch.float32 if element == "f32" else torch.float64
+    values = values.to(dtype)
     printed = _execute(
         _runner_module(
             values,
             offsets,
-            reduction_module(kind, transform),
-            f"segmented_{kind}",
+            reduction_module(kind, transform, element),
+            _reduction_kernel(kind, element),
             len(offsets) - 1,
-        )
+        ),
+        element,
     )
     expected = _pytorch_reference(
         _transformed_values(values, transform), offsets, kind
     )
     torch.testing.assert_close(
-        torch.tensor(printed, dtype=torch.float32),
+        torch.tensor(printed, dtype=dtype),
         expected,
         rtol=0,
         atol=0,
@@ -661,8 +667,9 @@ def _sequential_f32_sum(values):
 
 
 def _bits(tensor):
-    """Return the IEEE-754 bit patterns of a float32 tensor."""
-    return tensor.contiguous().view(torch.int32).tolist()
+    """Return the IEEE-754 bit patterns of a float32 or float64 tensor."""
+    word = torch.int32 if tensor.dtype == torch.float32 else torch.int64
+    return tensor.contiguous().view(word).tolist()
 
 
 def test_cpu_sum_oracle_is_bit_exact_for_seeded_randn():
@@ -703,6 +710,58 @@ def test_cpu_oracle_round_trips_every_float32_class():
 
     actual = cpu_oracle(values, offsets, "max")
 
+    assert _bits(actual) == _bits(values)
+
+
+def test_cpu_sum_oracle_is_bit_exact_for_float64_values():
+    """An f64 sum is the left-to-right float64 sum, bit for bit.
+
+    The expected value is a Python loop, whose floats are float64 and whose
+    order is the oracle's. A transport or a kernel that passed through
+    float32 would lose most of the bits of this sum.
+    """
+    generator = torch.Generator().manual_seed(0)
+    values = torch.randn(65537, dtype=torch.float64, generator=generator)
+    offsets = torch.tensor([0, 65537], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    total = 0.0
+    for value in values.tolist():
+        total += value
+    assert actual.dtype == torch.float64
+    assert _bits(actual) == _bits(torch.tensor([total], dtype=torch.float64))
+    assert total != float(torch.tensor(total, dtype=torch.float32))
+
+
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_cpu_oracle_round_trips_every_float64_class(kind):
+    """Singleton extremes return their float64 input bits.
+
+    The values include the largest finite float64, the smallest normal and
+    the smallest subnormal, and a value next to one, none of which a
+    float32 holds.
+    """
+    values = torch.tensor(
+        [
+            1 / 3,
+            -0.0,
+            0.0,
+            float("inf"),
+            float("-inf"),
+            torch.finfo(torch.float64).max,
+            torch.finfo(torch.float64).tiny,
+            2.0**-1074,
+            1.0 + 2.0**-52,
+            -9007199254740991.0,
+        ],
+        dtype=torch.float64,
+    )
+    offsets = torch.arange(values.numel() + 1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    assert actual.dtype == torch.float64
     assert _bits(actual) == _bits(values)
 
 
@@ -921,6 +980,117 @@ def test_rejects_wrong_offset_dtype_rank_and_undersized_output():
         )
 
 
+def test_a_program_takes_values_and_output_of_its_element_type():
+    """Refuse a tensor whose dtype is not the element type of the kernel.
+
+    A kernel reads and writes elements of one width, so a tensor of the
+    other width would be read at the wrong stride. Each refusal comes
+    before any device or pointer access, so the tensors can stay on the
+    host.
+    """
+    offsets = torch.tensor([0, 2], dtype=torch.int32)
+    single, double = torch.empty(2), torch.empty(2, dtype=torch.float64)
+    with pytest.raises(
+        TypeError, match="^output must have dtype torch.float64$"
+    ):
+        launch_gpu(double, offsets, single, "sum")
+    with pytest.raises(
+        TypeError, match="^output must have dtype torch.float32$"
+    ):
+        launch_gpu(single, offsets, double, "sum")
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        launch_gpu(single.half(), offsets, single, "sum")
+    # The softmax and the persistent sum have f32 kernels only.
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        launch_softmax_gpu(double, offsets, double)
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        _prepare_persistent_sum(double, offsets, double)
+    # A prepared reduction takes the element type from its program.
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float64$"
+    ):
+        _prepare_planned_reduction(
+            single,
+            offsets,
+            single,
+            module_text=reduction_module("sum", "identity", "f64"),
+            kernel_name="segmented_sum_f64",
+        )
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        _prepare_planned_reduction(
+            double,
+            offsets,
+            double,
+            module_text=reduction_module("sum", "identity"),
+            kernel_name="segmented_sum",
+        )
+
+
+def test_program_element_reads_the_declared_values_type():
+    """The element type of a program is the one its values declare."""
+    assert _program_element(reduction_module("max", "maps")) == "f32"
+    assert _program_element(reduction_module("max", "maps", "f64")) == "f64"
+    with pytest.raises(ValueError, match="declares no swage.role<values>"):
+        _program_element(
+            reduction_module("max", "maps").replace("f32", "f16")
+        )
+
+
+def _f64_case(lengths):
+    """Build float64 values that no float32 holds, and their offsets.
+
+    Each value is the exact value of `_case` plus a multiple of 2**-30 that
+    depends on its position. Every partial sum of the compared segments is
+    a multiple of 2**-30 below 2**20, so each sum is exact in float64 under
+    any association, and no value survives a round trip through float32.
+    """
+    values, offsets = _case(lengths)
+    index = torch.arange(values.numel())
+    return values.double() + (index % 5).double() * 2.0**-30, offsets
+
+
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("lengths", CASES)
+def test_cpu_reduction_matches_pytorch_for_float64(lengths, kind):
+    """The sequential f64 reductions equal the float64 reference exactly."""
+    values, offsets = _f64_case(lengths)
+
+    actual = cpu_oracle(values, offsets, kind)
+    expected = _pytorch_reference(values, offsets, kind)
+
+    assert actual.dtype == expected.dtype == torch.float64
+    assert _bits(actual) == _bits(expected)
+    if values.numel() > 1:
+        assert not torch.equal(values.float().double(), values)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("lengths", CASES)
+def test_gpu_reduction_matches_pytorch_and_cpu_oracle_for_float64(
+    lengths, kind
+):
+    """Qualify the one-CTA f64 reductions against both references."""
+    host_values, host_offsets = _f64_case(lengths)
+    output = torch.empty(len(lengths), dtype=torch.float64, device="cuda")
+
+    launch_gpu(host_values.cuda(), host_offsets.cuda(), output, kind)
+
+    actual = output.cpu()
+    assert _bits(actual) == _bits(
+        _pytorch_reference(host_values, host_offsets, kind)
+    )
+    assert _bits(actual) == _bits(cpu_oracle(host_values, host_offsets, kind))
+
+
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("lengths", CASES)
 def test_cpu_reduction_matches_pytorch(lengths, kind):
@@ -1003,6 +1173,7 @@ def test_static_policies_own_every_element_of_long_segments(policy, lengths):
 RANDOM_LENGTHS = [0, 1, 31, 32, 33, 4095, 4096, 4097, 65537]
 RANDOM_SUITES = ["randn", "cancellation", "magnitude"]
 _EPS32 = torch.finfo(torch.float32).eps
+_EPS64 = torch.finfo(torch.float64).eps
 
 
 def _random_values(suite, count, generator):

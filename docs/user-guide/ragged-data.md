@@ -37,7 +37,9 @@ and `numpy`, which the binding requirements in
 
 For `N` segments over one values buffer:
 
-- `values` is a contiguous rank-one `torch.float32` tensor.
+- `values` is a contiguous rank-one `torch.float32` or `torch.float64`
+  tensor. A reduction takes both dtypes. A softmax takes `torch.float32`
+  only, and so does the private persistent sum.
 - `offsets` is a contiguous rank-one `torch.int32` tensor with `N + 1`
   entries. The two public calls also take `torch.int64` offsets, the
   default integer width of PyTorch.
@@ -52,9 +54,10 @@ For `N` segments over one values buffer:
 - For a GPU launch, both tensors are CUDA tensors on the current device.
 
 The result tensor has the same basic rules on both surfaces: it is a
-contiguous rank-one `torch.float32` tensor on the same device, it does not
-overlap `values` or `offsets` in memory, and it does not require grad. Its
-size differs:
+contiguous rank-one tensor of the dtype of `values` on the same device, it
+does not overlap `values` or `offsets` in memory, and it does not require
+grad. A kernel reads and writes elements of one width, so a float64 batch
+with a float32 result is refused, and so is the reverse. Its size differs:
 
 - The public calls take an optional `out` with exactly `N` elements for a
   reduction and exactly one element per value for a softmax.
@@ -201,8 +204,8 @@ empty = offsets[1:] == offsets[:-1]
 output = output.masked_fill(empty, 0.0)
 ```
 
-An f32 sum has one more property that a caller should know: its rounding
-depends on the schedule. [Execution Model](execution-model.md) introduces
+A sum has one more property that a caller should know, in both dtypes:
+its rounding depends on the schedule. [Execution Model](execution-model.md) introduces
 that, and [Segmented Reductions](../internals/segmented-reductions.md)
 states the bound, the evidence, what a sum does with NaN and infinities,
 and the internal module shapes and ABIs behind this contract.

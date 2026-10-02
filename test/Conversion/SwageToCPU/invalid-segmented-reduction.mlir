@@ -479,10 +479,35 @@ module {
 
 // -----
 
-// The element type comes from the values, and f32 is the one admitted today.
+// The element type comes from the values, and f32 and f64 are the ones
+// admitted. A half-precision sum would need an accumulator of another type
+// than its elements.
 module {
-  // expected-error@+1 {{swage.role<values> requires a rank-one f32 memref with a dynamic size, the identity layout, and the default memory space, got 'memref<?xf64>'}}
-  func.func @double_values(
+  // expected-error@+1 {{swage.role<values> requires a rank-one f32 or f64 memref with a dynamic size, the identity layout, and the default memory space, got 'memref<?xf16>'}}
+  func.func @half_values(
+      %values: memref<?xf16> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf16> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf16>, memref<?xi32>, index -> !swage.segment<f16>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f16> -> f16 {
+    ^bb0(%value: f16):
+      swage.yield %value : f16
+    }
+    memref.store %sum, %output[%sid] : memref<?xf16>
+    return
+  }
+}
+
+// -----
+
+// A program has one element type, the one of its values. An f64 program
+// with an f32 constant in a region, or with an f32 capture, mixes two.
+module {
+  func.func @narrow_constant(
       %values: memref<?xf64> {swage.role = #swage.role<values>},
       %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
       %output: memref<?xf64> {swage.role = #swage.role<output>},
@@ -493,7 +518,63 @@ module {
         : memref<?xf64>, memref<?xi32>, index -> !swage.segment<f64>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f64> -> f64 {
     ^bb0(%value: f64):
+      // expected-error@+1 {{operation 'arith.constant' is unsupported inside a segment region; every result must be f64, got 'f32'}}
+      %one = arith.constant 1.0 : f32
       swage.yield %value : f64
+    }
+    memref.store %sum, %output[%sid] : memref<?xf64>
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @narrow_capture(
+      %values: memref<?xf64> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf64> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf64>, memref<?xi32>, index -> !swage.segment<f64>
+    %narrow = swage.reduce %segment kind<max> : !swage.segment<f64> -> f32 {
+    ^bb0(%value: f64):
+      %narrowed = arith.truncf %value : f64 to f32
+      swage.yield %narrowed : f32
+    }
+    // expected-error@+1 {{segment captures must be f64 results of a swage.reduce in the same function}}
+    %sum = swage.reduce %segment captures(%narrow : f32) kind<sum>
+        : !swage.segment<f64> -> f64 {
+    ^bb0(%value: f64, %n: f32):
+      swage.yield %value : f64
+    }
+    memref.store %sum, %output[%sid] : memref<?xf64>
+    return
+  }
+}
+
+// -----
+
+// The device has an approximate exp2 for f32 and none for f64, so an f64
+// program with one is refused here, on the oracle as well, and never
+// reaches code generation.
+module {
+  func.func @exponential_double(
+      %values: memref<?xf64> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf64> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf64>, memref<?xi32>, index -> !swage.segment<f64>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f64> -> f64 {
+    ^bb0(%value: f64):
+      // expected-error@+1 {{operation 'math.exp2' is admitted for f32 values only: the device has no f64 exp2}}
+      %exponential = math.exp2 %value : f64
+      swage.yield %exponential : f64
     }
     memref.store %sum, %output[%sid] : memref<?xf64>
     return

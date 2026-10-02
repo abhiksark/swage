@@ -110,9 +110,8 @@ scf + arith + memref
 
 ## Private SwagePlan branch
 
-For a capture-free, single-stage f32 sum, max, or min, planning admission
-accepts
-the program without changing the module. Validated host metadata is
+For a capture-free, single-stage sum, max, or min over f32 or f64 values,
+planning admission accepts the program without changing the module. Validated host metadata is
 then classified and materialized into direct IDs or split records. Private
 lowering factories produce the direct, partial, and merge kernels used by the
 qualification runtime. Element programs and single-consumer map chains are
@@ -153,8 +152,8 @@ passes must leave three things exactly as the lowering produced them:
   unrolling does not run either: the persistent queue loops hold
   synchronization that must not be repeated.
 - **Floating-point results.** No pass adds a fast-math flag, reassociates,
-  or contracts a multiply and an add. Each f32 operation stays the
-  round-to-nearest operation of the semantic program, in the same order, so
+  or contracts a multiply and an add. Each floating-point operation stays
+  the round-to-nearest operation of the semantic program, in the same order, so
   results are bit-identical to those of the kernels without the passes.
 - **The launch contract.** Kernel names, parameters, and the `.reqntid`
   launch width are unchanged. No module-level pass runs.

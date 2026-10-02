@@ -39,6 +39,7 @@ from swage import _runtime
 from swage._segmented_qualification import (
     _prepare_persistent_sum,
     _prepare_planned_reduction,
+    _reduction_kernel,
     _semantic_module,
     launch_gpu,
     launch_softmax_gpu,
@@ -149,6 +150,46 @@ def _exact(launch, output, expected):
     return torch.equal(output.cpu(), expected)
 
 
+def _run_static_kernels(results, element, values, offsets, expected):
+    """Launch the static kernel families of one element type.
+
+    Args:
+        results: Receives whether each launch was exact, by name.
+        element: The element type, `"f32"` or `"f64"`.
+        values: The values, of the dtype of `element`.
+        offsets: The int32 offsets.
+        expected: The exact results of each kind, of the dtype of `element`.
+    """
+    output = torch.empty(len(_LENGTHS), dtype=values.dtype, device="cuda")
+    for kind in ("sum", "max", "min"):
+        label = f"{kind} {element}"
+        for block_size in (33, 100, 128, 512):
+            results[f"direct {label} block {block_size}"] = _exact(
+                lambda: launch_gpu(values, offsets, output, kind, block_size),
+                output,
+                expected[kind],
+            )
+        for name, limits in (("default", {}), ("split", _SPLIT_LIMITS)):
+            prepared = _prepare_planned_reduction(
+                values,
+                offsets,
+                output,
+                module_text=_semantic_module(kind, element),
+                kernel_name=_reduction_kernel(kind, element),
+                select_schedule=False,
+                **limits,
+            )
+            results[f"task-id warp {label} {name}"] = _exact(
+                prepared.warp, output, expected[kind]
+            )
+            results[f"task-id cta {label} {name}"] = _exact(
+                prepared.cta, output, expected[kind]
+            )
+            results[f"fused mixed and split {label} {name}"] = _exact(
+                prepared.mixed, output, expected[kind]
+            )
+
+
 def _run_kernels():
     """Launch every segmented kernel family and report exactness by name.
 
@@ -161,36 +202,22 @@ def _run_kernels():
     - persistent: the resident queue kernel at several residencies, with
       the default limits and with the splitting ones.
     - softmax: the multi-phase map-store kernel.
+
+    The direct, task-id, fused, and split families run once per element
+    type. The f64 kernels reduce through shared slots of eight bytes, so
+    their shared accesses are not those of the f32 kernels.
     """
     values, offsets, expected = _case()
     output = torch.empty(len(_LENGTHS), device="cuda")
     results = {}
-    for kind in ("sum", "max", "min"):
-        for block_size in (33, 100, 128, 512):
-            results[f"direct {kind} block {block_size}"] = _exact(
-                lambda: launch_gpu(values, offsets, output, kind, block_size),
-                output,
-                expected[kind],
-            )
-        for name, limits in (("default", {}), ("split", _SPLIT_LIMITS)):
-            prepared = _prepare_planned_reduction(
-                values,
-                offsets,
-                output,
-                module_text=_semantic_module(kind),
-                kernel_name=f"segmented_{kind}",
-                select_schedule=False,
-                **limits,
-            )
-            results[f"task-id warp {kind} {name}"] = _exact(
-                prepared.warp, output, expected[kind]
-            )
-            results[f"task-id cta {kind} {name}"] = _exact(
-                prepared.cta, output, expected[kind]
-            )
-            results[f"fused mixed and split {kind} {name}"] = _exact(
-                prepared.mixed, output, expected[kind]
-            )
+    for element, dtype in (("f32", torch.float32), ("f64", torch.float64)):
+        _run_static_kernels(
+            results,
+            element,
+            values.to(dtype),
+            offsets,
+            {kind: result.to(dtype) for kind, result in expected.items()},
+        )
     for name, limits in (("default", {}), ("split", _SPLIT_LIMITS)):
         for resident_blocks in (1, 2, 5):
             persistent = _prepare_persistent_sum(
@@ -299,7 +326,9 @@ def test_segmented_kernels_have_no_shared_memory_hazard(tmp_path):
     assert completed.returncode == 0, f"{report}\n{completed.stderr}"
     assert counts == (0, 0, 0), report
     results = json.loads(completed.stdout.splitlines()[-1])
-    assert len(results) > 30
+    assert len(results) > 70
+    # Ten static launches of each of three kinds over f64 values.
+    assert sum(" f64" in name for name in results) == 30
     assert all(results.values()), results
 
 

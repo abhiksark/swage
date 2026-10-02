@@ -34,7 +34,15 @@ _RUNTIME_LIBRARY = "libSwageRuntime.so"
 # The `e_machine` values of an ELF header this command can name, as
 # `platform.machine()` spells them on the host that loads the library.
 _ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
-_PROGRAMS = ("sum", "max", "min", "softmax")
+_PROGRAMS = (
+    "sum",
+    "max",
+    "min",
+    "sum_f64",
+    "max_f64",
+    "min_f64",
+    "softmax",
+)
 
 
 def _planning_limits():
@@ -51,8 +59,8 @@ def _program(name):
     """Return the kernel name, module text, and planning of one program.
 
     Args:
-        name: A name of `_PROGRAMS`: a kind of the reduction, or
-            `"softmax"`.
+        name: A name of `_PROGRAMS`: a kind of the reduction, which is
+            its f32 program, the kind followed by `_f64`, or `"softmax"`.
 
     Returns:
         The name of the kernel function, the semantic module text, and
@@ -60,7 +68,13 @@ def _program(name):
     """
     if name == "softmax":
         return "ragged_softmax", _qualification._SOFTMAX_MODULE, False
-    return f"segmented_{name}", _qualification._semantic_module(name), True
+    kind, _, element = name.partition("_")
+    element = element or "f32"
+    return (
+        _qualification._reduction_kernel(kind, element),
+        _qualification._semantic_module(kind, element),
+        True,
+    )
 
 
 def _packaged_runtime():

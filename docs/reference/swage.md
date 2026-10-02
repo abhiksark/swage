@@ -187,8 +187,8 @@ segmented kernel.
 swage.segment_reduce(values, offsets, kind, *, out=None)
 ```
 
-Reduce every segment of `values` to one f32 result on the GPU. Segment `i`
-is `values[offsets[i]:offsets[i + 1]]`. The call validates its tensors,
+Reduce every segment of `values` to one result on the GPU, in the dtype of
+`values`. Segment `i` is `values[offsets[i]:offsets[i + 1]]`. The call validates its tensors,
 copies the offsets to the host to validate and classify them, enqueues its
 kernels on the current PyTorch CUDA stream, and returns without waiting for
 them. Every call repeats the host work, so with offsets that change on every
@@ -198,9 +198,10 @@ the committed record of the private preparation that the call repeats; no
 record times the call itself.
 
 Parameters
-:   `values`: a contiguous rank-one `torch.float32` CUDA tensor on the
-    current device. It must not require grad and must not be a lazy
-    negation or conjugate view.
+:   `values`: a contiguous rank-one `torch.float32` or `torch.float64` CUDA
+    tensor on the current device. It must not require grad and must not be
+    a lazy negation or conjugate view. float64 values run a float64
+    program; nothing is cast.
 :   `offsets`: a contiguous rank-one `torch.int32` or `torch.int64` tensor
     on the same device with one entry more than there are segments. It
     starts at zero, never decreases, and ends at or below the number of
@@ -210,16 +211,18 @@ Parameters
 :   `kind`: `"sum"`, `"max"`, or `"min"`. The sum of an empty segment is
     `0.0`, its maximum is negative infinity, and its minimum is positive
     infinity. A maximum or a minimum over a NaN is NaN, and both are exact.
-    A sum follows IEEE-754 addition, and its rounding depends on the
-    schedule the call selects. No argument pins the schedule.
+    A sum follows IEEE-754 addition in the dtype of `values`, and its
+    rounding depends on the schedule the call selects. No argument pins the
+    schedule.
 :   `out`: an optional result tensor, keyword-only. A contiguous rank-one
-    `torch.float32` tensor on the device of `values` with exactly one
-    element per segment, which shares no memory with `values` or `offsets`,
-    does not require grad, and is not a lazy view. It is never resized.
+    tensor of the dtype of `values`, on the device of `values`, with
+    exactly one element per segment, which shares no memory with `values`
+    or `offsets`, does not require grad, and is not a lazy view. It is
+    never resized.
 
 Returns
-:   `out`, or a new `torch.float32` tensor on the device of `values` when
-    `out` is `None`, with one element per segment. The kernels that write
+:   `out`, or a new tensor of the dtype of `values` on the device of
+    `values` when `out` is `None`, with one element per segment. The kernels that write
     it are enqueued and may not have finished. Submitted tensors are
     retained through `record_stream()`, and the version counter of the
     result is advanced when a kernel is enqueued. `values`, `offsets`, and
@@ -227,7 +230,11 @@ Returns
 
 Raises
 :   `TypeError`: an argument is not a tensor, or a tensor has the wrong
-    dtype, rank, or device type.
+    dtype, rank, or device type. The dtype messages are
+    `values must have dtype torch.float32 or torch.float64`,
+    `offsets must have dtype torch.int32 or torch.int64`, and
+    `out must have the dtype of values, torch.float64` with the dtype of
+    the call.
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
     is a lazy view, requires grad, or is on another device; offsets that
     break the offsets contract; an `out` of the wrong size or one that
@@ -243,8 +250,9 @@ Raises
 
 The checks run in this order: the PyTorch check, `kind`, the tensor type of
 `values` and `offsets` and the grad state of `values`, `out`, the selected
-artifact or the native bindings, `numpy`, CUDA graph capture, and then the
-shared validation of dtype, rank, layout, offsets, and device. All of them
+artifact or the native bindings, `numpy`, CUDA graph capture, the dtype of
+`values`, and then the shared validation of rank, layout, offsets, and
+device. All of them
 precede the first enqueue.
 
 Example
@@ -275,7 +283,9 @@ enqueues one kernel on the current PyTorch CUDA stream, and returns without
 waiting for it.
 
 Parameters
-:   `values`: as for `segment_reduce`.
+:   `values`: as for `segment_reduce`, with one difference. The values are
+    `torch.float32`. float64 values raise a `TypeError`, because the device
+    has no 64-bit `exp2` instruction for the exponential of the kernel.
 :   `offsets`: as for `segment_reduce`, with one difference. The final
     offset must equal the number of values, so that every value belongs to
     a segment.
@@ -290,7 +300,10 @@ Returns
 
 Raises
 :   The exceptions of `segment_reduce`, without the `kind` error. Offsets
-    that end below the number of values raise a `ValueError`.
+    that end below the number of values raise a `ValueError`. float64
+    values raise the `TypeError`
+    `values must have dtype torch.float32; segment_softmax has no float64
+    kernel because the device has no 64-bit exp2`.
 
 Example
 
@@ -342,7 +355,7 @@ The installed package version string.
 
 ```bash
 python -m swage.compile --target TARGET --output DIRECTORY
-    [--program {sum,max,softmax}] [--runtime-library LIBRARY]
+    [--program PROGRAM] [--runtime-library LIBRARY]
 ```
 
 Compile every kernel that `segment_reduce` and `segment_softmax` can launch
@@ -354,8 +367,10 @@ Options
 :   `--target`: the NVPTX processor of the device that will run the
     kernels, such as `sm_86`. Required.
 :   `--output`: the directory to create. It must not exist. Required.
-:   `--program`: a program to include, `sum`, `max`, `min`, or `softmax`.
-    It may be repeated. All four are included without it.
+:   `--program`: a program to include: `sum`, `max`, `min`, `sum_f64`,
+    `max_f64`, `min_f64`, or `softmax`. A kind alone names the reduction
+    over float32 values, and the kind with `_f64` the one over float64
+    values. It may be repeated. All seven are included without it.
 :   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
     of the native build, for a serving host of another machine.
 

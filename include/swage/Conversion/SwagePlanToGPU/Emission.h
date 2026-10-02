@@ -70,8 +70,10 @@ Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments);
 // kind without a case is a compiler diagnostic and never the lowering of
 // another kind.
 
-/// The identity element of a reduction kind.
-Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind);
+/// The identity element of a reduction kind, as a constant of
+/// `elementType`, the floating-point element type of the reduction.
+Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind,
+                  Type elementType);
 /// Combine an accumulator with one element.
 Value combine(OpBuilder &builder, Location loc, ReductionKind kind,
               Value accumulator, Value value);

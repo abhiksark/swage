@@ -37,7 +37,7 @@ It does not deliver these:
   Python loader.
 - Machine code for the GPU. An artifact holds PTX text, and the CUDA driver
   compiles PTX when a module is loaded, as it does on the compiled path.
-- Any other kernel. An artifact holds the three fixed programs of the two
+- Any other kernel. An artifact holds the fixed programs of the two
   calls. The public `launch()` of the fixed vector add is not served from an
   artifact, and neither is any private helper.
 - A lower cost per call. A call from an artifact does the host work of a
@@ -60,8 +60,8 @@ PYTHONPATH=build/python_packages \
 artifact: /srv/swage/sm_86
 format_version: 2
 target: sm_86
-programs: segmented_sum, segmented_max, segmented_min, ragged_softmax
-kernels: 13
+programs: segmented_sum, segmented_max, segmented_min, segmented_sum_f64, segmented_max_f64, segmented_min_f64, ragged_softmax
+kernels: 25
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -72,7 +72,7 @@ The command takes these options:
 |---|---|
 | `--target` | The NVPTX processor to compile for, one of the processors [Runtime and Environment](../reference/runtime-environment.md#launch-lifecycle) lists. Required. |
 | `--output` | The directory to create. It must not exist, and its parent must. Required. |
-| `--program` | `sum`, `max`, `min`, or `softmax`. Repeat it to include several. Without it, all four are included. |
+| `--program` | `sum`, `max`, `min`, `sum_f64`, `max_f64`, `min_f64`, or `softmax`. A kind alone names the reduction over float32 values, and the kind with `_f64` the one over float64 values. Repeat it to include several. Without it, all seven are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one of the native build. See [The runtime library](#the-runtime-library). |
 
 These rules hold for every run:
@@ -106,7 +106,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 13 kernels of segmented_sum, segmented_max, segmented_min, ragged_softmax, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 25 kernels of segmented_sum, segmented_max, segmented_min, segmented_sum_f64, segmented_max_f64, segmented_min_f64, ragged_softmax, written by swage 0.5.1 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -138,12 +138,12 @@ still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
-An artifact for all four programs holds fifteen files:
+An artifact for all seven programs holds twenty-seven files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: four roles for each of `segmented_sum`, `segmented_max`, and `segmented_min`, and one for `ragged_softmax` |
+| `<program>.<role>.ptx` | One kernel: four roles for each of the six reductions, which are `segmented_sum`, `segmented_max`, and `segmented_min` over float32 values and the same three names with `_f64` over float64 values, and one for `ragged_softmax` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
 The roles of a reduction are `cta` for the pure CTA schedule, `mixed` for
@@ -219,7 +219,9 @@ The fields mean the following:
 
 An argument has a role and a C type. A pointer type is a device pointer,
 `const` marks a buffer the kernel only reads, and `int32_t` is a value
-passed by value.
+passed by value. The values, the results, and the partial results of a
+float64 program are `double` buffers; its offsets and task records are
+`int32_t`, as for float32.
 [Task Execution](../internals/task-execution.md) and
 [Split Execution](../internals/split-execution.md) state what each
 argument holds. The manifest describes kernels that only the two calls
@@ -248,7 +250,8 @@ The second group is found at a call, before a kernel is loaded or enqueued:
 
 - The artifact was written for another target than the current device.
 - The artifact does not hold the program of the call, for example an
-  artifact written with `--program sum` under a call for a maximum.
+  artifact written with `--program sum` under a call for a maximum or for a
+  sum of float64 values.
 - The program text of the artifact differs from the one this `swage` runs,
   which happens when the artifact and the package come from different
   source revisions. Write the artifact again with the `swage` that loads
@@ -318,9 +321,11 @@ For a serving host of another machine, such as an AArch64 host with an
   an artifact in a process that cannot import `mlir_swage`, checks that the
   process maps no LLVM or MLIR library, compares the results with
   `torch.segment_reduce`, `torch.softmax`, and float64 references, and
-  requires the bits of the compiled path. A second process, in which
-  `mlir_swage` is importable, runs both calls from the artifact with no
-  LLVM or MLIR library mapped and then launches the fixed vector add.
+  requires the bits of the compiled path. The cases include the three
+  float64 reductions, whose sums are compared with exactly rounded ones. A
+  second process, in which `mlir_swage` is importable, runs both calls from
+  the artifact with no LLVM or MLIR library mapped and then launches the
+  fixed vector add.
 - `tests/python/test_artifact.py` covers selection, every refusal, and the
   trust rule, without the native build.
 - `unittests/RuntimeTest.cpp` and

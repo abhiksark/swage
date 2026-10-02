@@ -102,3 +102,45 @@ module {
 // CHECK: llvm.func @exponential_sum(
 // CHECK: llvm.call @__nv_exp2f(
 // CHECK: llvm.return
+
+// -----
+
+module {
+  func.func @segmented_max_f64(
+      %values: memref<?xf64> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf64> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf64>, memref<?xi32>, index -> !swage.segment<f64>
+    %max = swage.reduce %segment kind<max>
+        : !swage.segment<f64> -> f64 {
+    ^bb0(%value: f64):
+      swage.yield %value : f64
+    }
+    memref.store %max, %output[%sid] : memref<?xf64>
+    return
+  }
+}
+
+// A warp shuffle moves 32 bits, so the NVVM conversion sends an f64 value as
+// its two i32 halves and joins them again. One warp therefore reduces with
+// ten shuffles for its five steps, and the block reduction doubles in the
+// same way. The combine stays an f64 maximum.
+// CHECK-LABEL: gpu.module @segmented_max_f64_module
+// CHECK: llvm.func @segmented_max_f64(
+// CTA-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
+// WARP-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 32, 1, 1>}
+// CHECK: llvm.intr.maximum(%{{.*}}) : (f64, f64) -> f64
+// CHECK: llvm.bitcast %{{.*}} : f64 to i64
+// CHECK: nvvm.shfl.sync {{ *}}bfly %{{.*}} : i32 -> i32
+// CHECK: nvvm.shfl.sync {{ *}}bfly %{{.*}} : i32 -> i32
+// CHECK: llvm.bitcast %{{.*}} : i64 to f64
+// CHECK-NEXT: llvm.intr.maximum(%{{.*}}) : (f64, f64) -> f64
+// CTA: nvvm.barrier0
+// WARP-COUNT-8: nvvm.shfl.sync {{ *}}bfly %{{.*}} : i32 -> i32
+// WARP-NOT: nvvm.shfl.sync
+// WARP-NOT: nvvm.barrier0
+// CHECK: llvm.return

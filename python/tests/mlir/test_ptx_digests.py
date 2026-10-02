@@ -114,18 +114,28 @@ _PERSISTENT_VARIANT = (
 )
 
 # The reduction programs: a kind, an element transform of
-# `reduction_programs.reduction_module`, and the processors each is compiled
-# for. Together they cover every admitted kind, a region with arithmetic, a
-# chain of maps, and `math.exp2`.
+# `reduction_programs.reduction_module`, an element type, and the processors
+# each is compiled for. Together they cover every admitted kind and element
+# type, a region with arithmetic, a chain of maps, and `math.exp2`.
+#
+# The f64 sum and maximum are compiled for every processor although they
+# were added later: the backend selects other instructions for f64, and an
+# f64 maximum is expanded into a compare and selects, so their text is the
+# one most likely to differ between processors.
 _REDUCTIONS = (
-    ("sum", "identity", _PROCESSORS),
-    ("sum", "square", _PROCESSORS),
-    ("sum", "maps", _PROCESSORS),
-    ("sum", "exp2", _PROCESSORS),
-    ("max", "identity", _PROCESSORS),
-    ("max", "maps", _PROCESSORS),
-    ("min", "identity", _NEWER_PROCESSORS),
-    ("min", "maps", _NEWER_PROCESSORS),
+    ("sum", "identity", "f32", _PROCESSORS),
+    ("sum", "square", "f32", _PROCESSORS),
+    ("sum", "maps", "f32", _PROCESSORS),
+    ("sum", "exp2", "f32", _PROCESSORS),
+    ("max", "identity", "f32", _PROCESSORS),
+    ("max", "maps", "f32", _PROCESSORS),
+    ("min", "identity", "f32", _NEWER_PROCESSORS),
+    ("min", "maps", "f32", _NEWER_PROCESSORS),
+    ("sum", "identity", "f64", _PROCESSORS),
+    ("max", "identity", "f64", _PROCESSORS),
+    ("min", "identity", "f64", _NEWER_PROCESSORS),
+    ("sum", "square", "f64", _NEWER_PROCESSORS),
+    ("max", "maps", "f64", _NEWER_PROCESSORS),
 )
 
 
@@ -146,14 +156,15 @@ def _programs():
             _PROCESSORS,
         ),
     }
-    for kind, transform, processors in _REDUCTIONS:
+    for kind, transform, element, processors in _REDUCTIONS:
         variants = _REDUCTION_VARIANTS
-        # The persistent queue admits the identity sum only.
-        if (kind, transform) == ("sum", "identity"):
+        # The persistent queue admits the f32 identity sum only.
+        if (kind, transform, element) == ("sum", "identity", "f32"):
             variants += (_PERSISTENT_VARIANT,)
-        programs[f"{kind}-{transform}"] = (
-            reduction_module(kind, transform),
-            f"segmented_{kind}",
+        suffix = "" if element == "f32" else f"-{element}"
+        programs[f"{kind}-{transform}{suffix}"] = (
+            reduction_module(kind, transform, element),
+            qualification._reduction_kernel(kind, element),
             variants,
             processors,
         )

@@ -22,10 +22,19 @@
 
 namespace mlir::swage {
 
-bool isAdmittedElementType(Type type) { return type.isF32(); }
+bool isAdmittedElementType(Type type) { return type.isF32() || type.isF64(); }
 bool isAdmittedIndexType(Type type) { return type.isSignlessInteger(32); }
 
 namespace {
+
+/// The spelling of a type inside a sentence of a diagnostic, without the
+/// quotes a diagnostic puts around a type it is given.
+std::string spelled(Type type) {
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  stream << type;
+  return text;
+}
 
 bool isRankOneMemRef(Type type, Type elementType) {
   auto memref = dyn_cast<MemRefType>(type);
@@ -64,23 +73,27 @@ using RegionOperations =
                  arith::DivFOp, arith::MaximumFOp, arith::MinimumFOp,
                  math::Exp2Op>;
 
-/// Verify a Swage region: an f32 element argument followed by one f32
-/// argument per capture, admitted operations only, and an f32 yield.
+/// Verify a Swage region of a program over `element` values: an element
+/// argument followed by one argument of the same type per capture, admitted
+/// operations only, and a yield of that type. A program has one element
+/// type, the one of its values, so a region of another type is refused.
 LogicalResult verifyRegion(Operation *owner, Region &region,
-                           unsigned captureCount) {
+                           unsigned captureCount, Type element) {
   // Malformed IR that bypassed the dialect verifier must fail here rather
   // than reach the unchecked dereferences below.
   if (!region.hasOneBlock())
     return owner->emitError("segment region requires exactly one block");
   Block &body = region.front();
   if (!body.mightHaveTerminator())
-    return owner->emitError("segment region must yield an f32 value");
+    return owner->emitError()
+           << "segment region must yield an " << spelled(element) << " value";
   if (body.getNumArguments() != 1 + captureCount ||
       llvm::any_of(body.getArgumentTypes(),
-                   [](Type type) { return !type.isF32(); }))
-    return owner->emitError(
-        "segment region requires an f32 element argument followed by f32 "
-        "captures");
+                   [&](Type type) { return type != element; }))
+    return owner->emitError()
+           << "segment region requires an " << spelled(element)
+           << " element argument followed by " << spelled(element)
+           << " captures";
   for (Operation &operation : body.without_terminator()) {
     if (!RegionOperations::contains(operation))
       return operation.emitError()
@@ -88,16 +101,25 @@ LogicalResult verifyRegion(Operation *owner, Region &region,
              << "' is unsupported inside a segment region; a region accepts "
              << RegionOperations::describe();
     for (Type type : operation.getResultTypes())
-      if (!type.isF32())
+      if (type != element)
         return operation.emitError()
                << "operation '" << operation.getName()
                << "' is unsupported inside a segment region; every result "
-                  "must be f32, got "
-               << type;
+                  "must be "
+               << spelled(element) << ", got " << type;
+    // The device has an approximate exp2 for f32 and none for f64, and the
+    // backend aborts on one it cannot select. The oracle follows the same
+    // rule, so it never runs a program that no kernel can.
+    if (isa<math::Exp2Op>(operation) && !element.isF32())
+      return operation.emitError()
+             << "operation 'math.exp2' is admitted for f32 values only: the "
+                "device has no "
+             << spelled(element) << " exp2";
   }
   auto yield = dyn_cast<YieldOp>(body.getTerminator());
-  if (!yield || !yield.getValue().getType().isF32())
-    return owner->emitError("segment region must yield an f32 value");
+  if (!yield || yield.getValue().getType() != element)
+    return owner->emitError()
+           << "segment region must yield an " << spelled(element) << " value";
   return success();
 }
 
@@ -242,8 +264,8 @@ LogicalResult readSegmentABI(func::FuncOp function, SegmentABI &abi) {
   if (!isSegmentBuffer(valuesType) ||
       !isAdmittedElementType(cast<MemRefType>(valuesType).getElementType()))
     return function.emitError()
-           << attribute << "<values> requires a rank-one f32 memref" << shape
-           << valuesType;
+           << attribute << "<values> requires a rank-one f32 or f64 memref"
+           << shape << valuesType;
   Type offsetsType = type.getInput(abi.offsets);
   if (!isSegmentBuffer(offsetsType) ||
       !isAdmittedIndexType(cast<MemRefType>(offsetsType).getElementType()))
@@ -353,40 +375,45 @@ LogicalResult verifyMapConsumers(SegmentProgramAnalysis &analysis) {
   return success();
 }
 
-LogicalResult verifyOperationCaptures(Operation *operation,
-                                      ValueRange captures) {
+LogicalResult verifyOperationCaptures(Operation *operation, ValueRange captures,
+                                      Type element) {
   for (Value capture : captures)
-    if (!capture.getDefiningOp<ReduceOp>() || !capture.getType().isF32())
-      return operation->emitError(
-          "segment captures must be f32 results of a swage.reduce in the "
-          "same function");
+    if (!capture.getDefiningOp<ReduceOp>() || capture.getType() != element)
+      return operation->emitError()
+             << "segment captures must be " << spelled(element)
+             << " results of a swage.reduce in the same function";
   return success();
 }
 
 LogicalResult verifySegmentCaptures(SegmentProgramAnalysis &analysis) {
+  Type element = analysis.element;
   for (MapOp map : analysis.maps)
-    if (failed(verifyOperationCaptures(map, map.getCaptures())))
+    if (failed(verifyOperationCaptures(map, map.getCaptures(), element)))
       return failure();
   for (ReduceOp reduction : analysis.reductions)
-    if (failed(verifyOperationCaptures(reduction, reduction.getCaptures())))
+    if (failed(verifyOperationCaptures(reduction, reduction.getCaptures(),
+                                       element)))
       return failure();
   for (MapStoreOp mapStore : analysis.mapStores)
-    if (failed(verifyOperationCaptures(mapStore, mapStore.getCaptures())))
+    if (failed(
+            verifyOperationCaptures(mapStore, mapStore.getCaptures(), element)))
       return failure();
   return success();
 }
 
 LogicalResult verifySegmentRegions(SegmentProgramAnalysis &analysis) {
+  Type element = analysis.element;
   for (MapOp map : analysis.maps)
-    if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size())))
+    if (failed(verifyRegion(map, map.getBody(), map.getCaptures().size(),
+                            element)))
       return failure();
   for (ReduceOp reduction : analysis.reductions)
     if (failed(verifyRegion(reduction, reduction.getBody(),
-                            reduction.getCaptures().size())))
+                            reduction.getCaptures().size(), element)))
       return failure();
   for (MapStoreOp mapStore : analysis.mapStores)
     if (failed(verifyRegion(mapStore, mapStore.getBody(),
-                            mapStore.getCaptures().size())))
+                            mapStore.getCaptures().size(), element)))
       return failure();
   return success();
 }
@@ -436,8 +463,12 @@ LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis) {
 /// Analyze one canonical segment program without mutating it.
 LogicalResult analyzeSegmentProgram(func::FuncOp function,
                                     SegmentProgramAnalysis &analysis) {
-  if (failed(verifySegmentedFunctionShape(function, analysis.abi)) ||
-      failed(collectSegmentOperations(function, analysis)) ||
+  if (failed(verifySegmentedFunctionShape(function, analysis.abi)))
+    return failure();
+  analysis.element =
+      cast<MemRefType>(function.getArgument(analysis.abi.values).getType())
+          .getElementType();
+  if (failed(collectSegmentOperations(function, analysis)) ||
       failed(verifySegmentRoot(function, analysis)) ||
       failed(verifyMapConsumers(analysis)) ||
       failed(verifyConsumerPrograms(analysis)))
@@ -480,6 +511,10 @@ LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
   ReduceOp reduction = analysis.reductions.front();
   if (reduction.getKind() != ReductionKind::Sum)
     return reduction.emitError("persistent execution requires kind<sum>");
+  if (!analysis.element.isF32())
+    return reduction.emitError()
+           << "persistent execution requires f32 values, got "
+           << spelled(analysis.element);
   Block &body = reduction.getBody().front();
   auto yield = cast<YieldOp>(body.getTerminator());
   if (!body.without_terminator().empty() ||

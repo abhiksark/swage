@@ -64,15 +64,6 @@ _TASK_IDS = ("task_ids", "const int32_t*")
 _VALUE_COUNT = ("value_count", "int32_t")
 _SEGMENT_COUNT = ("segment_count", "int32_t")
 _PARTIAL_COUNT = ("partial_count", "int32_t")
-_TASK_ARGUMENTS = (
-    _VALUES,
-    _OFFSETS,
-    _OUTPUT,
-    _TASK_IDS,
-    _VALUE_COUNT,
-    ("task_count", "int32_t"),
-    _SEGMENT_COUNT,
-)
 _SEGMENTED = "_compile_segmented_reduction_ptx"
 # The threads per block of the kernels below, by the field of the target
 # description that the runner launches each with.
@@ -82,65 +73,86 @@ _BLOCK_WIDTHS = {
     "cta_block_threads": _CTA_BLOCK,
     "split_block_threads": _SPLIT_BLOCK,
 }
-# The kernels `segment_reduce` can request for one kind. The pure warp
-# kernel of the private prepared path is not among them: no public call
-# launches it.
-_REDUCTION_KERNELS = (
-    _Kernel(
-        "cta",
-        _SEGMENTED,
-        (("block_size", _CTA_BLOCK), ("use_task_ids", True)),
-        _CTA_BLOCK,
-        "",
-        _TASK_ARGUMENTS,
-    ),
-    _Kernel(
-        "mixed",
-        "_compile_fused_segmented_reduction_ptx",
-        (),
-        _CTA_BLOCK,
-        "",
-        (
-            _VALUES,
-            _OFFSETS,
-            _OUTPUT,
-            _TASK_IDS,
-            _VALUE_COUNT,
-            ("warp_task_count", "int32_t"),
-            ("cta_task_count", "int32_t"),
-            _SEGMENT_COUNT,
+def _reduction_kernels(scalar):
+    """Return the kernels `segment_reduce` can request for one program.
+
+    The pure warp kernel of the private prepared path is not among them: no
+    public call launches it.
+
+    Args:
+        scalar: The C type of one element of the values, the scratch, and
+            the output: `"float"` for an f32 program, `"double"` for f64.
+    """
+    values = ("values", f"const {scalar}*")
+    output = ("output", f"{scalar}*")
+    return (
+        _Kernel(
+            "cta",
+            _SEGMENTED,
+            (("block_size", _CTA_BLOCK), ("use_task_ids", True)),
+            _CTA_BLOCK,
+            "",
+            (
+                values,
+                _OFFSETS,
+                output,
+                _TASK_IDS,
+                _VALUE_COUNT,
+                ("task_count", "int32_t"),
+                _SEGMENT_COUNT,
+            ),
         ),
-    ),
-    _Kernel(
-        "partial",
-        "_compile_split_partial_reduction_ptx",
-        (),
-        _SPLIT_BLOCK,
-        "__partial",
-        (
-            _VALUES,
-            ("partial_ranges", "const int32_t*"),
-            ("scratch", "float*"),
-            _VALUE_COUNT,
-            _PARTIAL_COUNT,
+        _Kernel(
+            "mixed",
+            "_compile_fused_segmented_reduction_ptx",
+            (),
+            _CTA_BLOCK,
+            "",
+            (
+                values,
+                _OFFSETS,
+                output,
+                _TASK_IDS,
+                _VALUE_COUNT,
+                ("warp_task_count", "int32_t"),
+                ("cta_task_count", "int32_t"),
+                _SEGMENT_COUNT,
+            ),
         ),
-    ),
-    _Kernel(
-        "merge",
-        "_compile_split_merge_reduction_ptx",
-        (),
-        _SPLIT_BLOCK,
-        "__merge",
-        (
-            ("scratch", "const float*"),
-            _OUTPUT,
-            ("merge_records", "const int32_t*"),
-            _PARTIAL_COUNT,
-            ("merge_count", "int32_t"),
-            _SEGMENT_COUNT,
+        _Kernel(
+            "partial",
+            "_compile_split_partial_reduction_ptx",
+            (),
+            _SPLIT_BLOCK,
+            "__partial",
+            (
+                values,
+                ("partial_ranges", "const int32_t*"),
+                ("scratch", f"{scalar}*"),
+                _VALUE_COUNT,
+                _PARTIAL_COUNT,
+            ),
         ),
-    ),
-)
+        _Kernel(
+            "merge",
+            "_compile_split_merge_reduction_ptx",
+            (),
+            _SPLIT_BLOCK,
+            "__merge",
+            (
+                ("scratch", f"const {scalar}*"),
+                output,
+                ("merge_records", "const int32_t*"),
+                _PARTIAL_COUNT,
+                ("merge_count", "int32_t"),
+                _SEGMENT_COUNT,
+            ),
+        ),
+    )
+
+
+_REDUCTION_KERNELS = _reduction_kernels("float")
+_REDUCTION_KERNELS_F64 = _reduction_kernels("double")
 # The one kernel `segment_softmax` launches. Its value count is the length
 # of the shorter of the values and output buffers.
 _SOFTMAX_KERNELS = (
@@ -160,6 +172,9 @@ _PROGRAMS = {
     "segmented_sum": _REDUCTION_KERNELS,
     "segmented_max": _REDUCTION_KERNELS,
     "segmented_min": _REDUCTION_KERNELS,
+    "segmented_sum_f64": _REDUCTION_KERNELS_F64,
+    "segmented_max_f64": _REDUCTION_KERNELS_F64,
+    "segmented_min_f64": _REDUCTION_KERNELS_F64,
     "ragged_softmax": _SOFTMAX_KERNELS,
 }
 

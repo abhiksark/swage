@@ -49,11 +49,14 @@ struct SegmentProgramAnalysis {
   SmallVector<MapStoreOp> mapStores;
   SmallVector<func::ReturnOp> returns;
   ReduceOp storedReduction;
+  /// The element type of the values. Every region, capture, and result of
+  /// the program has it.
+  Type element;
 };
 
-/// The element types the lowerings admit for the values and the output, and
-/// the index word types they admit for the offsets and the counts. Each
-/// table has one row today.
+/// The element types the lowerings admit for the values and the output, f32
+/// and f64, and the index word types they admit for the offsets and the
+/// counts, i32.
 bool isAdmittedElementType(Type type);
 bool isAdmittedIndexType(Type type);
 
@@ -75,8 +78,9 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
                                     SegmentProgramAnalysis &analysis);
 
 /// Check the element programs of the maps, reductions, and stores listed in
-/// `analysis`: captures are f32 results of reductions, kinds are ones a
-/// lowering implements, and regions hold admitted f32 operations only.
+/// `analysis`, against `analysis.element`: captures are results of
+/// reductions of that type, and regions hold admitted operations of that
+/// type only. `math.exp2` is admitted for f32 alone.
 LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis);
 
 /// Admit a single reduction whose element program needs no other stage.
@@ -100,7 +104,8 @@ std::optional<int64_t> estimateElementWork(Operation *root);
 /// is emptied.
 void fuseAdmittedMaps(SegmentProgramAnalysis &analysis);
 
-/// Persistent partials and merges still implement only identity sum.
+/// Persistent partials and merges still implement only the identity sum of
+/// f32 values.
 LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis);
 
 } // namespace mlir::swage

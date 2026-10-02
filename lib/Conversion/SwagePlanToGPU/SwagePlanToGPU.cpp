@@ -940,6 +940,11 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
              << " = " << threads;
     Type values = persistent.getValues().getType();
     Type scratch = persistent.getScratch().getType();
+    // The queue kernel has run with f32 values only.
+    if (!cast<MemRefType>(values).getElementType().isF32())
+      return persistent.emitError()
+             << "a persistent task operation takes f32 values, got "
+             << cast<MemRefType>(values).getElementType();
     Type offsets = persistent.getOffsets().getType();
     const std::pair<Region *, Type> regions[] = {
         {&persistent.getCta(), values},

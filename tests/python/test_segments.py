@@ -76,13 +76,23 @@ class _Tensor:
         raise AssertionError("a tensor was retained without a launch")
 
 
+class _Dtype:
+    """A stand-in for one tensor dtype, which prints as PyTorch prints it."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __repr__(self):
+        return self._name
+
+
 def _fake_torch(monkeypatch, version="2.6.0"):
     """Install a PyTorch stand-in that passes the launch requirements."""
     torch = types.ModuleType("torch")
     torch.__version__ = version
-    torch.float32 = object()
-    torch.float64 = object()
-    torch.int32 = object()
+    torch.float32 = _Dtype("torch.float32")
+    torch.float64 = _Dtype("torch.float64")
+    torch.int32 = _Dtype("torch.int32")
     torch.Tensor = _Tensor
     torch.autograd = types.SimpleNamespace(
         graph=types.SimpleNamespace(increment_version=lambda tensor: None)
@@ -352,7 +362,11 @@ def _wrong_out(torch, case, count):
     ("case", "error", "message"),
     [
         ("list", TypeError, "out must be a torch.Tensor or None$"),
-        ("dtype", TypeError, "out must have dtype torch.float32$"),
+        (
+            "dtype",
+            TypeError,
+            "out must have the dtype of values, torch.float32$",
+        ),
         ("rank", TypeError, "out must have rank one$"),
         ("longer", ValueError, "out must have exactly [46] elements, one per"),
         ("shorter", ValueError, "out must have exactly [46] elements, one per"),
@@ -396,6 +410,23 @@ def test_an_out_that_ends_where_an_input_begins_does_not_overlap(
         # The call passes the `out` checks and stops at the missing build.
         with pytest.raises(RuntimeError, match="requires the build-tree"):
             _call(function, values, offsets, out=out)
+
+
+def test_a_float64_reduction_takes_a_float64_out(monkeypatch):
+    """Require the dtype of the values, which a reduction never casts."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, dtype=torch.float64, pointer=0x1000)
+    narrow = _Tensor(torch, 4, pointer=0x3000)
+    wide = _Tensor(torch, 4, dtype=torch.float64, pointer=0x3000)
+
+    with pytest.raises(
+        TypeError, match="^out must have the dtype of values, torch.float64$"
+    ):
+        swage.segment_reduce(values, offsets, "sum", out=narrow)
+    # A float64 out passes the `out` checks and stops at the missing build.
+    with pytest.raises(RuntimeError, match="requires the build-tree"):
+        swage.segment_reduce(values, offsets, "sum", out=wide)
 
 
 def test_out_size_names_what_one_element_belongs_to(monkeypatch):

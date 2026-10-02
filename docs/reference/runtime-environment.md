@@ -293,11 +293,15 @@ A call makes its checks in a fixed order, all before the first enqueue:
    it stops here with a `RuntimeError` that names `numpy` and the
    installation page.
 5. CUDA graph capture.
-6. The shared validation of dtype, rank, layout, lazy views, the offsets on
+6. The dtype of `values` for `segment_reduce`, which takes float32 and
+   float64, and float64 values for `segment_softmax`, which refuses them
+   with a reason of its own.
+7. The shared validation of dtype, rank, layout, lazy views, the offsets on
    a host copy, and the device.
 
-A result that the call allocates is allocated before step 6, so a call that
-fails there has allocated and released one tensor.
+A result that the call allocates is allocated before step 7, in the dtype
+of `values`, so a call that fails there has allocated and released one
+tensor.
 
 Preparation and launch follow these rules:
 
@@ -313,6 +317,9 @@ Preparation and launch follow these rules:
   automatic schedule selection. For the same batch it returns the bits of
   the prepared private `mixed` launch. `segment_softmax` runs the one-CTA
   path with a 128-thread block. Neither call takes a scheduling argument.
+- `segment_reduce` runs the program of the dtype of `values`: float64
+  values have kernels of their own, compiled and loaded like the float32
+  ones, and nothing is cast. The schedule does not depend on the dtype.
 - `segment_reduce` prepares nothing it does not launch. A batch compiles
   and loads the fused kernel when it has segments of up to 4096 elements
   and the partial and merge kernels when it has longer ones. A batch that

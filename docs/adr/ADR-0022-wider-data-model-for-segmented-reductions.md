@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; steps 1 and 2 of the migration sequence are implemented
+- Status: accepted; steps 1 to 3 of the migration sequence are implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end
@@ -120,7 +120,9 @@ float64 is admitted for the four reductions and refused for
 - The pinned NVPTX backend has no f64 `exp2`: `llc` on `llvm.exp2.f64`
   aborts. Admission therefore refuses `math.exp2` on any type but f32, so
   that a program the GPU cannot compile is refused with a diagnostic on
-  both backends.
+  both backends. The replacement of libdevice calls in the code generation
+  C API stays f32 only: extended to `__nv_exp2`, it would hand the backend
+  the intrinsic it aborts on.
 - The CPU oracle transport becomes typed: f64 values and results travel as
   64-bit patterns.
 - A float64 reference no longer suffices for an f64 sum. The tests use an
@@ -284,7 +286,65 @@ Step 2. int64 offsets. Python only. Implemented.
   that times the call on int64 offsets. No record holds it.
 - No kernel, no digest, and no artifact changes.
 
-Step 3. float64 reductions, rank one. Not implemented.
+Step 3. float64 reductions, rank one. Implemented.
+
+- The admission tables admit f32 and f64. A function has one element type,
+  the one of its values. The output, every region value, and every capture
+  must have it, so a function that mixes the two is refused, and so is
+  f16. `math.exp2` is admitted in an f32 program only, and the persistent
+  schedule is refused for f64 by the planner and by the conversion.
+- `identityFor` takes the element type, and `unittests/EmissionTest.cpp`
+  holds the identity of each kind to each element type.
+- `test/Conversion/SwageToPlan/segmented-f64.mlir` and the files of the
+  same name under `SwageToCPU`, with a runner file, and `SwageToGPU` pin
+  the plan, the oracle, and the kernel schedules.
+  `test/Conversion/SwageToGPU/nvvm-pipeline.mlir` holds an f64 maximum
+  through the NVVM conversion.
+- `swage.segment_reduce` takes float64 values and returns float64, and
+  `out` has the dtype of the values. `swage.segment_softmax` refuses
+  float64 values and states the reason. The private runner reads the
+  element type of a program from the declaration of its values and requires
+  values, output, and scratch of that type.
+- The CPU oracle transport is typed: an f64 result travels as a 64-bit
+  pattern through `printMemrefI64`.
+- The PTX scan of `python/tests/mlir/test_segmented_numerics.py` takes the
+  element type of the kernel and reports an instruction of the other width.
+  It now also sees instructions with a mixed-case modifier, such as
+  `max.NaN.f32`, which it had skipped.
+- `python/tests/mlir/test_segmented_codegen.py` holds every compile
+  function to the diagnostic for an f64 `math.exp2`.
+- The digest matrix gains 210 pairs: the f64 identity sum and the f64
+  identity maximum on every admitted processor, and the f64 identity
+  minimum, square sum, and map-chain maximum on `sm_80` and `sm_86`.
+- The artifact holds three more programs, `segmented_sum_f64`,
+  `segmented_max_f64`, and `segmented_min_f64`, in format version 2.
+
+What the first runs on a device showed, on the RTX A6000 (`sm_86`):
+
+- An f64 sum stays within `k * eps64 * sum(|x|)` of the exactly rounded
+  sum, with the `k` of the f32 trees, on every static schedule and on the
+  one-CTA path. The largest error the committed test measures is
+  `0.35 * eps64 * sum(|x|)`. The bits differ between the schedules and
+  repeat between launches.
+- A maximum and a minimum equal the reference bit for bit, on values that
+  differ only below f32 precision, and on NaN, both infinities, signed
+  zeros, and subnormals down to `2**-1074`.
+- The CPU oracle returns the left-to-right float64 sum bit for bit.
+- The PTX is as expected at the decision: ten shuffles for a warp tree,
+  forty shuffles and two barriers for a block reduction, a 256-byte shared
+  buffer, `add.rn.f64`, and no f32 instruction in an f64 kernel.
+- One detail differs from the estimate. The backend expands an f64 maximum
+  or minimum into `max.f64` or `min.f64`, `setp.nan.f64`, `setp.eq.f64`,
+  and four `selp.f64`, where three selects were expected. The result is the
+  IEEE-754 maximum or minimum, as the exact tests show.
+- NVIDIA Compute Sanitizer reports no shared-memory hazard in the f64
+  kernels.
+- With the admission rule removed, an f64 `math.exp2` does not reach the
+  backend through the code generation C API: its libdevice check refuses
+  the unresolved `__nv_exp2`. `llc` on the intrinsic does abort. The rule
+  gives the refusal earlier, by name, and on both backends.
+
+Nothing the device showed contradicts the decision.
 
 Step 4. `mean`, both dtypes, rank one. Not implemented.
 
@@ -297,7 +357,7 @@ Step 6. Rank-two softmax, f32. Not implemented.
 | Risk | Detected by |
 |---|---|
 | A new kind falls into the branch of another kind | The switches without a default; `unittests/EmissionTest.cpp`; the `segmented-min.mlir` files; exact comparison with PyTorch |
-| An f32 identity in an f64 kernel | The f64 lit files; the verifier after the conversion |
+| An f32 identity in an f64 kernel | The f64 lit files; the verifier after the conversion; `unittests/EmissionTest.cpp`; the typed PTX scan; exact f64 results on values that are not f32 values |
 | f64 `exp2` reaches NVPTX and aborts the process | The admission rule; a negative lit case; a compile-only Python test |
 | A mean of partial means, or a wrong divisor | A plan check on `arith.divf`; a bitwise `sum / length` test on split lengths |
 | The merge reads a range record out of bounds | A stray-record case with canaries |
@@ -306,7 +366,7 @@ Step 6. Rank-two softmax, f32. Not implemented.
 | A column reads a neighbor or writes past `[S, D]` | Position-dependent values; canaries; bounds lit |
 | The PTX scan passes arithmetic of the wrong type | The typed arithmetic scan |
 | An existing kernel's text moves | The 552 digest pairs |
-| f64 behaves differently on the device | The GPU tier, from step 3 |
+| f64 behaves differently on the device | The GPU tier, from step 3: the `eps64` bound against exactly rounded sums, the exact extremes, and the special values on every schedule |
 
 ## Scope
 

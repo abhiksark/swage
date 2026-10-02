@@ -50,14 +50,27 @@ _needs_cuda = pytest.mark.skipif(
 )
 _SENTINEL = -5.0
 _CHILD = pathlib.Path(__file__).with_name("artifact_child.py")
+# The kinds of the reduction. Each is a program per element type.
+_KINDS = ("sum", "max", "min")
 _PROGRAMS = {
-    "segmented_sum": qualification._semantic_module("sum"),
-    "segmented_max": qualification._semantic_module("max"),
-    "segmented_min": qualification._semantic_module("min"),
+    **{
+        qualification._reduction_kernel(kind, element): (
+            qualification._semantic_module(kind, element)
+        )
+        for element in ("f32", "f64")
+        for kind in _KINDS
+    },
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
-# The kinds of the reduction, each a program of its own.
-_KINDS = ("sum", "max", "min")
+_PROGRAM_NAMES = (
+    "segmented_sum",
+    "segmented_max",
+    "segmented_min",
+    "segmented_sum_f64",
+    "segmented_max_f64",
+    "segmented_min_f64",
+    "ragged_softmax",
+)
 
 
 def _run(*arguments):
@@ -116,7 +129,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write thirteen kernels, the library, and what describes them."""
+    """Write twenty-five kernels, the library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -126,7 +139,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 13
+    assert len(_kernel_ids()) == 25
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -199,28 +212,17 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
 
 def test_the_manifest_identifies_each_program(manifest):
     """Record the text digest and the planning admission of each program."""
+    assert tuple(_PROGRAMS) == _PROGRAM_NAMES
+    reductions = _PROGRAM_NAMES[:-1]
     assert manifest["programs"] == [
-        {
-            "name": "segmented_sum",
-            "sha256": hashlib.sha256(
-                _PROGRAMS["segmented_sum"].encode()
-            ).hexdigest(),
-            "small_element_program": True,
-        },
-        {
-            "name": "segmented_max",
-            "sha256": hashlib.sha256(
-                _PROGRAMS["segmented_max"].encode()
-            ).hexdigest(),
-            "small_element_program": True,
-        },
-        {
-            "name": "segmented_min",
-            "sha256": hashlib.sha256(
-                _PROGRAMS["segmented_min"].encode()
-            ).hexdigest(),
-            "small_element_program": True,
-        },
+        *[
+            {
+                "name": name,
+                "sha256": hashlib.sha256(_PROGRAMS[name].encode()).hexdigest(),
+                "small_element_program": True,
+            }
+            for name in reductions
+        ],
         {
             "name": "ragged_softmax",
             "sha256": hashlib.sha256(
@@ -228,7 +230,7 @@ def test_the_manifest_identifies_each_program(manifest):
             ).hexdigest(),
         },
     ]
-    for name in ("segmented_sum", "segmented_max", "segmented_min"):
+    for name in reductions:
         assert (
             qualification._admit_program(_PROGRAMS[name], name, 32, 4096)
             is True
@@ -308,12 +310,17 @@ def test_the_manifest_describes_each_kernel_as_its_ptx_declares_it(
     assert f".reqntid {entry['block_size']}, 1, 1" in ptx
     assert len(re.findall(r"\.entry ", ptx)) == 1
     assert parameters == stated
-    assert {argument["type"] for argument in entry["arguments"]} <= {
-        "const float*",
-        "float*",
+    # The values, the output, and the partial results of an f64 program
+    # are doubles, and no kernel takes both widths.
+    scalar = "double" if program.endswith("_f64") else "float"
+    types = {argument["type"] for argument in entry["arguments"]}
+    assert types <= {
+        f"const {scalar}*",
+        f"{scalar}*",
         "const int32_t*",
         "int32_t",
     }
+    assert {f"const {scalar}*", f"{scalar}*"} <= types
     roles = [argument["role"] for argument in entry["arguments"]]
     assert len(set(roles)) == len(roles)
 
@@ -345,9 +352,8 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         f"artifact: {output}",
         "format_version: 2",
         "target: sm_86",
-        "programs: segmented_sum, segmented_max, segmented_min, "
-        "ragged_softmax",
-        "kernels: 13",
+        "programs: " + ", ".join(_PROGRAM_NAMES),
+        "kernels: 25",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -653,12 +659,7 @@ def test_a_written_artifact_loads(selected, written, manifest):
     assert selected.directory == written
     assert selected.target == "sm_87"
     assert selected.manifest == manifest
-    assert selected.programs == (
-        "segmented_sum",
-        "segmented_max",
-        "segmented_min",
-        "ragged_softmax",
-    )
+    assert selected.programs == _PROGRAM_NAMES
 
 
 def test_a_written_artifact_survives_a_copy_that_keeps_its_modes(
@@ -767,6 +768,16 @@ def _cases():
     for kind in ("sum", "softmax"):
         _, values, offsets = cases[f"{kind}/uniform"]
         cases[f"{kind}/int64-offsets"] = (kind, values, offsets.long())
+    # float64 values, which run the f64 program of each kind: the fused,
+    # partial, and merge kernels on the power-law batch and the CTA kernel
+    # on the direct-CTA batch.
+    lengths = _distributions.generate_lengths("power-law", 2048, 0)
+    generator = torch.Generator().manual_seed(2)
+    values, offsets = _host_case(lengths, generator, torch.float64)
+    wide, wide_offsets = _host_case(selected.tolist(), generator, torch.float64)
+    for kind in _KINDS:
+        cases[f"{kind}/float64"] = (kind, values, offsets)
+        cases[f"{kind}/float64-direct-cta"] = (kind, wide, wide_offsets)
     return cases
 
 
@@ -783,12 +794,14 @@ def _case_names():
             f"{kind}/one-long",
             f"{kind}/no-segment",
         ]
-    return [
-        *names,
+    names += [
         "softmax/one-long",
         "sum/int64-offsets",
         "softmax/int64-offsets",
     ]
+    for kind in _KINDS:
+        names += [f"{kind}/float64", f"{kind}/float64-direct-cta"]
+    return names
 
 
 @pytest.fixture(scope="module")
@@ -885,7 +898,12 @@ def child_with_bindings(device_artifact, tmp_path_factory):
         root / "site" / "swage",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
-    wanted = ("sum/power-law", "max/uniform", "softmax/many-tiny")
+    wanted = (
+        "sum/power-law",
+        "max/uniform",
+        "softmax/many-tiny",
+        "sum/float64",
+    )
     cases = {
         name: case
         for name, case in _cases().items()
@@ -929,8 +947,8 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
     cases, report = child_with_bindings
 
     assert sorted(report["results"]) == sorted(cases)
-    # Three named cases and the direct-CTA batch of every kind.
-    assert len(cases) == 3 + len(_KINDS)
+    # Four named cases and the direct-CTA batch of every kind.
+    assert len(cases) == 4 + len(_KINDS)
     bindings = pathlib.Path(ir.__file__).absolute().parents[1]
     assert str(bindings) in report["path"]
     assert report["modules"] == []

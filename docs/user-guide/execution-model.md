@@ -52,10 +52,11 @@ defaults, derive:
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
 The thresholds are planning limits that the private helpers can change
-and the public call cannot. Static work supports capture-free f32 sum,
-max, and min programs and their fused element expressions, of which the
-public call runs the three identity programs. The
-experimental private resident kernel retains identity-sum admission and
+and the public call cannot. Static work supports capture-free sum, max,
+and min programs over f32 or f64 values and their fused element
+expressions, of which the public call runs the three identity programs in
+both element types. The
+experimental private resident kernel retains f32 identity-sum admission and
 consumes these descriptors through device counters, but its clean
 A6000 run failed the predeclared performance gate. Packing several short
 segments in the static path,
@@ -95,8 +96,9 @@ the order in which they are combined, because `swage.reduce` leaves that
 order open. The admitted kinds respond differently:
 
 - A maximum and a minimum are the same in every order.
-- An f32 sum is not. Addition in f32 is not associative, so two schedules
-  can return different sums of one segment, within rounding error.
+- A floating-point sum is not. Floating-point addition is not associative,
+  so two schedules can return different sums of one segment, within
+  rounding error. That holds for f32 and for f64 values.
 
 [Sum rounding](../internals/segmented-reductions.md#sum-rounding) is the one
 place that states the reduction trees, the cases in which the schedule of a

@@ -30,6 +30,9 @@ PROGRAM_TEXTS = {
     "segmented_sum": qualification._semantic_module("sum"),
     "segmented_max": qualification._semantic_module("max"),
     "segmented_min": qualification._semantic_module("min"),
+    "segmented_sum_f64": qualification._semantic_module("sum", "f64"),
+    "segmented_max_f64": qualification._semantic_module("max", "f64"),
+    "segmented_min_f64": qualification._semantic_module("min", "f64"),
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
@@ -306,6 +309,19 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         )
     ]
 
+    def typed(kernels):
+        """Return the same kernels for f64 values, scratch, and output."""
+        return [
+            (
+                *kernel[:5],
+                tuple(
+                    (role, kind.replace("float", "double"))
+                    for role, kind in kernel[5]
+                ),
+            )
+            for kernel in kernels
+        ]
+
     assert {
         name: [tuple(kernel) for kernel in kernels]
         for name, kernels in _artifact._PROGRAMS.items()
@@ -313,8 +329,17 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         "segmented_sum": reduction,
         "segmented_max": reduction,
         "segmented_min": reduction,
+        "segmented_sum_f64": typed(reduction),
+        "segmented_max_f64": typed(reduction),
+        "segmented_min_f64": typed(reduction),
         "ragged_softmax": softmax,
     }
+    # An f64 program differs from its f32 program in the element pointers
+    # and in nothing else.
+    assert typed(reduction) != reduction
+    assert [kernel[:5] for kernel in typed(reduction)] == [
+        kernel[:5] for kernel in reduction
+    ]
 
 
 def _compiler_target_description():
@@ -1049,6 +1074,7 @@ def test_a_request_outside_the_table_is_refused(artifact_dir, monkeypatch):
             r"holds no kernel 'segmented_sum' \(_compile_segmented_reduction"
             r"_ptx, block_size=64, use_task_ids=True\); it holds the "
             "programs segmented_sum, segmented_max, segmented_min, "
+            "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
             "ragged_softmax"
         ),
     ):
@@ -1130,7 +1156,8 @@ def test_admission_refuses_a_program_the_build_host_did_not_plan(
     assert str(error.value) == (
         f"the artifact at {artifact_dir} holds no planned program with the "
         f"text of this call (SHA-256 {_digest(text)}); it holds the planned "
-        "programs segmented_sum, segmented_max, segmented_min. The "
+        "programs segmented_sum, segmented_max, segmented_min, "
+        "segmented_sum_f64, segmented_max_f64, segmented_min_f64. The "
         "artifact was written without this program, or from another "
         "program text than this swage runs. Nothing was compiled or "
         "launched"
@@ -1159,6 +1186,9 @@ def test_the_manifest_is_kept_for_reports(artifact_dir, monkeypatch):
         "segmented_sum",
         "segmented_max",
         "segmented_min",
+        "segmented_sum_f64",
+        "segmented_max_f64",
+        "segmented_min_f64",
         "ragged_softmax",
     )
 
@@ -1352,6 +1382,7 @@ def _fake_torch(monkeypatch):
     torch = types.ModuleType("torch")
     torch.__version__ = "2.6.0"
     torch.float32 = object()
+    torch.float64 = object()
     torch.int32 = object()
     torch.Tensor = _Tensor
     torch.autograd = types.SimpleNamespace(
@@ -1478,9 +1509,10 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 13 kernels of "
-        "segmented_sum, segmented_max, segmented_min, ragged_softmax, "
-        "written by swage "
+        f"{artifact_dir} (format 2, target sm_86, 25 kernels of "
+        "segmented_sum, segmented_max, segmented_min, segmented_sum_f64, "
+        "segmented_max_f64, segmented_min_f64, ragged_softmax, written by "
+        "swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"
     )

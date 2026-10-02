@@ -21,6 +21,7 @@ script it prints the result bits of every sum schedule as JSON.
 
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import re
@@ -37,13 +38,16 @@ from mlir_swage.dialects import swage as swage_dialect
 from reduction_programs import reduction_module
 from swage._segmented_qualification import (
     _SOFTMAX_MODULE,
+    _element_of,
     _prepare_persistent_sum,
     _prepare_planned_reduction,
+    _reduction_kernel,
     launch_gpu,
     launch_softmax_gpu,
 )
 from test_segmented_runtime import (
     _EPS32,
+    _EPS64,
     _PLANNING_LIMITS,
     _bits,
     _offsets,
@@ -67,19 +71,21 @@ SUM_PATHS = [*STATIC_POLICIES, "one-cta", "persistent"]
 def _sum_launch(path, values, offsets, output, kind="sum"):
     """Prepare one path with a pinned schedule and return its launch.
 
-    The persistent path reduces a sum only. Every other path takes `kind`.
+    The persistent path reduces an f32 sum only. Every other path takes
+    `kind` and runs the program of the dtype of `values`.
     """
     if path == "one-cta":
         return lambda: launch_gpu(values, offsets, output, kind)
     if path == "persistent":
         return _prepare_persistent_sum(values, offsets, output).launch
+    element = _element_of(torch, values)
     warp_max, chunk = _PLANNING_LIMITS["split" if path == "split" else "mixed"]
     prepared = _prepare_planned_reduction(
         values,
         offsets,
         output,
-        module_text=reduction_module(kind, "identity"),
-        kernel_name=f"segmented_{kind}",
+        module_text=reduction_module(kind, "identity", element),
+        kernel_name=_reduction_kernel(kind, element),
         warp_max_elements=warp_max,
         cta_chunk_elements=chunk,
         select_schedule=False,
@@ -90,7 +96,9 @@ def _sum_launch(path, values, offsets, output, kind="sum"):
 def _run_sum(path, host_values, host_offsets, launches=1, kind="sum"):
     """Launch one path on fresh device tensors and return each result."""
     values, offsets = host_values.cuda(), host_offsets.cuda()
-    output = torch.empty(host_offsets.numel() - 1, device="cuda")
+    output = torch.empty(
+        host_offsets.numel() - 1, dtype=host_values.dtype, device="cuda"
+    )
     launch = _sum_launch(path, values, offsets, output, kind)
     results = []
     for _ in range(launches):
@@ -540,8 +548,19 @@ _DENORMAL = 2.0**-149
 SPECIAL_LENGTHS = [2, 32, 33, 4096, 4097, 8193]
 
 
-def _special_segment(case, count):
-    """Build one segment whose sum has a single correct f32 value.
+def _smallest_subnormal(dtype):
+    """Return the smallest positive value of a float dtype."""
+    return _DENORMAL if dtype == torch.float32 else 2.0**-1074
+
+
+def _special_segment(case, count, dtype=torch.float32):
+    """Build one segment whose sum has a single correct value in `dtype`.
+
+    The descriptions below give the float32 values. A float64 segment uses
+    the largest finite float64, the smallest float64 subnormal, 2**-1074,
+    and the smallest float64 normal, 2**-1022, in their places, so its
+    cases are out of reach of float32 arithmetic.
+
 
     Every case is independent of the order of addition:
 
@@ -558,7 +577,7 @@ def _special_segment(case, count):
       smallest subnormal. Every partial sum is a multiple of 2**-149 below
       2**-125, so the sum is exact and crosses into the normal range.
     """
-    values = torch.ones(count)
+    values = torch.ones(count, dtype=dtype)
     if case == "nan":
         values[-1] = float("nan")
     elif case == "positive-infinity":
@@ -568,31 +587,40 @@ def _special_segment(case, count):
     elif case == "opposite-infinities":
         values[0], values[-1] = float("inf"), float("-inf")
     elif case == "overflow":
-        values.fill_(torch.finfo(torch.float32).max)
+        values.fill_(torch.finfo(dtype).max)
     elif case == "denormal":
-        values.fill_(_DENORMAL)
+        values.fill_(_smallest_subnormal(dtype))
     else:
         assert case == "denormal-and-normal"
-        values.fill_(_DENORMAL)
-        values[count // 2] = torch.finfo(torch.float32).tiny
+        values.fill_(_smallest_subnormal(dtype))
+        values[count // 2] = torch.finfo(dtype).tiny
     return values
 
 
+# The exact sum of each special segment, as a function of its length and of
+# its dtype.
 SPECIAL_CASES = {
-    "nan": lambda count: float("nan"),
-    "positive-infinity": lambda count: float("inf"),
-    "negative-infinity": lambda count: float("-inf"),
-    "opposite-infinities": lambda count: float("nan"),
-    "overflow": lambda count: float("inf"),
-    "denormal": lambda count: count * _DENORMAL,
-    "denormal-and-normal": lambda count: 2.0**-126 + (count - 1) * _DENORMAL,
+    "nan": lambda count, dtype=torch.float32: float("nan"),
+    "positive-infinity": lambda count, dtype=torch.float32: float("inf"),
+    "negative-infinity": lambda count, dtype=torch.float32: float("-inf"),
+    "opposite-infinities": lambda count, dtype=torch.float32: float("nan"),
+    "overflow": lambda count, dtype=torch.float32: float("inf"),
+    "denormal": lambda count, dtype=torch.float32: (
+        count * _smallest_subnormal(dtype)
+    ),
+    "denormal-and-normal": lambda count, dtype=torch.float32: (
+        torch.finfo(dtype).tiny + (count - 1) * _smallest_subnormal(dtype)
+    ),
 }
 
 
 @_needs_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["float32", "float64"]
+)
 @pytest.mark.parametrize("policy", STATIC_POLICIES)
 @pytest.mark.parametrize("case", SPECIAL_CASES)
-def test_sum_propagates_special_values(case, policy):
+def test_sum_propagates_special_values(case, policy, dtype):
     """NaN, both infinities, and subnormals sum as IEEE-754 addition does.
 
     Each case runs at lengths on both sides of the warp and chunk limits,
@@ -607,16 +635,17 @@ def test_sum_propagates_special_values(case, policy):
     compared bit for bit.
     """
     host_values = torch.cat(
-        [_special_segment(case, length) for length in SPECIAL_LENGTHS]
+        [_special_segment(case, length, dtype) for length in SPECIAL_LENGTHS]
     )
     host_offsets = torch.tensor(_offsets(SPECIAL_LENGTHS), dtype=torch.int32)
     exact = torch.tensor(
-        [SPECIAL_CASES[case](length) for length in SPECIAL_LENGTHS],
+        [SPECIAL_CASES[case](length, dtype) for length in SPECIAL_LENGTHS],
         dtype=torch.float64,
     )
-    expected = exact.float()
-    # A finite expected value must be an f32, or the comparison would test
-    # the rounding of this table instead of the kernel.
+    expected = exact.to(dtype)
+    # A finite expected value must be a value of the dtype, or the
+    # comparison would test the rounding of this table instead of the
+    # kernel.
     finite = exact.isfinite()
     assert torch.equal(expected[finite].double(), exact[finite])
 
@@ -629,9 +658,12 @@ def test_sum_propagates_special_values(case, policy):
 
 
 @_needs_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["float32", "float64"]
+)
 @pytest.mark.parametrize("policy", [*STATIC_POLICIES, "one-cta"])
 @pytest.mark.parametrize("kind", ["min", "max"])
-def test_extremes_propagate_nan_and_order_infinities(kind, policy):
+def test_extremes_propagate_nan_and_order_infinities(kind, policy, dtype):
     """A minimum and a maximum follow IEEE-754 minimum and maximum.
 
     The cases are written for the minimum and negated for the maximum. The
@@ -640,25 +672,28 @@ def test_extremes_propagate_nan_and_order_infinities(kind, policy):
     result reads. Each case runs at lengths on both sides of the warp and
     chunk limits, so the split schedule carries the special value through
     a partial and a merge. Results that are not NaN are compared bit for
-    bit.
+    bit, which tells the two zeros apart: the minimum of zeros with one
+    negative zero among them is the negative zero.
     """
     sign = 1.0 if kind == "min" else -1.0
     infinity = float("inf")
+    subnormal = _smallest_subnormal(dtype)
     expected = []
     segments = []
     for length in SPECIAL_LENGTHS:
-        ramp = torch.arange(length, 0, -1, dtype=torch.float32)
+        ramp = torch.arange(length, 0, -1, dtype=dtype)
         cases = {
             "nan-first": (ramp.clone(), float("nan")),
             "nan-last": (ramp.clone(), float("nan")),
             "negative-infinity": (ramp.clone(), -infinity),
             "all-positive-infinity": (
-                torch.full((length,), infinity),
+                torch.full((length,), infinity, dtype=dtype),
                 infinity,
             ),
             "positive-infinity": (ramp.clone(), 2.0),
             "opposite-infinities": (ramp.clone(), -infinity),
-            "subnormal": (ramp.clone(), _DENORMAL),
+            "subnormal": (ramp.clone(), subnormal),
+            "negative-zero": (torch.zeros(length, dtype=dtype), -0.0),
         }
         cases["nan-first"][0][0] = float("nan")
         cases["nan-last"][0][-1] = float("nan")
@@ -666,7 +701,8 @@ def test_extremes_propagate_nan_and_order_infinities(kind, policy):
         cases["positive-infinity"][0][-1] = infinity
         cases["opposite-infinities"][0][0] = infinity
         cases["opposite-infinities"][0][-1] = -infinity
-        cases["subnormal"][0][-1] = _DENORMAL
+        cases["subnormal"][0][-1] = subnormal
+        cases["negative-zero"][0][length // 2] = -0.0
         for values, result in cases.values():
             segments.append(sign * values)
             expected.append(sign * result)
@@ -675,7 +711,7 @@ def test_extremes_propagate_nan_and_order_infinities(kind, policy):
         _offsets([segment.numel() for segment in segments]),
         dtype=torch.int32,
     )
-    expected = torch.tensor(expected, dtype=torch.float32)
+    expected = torch.tensor(expected, dtype=dtype)
 
     (actual,) = _run_sum(policy, host_values, host_offsets, kind=kind)
 
@@ -705,15 +741,18 @@ _SUM_KERNELS = [
 ]
 
 _FLOAT_INSTRUCTION = re.compile(
-    r"^\s*(?P<name>[a-z][a-z0-9]*)(?P<modifiers>(?:\.[a-z0-9]+)*)"
+    r"^\s*(?P<name>[a-z][a-z0-9]*)(?P<modifiers>(?:\.[A-Za-z0-9]+)*)"
     r"\.(?P<type>f16|f32|f64)\s",
     re.MULTILINE,
 )
 _ROUNDED = {"add", "sub", "mul", "div"}
 
 
-def _float_arithmetic(ptx):
+def _float_arithmetic(ptx, element="f32"):
     """Return the unsafe float instructions of a PTX text and its counts.
+
+    `element` is the element type of the kernel, `"f32"` or `"f64"`. Every
+    float instruction of a kernel has that type.
 
     PTX gives add, sub, mul, and div an optional rounding modifier. The
     PTX specification lets the driver fuse an add and a multiply that carry
@@ -726,8 +765,9 @@ def _float_arithmetic(ptx):
     of the semantic program, each rounded once.
 
     `.ftz` would flush subnormal values to zero and `.sat` would clamp, so
-    both are violations. So is any float type other than f32, which would
-    round twice.
+    both are violations. So is any float type other than the element type:
+    a narrower instruction in an f64 kernel would lose bits, and a wider
+    one in an f32 kernel would round twice.
 
     Returns:
         A list of violating instruction spellings and a dict that counts
@@ -739,7 +779,7 @@ def _float_arithmetic(ptx):
         name = match["name"]
         modifiers = match["modifiers"].split(".")[1:]
         spelling = f"{name}{match['modifiers']}.{match['type']}"
-        if name in ("fma", "mad") or match["type"] != "f32":
+        if name in ("fma", "mad") or match["type"] != element:
             violations.append(spelling)
         elif name in _ROUNDED and modifiers != ["rn"]:
             violations.append(spelling)
@@ -769,7 +809,13 @@ def test_float_arithmetic_scan_flags_every_unsafe_spelling():
         "ex2.approx.ftz.f32",
         "add.rn.f64",
     ]
-    safe = ["add.rn.f32", "mul.rn.f32", "max.f32", "ex2.approx.f32"]
+    safe = [
+        "add.rn.f32",
+        "mul.rn.f32",
+        "max.f32",
+        "max.NaN.f32",
+        "ex2.approx.f32",
+    ]
     integer = ["mad.lo.s64", "add.s64", "mul.lo.s32", "ld.global.u32"]
     ptx = "".join(
         f"\t{spelling} \t%r1, %r2, %r3;\n"
@@ -780,6 +826,202 @@ def test_float_arithmetic_scan_flags_every_unsafe_spelling():
 
     assert violations == unsafe
     assert counts == dict.fromkeys(safe, 1)
+
+
+def test_float_arithmetic_scan_holds_a_kernel_to_its_element_type():
+    """The scan of an f64 kernel rejects f32 arithmetic, and the reverse.
+
+    A scan that accepted either width would pass an f64 kernel that
+    accumulated in f32. The f64 spellings are the ones the pinned backend
+    writes for f64 kernels: round-to-nearest arithmetic, and the compare
+    and select instructions of the NaN-propagating maximum and minimum.
+    The f32 maximum and minimum are one instruction each, `max.NaN.f32`
+    and `min.NaN.f32`.
+    """
+    narrow = [
+        "add.rn.f32",
+        "max.NaN.f32",
+        "min.NaN.f32",
+        "selp.f32",
+        "ex2.approx.f32",
+    ]
+    wide = [
+        "add.rn.f64",
+        "mul.rn.f64",
+        "div.rn.f64",
+        "max.f64",
+        "min.f64",
+        "setp.nan.f64",
+        "setp.eq.f64",
+        "selp.f64",
+    ]
+    unsafe_wide = ["add.f64", "fma.rn.f64", "mul.rn.ftz.f64", "sub.rz.f64"]
+    ptx = "".join(
+        f"\t{spelling} \t%r1, %r2, %r3;\n"
+        for spelling in (*narrow, *wide, *unsafe_wide)
+    )
+
+    as_f64, counts_f64 = _float_arithmetic(ptx, "f64")
+    as_f32, counts_f32 = _float_arithmetic(ptx, "f32")
+
+    assert as_f64 == [*narrow, *unsafe_wide]
+    assert counts_f64 == dict.fromkeys(wide, 1)
+    assert as_f32 == [*wide, *unsafe_wide]
+    assert counts_f32 == dict.fromkeys(narrow, 1)
+
+
+@pytest.mark.parametrize("target", ["sm_80", "sm_86"])
+@pytest.mark.parametrize(
+    ("kind", "transform"),
+    [("sum", "identity"), ("sum", "square"), ("max", "identity"),
+     ("min", "identity")],
+)
+def test_f64_kernels_hold_f64_round_to_nearest_arithmetic_only(
+    kind, transform, target
+):
+    """Every f64 kernel computes in f64, rounded to nearest, uncontracted.
+
+    A sum adds with `add.rn.f64`, and the square program keeps its
+    `mul.rn.f64` beside it. The pinned backend writes no single
+    NaN-propagating instruction for an f64 maximum or minimum: it expands
+    each into `max.f64` or `min.f64` with a NaN test, a zero test, and
+    selects, which the scan admits and which involve no rounding. No kernel
+    holds an f32 instruction, which is what an f32 identity, load, or
+    accumulator would be: scanned as an f32 kernel, each one is all
+    violations.
+    """
+    for label, compiler, options in _SUM_KERNELS:
+        if label == "persistent":
+            continue
+        with ir.Context() as context:
+            swage_dialect.register_dialects(context)
+            module = ir.Module.parse(reduction_module(kind, transform, "f64"))
+            _, ptx = getattr(native_swage, compiler)(
+                module,
+                kernel_name=_reduction_kernel(kind, "f64"),
+                target=target,
+                **options,
+            )
+
+        violations, counts = _float_arithmetic(ptx, "f64")
+
+        assert not violations, f"{label}: {violations}"
+        if kind == "sum":
+            assert counts.get("add.rn.f64", 0) > 0, label
+            multiplies = transform == "square" and label != "split-merge"
+            assert ("mul.rn.f64" in counts) == multiplies, label
+        else:
+            assert counts.get(f"{kind}.f64", 0) > 0, label
+            assert counts.get("setp.nan.f64", 0) > 0, label
+            assert not any(name.startswith("add.") for name in counts), label
+        wrong_width, as_f32 = _float_arithmetic(ptx, "f32")
+        assert wrong_width and not as_f32, label
+
+
+# Lengths on both sides of the warp and chunk limits and one segment of
+# seventeen chunks, as ORDER_LENGTHS, for the f64 bound.
+def _f64_case(seed):
+    """Draw f64 values over sixteen binades whose sum depends on the order."""
+    generator = torch.Generator().manual_seed(seed)
+    count = sum(ORDER_LENGTHS)
+    exponents = torch.empty(count, dtype=torch.float64).uniform_(
+        -8, 8, generator=generator
+    )
+    values = torch.randn(
+        count, dtype=torch.float64, generator=generator
+    ) * torch.exp2(exponents)
+    return values, torch.tensor(_offsets(ORDER_LENGTHS), dtype=torch.int32)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("seed", range(3))
+def test_f64_sums_stay_within_the_tree_bound_of_the_exact_sum(seed):
+    """Bound every f64 sum path against the exactly rounded sum.
+
+    Each sum must lie within k * eps64 * sum(|x|) of the exact sum of its
+    segment, with eps64 = 2**-52 and k the depth of the tree of its path,
+    the same trees as for f32 (_summation_depth). The reference is
+    `math.fsum`, the float64 nearest to the exact sum: a float64 reference
+    summed by another tree would carry rounding of the size being bounded.
+
+    The bound is a guarantee about the tree. On an RTX A6000 at sm_86 the
+    largest error over these inputs is 0.35 * eps64 * sum(|x|), so each sum
+    must also lie within _MEASURED_SUM_EPS * eps64 * sum(|x|).
+
+    The schedules add in different orders, so their bits differ on these
+    values, as for f32. Two launches of one path return the same bits.
+    """
+    host_values, host_offsets = _f64_case(seed)
+    bounds = list(pairwise(host_offsets.tolist()))
+    host = host_values.tolist()
+    exact = torch.tensor(
+        [math.fsum(host[begin:end]) for begin, end in bounds],
+        dtype=torch.float64,
+    )
+    magnitude = torch.tensor(
+        [math.fsum(map(abs, host[begin:end])) for begin, end in bounds],
+        dtype=torch.float64,
+    )
+    patterns = set()
+
+    for path in (*STATIC_POLICIES, "one-cta"):
+        first, second = _run_sum(path, host_values, host_offsets, launches=2)
+        assert first.dtype == torch.float64
+        assert _bits(first) == _bits(second), path
+        patterns.add(tuple(_bits(first)))
+        tree = "cta" if path == "one-cta" else path
+        depth = torch.tensor(
+            [_summation_depth(tree, length) for length in ORDER_LENGTHS],
+            dtype=torch.float64,
+        )
+        error = (first - exact).abs()
+        assert (error <= depth * _EPS64 * magnitude).all(), (
+            f"{path}: error {error.tolist()} exceeds the tree bound for "
+            f"lengths {ORDER_LENGTHS}"
+        )
+        measured = (error / (_EPS64 * magnitude)).nan_to_num()
+        assert (measured <= _MEASURED_SUM_EPS).all(), (
+            f"{path}: error is {measured.tolist()} eps64 * sum(|x|)"
+        )
+    assert len(patterns) > 1
+
+
+@_needs_cuda
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("policy", [*STATIC_POLICIES, "one-cta"])
+def test_f64_reductions_do_not_round_through_f32(kind, policy):
+    """Keep the bits of f64 values that f32 cannot represent.
+
+    The values are multiples of 0.25 plus small multiples of 2**-30, and
+    every partial sum stays below 2**21, so each sum is exact in f64
+    whatever the order. A kernel that loaded, accumulated, or stored in f32
+    would lose the 2**-30 part. The values depend on their position, so a
+    moved window, or a dropped or repeated element, changes a result.
+    """
+    lengths = [0, 1, 31, 33, 97, 300, 4097, 8193, 65537]
+    host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    index = torch.arange(sum(lengths))
+    host_values = (2 * (index % 67) - 65).double() / 4 + (
+        index % 5
+    ).double() * 2.0**-30
+    assert not torch.equal(host_values.float().double(), host_values)
+    reduce, identity = {
+        "sum": (math.fsum, 0.0),
+        "max": (max, float("-inf")),
+        "min": (min, float("inf")),
+    }[kind]
+    host = host_values.tolist()
+    expected = torch.tensor(
+        [
+            reduce(host[begin:end]) if end > begin else identity
+            for begin, end in pairwise(host_offsets.tolist())
+        ],
+        dtype=torch.float64,
+    )
+
+    (actual,) = _run_sum(policy, host_values, host_offsets, kind=kind)
+
+    assert _bits(actual) == _bits(expected)
 
 
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])

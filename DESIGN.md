@@ -78,10 +78,10 @@ pipeline and links to exact references live in
 - Region captures are explicit and ordered.
 - A reduction combines every element of its segment exactly once and fixes
   no combining order. A maximum and a minimum are the same in every
-  order. An f32 sum is
-  not: its rounding depends on the order that a lowering and a schedule
-  choose, so changing the task derivation can change the result within
-  rounding error. No lowering adds fast-math flags.
+  order. A floating-point sum is not: its rounding depends on the order
+  that a lowering and a schedule choose, so changing the task derivation
+  can change the result within rounding error. No lowering adds fast-math
+  flags.
 - Cross-segment effects must be explicit. A map-store writes only the
   corresponding segment range.
 - Unsupported syntax, module shapes, types, policies, and ABIs fail before

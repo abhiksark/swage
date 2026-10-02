@@ -24,7 +24,11 @@ from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
-from swage._segmented_qualification import _SOFTMAX_MODULE, _semantic_module
+from swage._segmented_qualification import (
+    _SOFTMAX_MODULE,
+    _reduction_kernel,
+    _semantic_module,
+)
 
 # The oldest admitted processor, the qualified one, and the newest admitted.
 _TARGETS = ("sm_80", "sm_86", "sm_121")
@@ -67,6 +71,17 @@ _TWO_BLOCK_REDUCTIONS = _counts(barriers=4, shuffles=40)
 _PERSISTENT = _counts(barriers=12, shuffles=66, fences=2, atomics=4)
 _NONE = _counts(barriers=0, shuffles=0)
 
+
+def _for_element(counts, element):
+    """Return the counts of a reduction over `element` values.
+
+    A warp shuffle moves 32 bits. An f64 value crosses as its two halves,
+    so every shuffle of an f32 reduction is two in the f64 one. Nothing
+    else about the synchronization depends on the element type.
+    """
+    words = {"f32": 1, "f64": 2}[element]
+    return dict(counts, shuffles=words * counts["shuffles"])
+
 _DIRECT = "_compile_segmented_reduction_ptx"
 _FUSED_COMPILER = "_compile_fused_segmented_reduction_ptx"
 _PARTIAL = "_compile_split_partial_reduction_ptx"
@@ -81,35 +96,39 @@ def _segmented_kernels():
         A pytest parameter of the module text, the native compiler, the
         kernel name, the compiler options, and the expected counts.
     """
-    for kind in ("sum", "max", "min"):
-        text = _semantic_module(kind)
-        name = f"segmented_{kind}"
-        # Block size 1 is where a pipeline that knew the launch width would
-        # delete the full-warp path, and 40 and 100 end in a partial warp.
-        for block_size in (1, 32, 40, 100, 128, 256, 512, 1024):
+    for element, suffix in (("f32", ""), ("f64", "-f64")):
+        block = _for_element(_ONE_BLOCK_REDUCTION, element)
+        warp = _for_element(_ONE_WARP_REDUCTION, element)
+        fused = _for_element(_FUSED, element)
+        for kind in ("sum", "max", "min"):
+            text = _semantic_module(kind, element)
+            name = _reduction_kernel(kind, element)
+            label = f"{kind}{suffix}"
+            # Block size 1 is where a pipeline that knew the launch width
+            # would delete the full-warp path, and 40 and 100 end in a
+            # partial warp.
+            for block_size in (1, 32, 40, 100, 128, 256, 512, 1024):
+                yield pytest.param(
+                    text, _DIRECT, name, {"block_size": block_size},
+                    block, id=f"direct-{label}-{block_size}",
+                )
             yield pytest.param(
-                text, _DIRECT, name, {"block_size": block_size},
-                _ONE_BLOCK_REDUCTION, id=f"direct-{kind}-{block_size}",
+                text, _DIRECT, name, {"block_size": 32, "use_task_ids": True},
+                warp, id=f"task-ids-warp-{label}",
             )
-        yield pytest.param(
-            text, _DIRECT, name, {"block_size": 32, "use_task_ids": True},
-            _ONE_WARP_REDUCTION, id=f"task-ids-warp-{kind}",
-        )
-        yield pytest.param(
-            text, _DIRECT, name, {"block_size": 128, "use_task_ids": True},
-            _ONE_BLOCK_REDUCTION, id=f"task-ids-cta-{kind}",
-        )
-        yield pytest.param(
-            text, _FUSED_COMPILER, name, {}, _FUSED, id=f"fused-{kind}"
-        )
-        yield pytest.param(
-            text, _PARTIAL, name, {}, _ONE_BLOCK_REDUCTION,
-            id=f"split-partial-{kind}",
-        )
-        yield pytest.param(
-            text, _MERGE, name, {}, _ONE_BLOCK_REDUCTION,
-            id=f"split-merge-{kind}",
-        )
+            yield pytest.param(
+                text, _DIRECT, name, {"block_size": 128, "use_task_ids": True},
+                block, id=f"task-ids-cta-{label}",
+            )
+            yield pytest.param(
+                text, _FUSED_COMPILER, name, {}, fused, id=f"fused-{label}"
+            )
+            yield pytest.param(
+                text, _PARTIAL, name, {}, block, id=f"split-partial-{label}"
+            )
+            yield pytest.param(
+                text, _MERGE, name, {}, block, id=f"split-merge-{label}"
+            )
     # Element programs add arithmetic to the loops and must add nothing to
     # the synchronization.
     for kind, transform in (

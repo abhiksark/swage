@@ -44,7 +44,9 @@ The programs and the roles of each program are the kernel table of the
 for each program the kernels a call of it can launch. The format does not
 fix the list of programs. A later `swage` may add a program to its table
 without a new format version, and an artifact that was written before does
-not hold it.
+not hold it. The reductions over f64 values were added that way: each is a
+program of its own, named with the suffix `_f64`, with the four roles of a
+reduction and with `double` buffers in its argument lists.
 
 The loader requires every kernel of a listed program, so that a missing
 kernel is found when the artifact is loaded and not at the first batch that

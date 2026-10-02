@@ -119,8 +119,8 @@ declares none and verifies.
 
 The segmented lowerings require more. Every argument of a function they
 lower declares a role, each of the five roles appears once, and the types
-are the admitted ones: f32 `values` and `output`, i32 `offsets`, and counts
-of the offsets' element type, in dynamically sized buffers with the
+are the admitted ones: `values` and `output` of one element type, f32 or
+f64, i32 `offsets`, and counts of the offsets' element type, in dynamically sized buffers with the
 identity layout in the default memory space. A function that falls short is
 rejected with a diagnostic that names the argument or the missing role.
 There is no positional default.
@@ -265,7 +265,9 @@ element type:
   admits an integer element type.
 
 Lowerings add no fast-math flags. The current lowerings admit `sum`,
-`max`, and `min` over `f32`.
+`max`, and `min` over `f32` and over `f64`. Every value of a region has
+the element type of its function, and `math.exp2` is admitted over `f32`
+only, because the device has no `f64` `exp2`.
 
 ### `swage.map_store`
 

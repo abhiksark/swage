@@ -54,8 +54,8 @@ the paths the calls run through.
 | Public segment syntax, and public launch of a segment program that the caller writes | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |
 
-The sequential CPU oracle transports each f32 result as its exact bit
-pattern, so oracle comparisons involve no decimal rounding.
+The sequential CPU oracle transports each f32 or f64 result as its exact
+bit pattern, so oracle comparisons involve no decimal rounding.
 
 Numerical claims have their own evidence in
 `python/tests/mlir/test_segmented_numerics.py`:
@@ -75,6 +75,14 @@ Numerical claims have their own evidence in
 - Code generation: the PTX of every sum kernel and of the softmax kernel
   uses round-to-nearest f32 operations with no fused multiply-add and no
   flush-to-zero. This check needs no GPU.
+- f64 reductions: every static schedule and the one-CTA path stay within
+  `k * eps64 * sum(|x|)` of the exactly rounded sum, return the exact
+  result on f64 values that are exactly summable and are not f32 values,
+  and propagate NaN, infinities, signed zeros, and the subnormal values of
+  f64. The PTX of every f64 kernel holds f64 round-to-nearest operations
+  and no f32 instruction, and an f64 `math.exp2` is refused with a
+  diagnostic by every compile function
+  (`python/tests/mlir/test_segmented_codegen.py`).
 - Softmax accuracy: every output stays within a relative bound that grows
   linearly with logit spread, at spreads 8, 20, 50, and 80, and
   `ex2.approx.f32` is measured on its own.

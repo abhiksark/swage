@@ -23,8 +23,9 @@ The figure uses one oversized identity-sum segment over absolute input range
 writer. The merge record names segment 7 and compact scratch range `[0, 3)`,
 then one writer stores `output[7]`. Mixed execution submits direct fused work,
 partial CTAs, and merge CTAs in that order on the current stream, skipping any
-empty phase. This lifecycle supports private capture-free, single-stage f32
-sum, max, and min, including fused map chains. Partial tasks evaluate the element
+empty phase. This lifecycle supports private capture-free, single-stage
+sum, max, and min over f32 or f64 values, including fused map chains. The
+scratch has the element type of the program. Partial tasks evaluate the element
 program on input values; merges combine scratch using the reduction kind
 without reapplying that program. It does not support split softmax.
 

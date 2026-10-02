@@ -9,7 +9,10 @@ from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
-from swage._segmented_qualification import _has_small_element_program
+from swage._segmented_qualification import (
+    _has_small_element_program,
+    _reduction_kernel,
+)
 
 
 def _plan(module, kernel_name, offsets, **arguments):
@@ -117,17 +120,23 @@ module {
 """
 
 
+@pytest.mark.parametrize("element", ["f32", "f64"])
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
-def test_static_schedules_share_reduction_program(kind, transform):
-    """One admitted program compiles unchanged through every static path."""
+def test_static_schedules_share_reduction_program(kind, transform, element):
+    """One admitted program compiles unchanged through every static path.
+
+    The plan of a program does not depend on its element type: an f64
+    program has the task records of the f32 program.
+    """
+    kernel_name = _reduction_kernel(kind, element)
     with ir.Context() as context:
         swage.register_dialects(context)
-        module = ir.Module.parse(reduction_module(kind, transform))
+        module = ir.Module.parse(reduction_module(kind, transform, element))
         original = module.operation.get_asm(enable_debug_info=False)
         assert _plan(
             module,
-            f"segmented_{kind}",
+            kernel_name,
             [0, 1, 34, 4131],
             value_count=4131,
             segment_count=3,
@@ -149,13 +158,13 @@ def test_static_schedules_share_reduction_program(kind, transform):
             compiler = getattr(native_swage, name)
             first = compiler(
                 module,
-                kernel_name=f"segmented_{kind}",
+                kernel_name=kernel_name,
                 target="sm_86",
                 **arguments,
             )
             assert first == compiler(
                 module,
-                kernel_name=f"segmented_{kind}",
+                kernel_name=kernel_name,
                 target="sm_86",
                 **arguments,
             )
@@ -166,7 +175,29 @@ def test_static_schedules_share_reduction_program(kind, transform):
             )
             assert "swage." not in lowered
             assert ".entry segmented_" in ptx
+            other = "f32" if element == "f64" else "f64"
+            assert not re.search(rf"\b{other}\b", lowered)
             assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_persistent_execution_refuses_f64_values():
+    """The persistent kernel is an f32 kernel, and f64 values are refused.
+
+    The identity sum is the one program persistent execution admits, so
+    the element type is the only reason this program is refused.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module("sum", "identity", "f64"))
+        original = module.operation.get_asm(enable_debug_info=False)
+        with pytest.raises(
+            ValueError,
+            match="persistent execution requires f32 values, got f64",
+        ):
+            native_swage._compile_persistent_segmented_reduction_ptx(
+                module, kernel_name="segmented_sum_f64", target="sm_86"
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
 
 
 @pytest.mark.parametrize(
@@ -706,6 +737,73 @@ module {
   }
 }
 """
+
+
+_EVERY_COMPILER = [
+    ("_compile_segmented_reduction_ptx", {"block_size": 128}),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+    ),
+    ("_compile_fused_segmented_reduction_ptx", {}),
+    ("_compile_split_partial_reduction_ptx", {}),
+    ("_compile_split_merge_reduction_ptx", {}),
+    ("_compile_persistent_segmented_reduction_ptx", {}),
+]
+
+
+@pytest.mark.parametrize(("compiler", "arguments"), _EVERY_COMPILER)
+def test_an_f64_exponential_is_refused_before_the_backend(
+    compiler, arguments
+):
+    """An f64 `math.exp2` raises a diagnostic from every compile function.
+
+    The device has an f32 `ex2.approx` and no f64 one. The pinned NVPTX
+    backend aborts the process on an f64 exp2 intrinsic, and without the
+    planner's rule the libdevice guard would refuse the program late, as an
+    unresolved `__nv_exp2`. The planner refuses the operation by name
+    first, before any lowering runs. This test runs in the test process:
+    an abort would end the run instead of failing one test.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(
+            SEGMENTED_EXPONENTIAL_SUM.replace("f32", "f64")
+        )
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        with pytest.raises(
+            ValueError,
+            match="operation 'math.exp2' is admitted for f32 values only: "
+            "the device has no f64 exp2",
+        ):
+            getattr(native_swage, compiler)(
+                module, kernel_name="segmented_sum", target="sm_80", **arguments
+            )
+
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_an_f64_softmax_is_refused_before_the_backend():
+    """The softmax program is refused over f64 for its exponential."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(RAGGED_SOFTMAX.replace("f32", "f64"))
+
+        with pytest.raises(
+            ValueError,
+            match="operation 'math.exp2' is admitted for f32 values only",
+        ):
+            native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name="ragged_softmax",
+                block_size=128,
+                target="sm_80",
+            )
 
 
 def test_region_exponential_compiles_without_libdevice():

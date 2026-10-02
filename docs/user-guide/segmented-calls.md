@@ -5,14 +5,15 @@
 Two functions run a fixed program over every segment of a ragged batch:
 
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` returns one
-  f32 result per segment: a sum, a maximum, or a minimum.
-- `swage.segment_softmax(values, offsets, *, out=None)` returns one f32
+  result per segment, in the dtype of `values`: a sum, a maximum, or a
+  minimum of float32 or float64 values.
+- `swage.segment_softmax(values, offsets, *, out=None)` returns one float32
   result per value, the softmax within its segment.
 
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
-reduction kind, another dtype, and a trailing feature dimension cannot be
-written. The calls record no gradient. [Ragged Data](ragged-data.md) defines
+reduction kind, a dtype outside the admitted ones, and a trailing feature
+dimension cannot be written. The calls record no gradient. [Ragged Data](ragged-data.md) defines
 the storage they read. This page shows a call, states what it returns and
 what it costs, and lists where it is refused.
 
@@ -56,14 +57,25 @@ stream. It does not wait for them. Reading a result, as `tolist()` or
 
 `values` and `offsets` follow
 [the offsets contract](ragged-data.md#the-offsets-contract): rank-one,
-contiguous, `torch.float32` values and `torch.int32` or `torch.int64`
-offsets on the current CUDA device. No values are cast, and nothing is
-moved to another device or repaired. int64 offsets are checked and then
-narrowed on the host, as [int64 offsets](ragged-data.md#int64-offsets)
-describes, so offsets that PyTorch produced as int64 need no cast first. An
-argument outside the contract raises before anything is enqueued.
+contiguous values and `torch.int32` or `torch.int64` offsets on the current
+CUDA device. No values are cast, and nothing is moved to another device or
+repaired. int64 offsets are checked and then narrowed on the host, as
+[int64 offsets](ragged-data.md#int64-offsets) describes, so offsets that
+PyTorch produced as int64 need no cast first. An argument outside the
+contract raises before anything is enqueued.
 
-The two calls differ in one offsets rule:
+The two calls differ in the values they take:
+
+- `segment_reduce` takes `torch.float32` or `torch.float64` values. A
+  float64 batch runs a float64 program: every value is loaded, combined,
+  and stored as float64, and the result is float64. Any other dtype raises
+  a `TypeError` that names the two.
+- `segment_softmax` takes `torch.float32` values only. float64 values raise
+  a `TypeError` that states the reason: the softmax kernel computes its
+  exponential with the `exp2` instruction of the device, which exists for
+  32-bit values and not for 64-bit ones.
+
+They also differ in one offsets rule:
 
 - `segment_reduce` admits offsets that end below the number of values, as
   `torch.segment_reduce` does. The values past the final offset belong to no
@@ -75,8 +87,8 @@ The two calls differ in one offsets rule:
 `out` is optional and keyword-only. When it is given, the call writes it and
 returns the same tensor. It must meet all of these rules:
 
-- It is a contiguous rank-one `torch.float32` tensor on the device of
-  `values`. A contiguous slice of a larger tensor is admitted.
+- It is a contiguous rank-one tensor of the dtype of `values`, on the
+  device of `values`. A contiguous slice of a larger tensor is admitted.
 - It has exactly one element per segment for `segment_reduce`, and exactly
   one element per value for `segment_softmax`. It is never resized.
 - It shares no memory with `values` or `offsets`.
@@ -103,7 +115,8 @@ A sum follows IEEE-754 addition:
 - A NaN element gives NaN.
 - One infinity among finite elements gives that infinity.
 - Infinities of both signs give NaN.
-- Finite elements whose sum exceeds the f32 range give positive infinity.
+- Finite elements whose sum exceeds the range of the dtype give positive
+  infinity.
 - Subnormal elements and results are kept and are not flushed to zero.
 
 A maximum propagates NaN:
@@ -140,19 +153,21 @@ segment:
 A maximum and a minimum involve no rounding and are exact. The other two
 results are rounded:
 
-- A sum lies within `k * eps32 * sum(|x|)` of the exact sum of its segment,
-  where `eps32` is `2**-23` and `k` depends on the schedule. For these calls
-  `k` is at most 70 for a segment of up to 2,097,152 elements, which is
-  `8.3e-06 * sum(|x|)`. The bound is relative to the sum of magnitudes, not
-  to the sum.
+- A sum lies within `k * eps * sum(|x|)` of the exact sum of its segment,
+  where `eps` is `2**-23` for float32 values and `2**-52` for float64
+  values, and `k` depends on the schedule and not on the dtype. For these
+  calls `k` is at most 70 for a segment of up to 2,097,152 elements, which
+  is `8.3e-06 * sum(|x|)` for float32 and `1.6e-14 * sum(|x|)` for float64.
+  The bound is relative to the sum of magnitudes, not to the sum.
 - A softmax output has a relative error bound that grows with the distance
   of its logit below the segment maximum.
   [Ragged Softmax](../internals/ragged-softmax.md#accuracy) states it.
 
 ## Sum rounding
 
-The bits of an f32 sum depend on the order of the additions, and a call
-selects that order from the batch it is given:
+The bits of a sum depend on the order of the additions, for float32 and
+for float64 values, and a call selects that order from the batch it is
+given. The dtype has no part in the selection:
 
 - A segment of at most 32 elements is added by a 32-lane tree.
 - A segment of 33 to 4096 elements is added by a 128-lane tree.
@@ -221,13 +236,13 @@ The first calls of a process cost more:
 
 - A call compiles each kernel its batch needs that the process does not
   hold yet, and loads it into the CUDA context. A reduction kind has four
-  kernels that a batch can need: one for segments of up to 4096 elements,
-  two for longer segments, and one for a batch that the selection rule of
-  [Sum rounding](#sum-rounding) sends to the 128-lane tree. The softmax has
-  one. Kernels stay in the process for later calls and are never written to
-  the persistent cache. With an artifact
-  selected, a call compiles nothing: the first call reads and verifies the
-  directory, and each kernel is loaded from it when a call first needs it.
+  kernels per dtype that a batch can need: one for segments of up to 4096
+  elements, two for longer segments, and one for a batch that the selection
+  rule of [Sum rounding](#sum-rounding) sends to the 128-lane tree. The
+  softmax has one. Kernels stay in the process for later calls and are
+  never written to the persistent cache. With an artifact selected, a call
+  compiles nothing: the first call reads and verifies the directory, and
+  each kernel is loaded from it when a call first needs it.
 - The first `segment_reduce` call on a device whose batch meets that
   selection rule uploads a table of segment ids that holds 4 MiB of device
   memory for the life of the process.

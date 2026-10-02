@@ -30,11 +30,12 @@ Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
 // reports a kind that has no case, and no kind can take the branch of
 // another.
 
-Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind) {
-  FloatType f32 = builder.getF32Type();
-  const llvm::fltSemantics &semantics = f32.getFloatSemantics();
+Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind,
+                  Type elementType) {
+  auto type = cast<FloatType>(elementType);
+  const llvm::fltSemantics &semantics = type.getFloatSemantics();
   auto constant = [&](const APFloat &identity) {
-    return Value(arith::ConstantFloatOp::create(builder, loc, f32, identity));
+    return Value(arith::ConstantFloatOp::create(builder, loc, type, identity));
   };
   switch (kind) {
   case ReductionKind::Sum:
@@ -193,7 +194,7 @@ Value emitReductionStage(OpBuilder &builder, Location loc,
                          Type elementType, const SegmentBinding &segment,
                          ThreadCombination combination,
                          ElementProgramFn element) {
-  Value identity = identityFor(builder, loc, kind);
+  Value identity = identityFor(builder, loc, kind, elementType);
   auto local = scf::ForOp::create(
       builder, loc, segment.first, segment.end, segment.stride,
       ValueRange(identity),

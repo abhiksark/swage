@@ -1,11 +1,28 @@
 # python/tests/mlir/reduction_programs.py
 """Semantic programs shared by static codegen and runtime qualification."""
 
-from swage._segmented_qualification import _semantic_module
+from swage._segmented_qualification import _reduction_kernel, _semantic_module
 
 
-def reduction_module(kind, transform):
-    """Build simple and compute-heavy native reduction qualification IR."""
+def reduction_module(kind, transform, element="f32"):
+    """Build simple and compute-heavy native reduction qualification IR.
+
+    Args:
+        kind: The reduction kind.
+        transform: The element program, by name.
+        element: The element type, `"f32"` or `"f64"`. The f64 program is
+            the f32 program with every f32 replaced, under the kernel name
+            `_reduction_kernel(kind, "f64")`.
+    """
+    if element != "f32":
+        return (
+            reduction_module(kind, transform)
+            .replace("f32", element)
+            .replace(
+                f"@{_reduction_kernel(kind)}(",
+                f"@{_reduction_kernel(kind, element)}(",
+            )
+        )
     module = _semantic_module(kind)
     if transform in (
         "exp2", "exp2_chain", "exp2_pair", "rational4", "rational8",

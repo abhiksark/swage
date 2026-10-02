@@ -9,7 +9,8 @@ This file pins what the wrapper adds and what a caller can rely on:
   of int32 offsets, and reach a kernel only as a private int32 copy.
 - Results against `torch.segment_reduce`, `torch.softmax`, and float64
   references, on the shapes of the nine benchmark distributions, on empty
-  batches and segments, on one long segment, and on special values.
+  batches and segments, on one long segment, and on special values. A
+  float64 sum is held to an exactly rounded reference instead.
 - That a sum is the documented schedule of its batch and nothing a caller
   can pin.
 - The behavior under CUDA graph capture, on another stream, on a thread
@@ -22,6 +23,7 @@ This file pins what the wrapper adds and what a caller can rely on:
 import collections
 import gc
 import importlib.util
+import math
 import pathlib
 import sys
 import threading
@@ -40,7 +42,13 @@ from test_segmented_numerics import (
     _softmax_bound,
     _special_segment,
 )
-from test_segmented_runtime import _EPS32, _bits, _offsets, _summation_depth
+from test_segmented_runtime import (
+    _EPS32,
+    _EPS64,
+    _bits,
+    _offsets,
+    _summation_depth,
+)
 
 _needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -68,14 +76,35 @@ DISTRIBUTIONS = sorted(_distributions._NAMES)
 # 4096-element chunk limit and the 8192-element selection limit.
 _SEGMENT_COUNTS = {name: 257 for name in DISTRIBUTIONS} | {"power-law": 2048}
 KINDS = ["sum", "max", "min"]
+DTYPES = [torch.float32, torch.float64]
+_DTYPE_IDS = ["float32", "float64"]
 
 
-def _host_case(lengths, generator):
+def _host_case(lengths, generator, dtype=torch.float32):
     """Draw mixed-sign values over many binades for the given lengths."""
     count = sum(lengths)
-    exponents = torch.empty(count).uniform_(-8, 8, generator=generator)
-    values = torch.randn(count, generator=generator) * torch.exp2(exponents)
+    exponents = torch.empty(count, dtype=dtype).uniform_(
+        -8, 8, generator=generator
+    )
+    values = torch.randn(
+        count, dtype=dtype, generator=generator
+    ) * torch.exp2(exponents)
     return values, torch.tensor(_offsets(lengths), dtype=torch.int32)
+
+
+def _exact_sums(values, offsets):
+    """Return the exactly rounded float64 sum of every segment.
+
+    `math.fsum` returns the float64 nearest to the exact sum, which is the
+    reference a float64 result needs: a float64 summation of the same
+    values would carry rounding of its own.
+    """
+    bounds = offsets.tolist()
+    host = values.double().tolist()
+    return torch.tensor(
+        [math.fsum(host[begin:end]) for begin, end in pairwise(bounds)],
+        dtype=torch.float64,
+    )
 
 
 def _public_depth(length):
@@ -92,42 +121,54 @@ def _public_depth(length):
 
 
 def _assert_reduction_matches(kind, host_values, host_offsets, actual):
-    """Compare one public result with PyTorch and with float64.
+    """Compare one public result with PyTorch and with a reference.
 
-    A maximum and a minimum are exact. A sum lies within
-    `k * eps32 * sum(|x|)` of the
-    float64 sum, the bound of docs/internals/segmented-reductions.md, and
-    within that bound plus the sequential one of `torch.segment_reduce`,
-    whose own tree is not documented.
+    The result has the dtype of the values. A maximum and a minimum are
+    exact. A sum lies within `k * eps * sum(|x|)` of the reference, the
+    bound of docs/internals/segmented-reductions.md with the `eps` of the
+    dtype, and within that bound plus the sequential one of
+    `torch.segment_reduce`, whose own tree is not documented.
+
+    The reference of a float32 sum is the float64 sum. The reference of a
+    float64 sum is the exactly rounded sum of `math.fsum`.
     """
     lengths = host_offsets[1:] - host_offsets[:-1]
-    covered = host_values[: int(host_offsets[-1])]
+    final = int(host_offsets[-1])
+    covered = host_values[:final]
+    covered_offsets = host_offsets.long()
     theirs = torch.segment_reduce(
         covered.cuda(), kind, lengths=lengths.long().cuda()
     ).cpu()
     reference = torch.segment_reduce(
         covered.double(), kind, lengths=lengths.long()
     )
+    assert actual.dtype == host_values.dtype
     assert actual.shape == theirs.shape == reference.shape
     if kind != "sum":
         assert _bits(actual) == _bits(theirs)
         assert torch.equal(actual.double(), reference)
         return
-    magnitude = torch.segment_reduce(
-        covered.double().abs(), "sum", lengths=lengths.long()
-    )
+    wide = host_values.dtype == torch.float64
+    eps = _EPS64 if wide else _EPS32
+    if wide:
+        reference = _exact_sums(covered, covered_offsets)
+        magnitude = _exact_sums(covered.abs(), covered_offsets)
+    else:
+        magnitude = torch.segment_reduce(
+            covered.double().abs(), "sum", lengths=lengths.long()
+        )
     depth = torch.tensor(
         [_public_depth(length) for length in lengths.tolist()],
         dtype=torch.float64,
     )
     error = (actual.double() - reference).abs()
-    assert (error <= depth * _EPS32 * magnitude).all(), (
-        f"largest error {(error / (_EPS32 * magnitude)).nan_to_num().max()} "
-        "eps32 * sum(|x|) exceeds the tree bound"
+    assert (error <= depth * eps * magnitude).all(), (
+        f"largest error {(error / (eps * magnitude)).nan_to_num().max()} "
+        "eps * sum(|x|) exceeds the tree bound"
     )
     sequential = (lengths - 1).clamp(min=0).double()
     difference = (actual.double() - theirs.double()).abs()
-    assert (difference <= (depth + sequential) * _EPS32 * magnitude).all()
+    assert (difference <= (depth + sequential) * eps * magnitude).all()
 
 
 def _reduce(kind, host_values, host_offsets):
@@ -242,9 +283,6 @@ def _wrong_values(case):
 @pytest.mark.parametrize(
     ("case", "error", "message"),
     [
-        ("float64", TypeError, "values must have dtype torch.float32"),
-        ("float16", TypeError, "values must have dtype torch.float32"),
-        ("int32", TypeError, "values must have dtype torch.float32"),
         ("rank-two", TypeError, "values must have rank one"),
         ("strided", ValueError, "values must be contiguous"),
         ("negated", ValueError, "values must not be a lazy negation view"),
@@ -253,11 +291,72 @@ def _wrong_values(case):
 def test_segmented_calls_reject_values_outside_the_data_model(
     function, case, error, message
 ):
-    """Reject other dtypes, ranks, and layouts instead of converting."""
+    """Reject other ranks and layouts instead of converting."""
     _, offsets = _host_segments()
 
     with pytest.raises(error, match=f"^{message}"):
         _call(function, _wrong_values(case), offsets)
+
+
+@pytest.mark.parametrize("case", ["float16", "int32"])
+def test_segmented_calls_reject_values_of_another_dtype(case):
+    """Name the dtypes each call takes, and cast nothing."""
+    _, offsets = _host_segments()
+    values = _wrong_values(case)
+
+    with pytest.raises(
+        TypeError,
+        match="^values must have dtype torch.float32 or torch.float64$",
+    ):
+        swage.segment_reduce(values, offsets, "sum")
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        swage.segment_softmax(values, offsets)
+
+
+def test_segment_softmax_refuses_float64_values_with_the_reason():
+    """Say why there is no float64 softmax instead of naming a dtype only."""
+    values, offsets = _host_segments()
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            "^values must have dtype torch.float32; segment_softmax has no "
+            "float64 kernel because the device has no 64-bit exp2$"
+        ),
+    ):
+        swage.segment_softmax(values.double(), offsets)
+    with pytest.raises(TypeError, match="has no float64 kernel"):
+        swage.segment_softmax(
+            values.double(), offsets, out=torch.empty(6, dtype=torch.float64)
+        )
+
+
+def test_segment_reduce_takes_float64_values_up_to_the_device_check():
+    """Admit float64 values on the host, as float32 values are."""
+    values, offsets = _host_segments()
+
+    with pytest.raises((TypeError, RuntimeError), match="CUDA"):
+        swage.segment_reduce(values.double(), offsets, "sum")
+
+
+def test_out_has_the_dtype_of_the_values():
+    """Refuse a result tensor of the other width, in either direction."""
+    values, offsets = _host_segments()
+
+    with pytest.raises(
+        TypeError, match="^out must have the dtype of values, torch.float64$"
+    ):
+        swage.segment_reduce(
+            values.double(), offsets, "sum", out=torch.empty(4)
+        )
+    with pytest.raises(
+        TypeError, match="^out must have the dtype of values, torch.float32$"
+    ):
+        swage.segment_reduce(
+            values, offsets, "sum", out=torch.empty(4, dtype=torch.float64)
+        )
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
@@ -423,7 +522,11 @@ def _wrong_out(case, count, values, offsets):
     ("case", "error", "message"),
     [
         ("list", TypeError, "out must be a torch.Tensor or None"),
-        ("float64", TypeError, "out must have dtype torch.float32"),
+        (
+            "float64",
+            TypeError,
+            "out must have the dtype of values, torch.float32",
+        ),
         ("rank-two", TypeError, "out must have rank one"),
         ("longer", ValueError, "out must have exactly [46] elements, one per"),
         ("shorter", ValueError, "out must have exactly [46] elements, one per"),
@@ -523,16 +626,20 @@ def test_segmented_calls_require_the_current_device(function, monkeypatch):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("seed", range(3))
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("name", DISTRIBUTIONS)
-def test_segment_reduce_matches_pytorch_and_float64(name, kind, seed):
-    """Reduce the shape of every benchmark distribution at a small size."""
+def test_segment_reduce_matches_pytorch_and_float64(name, kind, seed, dtype):
+    """Reduce the shape of every benchmark distribution at a small size.
+
+    A float64 sum is compared with the exactly rounded sum of its segment.
+    """
     lengths = _distributions.generate_lengths(
         name, _SEGMENT_COUNTS[name], seed
     )
     generator = torch.Generator().manual_seed(seed)
-    host_values, host_offsets = _host_case(lengths, generator)
+    host_values, host_offsets = _host_case(lengths, generator, dtype)
 
     actual = _reduce(kind, host_values, host_offsets)
 
@@ -754,12 +861,13 @@ def test_the_differential_batches_reach_every_schedule():
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("length", [100_003, 1_048_577])
-def test_segment_reduce_reduces_one_long_segment(length, kind):
+def test_segment_reduce_reduces_one_long_segment(length, kind, dtype):
     """Split one segment into hundreds of chunks and merge them."""
     generator = torch.Generator().manual_seed(length)
-    host_values, host_offsets = _host_case([length], generator)
+    host_values, host_offsets = _host_case([length], generator, dtype)
 
     actual = _reduce(kind, host_values, host_offsets)
 
@@ -767,40 +875,45 @@ def test_segment_reduce_reduces_one_long_segment(length, kind):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("value_count", [0, 5])
 def test_segment_reduce_returns_an_empty_result_for_an_empty_batch(
-    value_count, kind
+    value_count, kind, dtype
 ):
     """Return a tensor of no elements when the offsets hold no segment."""
-    values = torch.ones(value_count, device="cuda")
+    values = torch.ones(value_count, dtype=dtype, device="cuda")
     offsets = torch.zeros(1, dtype=torch.int32, device="cuda")
 
     result = swage.segment_reduce(values, offsets, kind)
 
     assert result.shape == (0,)
-    assert result.dtype == torch.float32
+    assert result.dtype == dtype
     assert result.device == values.device
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize(
     "lengths", [[0], [0] * 300, [0, 5, 0, 0, 33, 0, 4097, 0]]
 )
-def test_segment_reduce_gives_empty_segments_their_identity(lengths):
+def test_segment_reduce_gives_empty_segments_their_identity(lengths, dtype):
     """Return 0.0 for an empty sum and an infinity for an empty extreme.
 
     An empty maximum is negative infinity and an empty minimum is positive
     infinity, the identity of each kind.
     """
     host_values, host_offsets = _host_segments(lengths)
+    host_values = host_values.to(dtype)
     empty = torch.tensor(lengths) == 0
 
     total = _reduce("sum", host_values, host_offsets)
     maximum = _reduce("max", host_values, host_offsets)
     minimum = _reduce("min", host_values, host_offsets)
 
-    assert _bits(total[empty]) == _bits(torch.zeros(int(empty.sum())))
+    assert _bits(total[empty]) == _bits(
+        torch.zeros(int(empty.sum()), dtype=dtype)
+    )
     assert torch.all(maximum[empty] == float("-inf"))
     assert torch.all(minimum[empty] == float("inf"))
     _assert_reduction_matches("sum", host_values, host_offsets, total)
@@ -827,15 +940,20 @@ def test_segment_reduce_ignores_values_past_the_final_offset(kind):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("case", SPECIAL_CASES)
-def test_segment_reduce_sums_special_values_as_ieee_addition_does(case):
-    """Propagate NaN and infinities and keep subnormals, as PyTorch does."""
+def test_segment_reduce_sums_special_values_as_ieee_addition_does(case, dtype):
+    """Propagate NaN and infinities and keep subnormals, as PyTorch does.
+
+    The float64 cases use the largest finite and the smallest subnormal
+    float64, so a kernel that rounded through float32 would fail them.
+    """
     host_values = torch.cat(
-        [_special_segment(case, length) for length in SPECIAL_LENGTHS]
+        [_special_segment(case, length, dtype) for length in SPECIAL_LENGTHS]
     )
     host_offsets = torch.tensor(_offsets(SPECIAL_LENGTHS), dtype=torch.int32)
     exact = torch.tensor(
-        [SPECIAL_CASES[case](length) for length in SPECIAL_LENGTHS],
+        [SPECIAL_CASES[case](length, dtype) for length in SPECIAL_LENGTHS],
         dtype=torch.float64,
     )
     theirs = torch.segment_reduce(
@@ -848,20 +966,25 @@ def test_segment_reduce_sums_special_values_as_ieee_addition_does(case):
         assert actual.isnan().all()
         assert theirs.isnan().all()
     else:
-        assert _bits(actual) == _bits(exact.float())
+        assert _bits(actual) == _bits(exact.to(dtype))
         assert _bits(actual) == _bits(theirs)
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("length", SPECIAL_LENGTHS)
-def test_segment_reduce_max_propagates_nan_and_orders_infinities(length):
+def test_segment_reduce_max_propagates_nan_and_orders_infinities(
+    length, dtype
+):
     """Return NaN for a segment that holds one, wherever it sits."""
-    ramp = torch.arange(length, dtype=torch.float32)
+    ramp = torch.arange(length, dtype=dtype)
     segments = {
         "nan-first": ramp.clone(),
         "nan-last": ramp.clone(),
         "positive-infinity": ramp.clone(),
-        "all-negative-infinity": torch.full((length,), float("-inf")),
+        "all-negative-infinity": torch.full(
+            (length,), float("-inf"), dtype=dtype
+        ),
         "negative-infinity": ramp.clone(),
         "opposite-infinities": ramp.clone(),
     }
@@ -893,20 +1016,25 @@ def test_segment_reduce_max_propagates_nan_and_orders_infinities(length):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("length", SPECIAL_LENGTHS)
-def test_segment_reduce_min_propagates_nan_and_orders_infinities(length):
+def test_segment_reduce_min_propagates_nan_and_orders_infinities(
+    length, dtype
+):
     """Return NaN for a segment that holds one, wherever it sits.
 
     The finite values descend, so the minimum of a segment is its last
     element or the one before it, which a lane other than the one that
     stores the result reads.
     """
-    ramp = torch.arange(length, 0, -1, dtype=torch.float32)
+    ramp = torch.arange(length, 0, -1, dtype=dtype)
     segments = {
         "nan-first": ramp.clone(),
         "nan-last": ramp.clone(),
         "negative-infinity": ramp.clone(),
-        "all-positive-infinity": torch.full((length,), float("inf")),
+        "all-positive-infinity": torch.full(
+            (length,), float("inf"), dtype=dtype
+        ),
         "positive-infinity": ramp.clone(),
         "opposite-infinities": ramp.clone(),
     }
@@ -1092,14 +1220,18 @@ def test_segment_reduce_sum_is_the_default_mixed_schedule_of_its_batch():
 def _prepared_mixed(kind, values, offsets):
     """Run the private prepared `mixed` launch at its defaults."""
     output = torch.full(
-        (offsets.numel() - 1,), float("nan"), device=values.device
+        (offsets.numel() - 1,),
+        float("nan"),
+        dtype=values.dtype,
+        device=values.device,
     )
+    element = qualification._element_of(torch, values)
     qualification._prepare_planned_reduction(
         values,
         offsets,
         output,
-        module_text=qualification._semantic_module(kind),
-        kernel_name=f"segmented_{kind}",
+        module_text=qualification._semantic_module(kind, element),
+        kernel_name=qualification._reduction_kernel(kind, element),
     ).mixed()
     return output
 
@@ -1116,10 +1248,13 @@ def _assert_equals_the_prepared_launch(kind, host_values, host_offsets):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("seed", range(3))
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("name", DISTRIBUTIONS)
-def test_segment_reduce_equals_the_prepared_mixed_launch(name, kind, seed):
+def test_segment_reduce_equals_the_prepared_mixed_launch(
+    name, kind, seed, dtype
+):
     """Keep the bits of the path that prepares all three policies.
 
     The public call validates, classifies, and enqueues the mixed schedule
@@ -1133,7 +1268,7 @@ def test_segment_reduce_equals_the_prepared_mixed_launch(name, kind, seed):
     generator = torch.Generator().manual_seed(seed)
 
     _assert_equals_the_prepared_launch(
-        kind, *_host_case(lengths, generator)
+        kind, *_host_case(lengths, generator, dtype)
     )
 
 
@@ -1144,11 +1279,14 @@ def _selection_lengths(segments):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize(
     "case", ["selected", "one-short-of-selection", "one-long", "empty-only"]
 )
-def test_segment_reduce_equals_the_prepared_launch_at_the_edges(case, kind):
+def test_segment_reduce_equals_the_prepared_launch_at_the_edges(
+    case, kind, dtype
+):
     """Match the prepared launch where the schedule changes.
 
     A batch that the selection rule sends to the pure CTA kernel, the same
@@ -1165,7 +1303,7 @@ def test_segment_reduce_equals_the_prepared_launch_at_the_edges(case, kind):
     generator = torch.Generator().manual_seed(len(lengths))
 
     _assert_equals_the_prepared_launch(
-        kind, *_host_case(lengths, generator)
+        kind, *_host_case(lengths, generator, dtype)
     )
 
 
@@ -1302,6 +1440,38 @@ def test_segmented_calls_allocate_the_result_on_the_device(function):
     assert result.dtype == torch.float32
     assert result.device == values.device
     assert not result.requires_grad
+
+
+@_needs_cuda
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_float64_reduction_returns_float64_and_writes_a_float64_out(kind):
+    """Reduce float64 values in float64, into a new tensor or into `out`.
+
+    The values differ from 1 only below float32 precision, so a reduction
+    that cast them, or that accumulated in float32, would return another
+    result.
+    """
+    lengths = [3, 0, 40, 4100]
+    host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    index = torch.arange(sum(lengths), dtype=torch.float64)
+    host_values = 1.0 + (index % 7 - 3) * 2.0**-40
+    assert not torch.equal(host_values.float().double(), host_values)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    out = torch.full((4,), _SENTINEL, dtype=torch.float64, device="cuda")
+
+    result = swage.segment_reduce(values, offsets, kind)
+    returned = swage.segment_reduce(values, offsets, kind, out=out)
+
+    assert returned is out
+    assert result.dtype == torch.float64
+    assert _bits(out.cpu()) == _bits(result.cpu())
+    _assert_reduction_matches(kind, host_values, host_offsets, result.cpu())
+    if kind == "sum":
+        # Every partial sum is a multiple of 2**-40 below 2**13, so the sum
+        # is exact in float64 on every schedule.
+        assert _bits(result.cpu()) == _bits(
+            _exact_sums(host_values, host_offsets.long())
+        )
 
 
 @_needs_cuda

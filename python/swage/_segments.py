@@ -16,7 +16,7 @@ _KINDS = ("sum", "max", "min")
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
-    """Reduce every segment of `values` to one f32 result on the GPU.
+    """Reduce every segment of `values` to one result on the GPU.
 
     Segment `i` is `values[offsets[i]:offsets[i + 1]]`. The call validates
     the tensors, copies the offsets to the host to validate and classify
@@ -32,9 +32,10 @@ def segment_reduce(values, offsets, kind, *, out=None):
     wrote, the kernels come from it and nothing is compiled.
 
     Args:
-        values: Contiguous rank-one `torch.float32` CUDA tensor on the
-            current device. It must not require grad: the call records no
-            gradient.
+        values: Contiguous rank-one `torch.float32` or `torch.float64`
+            CUDA tensor on the current device. It must not require grad:
+            the call records no gradient. Nothing is cast: float64 values
+            are reduced in float64.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at or
@@ -49,14 +50,15 @@ def segment_reduce(values, offsets, kind, *, out=None):
             are exact. The rounding of a sum depends on the schedule the
             call selects from the segment lengths, the batch, and the
             device, and no argument pins it.
-        out: Optional result tensor: contiguous, rank one, `torch.float32`,
-            on the device of `values`, with exactly one element per segment,
-            sharing no memory with `values` or `offsets`, and not requiring
-            grad. It is never resized.
+        out: Optional result tensor: contiguous, rank one, of the dtype of
+            `values`, on the device of `values`, with exactly one element
+            per segment, sharing no memory with `values` or `offsets`, and
+            not requiring grad. It is never resized.
 
     Returns:
-        `out`, or a new tensor on the device of `values` when `out` is
-        None, with one element per segment. The kernels that write it are
+        `out`, or a new tensor of the dtype and on the device of `values`
+        when `out` is None, with one element per segment. The kernels that
+        write it are
         enqueued and may not have finished. The version counter of the
         tensor is advanced when a kernel is enqueued.
 
@@ -82,17 +84,25 @@ def segment_reduce(values, offsets, kind, *, out=None):
         )
     _require_inputs(torch, values, offsets)
     segment_count = max(offsets.numel() - 1, 0)
-    _require_out(torch, out, segment_count, "segment", values, offsets)
+    # The element type of the program, or None for values no program takes.
+    element = _qualification._element_of(torch, values)
+    _require_out(
+        torch, out, segment_count, "segment", values, offsets, element
+    )
     _require_bindings("segment_reduce")
     _require_numpy("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
-    output = _result(torch, out, segment_count, values)
+    if element is None:
+        raise TypeError(
+            "values must have dtype torch.float32 or torch.float64"
+        )
+    output = _result(torch, out, segment_count, values, values.dtype)
     _qualification._launch_planned_reduction(
         values,
         offsets,
         output,
-        module_text=_qualification._semantic_module(kind),
-        kernel_name=f"segmented_{kind}",
+        module_text=_qualification._semantic_module(kind, element),
+        kernel_name=_qualification._reduction_kernel(kind, element),
     )
     return output
 
@@ -109,7 +119,8 @@ def segment_softmax(values, offsets, *, out=None):
     Args:
         values: Contiguous rank-one `torch.float32` CUDA tensor on the
             current device. It must not require grad: the call records no
-            gradient.
+            gradient. float64 values are refused: the device has no 64-bit
+            exp2, so there is no float64 softmax kernel.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at the
@@ -146,11 +157,17 @@ def segment_softmax(values, offsets, *, out=None):
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
     value_count = values.numel()
-    _require_out(torch, out, value_count, "value", values, offsets)
+    element = "f32" if values.dtype == torch.float32 else None
+    _require_out(torch, out, value_count, "value", values, offsets, element)
     _require_bindings("segment_softmax")
     _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
-    output = _result(torch, out, value_count, values)
+    if values.dtype == torch.float64:
+        raise TypeError(
+            "values must have dtype torch.float32; segment_softmax has no "
+            "float64 kernel because the device has no 64-bit exp2"
+        )
+    output = _result(torch, out, value_count, values, torch.float32)
     value_count, segment_count, host_offsets = (
         _qualification._validate_shapes(
             values,
@@ -196,7 +213,7 @@ def _require_inputs(torch, values, offsets):
         )
 
 
-def _require_out(torch, out, count, unit, values, offsets):
+def _require_out(torch, out, count, unit, values, offsets, element):
     """Validate a caller-supplied result tensor under its public name.
 
     Args:
@@ -206,13 +223,17 @@ def _require_out(torch, out, count, unit, values, offsets):
         unit: What one element belongs to, `"segment"` or `"value"`.
         values: The values tensor, already known to be a tensor.
         offsets: The offsets tensor, already known to be a tensor.
+        element: The element type of the program the call runs, or None
+            when the call takes no values of this dtype. The dtype of `out`
+            is then not judged here: the shared validation refuses the
+            values.
     """
     if out is None:
         return
     if not isinstance(out, torch.Tensor):
         raise TypeError("out must be a torch.Tensor or None")
-    if out.dtype != torch.float32:
-        raise TypeError("out must have dtype torch.float32")
+    if element is not None and out.dtype != values.dtype:
+        raise TypeError(f"out must have the dtype of values, {values.dtype}")
     if out.dim() != 1:
         raise TypeError("out must have rank one")
     if out.numel() != count:
@@ -311,11 +332,11 @@ def _refuse_capture(torch, call, values, offsets):
         )
 
 
-def _result(torch, out, count, values):
+def _result(torch, out, count, values, dtype):
     """Return the tensor a call writes: `out`, or a new one of `count`."""
     if out is not None:
         return out
-    return torch.empty(count, dtype=torch.float32, device=values.device)
+    return torch.empty(count, dtype=dtype, device=values.device)
 
 
 def _validate_covering_offsets(offsets, value_count, output_count):

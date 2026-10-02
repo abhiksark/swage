@@ -131,10 +131,11 @@ LogicalResult verifyTaskConsumers(Operation *task, Type valuesType,
   Type word = cast<MemRefType>(offsetsType).getElementType();
   if (!isAdmittedElementType(element) || !isAdmittedIndexType(word))
     return task->emitError()
-           << "the conversion lowers f32 values with i32 offsets and counts, "
-              "got values of "
+           << "the conversion lowers f32 or f64 values with i32 offsets and "
+              "counts, got values of "
            << element << " and offsets of " << word;
   SegmentProgramAnalysis analysis;
+  analysis.element = element;
   for (Operation &operation : consumers.without_terminator()) {
     if (auto reduction = dyn_cast<ReduceOp>(operation))
       analysis.reductions.push_back(reduction);

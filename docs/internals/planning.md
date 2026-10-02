@@ -11,13 +11,15 @@ exact internal contracts; none of them is a public API.
 [Verification](verification.md) and
 [ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
-Planning admission accepts a capture-free, single-stage f32 sum, max, or
-min with
-optional single-consumer map chains and a scalar output per segment. Element
-regions use the existing admitted arithmetic and `math.exp2` operations.
+Planning admission accepts a capture-free, single-stage sum, max, or min
+over f32 or f64 values, with optional single-consumer map chains and a
+scalar output per segment. Element regions use the existing admitted
+arithmetic and `math.exp2` operations, and every value of a region has the
+element type of the function. `math.exp2` is admitted in an f32 program
+only, because the device has no f64 `exp2`.
 Admission is read-only analysis of one segment function. Captures, multiple
 reductions, and map-store outputs remain outside static planning. Persistent
-execution retains its separate identity-sum restriction.
+execution retains its separate restriction to the f32 identity sum.
 
 Two callers run the same admission. `--swage-to-plan` with
 `schedule=task-ids` admits a function and then replaces it by the plan

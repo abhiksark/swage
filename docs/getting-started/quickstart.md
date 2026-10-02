@@ -165,9 +165,9 @@ infinity, and has no softmax element.
 Each call validates and classifies its offsets on the host before it
 launches, every time, so it costs more than its kernels. With offsets that
 change on every call, expect it to be slower than `torch.segment_reduce`.
-The values are rank-one `torch.float32`, the offsets are `torch.int32` or
-`torch.int64`, and
-the calls record no gradient.
+The values are rank-one `torch.float32`, or `torch.float64` for a
+reduction, the offsets are `torch.int32` or `torch.int64`, and the calls
+record no gradient.
 [Segmented Calls](../user-guide/segmented-calls.md) states the whole
 contract, including the cost and the cases a call refuses.
 

@@ -16,7 +16,8 @@
 // UNCHANGED: swage_plan.tasks
 // UNCHANGED-LABEL: func.func @too_wide(
 // UNCHANGED-LABEL: func.func @warp_policy_on_a_wide_block(
-// UNCHANGED-LABEL: func.func @double_values(
+// UNCHANGED-LABEL: func.func @half_values(
+// UNCHANGED-LABEL: func.func @exponential_double(
 // UNCHANGED-LABEL: func.func @wide_offsets(
 // UNCHANGED-LABEL: func.func @exponential(
 // UNCHANGED-LABEL: func.func @clashes(
@@ -100,11 +101,34 @@ module {
 
 // The element and word types are the ones the lowerings admit.
 module {
-  func.func @double_values(
+  func.func @half_values(
+      %values: memref<?xf16>, %offsets: memref<?xi32>,
+      %output: memref<?xf16>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    // expected-error@+1 {{the conversion lowers f32 or f64 values with i32 offsets and counts, got values of 'f16' and offsets of 'i32'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf16>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf16>) {
+    ^bb0(%segment: !swage.segment<f16>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f16> -> f16 {
+      ^bb0(%value: f16):
+        swage.yield %value : f16
+      }
+      swage_plan.yield %sum : f16
+    }
+    return
+  }
+}
+
+// -----
+
+// An f64 exp2 has no instruction on the device.
+module {
+  func.func @exponential_double(
       %values: memref<?xf64>, %offsets: memref<?xi32>,
       %output: memref<?xf64>, %value_count: i32, %segment_count: i32)
       attributes {swage_plan.block_threads = 128 : i32} {
-    // expected-error@+1 {{the conversion lowers f32 values with i32 offsets and counts, got values of 'f64' and offsets of 'i32'}}
     swage_plan.tasks policy<cta>
         segments(%values, %offsets : memref<?xf64>, memref<?xi32>)
         value_count(%value_count : i32) segment_count(%segment_count : i32)
@@ -112,7 +136,9 @@ module {
     ^bb0(%segment: !swage.segment<f64>):
       %sum = swage.reduce %segment kind<sum> : !swage.segment<f64> -> f64 {
       ^bb0(%value: f64):
-        swage.yield %value : f64
+        // expected-error@+1 {{operation 'math.exp2' is admitted for f32 values only: the device has no f64 exp2}}
+        %exponential = math.exp2 %value : f64
+        swage.yield %exponential : f64
       }
       swage_plan.yield %sum : f64
     }
@@ -127,7 +153,7 @@ module {
       %values: memref<?xf32>, %offsets: memref<?xi64>,
       %output: memref<?xf32>, %value_count: i64, %segment_count: i64)
       attributes {swage_plan.block_threads = 128 : i32} {
-    // expected-error@+1 {{the conversion lowers f32 values with i32 offsets and counts, got values of 'f32' and offsets of 'i64'}}
+    // expected-error@+1 {{the conversion lowers f32 or f64 values with i32 offsets and counts, got values of 'f32' and offsets of 'i64'}}
     swage_plan.tasks policy<cta>
         segments(%values, %offsets : memref<?xf32>, memref<?xi64>)
         value_count(%value_count : i64) segment_count(%segment_count : i64)

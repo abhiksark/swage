@@ -33,11 +33,11 @@ qualification machinery or planned work.
   subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
 - `swage.segment_reduce` for `"sum"`, `"max"`, and `"min"`, and
-  `swage.segment_softmax`, over rank-one f32 values and int32 or int64
-  offsets on
-  one CUDA device, when build-tree native bindings are present. The calls
-  admit no other dtype, kind, or rank, record no gradient, and prepare
-  their offsets on the host at every call.
+  `swage.segment_softmax`, over rank-one values and int32 or int64 offsets
+  on one CUDA device, when build-tree native bindings are present. A
+  reduction takes f32 or f64 values, and the softmax takes f32 values. The
+  calls admit no other dtype, kind, or rank, record no gradient, and
+  prepare their offsets on the host at every call.
   [Segmented Calls](user-guide/segmented-calls.md) states the contract and
   the cost.
 - `python -m swage.compile`, which writes the kernels of those two calls
@@ -61,8 +61,8 @@ describe the current source tree, and
 - Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
 - Planning, direct warp and CTA execution, fused mixed execution, and
-  split-CTA partial and merge execution for capture-free, single-stage f32
-  sum, max, and min programs.
+  split-CTA partial and merge execution for capture-free, single-stage
+  sum, max, and min programs over f32 or f64 values.
 
 These paths have tests and recorded qualification evidence. The two
 segmented calls run a fixed sum, max, and softmax through them with default

@@ -235,6 +235,7 @@ def _validate_shapes(
     *,
     require_cuda=True,
     int64_offsets=False,
+    element="f32",
 ):
     """Validate tensor shapes against one of the two output ABIs.
 
@@ -250,6 +251,9 @@ def _validate_shapes(
         int64_offsets: Whether `torch.int64` offsets are admitted beside
             `torch.int32` ones. A caller that sets it must give its kernels
             `_kernel_offsets`: a kernel reads int32 words.
+        element: The element type of the program the caller runs, `"f32"`
+            or `"f64"`. The values and the output must have its dtype: a
+            kernel reads and writes elements of one width.
 
     Returns:
         The value count, the segment count, and the offsets on the host as
@@ -267,9 +271,10 @@ def _validate_shapes(
     ):
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
+    dtype = _element_dtype(torch, element)
     for name, tensor in (("values", values), ("output", output)):
-        if tensor.dtype != torch.float32:
-            raise TypeError(f"{name} must have dtype torch.float32")
+        if tensor.dtype != dtype:
+            raise TypeError(f"{name} must have dtype {dtype}")
     if offsets.dtype != torch.int32 and not (
         int64_offsets and offsets.dtype == torch.int64
     ):
@@ -667,27 +672,86 @@ def _load_once(driver, ptx, kernel_name):
     return handles
 
 
-def _semantic_module(kind):
-    """Return the canonical private qualification module."""
+# The element types a reduction admits, as the MLIR type of an element.
+_ELEMENTS = ("f32", "f64")
+
+
+def _element_dtype(torch, element):
+    """Return the tensor dtype of one element type of `_ELEMENTS`."""
+    return {"f32": torch.float32, "f64": torch.float64}[element]
+
+
+def _element_of(torch, values):
+    """Return the element type of a values tensor, or None.
+
+    None stands for a dtype that no reduction admits, and for a `values`
+    that is not a tensor. The caller validates both.
+    """
+    dtype = getattr(values, "dtype", None)
+    return {torch.float32: "f32", torch.float64: "f64"}.get(dtype)
+
+
+def _reduction_kernel(kind, element="f32"):
+    """Return the name of the kernel function of one reduction program.
+
+    The f32 programs are unsuffixed, which keeps the names and the program
+    texts they had before f64 was admitted.
+    """
+    return f"segmented_{kind}" + ("" if element == "f32" else f"_{element}")
+
+
+def _program_element(module_text):
+    """Return the element type a segment program declares for its values.
+
+    The private prepared and one-shot launches take a program as text. The
+    values and the output a caller passes must have the element type of
+    that program, so it is read from the declaration of the values.
+
+    Raises:
+        ValueError: The text declares no values argument of an element type
+            in `_ELEMENTS`.
+    """
+    match = re.search(
+        r"memref<\?x(\w+)> \{swage\.role = #swage\.role<values>\}",
+        module_text,
+    )
+    if match is None or match[1] not in _ELEMENTS:
+        raise ValueError(
+            "the segment program declares no swage.role<values> argument of "
+            "an element type in " + ", ".join(_ELEMENTS)
+        )
+    return match[1]
+
+
+def _semantic_module(kind, element="f32"):
+    """Return the canonical private qualification module.
+
+    Args:
+        kind: `"sum"`, `"max"`, or `"min"`.
+        element: The element type of the values and the result, `"f32"` or
+            `"f64"`.
+    """
     if kind not in {"sum", "max", "min"}:
         raise ValueError("reduction kind must be 'sum', 'max', or 'min'")
+    if element not in _ELEMENTS:
+        raise ValueError("reduction element type must be 'f32' or 'f64'")
     return f"""
 module {{
-  func.func @segmented_{kind}(
-      %values: memref<?xf32> {{swage.role = #swage.role<values>}},
+  func.func @{_reduction_kernel(kind, element)}(
+      %values: memref<?x{element}> {{swage.role = #swage.role<values>}},
       %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
-      %output: memref<?xf32> {{swage.role = #swage.role<output>}},
+      %output: memref<?x{element}> {{swage.role = #swage.role<output>}},
       %value_count: i32 {{swage.role = #swage.role<value_count>}},
       %segment_count: i32 {{swage.role = #swage.role<segment_count>}}) {{
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+        : memref<?x{element}>, memref<?xi32>, index -> !swage.segment<{element}>
     %result = swage.reduce %segment kind<{kind}>
-        : !swage.segment<f32> -> f32 {{
-    ^bb0(%value: f32):
-      swage.yield %value : f32
+        : !swage.segment<{element}> -> {element} {{
+    ^bb0(%value: {element}):
+      swage.yield %value : {element}
     }}
-    memref.store %result, %output[%sid] : memref<?xf32>
+    memref.store %result, %output[%sid] : memref<?x{element}>
     return
   }}
 }}
@@ -784,12 +848,16 @@ class _PreparedPersistentSum(NamedTuple):
 def launch_gpu(values, offsets, output, kind, block_size=None):
     """Launch one internally qualified segmented reduction.
 
-    The kernel is compiled once per kind, block size, and target, and loaded
-    once per CUDA context. An omitted block size is the CTA block of the
-    target description.
+    The kernel is compiled once per kind, element type, block size, and
+    target, and loaded once per CUDA context. An omitted block size is the
+    CTA block of the target description. float64 values run the f64 program
+    of the kind, and the output then is float64 as well.
     """
     torch = _runtime._import_torch()
-    value_count, segment_count = _validate_tensors(values, offsets, output)
+    element = _element_of(torch, values) or "f32"
+    value_count, segment_count, _ = _validate_shapes(
+        values, offsets, output, _validate_offsets, element=element
+    )
     if block_size is None:
         block_size = _target_description().cta_block_threads
     if type(block_size) is not int or block_size <= 0:
@@ -809,10 +877,10 @@ def launch_gpu(values, offsets, output, kind, block_size=None):
     )
 
     target = _target(torch, torch.cuda.current_device())
-    kernel_name = f"segmented_{kind}"
+    kernel_name = _reduction_kernel(kind, element)
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
-        _semantic_module(kind),
+        _semantic_module(kind, element),
         kernel_name=kernel_name,
         block_size=block_size,
         target=target,
@@ -1168,10 +1236,12 @@ def _prepare_planned_reduction(
     """Prepare static policies for one private capture-free reduction.
 
     Args:
-        values: Contiguous rank-one CUDA f32 input tensor.
+        values: Contiguous rank-one CUDA input tensor, float32 or float64
+            as the program declares its values.
         offsets: Contiguous rank-one CUDA i32 segment offsets. They must not
             change in place after preparation; values may.
-        output: Disjoint contiguous CUDA f32 output, one value per segment.
+        output: Disjoint contiguous CUDA output of the dtype of values, one
+            value per segment.
         module_text: Native qualification MLIR with the semantic program.
         kernel_name: Name of the segment function in the module.
         warp_max_elements: Largest segment assigned to direct warp work.
@@ -1209,7 +1279,11 @@ def _prepare_planned_reduction(
         warp_max_elements, cta_chunk_elements
     )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, validate
+        values,
+        offsets,
+        output,
+        validate,
+        element=_program_element(module_text),
     )
     offsets_version = _offsets_version(offsets)
     # A launch advances the output version, which the offsets may share.
@@ -1336,8 +1410,9 @@ def _prepare_planned_reduction(
         partial_pointer = mixed_pointer + 4 * direct_count
         merge_pointer = partial_pointer + 8 * partial_count
         if partial_count:
+            # One partial result per chunk, of the element type.
             scratch = torch.empty(
-                partial_count, dtype=torch.float32, device=device
+                partial_count, dtype=values.dtype, device=device
             )
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream(device_index))
@@ -1538,9 +1613,11 @@ def _launch_planned_reduction(
     as a tensor of its own for a batch that uploads no records.
 
     Args:
-        values: Contiguous rank-one CUDA f32 input tensor.
+        values: Contiguous rank-one CUDA input tensor, float32 or float64
+            as the program declares its values.
         offsets: Contiguous rank-one CUDA i32 or i64 segment offsets.
-        output: Disjoint contiguous CUDA f32 output, one value per segment.
+        output: Disjoint contiguous CUDA output of the dtype of values, one
+            value per segment.
         module_text: Native qualification MLIR with the semantic program.
         kernel_name: Name of the segment function in the module.
 
@@ -1555,7 +1632,12 @@ def _launch_planned_reduction(
         warp_max_elements, cta_chunk_elements
     )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, validate, int64_offsets=True
+        values,
+        offsets,
+        output,
+        validate,
+        int64_offsets=True,
+        element=_program_element(module_text),
     )
     native_swage = _native_swage()
     device = offsets.device
@@ -1703,7 +1785,7 @@ def _launch_planned_reduction(
             )
         if partial_count:
             scratch = torch.empty(
-                partial_count, dtype=torch.float32, device=device
+                partial_count, dtype=values.dtype, device=device
             )
             retained += (scratch,)
             driver.launch_segmented(
@@ -2076,10 +2158,20 @@ def _enqueue_softmax(
     return None
 
 
-def _float_literal(value):
-    """Emit an exact f32 bit pattern accepted by the MLIR parser."""
-    bits = struct.unpack("<I", struct.pack("<f", value))[0]
-    return f"0x{bits:08X}"
+# How an element of each type travels through the oracle: the struct codes
+# of its value and of its bit pattern, the integer type of the pattern, and
+# the runner function that prints a memref of that integer type.
+_TRANSPORT = {
+    "f32": ("f", "I", "i32", "printMemrefI32"),
+    "f64": ("d", "Q", "i64", "printMemrefI64"),
+}
+
+
+def _float_literal(value, element="f32"):
+    """Emit an exact bit pattern of `element` that the MLIR parser accepts."""
+    code, pattern, bits_type, _ = _TRANSPORT[element]
+    bits = struct.unpack(f"<{pattern}", struct.pack(f"<{code}", value))[0]
+    return f"0x{bits:0{int(bits_type[1:]) // 4}X}"
 
 
 def _dense_literal(code, numbers):
@@ -2093,16 +2185,19 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
 
     The inputs become constant globals initialized from their exact bytes,
     one operation per buffer instead of three per element. The result
-    leaves as bit patterns: each f32 output is bitcast to i32 and printed by
-    the integer memref printer, because the float printer keeps only six
-    significant digits.
+    leaves as bit patterns: each output is bitcast to the integer of its
+    width and printed by the integer memref printer, because the float
+    printer keeps only six significant digits. The element type is the one
+    the program declares for its values.
     """
+    element = _program_element(semantic)
+    code, _, word, printer = _TRANSPORT[element]
     value_count = values.numel()
     segment_count = offsets.numel() - 1
-    values_type = f"memref<{value_count}xf32>"
+    values_type = f"memref<{value_count}x{element}>"
     offsets_type = f"memref<{segment_count + 1}xi32>"
-    output_type = f"memref<{output_length}xf32>"
-    bits_type = f"memref<{output_length}xi32>"
+    output_type = f"memref<{output_length}x{element}>"
+    bits_type = f"memref<{output_length}x{word}>"
     lines = [
         semantic.rstrip()[:-1],
         "",
@@ -2117,7 +2212,7 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
     if value_count:
         lines.append(
             f'  memref.global "private" constant @runner_values : '
-            f"{values_type} = {_dense_literal('f', values.tolist())}"
+            f"{values_type} = {_dense_literal(code, values.tolist())}"
         )
         values_storage = f"memref.get_global @runner_values : {values_type}"
     lines.extend(
@@ -2133,7 +2228,7 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
             f"    %bits = memref.alloc() : {bits_type}",
             (
                 f"    %values = memref.cast %values_storage : {values_type} "
-                "to memref<?xf32>"
+                f"to memref<?x{element}>"
             ),
             (
                 f"    %offsets = memref.cast %offsets_storage : "
@@ -2141,37 +2236,43 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
             ),
             (
                 f"    %output = memref.cast %output_storage : {output_type} "
-                "to memref<?xf32>"
+                f"to memref<?x{element}>"
             ),
             # Prefill so that a store past the live range is visible in the
             # parsed result instead of being garbage.
             (
                 f"    %sentinel = arith.constant "
-                f"{_float_literal(_SENTINEL)} : f32"
+                f"{_float_literal(_SENTINEL, element)} : {element}"
             ),
             "    %from = arith.constant 0 : index",
             "    %step = arith.constant 1 : index",
             f"    %to = arith.constant {output_length} : index",
             "    scf.for %pi = %from to %to step %step {",
-            "      memref.store %sentinel, %output[%pi] : memref<?xf32>",
+            (
+                "      memref.store %sentinel, %output[%pi] : "
+                f"memref<?x{element}>"
+            ),
             "    }",
             f"    %value_count = arith.constant {value_count} : i32",
             f"    %segment_count = arith.constant {segment_count} : i32",
             (
                 f"    call @{kernel_name}(%values, %offsets, %output, "
-                "%value_count, %segment_count) : (memref<?xf32>, "
-                "memref<?xi32>, memref<?xf32>, i32, i32) -> ()"
+                f"%value_count, %segment_count) : (memref<?x{element}>, "
+                f"memref<?xi32>, memref<?x{element}>, i32, i32) -> ()"
             ),
             "    scf.for %bi = %from to %to step %step {",
-            "      %result = memref.load %output[%bi] : memref<?xf32>",
-            "      %pattern = arith.bitcast %result : f32 to i32",
+            (
+                "      %result = memref.load %output[%bi] : "
+                f"memref<?x{element}>"
+            ),
+            f"      %pattern = arith.bitcast %result : {element} to {word}",
             f"      memref.store %pattern, %bits[%bi] : {bits_type}",
             "    }",
             (
                 f"    %unranked = memref.cast %bits : {bits_type} "
-                "to memref<*xi32>"
+                f"to memref<*x{word}>"
             ),
-            "    call @printMemrefI32(%unranked) : (memref<*xi32>) -> ()",
+            f"    call @{printer}(%unranked) : (memref<*x{word}>) -> ()",
         ]
     )
     if not value_count:
@@ -2184,7 +2285,7 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
             "  }",
             "",
             (
-                "  func.func private @printMemrefI32(memref<*xi32>) "
+                f"  func.func private @{printer}(memref<*x{word}>) "
                 "attributes {llvm.emit_c_interface}"
             ),
             "}",
@@ -2274,12 +2375,13 @@ def _run(command, source):
     return result.stdout
 
 
-def _execute(module_text):
-    """Lower and run one executable module, returning its exact f32 results.
+def _execute(module_text, element="f32"):
+    """Lower and run one executable module, returning its exact results.
 
-    The module prints one signed i32 bit pattern per output element. Each
-    is reinterpreted as the f32 it encodes, so the returned Python floats
-    hold the computed values with no decimal rounding in between.
+    The module prints one signed integer bit pattern per output element, of
+    the width of `element`. Each is reinterpreted as the float it encodes,
+    so the returned Python floats hold the computed values with no decimal
+    rounding in between.
     """
     build = _oracle_build()
     llvm_root = _llvm_root(build)
@@ -2313,13 +2415,15 @@ def _execute(module_text):
         raise RuntimeError(
             f"mlir-runner returned an unreadable result:\n{printed}"
         )
+    code, pattern, word, _ = _TRANSPORT[element]
+    mask = (1 << int(word[1:])) - 1
     patterns = [
-        int(token) & 0xFFFFFFFF
+        int(token) & mask
         for token in match.group(1).split(",")
         if token.strip()
     ]
-    payload = struct.pack(f"<{len(patterns)}I", *patterns)
-    return list(struct.unpack(f"<{len(patterns)}f", payload))
+    payload = struct.pack(f"<{len(patterns)}{pattern}", *patterns)
+    return list(struct.unpack(f"<{len(patterns)}{code}", payload))
 
 
 def _execute_guarded(values, offsets, semantic, kernel_name, live):
@@ -2330,7 +2434,8 @@ def _execute_guarded(values, offsets, semantic, kernel_name, live):
     range" into a checked invariant of every oracle call.
     """
     results = _execute(
-        _runner_module(values, offsets, semantic, kernel_name, live + 1)
+        _runner_module(values, offsets, semantic, kernel_name, live + 1),
+        _program_element(semantic),
     )
     if len(results) != live + 1:
         raise RuntimeError(
@@ -2346,20 +2451,30 @@ def _execute_guarded(values, offsets, semantic, kernel_name, live):
 def cpu_oracle(values, offsets, kind):
     """Execute the sequential reduction lowering with the MLIR runner.
 
-    Returns the exact f32 result of each segment, accumulated left to right.
+    Returns the exact result of each segment, accumulated left to right, in
+    the dtype of `values`: float32 or float64.
     """
     torch = _runtime._import_torch()
+    element = _element_of(torch, values) or "f32"
+    dtype = _element_dtype(torch, element)
     segment_count = max(offsets.numel() - 1, 0)
-    output = torch.empty(segment_count, dtype=torch.float32)
-    _validate_tensors(values, offsets, output, require_cuda=False)
+    output = torch.empty(segment_count, dtype=dtype)
+    _validate_shapes(
+        values,
+        offsets,
+        output,
+        _validate_offsets,
+        require_cuda=False,
+        element=element,
+    )
     results = _execute_guarded(
         values,
         offsets,
-        _semantic_module(kind),
-        f"segmented_{kind}",
+        _semantic_module(kind, element),
+        _reduction_kernel(kind, element),
         segment_count,
     )
-    return torch.tensor(results, dtype=torch.float32)
+    return torch.tensor(results, dtype=dtype)
 
 
 def cpu_softmax_oracle(values, offsets):
