@@ -38,6 +38,7 @@
 namespace mlir::swage {
 namespace {
 
+using swage_plan::FusedTasksOp;
 using swage_plan::PartialTasksOp;
 using swage_plan::SwagePlanDialect;
 using swage_plan::TaskPolicy;
@@ -95,8 +96,8 @@ public:
       rewriter.replaceAllUsesWith(argument, parameter);
     if (failed(legalizeInPlace(rewriter, operationsOf(body))))
       return failure();
-    moveConvertedOperations<TasksOp, PartialTasksOp, func::ReturnOp>(
-        rewriter, body, entry);
+    moveConvertedOperations<TasksOp, PartialTasksOp, FusedTasksOp,
+                            func::ReturnOp>(rewriter, body, entry);
     rewriter.eraseOp(function);
     return success();
   }
@@ -121,14 +122,70 @@ public:
   }
 };
 
-/// One block of threads per task: the kernel prelude, the guard on the task
-/// index, the binding of the segment of the task, the consumers of the
-/// region in order, and the store of the yielded scalar.
+/// What a task site needs to bind a segment by its ID: the buffers and
+/// bounds of the task operation, as the kernel sees them, and the two index
+/// constants of the kernel prelude.
+struct SegmentSite {
+  Value values;
+  Value offsets;
+  Value valueCount;
+  Value segmentCount;
+  Value output;
+  Value zero;
+  Value one;
+};
+
+/// Run the consumers of a task region on the segment of one task, at the
+/// insertion point of `body`.
 ///
-/// The region argument is replaced by the four values of the binding, and
-/// the consumers are legalized while the task operation is still their
-/// parent, so each consumer pattern takes the binding from its operands and
-/// the policy from the operation it sits in.
+/// With `ids`, the segment ID is the word at `ids[taskId]`, compared with
+/// the segment count. Without, it is `taskId` itself, which the caller
+/// compared with the segment count. The segment is bound for the thread
+/// `logicalThreadId` at `stride`; the region argument is replaced by the
+/// four values of the binding; the consumers are legalized while the task
+/// operation is still their parent, so each consumer pattern takes the
+/// binding from its operands and the policy from the operation it sits in;
+/// and the yielded scalar is stored by the thread whose `logicalThreadId`
+/// is zero. Returns false when a consumer could not be legalized.
+bool convertSegmentTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
+                        Location loc, Region &region, const SegmentSite &site,
+                        Value ids, Value taskId, Value logicalThreadId,
+                        Value stride) {
+  Value segmentId = taskId;
+  Value segmentInRange;
+  if (ids) {
+    Value segmentIdWord = loadTaskWord(body, loc, ids, taskId);
+    segmentInRange =
+        isLoadedIndexInRange(body, loc, segmentIdWord, site.segmentCount);
+    segmentId = arith::IndexCastOp::create(body, loc, body.getIndexType(),
+                                           segmentIdWord);
+  }
+  BoundSegment bound = emitSegmentBinding(
+      body, loc, site.values, site.offsets, site.valueCount, segmentId,
+      segmentInRange, logicalThreadId, stride, site.zero, site.one);
+  Block &consumersBlock = region.front();
+  rewriter.replaceAllUsesWith(consumersBlock.getArgument(0),
+                              ValueRange{bound.segment.base,
+                                         bound.segment.first, bound.segment.end,
+                                         bound.segment.stride});
+
+  auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
+  SmallVector<Operation *> consumers = operationsOf(consumersBlock);
+  consumers.pop_back();
+  if (failed(legalizeInPlace(rewriter, consumers)))
+    return false;
+  moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
+      rewriter, consumersBlock, body.getInsertionBlock());
+  if (Value scalar = yield.getValue())
+    emitScalarStore(body, loc, rewriter.getRemappedValue(scalar), site.output,
+                    bound.segmentId64, logicalThreadId, site.zero,
+                    segmentInRange);
+  return true;
+}
+
+/// One block of threads per task: the kernel prelude, the guard on the task
+/// index, and the segment of the task. The direct kernel uses the block
+/// index as the segment ID; with a task buffer the ID is loaded from it.
 class TasksPattern : public OpConversionPattern<TasksOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -155,43 +212,19 @@ public:
     Value inRange = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::slt, taskIndex, taskCount);
 
-    Block &region = tasks.getBody().front();
-    auto yield = cast<swage_plan::YieldOp>(region.getTerminator());
+    SegmentSite site{adaptor.getValues(),
+                     adaptor.getOffsets(),
+                     adaptor.getValueCount(),
+                     adaptor.getSegmentCount(),
+                     adaptor.getOutput(),
+                     zero,
+                     one};
     bool converted = true;
     scf::IfOp::create(
         rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-          // The direct kernel uses the block index as the segment ID, which
-          // the guard compared with the segment count. A segment ID loaded
-          // from a task buffer is bounded here.
-          Value segmentId = taskIndex;
-          Value segmentInRange;
-          if (ids) {
-            Value segmentIdWord = loadTaskWord(body, bodyLoc, ids, taskIndex);
-            segmentInRange = isLoadedIndexInRange(body, bodyLoc, segmentIdWord,
-                                                  adaptor.getSegmentCount());
-            segmentId = arith::IndexCastOp::create(
-                body, bodyLoc, body.getIndexType(), segmentIdWord);
-          }
-          BoundSegment bound = emitSegmentBinding(
-              body, bodyLoc, adaptor.getValues(), adaptor.getOffsets(),
-              adaptor.getValueCount(), segmentId, segmentInRange, threadId,
-              block, zero, one);
-          rewriter.replaceAllUsesWith(
-              region.getArgument(0),
-              ValueRange{bound.segment.base, bound.segment.first,
-                         bound.segment.end, bound.segment.stride});
-
-          SmallVector<Operation *> consumers = operationsOf(region);
-          consumers.pop_back();
-          converted = succeeded(legalizeInPlace(rewriter, consumers));
-          if (converted) {
-            moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
-                rewriter, region, body.getInsertionBlock());
-            if (Value scalar = yield.getValue())
-              emitScalarStore(body, bodyLoc, rewriter.getRemappedValue(scalar),
-                              adaptor.getOutput(), bound.segmentId64, threadId,
-                              zero, segmentInRange);
-          }
+          converted =
+              convertSegmentTask(rewriter, body, bodyLoc, tasks.getBody(), site,
+                                 ids, taskIndex, threadId, block);
           scf::YieldOp::create(body, bodyLoc);
         });
     if (!converted)
@@ -201,25 +234,107 @@ public:
   }
 };
 
-class SwagePlanToGPUPass
-    : public PassWrapper<SwagePlanToGPUPass, OperationPass<ModuleOp>> {
+/// Warp tasks and block tasks in one launch. The first blocks each run one
+/// warp task per subgroup, on the lanes of that subgroup, and every block
+/// after them runs one block task. A task index beyond its count runs
+/// nothing.
+class FusedTasksPattern : public OpConversionPattern<FusedTasksOp> {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwagePlanToGPUPass)
+  FusedTasksPattern(MLIRContext *context, const TargetDescription &target)
+      : OpConversionPattern(context), target(target) {}
 
-  StringRef getArgument() const final { return "swage-plan-to-gpu"; }
-  StringRef getDescription() const final {
-    return "Convert every plan function to a GPU kernel module";
+  LogicalResult
+  matchAndRewrite(FusedTasksOp tasks, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    IntegerAttr threads = blockThreadsOf(tasks->getParentOp());
+    if (!threads)
+      return rewriter.notifyMatchFailure(tasks, "not in a plan function");
+    Location loc = tasks.getLoc();
+    Value ids = adaptor.getIds();
+
+    Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value block =
+        arith::ConstantIndexOp::create(rewriter, loc, threads.getInt());
+    // One warp task per subgroup of the block: `four` slots, and `three` to
+    // round the warp task count up to whole blocks.
+    int64_t slots =
+        target.slotsPerBlock(static_cast<int32_t>(threads.getInt()));
+    Value three = arith::ConstantIndexOp::create(rewriter, loc, slots - 1);
+    Value four = arith::ConstantIndexOp::create(rewriter, loc, slots);
+    Value warp =
+        arith::ConstantIndexOp::create(rewriter, loc, target.subgroupWidth);
+    Value warpTaskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getWarpTaskCount());
+    Value ctaTaskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getCtaTaskCount());
+    Value roundedWarpTaskCount =
+        arith::AddIOp::create(rewriter, loc, warpTaskCount, three);
+    Value warpBlockCount =
+        arith::DivUIOp::create(rewriter, loc, roundedWarpTaskCount, four);
+    Value isWarpBlock = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ult, taskIndex, warpBlockCount);
+
+    SegmentSite site{adaptor.getValues(),
+                     adaptor.getOffsets(),
+                     adaptor.getValueCount(),
+                     adaptor.getSegmentCount(),
+                     adaptor.getOutput(),
+                     zero,
+                     one};
+    bool converted = true;
+    scf::IfOp::create(
+        rewriter, loc, isWarpBlock,
+        [&](OpBuilder &warpBlock, Location warpLoc) {
+          Value physicalWarp =
+              arith::DivUIOp::create(warpBlock, warpLoc, threadId, warp);
+          Value lane =
+              arith::RemUIOp::create(warpBlock, warpLoc, threadId, warp);
+          Value firstTask =
+              arith::MulIOp::create(warpBlock, warpLoc, taskIndex, four);
+          Value warpTaskId = arith::AddIOp::create(warpBlock, warpLoc,
+                                                   firstTask, physicalWarp);
+          Value inRange = arith::CmpIOp::create(warpBlock, warpLoc,
+                                                arith::CmpIPredicate::ult,
+                                                warpTaskId, warpTaskCount);
+          scf::IfOp::create(warpBlock, warpLoc, inRange,
+                            [&](OpBuilder &task, Location taskLoc) {
+                              converted &= convertSegmentTask(
+                                  rewriter, task, taskLoc, tasks.getWarp(),
+                                  site, ids, warpTaskId, lane, warp);
+                              scf::YieldOp::create(task, taskLoc);
+                            });
+          scf::YieldOp::create(warpBlock, warpLoc);
+        },
+        [&](OpBuilder &ctaBlock, Location ctaLoc) {
+          Value ctaTaskId = arith::SubIOp::create(ctaBlock, ctaLoc, taskIndex,
+                                                  warpBlockCount);
+          Value inRange =
+              arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
+                                    ctaTaskId, ctaTaskCount);
+          scf::IfOp::create(ctaBlock, ctaLoc, inRange,
+                            [&](OpBuilder &task, Location taskLoc) {
+                              // The block tasks follow the warp tasks in the
+                              // task buffer.
+                              Value mixedTaskId = arith::AddIOp::create(
+                                  task, taskLoc, warpTaskCount, ctaTaskId);
+                              converted &= convertSegmentTask(
+                                  rewriter, task, taskLoc, tasks.getCta(), site,
+                                  ids, mixedTaskId, threadId, block);
+                              scf::YieldOp::create(task, taskLoc);
+                            });
+          scf::YieldOp::create(ctaBlock, ctaLoc);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
   }
 
-  void getDependentDialects(DialectRegistry &registry) const final {
-    registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
-                    NVVM::NVVMDialect, scf::SCFDialect>();
-  }
-
-  void runOnOperation() final {
-    if (failed(convertPlanToGPU(getOperation(), nvidiaTarget())))
-      signalPassFailure();
-  }
+private:
+  const TargetDescription &target;
 };
 
 /// One block of threads per chunk of a split segment: the kernel prelude,
@@ -306,6 +421,21 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
            << " threads with a power-of-two subgroup count, got " << threads;
 
   Operation *task = &function.getBody().front().front();
+  if (auto fused = dyn_cast<FusedTasksOp>(task)) {
+    // Each subgroup of a warp block runs one task, so a block is a whole
+    // number of subgroups.
+    if (threads % target.subgroupWidth != 0)
+      return fused.emitError()
+             << "a fused task block is a whole number of subgroups of "
+             << target.subgroupWidth << " threads, got " << name << " = "
+             << threads;
+    for (Region *region : {&fused.getWarp(), &fused.getCta()})
+      if (failed(verifyTaskConsumers(fused, fused.getValues().getType(),
+                                     fused.getOffsets().getType(),
+                                     region->front())))
+        return failure();
+    return verifyKernelSymbols(module, function, "");
+  }
   if (auto partial = dyn_cast<PartialTasksOp>(task)) {
     if (failed(verifyTaskConsumers(partial, partial.getValues().getType(),
                                    partial.getRanges().getType(),
@@ -325,6 +455,27 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
            << target.subgroupWidth << ", got " << threads;
   return verifyKernelSymbols(module, function, "");
 }
+
+class SwagePlanToGPUPass
+    : public PassWrapper<SwagePlanToGPUPass, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwagePlanToGPUPass)
+
+  StringRef getArgument() const final { return "swage-plan-to-gpu"; }
+  StringRef getDescription() const final {
+    return "Convert every plan function to a GPU kernel module";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const final {
+    registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
+                    NVVM::NVVMDialect, scf::SCFDialect>();
+  }
+
+  void runOnOperation() final {
+    if (failed(convertPlanToGPU(getOperation(), nvidiaTarget())))
+      signalPassFailure();
+  }
+};
 
 } // namespace
 
@@ -351,7 +502,8 @@ LogicalResult convertPlanToGPU(ModuleOp module,
   legality.addIllegalDialect<SwageDialect, SwagePlanDialect>();
 
   RewritePatternSet patterns(module.getContext());
-  patterns.add<PlanKernelFuncPattern>(module.getContext(), target);
+  patterns.add<PlanKernelFuncPattern, FusedTasksPattern>(module.getContext(),
+                                                         target);
   patterns.add<PlanKernelReturnPattern, TasksPattern, PartialTasksPattern>(
       module.getContext());
   populateSegmentConsumerPatterns(patterns, &target);

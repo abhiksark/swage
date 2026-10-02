@@ -31,6 +31,8 @@ enum class PlanSchedule {
   Direct,
   /// One block of threads per task; a task buffer names the segment.
   TaskIds,
+  /// Warp tasks and block tasks of one task buffer in one launch.
+  FusedMixed,
   /// One block of threads per chunk of a long segment: the first stage of a
   /// split reduction, whose kernel is named `<function>__partial`.
   SplitPartial,

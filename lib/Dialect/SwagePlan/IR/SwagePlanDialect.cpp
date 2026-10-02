@@ -47,6 +47,9 @@ std::optional<TaskPolicy> mlir::swage_plan::policyOfRegion(Region *region) {
   // The threads of a partial task combine across the whole block.
   if (isa_and_nonnull<PartialTasksOp>(task))
     return TaskPolicy::CTA;
+  // The first region of a fused task operation is its warp region.
+  if (isa_and_nonnull<FusedTasksOp>(task))
+    return region->getRegionNumber() == 0 ? TaskPolicy::Warp : TaskPolicy::CTA;
   return std::nullopt;
 }
 
@@ -100,7 +103,7 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
     return op->emitError("a plan function has a body of one block");
   Block &body = function.getBody().front();
   if (llvm::range_size(body) != 2 ||
-      !isa<TasksOp, PartialTasksOp>(body.front()) ||
+      !isa<TasksOp, PartialTasksOp, FusedTasksOp>(body.front()) ||
       !isa<func::ReturnOp>(body.back()))
     return op->emitError()
            << "a plan function holds one task operation followed by a return, "
@@ -212,6 +215,32 @@ LogicalResult TasksOp::verifyRegions() {
                        "scalar of each segment is stored in the into buffer");
   if (getOutput())
     return verifyYieldedScalar(getOperation(), getBody(), getOutput());
+  return success();
+}
+
+LogicalResult FusedTasksOp::verify() {
+  Type word = cast<MemRefType>(getOffsets().getType()).getElementType();
+  const std::pair<const char *, Type> words[] = {
+      {"value_count", getValueCount().getType()},
+      {"segment_count", getSegmentCount().getType()},
+      {"warp_task_count", getWarpTaskCount().getType()},
+      {"cta_task_count", getCtaTaskCount().getType()},
+      {"an element of ids",
+       cast<MemRefType>(getIds().getType()).getElementType()}};
+  for (auto [name, type] : words)
+    if (type != word)
+      return emitOpError() << name << " must have the element type of the "
+                           << "offsets, " << word << ", got " << type;
+  return success();
+}
+
+LogicalResult FusedTasksOp::verifyRegions() {
+  Type element = cast<MemRefType>(getValues().getType()).getElementType();
+  for (Region *region : {&getWarp(), &getCta()})
+    if (failed(verifyTaskRegion(getOperation(), *region, element, "values",
+                                /*allowStores=*/false)) ||
+        failed(verifyYieldedScalar(getOperation(), *region, getOutput())))
+      return failure();
   return success();
 }
 

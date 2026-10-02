@@ -83,8 +83,8 @@ Exact admitted module shapes and internal ABIs live in
 
 ## Plan stage
 
-The direct kernel, the task-id kernel, the split partial kernel, and the
-sequential CPU oracle are lowered in two steps. The
+The direct kernel, the task-id kernel, the fused mixed kernel, the split
+partial kernel, and the sequential CPU oracle are lowered in two steps. The
 planner replaces an admitted segment function by a plan function: the
 parameter list of the kernel, its launch width, and one `swage_plan.tasks`
 operation that takes every buffer and every bound as an operand and holds
@@ -94,10 +94,10 @@ operation. The oracle is planned in place with `policy<sequential>` and
 converted to loops over its memrefs by `--swage-plan-to-scf`, which lowers
 reductions and stores with the patterns the kernel conversion uses.
 `--swage-to-plan` and the two conversions run the steps from text,
-`--swage-segmented-reduction-to-gpu` runs both for the direct and task-id
-schedules, `--swage-split-segmented-reduction-to-gpu` for the partial
+`--swage-segmented-reduction-to-gpu` runs both for the direct, task-id, and
+fused schedules, `--swage-split-segmented-reduction-to-gpu` for the partial
 stage, and `--swage-segmented-reduction-to-scf` runs both for the
-oracle. The fused mixed, split merge, and persistent kernels are emitted by
+oracle. The split merge and persistent kernels are emitted by
 their lowerings without a plan stage;
 [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
 order in which they move.

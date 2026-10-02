@@ -138,12 +138,12 @@ Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
   return inlineRegion(builder, *element.region, arguments);
 }
 
-/// Emit the fused mixed kernel, or the persistent kernel when `persistent`
-/// is set. The direct and task-id kernels come from the plan conversion.
-void buildGPUProgram(ModuleOp module, func::FuncOp source,
-                     const SegmentProgram &program,
-                     const TargetDescription &target, int64_t blockSize,
-                     bool persistent) {
+/// Emit the persistent queue kernel. Every other kernel of a segment
+/// function comes from the plan conversion.
+void buildPersistentProgram(ModuleOp module, func::FuncOp source,
+                            const SegmentProgram &program,
+                            const TargetDescription &target,
+                            int64_t blockSize) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -154,11 +154,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  // Both kernels load segment IDs from task buffers.
+  // The kernel loads segment IDs from its task queues.
   using swage_plan::KernelArgument;
   const swage_plan::KernelLayout layout =
-      swage_plan::kernelLayout(persistent ? swage_plan::KernelKind::Persistent
-                                          : swage_plan::KernelKind::FusedMixed);
+      swage_plan::kernelLayout(swage_plan::KernelKind::Persistent);
   SmallVector<Type> inputs;
   for (KernelArgument parameter : layout.arguments())
     inputs.push_back(swage_plan::isBuffer(parameter) ? pointer : i32);
@@ -168,13 +167,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
   target.pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
-  Value claimBroadcast;
-  if (persistent) {
-    auto workgroupSpace = gpu::AddressSpaceAttr::get(
-        module.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
-    auto broadcastType = MemRefType::get({2}, i32, AffineMap(), workgroupSpace);
-    claimBroadcast = kernel.addWorkgroupAttribution(broadcastType, loc);
-  }
+  auto workgroupSpace = gpu::AddressSpaceAttr::get(
+      module.getContext(), gpu::GPUDialect::getWorkgroupAddressSpace());
+  auto broadcastType = MemRefType::get({2}, i32, AffineMap(), workgroupSpace);
+  Value claimBroadcast = kernel.addWorkgroupAttribution(broadcastType, loc);
 
   Block *entry = &kernel.getBody().front();
   // The entry block may carry workgroup attributions after the parameters,
@@ -243,7 +239,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                 stride, useWarpShuffle);
   };
 
-  if (persistent) {
+  {
     Value zeroI32 = arith::ConstantIntOp::create(builder, loc, 0, 32);
     Value oneI32 = arith::ConstantIntOp::create(builder, loc, 1, 32);
     // The batch a block claims from the partial queue, and the batch a
@@ -616,68 +612,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
     gpu::ReturnOp::create(builder, loc);
     source.erase();
-    return;
   }
-
-  // One warp task per subgroup of the block: `four` slots, and `three` to
-  // round the warp task count up to whole blocks.
-  int64_t slots = target.slotsPerBlock(static_cast<int32_t>(blockSize));
-  Value three = arith::ConstantIndexOp::create(builder, loc, slots - 1);
-  Value four = arith::ConstantIndexOp::create(builder, loc, slots);
-  Value warp =
-      arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
-  Value warpTaskCount =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                 argument(KernelArgument::WarpTaskCount));
-  Value ctaTaskCount =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                 argument(KernelArgument::CtaTaskCount));
-  Value roundedWarpTaskCount =
-      arith::AddIOp::create(builder, loc, warpTaskCount, three);
-  Value warpBlockCount =
-      arith::DivUIOp::create(builder, loc, roundedWarpTaskCount, four);
-  Value isWarpBlock = arith::CmpIOp::create(
-      builder, loc, arith::CmpIPredicate::ult, taskIndex, warpBlockCount);
-  scf::IfOp::create(
-      builder, loc, isWarpBlock,
-      [&](OpBuilder &warpBlock, Location warpLoc) {
-        Value physicalWarp =
-            arith::DivUIOp::create(warpBlock, warpLoc, threadId, warp);
-        Value lane = arith::RemUIOp::create(warpBlock, warpLoc, threadId, warp);
-        Value firstTask =
-            arith::MulIOp::create(warpBlock, warpLoc, taskIndex, four);
-        Value warpTaskId =
-            arith::AddIOp::create(warpBlock, warpLoc, firstTask, physicalWarp);
-        Value inRange =
-            arith::CmpIOp::create(warpBlock, warpLoc, arith::CmpIPredicate::ult,
-                                  warpTaskId, warpTaskCount);
-        scf::IfOp::create(warpBlock, warpLoc, inRange,
-                          [&](OpBuilder &task, Location taskLoc) {
-                            emitTaskSegment(task, taskLoc,
-                                            argument(KernelArgument::TaskIds),
-                                            warpTaskId, lane, warp, true);
-                            scf::YieldOp::create(task, taskLoc);
-                          });
-        scf::YieldOp::create(warpBlock, warpLoc);
-      },
-      [&](OpBuilder &ctaBlock, Location ctaLoc) {
-        Value ctaTaskId =
-            arith::SubIOp::create(ctaBlock, ctaLoc, taskIndex, warpBlockCount);
-        Value inRange =
-            arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
-                                  ctaTaskId, ctaTaskCount);
-        scf::IfOp::create(
-            ctaBlock, ctaLoc, inRange, [&](OpBuilder &task, Location taskLoc) {
-              Value mixedTaskId = arith::AddIOp::create(
-                  task, taskLoc, warpTaskCount, ctaTaskId);
-              emitTaskSegment(task, taskLoc, argument(KernelArgument::TaskIds),
-                              mixedTaskId, threadId, block, false);
-              scf::YieldOp::create(task, taskLoc);
-            });
-        scf::YieldOp::create(ctaBlock, ctaLoc);
-      });
-  gpu::ReturnOp::create(builder, loc);
-  source.erase();
 }
 
 /// Emit the merge stage of a split reduction: one block per split segment,
@@ -904,12 +839,13 @@ public:
       return signalPassFailure();
     }
     ModuleOp module = getOperation();
-    // The direct and task-id schedules are planned and then converted. The
-    // fused and persistent schedules are still emitted here.
-    if (!fusedMixed && !persistent) {
+    // The direct, task-id, and fused schedules are planned and then
+    // converted. The persistent schedule is still emitted here.
+    if (!persistent) {
       PlanOptions options;
-      options.schedules = {useTaskIds ? PlanSchedule::TaskIds
-                                      : PlanSchedule::Direct};
+      options.schedules = {fusedMixed   ? PlanSchedule::FusedMixed
+                           : useTaskIds ? PlanSchedule::TaskIds
+                                        : PlanSchedule::Direct};
       options.blockThreads = blockSize;
       options.function = selectedFunction;
       if (failed(planSegmentFunctions(module, options, *target)) ||
@@ -929,7 +865,7 @@ public:
         return signalPassFailure();
       if (failed(verifyPlanningProgram(analysis)))
         return signalPassFailure();
-      if (persistent && failed(verifyPersistentProgram(analysis)))
+      if (failed(verifyPersistentProgram(analysis)))
         return signalPassFailure();
       if (failed(verifyKernelSymbols(module, function, "")))
         return signalPassFailure();
@@ -938,8 +874,7 @@ public:
       RegionOwner owner;
       SegmentProgram program;
       detachSegmentProgram(analysis, owner, program);
-      buildGPUProgram(module, function, program, *target, blockSize,
-                      persistent);
+      buildPersistentProgram(module, function, program, *target, blockSize);
     }
   }
 

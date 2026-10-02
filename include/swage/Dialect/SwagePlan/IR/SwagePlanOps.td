@@ -165,9 +165,82 @@ def SwagePlan_PartialTasksOp
   let hasRegionVerifier = 1;
 }
 
+def SwagePlan_FusedTasksOp
+    : SwagePlan_Op<"fused_tasks", [RecursiveMemoryEffects]> {
+  let summary = "Run warp tasks and block tasks of one task buffer in one "
+                "launch";
+  let description = [{
+    The body of the fused mixed kernel. The task buffer `ids` holds
+    `warp_task_count` segment ids of short segments followed by
+    `cta_task_count` segment ids of longer ones. The first blocks of the
+    launch each run one warp task per subgroup, and every block after them
+    runs one block task.
+
+    The operation has two regions, each a task region over the bound
+    segment of its task: `warp` for a warp task, whose threads combine
+    within one subgroup, and `cta` for a block task, whose threads combine
+    across the block. Both hold the `swage.reduce` of the program and end in
+    `swage_plan.yield` with its result, which is stored at `output[s]` for
+    the segment `s` of the task.
+
+    Every bound the kernel needs is an operand: a loaded range is clamped to
+    `value_count`, a warp task index is compared with `warp_task_count` and
+    a block task index with `cta_task_count`, and a segment id loaded from
+    `ids` is compared with `segment_count`.
+
+    Example:
+
+    ```mlir
+    swage_plan.fused_tasks
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi32>) warp_task_count(%warp_task_count : i32)
+        cta_task_count(%cta_task_count : i32)
+        into(%output : memref<?xf32>) warp {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    } cta {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    ```
+  }];
+  let arguments = (ins
+    Arg<SwagePlan_Buffer, "segment values", [MemRead]>:$values,
+    Arg<SwagePlan_WordBuffer, "segment offsets", [MemRead]>:$offsets,
+    AnySignlessInteger:$value_count,
+    AnySignlessInteger:$segment_count,
+    Arg<SwagePlan_WordBuffer, "segment id of each task", [MemRead]>:$ids,
+    AnySignlessInteger:$warp_task_count,
+    AnySignlessInteger:$cta_task_count,
+    Arg<SwagePlan_Buffer, "one scalar per segment", [MemWrite]>:$output);
+  let regions = (region SizedRegion<1>:$warp, SizedRegion<1>:$cta);
+  let assemblyFormat = [{
+    `segments` `(` $values `,` $offsets `:` type($values) `,` type($offsets) `)`
+    `value_count` `(` $value_count `:` type($value_count) `)`
+    `segment_count` `(` $segment_count `:` type($segment_count) `)`
+    `ids` `(` $ids `:` type($ids) `)`
+    `warp_task_count` `(` $warp_task_count `:` type($warp_task_count) `)`
+    `cta_task_count` `(` $cta_task_count `:` type($cta_task_count) `)`
+    `into` `(` $output `:` type($output) `)`
+    attr-dict `warp` $warp `cta` $cta
+  }];
+  let hasVerifier = 1;
+  let hasRegionVerifier = 1;
+}
+
 def SwagePlan_YieldOp
     : SwagePlan_Op<"yield", [Pure, Terminator,
-                             ParentOneOf<["TasksOp", "PartialTasksOp"]>]> {
+                             ParentOneOf<["TasksOp", "PartialTasksOp",
+                                          "FusedTasksOp"]>]> {
   let summary = "End a task region, with the scalar result of the segment";
   let description = [{
     Terminates the region of a task operation. With an operand, the value is

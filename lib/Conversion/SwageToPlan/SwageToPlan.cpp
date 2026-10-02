@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
@@ -52,6 +53,9 @@ std::optional<KernelSchedule> kernelSchedule(PlanSchedule schedule) {
     return KernelSchedule{"direct", KernelKind::Direct, "", false, true};
   case PlanSchedule::TaskIds:
     return KernelSchedule{"task-ids", KernelKind::TaskIds, "", true, true};
+  case PlanSchedule::FusedMixed:
+    return KernelSchedule{"fused-mixed", KernelKind::FusedMixed, "", true,
+                          false};
   case PlanSchedule::SplitPartial:
     return KernelSchedule{"split-partial", KernelKind::SplitPartial,
                           "__partial", true, false};
@@ -66,6 +70,8 @@ int64_t blockThreadsOf(PlanSchedule schedule, const PlanOptions &options,
                        const TargetDescription &target) {
   if (schedule == PlanSchedule::SplitPartial)
     return target.splitBlockThreads;
+  if (schedule == PlanSchedule::FusedMixed)
+    return target.ctaBlockThreads;
   return options.blockThreads;
 }
 
@@ -210,7 +216,16 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   builder.setInsertionPointToEnd(entry);
   Operation *task = nullptr;
   Value output;
-  if (schedule == PlanSchedule::SplitPartial) {
+  if (schedule == PlanSchedule::FusedMixed) {
+    output = argument(KernelArgument::Output);
+    task = swage_plan::FusedTasksOp::create(
+        builder, loc, argument(KernelArgument::Values),
+        argument(KernelArgument::Offsets), argument(KernelArgument::ValueCount),
+        argument(KernelArgument::SegmentCount),
+        argument(KernelArgument::TaskIds),
+        argument(KernelArgument::WarpTaskCount),
+        argument(KernelArgument::CtaTaskCount), output);
+  } else if (schedule == PlanSchedule::SplitPartial) {
     // A partial task reduces one chunk into its scratch slot.
     task = swage_plan::PartialTasksOp::create(
         builder, loc, argument(KernelArgument::Values),
@@ -236,14 +251,21 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   }
   func::ReturnOp::create(builder, loc);
   fillTaskRegion(task, analysis, output);
+  // A warp task and a block task run the same program, so the block region
+  // of a fused task operation is a copy of its warp region.
+  if (schedule == PlanSchedule::FusedMixed) {
+    IRMapping mapping;
+    task->getRegion(0).cloneInto(&task->getRegion(1), mapping);
+  }
   source.erase();
 }
 
 std::optional<PlanSchedule> parseSchedule(StringRef text) {
   if (text == "sequential")
     return PlanSchedule::Sequential;
-  for (PlanSchedule schedule : {PlanSchedule::Direct, PlanSchedule::TaskIds,
-                                PlanSchedule::SplitPartial})
+  for (PlanSchedule schedule :
+       {PlanSchedule::Direct, PlanSchedule::TaskIds, PlanSchedule::FusedMixed,
+        PlanSchedule::SplitPartial})
     if (text == kernelSchedule(schedule)->name)
       return schedule;
   return std::nullopt;
@@ -274,8 +296,8 @@ public:
       std::optional<PlanSchedule> schedule = parseSchedule(name);
       if (!schedule) {
         getOperation().emitError()
-            << "schedule must be direct, task-ids, split-partial, or "
-               "sequential, got '"
+            << "schedule must be direct, task-ids, fused-mixed, "
+               "split-partial, or sequential, got '"
             << name << "'";
         return signalPassFailure();
       }
@@ -295,8 +317,9 @@ private:
       llvm::cl::desc(
           "The kernels to plan, one plan function each: direct (one block "
           "per segment, the default), task-ids (one block per task of a "
-          "task buffer), split-partial (one block per chunk of a long "
-          "segment), or sequential (no kernel: the CPU oracle, alone)")};
+          "task buffer), fused-mixed (warp tasks and block tasks in one "
+          "launch), split-partial (one block per chunk of a long segment), "
+          "or sequential (no kernel: the CPU oracle, alone)")};
   Option<int64_t> blockThreads{
       *this, "block-threads",
       llvm::cl::desc("Launch width of the direct and task-ids kernels in "

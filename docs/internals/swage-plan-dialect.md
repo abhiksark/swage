@@ -18,6 +18,8 @@ The dialect holds what a kernel lowering consumes:
 - `swage_plan.partial_tasks`, the task operation of the first stage of a
   split reduction, which reduces one chunk of a long segment per task into
   a scratch slot;
+- `swage_plan.fused_tasks`, the task operation of the fused mixed kernel,
+  with one region for a warp task and one for a block task;
 - `swage_plan.yield`, the terminator of a task region;
 - `#swage_plan.policy<warp>` and `#swage_plan.policy<cta>`, which say how
   the threads of a task combine their partial results, and
@@ -64,8 +66,8 @@ What is not in the dialect:
   host classification and no kernel reads them, so they are arguments of
   the classifier and not part of plan IR.
 - Runtime offset contents, which no compiler pass inspects.
-- The fused mixed, split merge, and persistent kernels. Their lowerings emit
-  them without a plan stage today;
+- The split merge and persistent kernels. Their lowerings emit them
+  without a plan stage today;
   [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
   order in which they move.
 - Packed-warp policies, queues, dependency execution, and a general task
@@ -78,7 +80,8 @@ width, keeps its signature and its callers, and takes no task buffer, and
 the region are lowered by the same patterns on both backends.
 
 `--swage-to-plan` writes plan functions for the direct, task-id,
-split-partial, and sequential schedules, one per schedule of its list, and
+fused-mixed, split-partial, and sequential schedules, one per schedule of
+its list, and
 `--swage-plan-to-gpu` converts every plan function of a kernel to a
 `gpu.module` that holds it. The plan function of a split partial kernel is
 named after the kernel, `<function>__partial`, and the records its task
