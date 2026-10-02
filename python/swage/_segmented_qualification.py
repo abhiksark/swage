@@ -767,16 +767,23 @@ def _has_small_element_program(module):
     return eligible
 
 
-# One parsed module per semantic module text, with the result of inspecting
-# its element program. Both depend only on the text, so a preparation with
-# new offsets reuses them. Threads share an entry, which is safe because
-# classification holds the GIL and leaves the module unchanged. Compiles do
-# not use these modules: on a miss `_compile_once` parses the text in a
-# context of its own, so a compile never runs on a context shared here.
-# ponytail: nothing is evicted. One context is kept per distinct program
-# text a process prepares; bound it with the kernel memo if a process
-# generates programs without bound.
-_module_memo = {}
+# What a preparation needs to know about a program, none of which depends on
+# the offsets. `_module_memo` keeps one parsed module per semantic module
+# text with the result of inspecting its element program. `_admitted` keeps
+# that result per program text and pair of planning limits the planning pass
+# has accepted, so the pass runs once per program and limits and a later
+# preparation only classifies its offsets.
+#
+# Threads share a parsed module, which is safe because the planning pass
+# holds the GIL and leaves the module unchanged. Compiles do not use these
+# modules: on a miss `_compile_once` parses the text in a context of its
+# own, so a compile never runs on a context shared here.
+#
+# Both memos are bounded like the kernel memos: each keeps
+# `_runtime._CACHE_LIMIT` entries and then forgets its oldest, which is
+# parsed or admitted again on its next use. A hit takes no lock.
+_module_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
+_admitted = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
 
 
 def _parsed_module(module_text):
@@ -798,10 +805,53 @@ def _parsed_module(module_text):
         context = ir.Context()
         swage.register_dialects(context)
         module = ir.Module.parse(module_text, context=context)
-        entry = _module_memo.setdefault(
-            module_text, (module, _has_small_element_program(module))
-        )
+        entry = (module, _has_small_element_program(module))
+        with _memo_lock:
+            _module_memo[module_text] = entry
     return entry
+
+
+def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
+    """Admit one program for planning under one pair of limits, once.
+
+    The planning pass decides whether a program can be classified and
+    whether the limits are valid. Neither depends on the offsets, so the
+    pass runs at the first preparation of a program with a pair of limits,
+    on a layout without segments. Later preparations classify their offsets
+    without the module.
+
+    Args:
+        module_text: Semantic module text that identifies the program.
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+
+    Returns:
+        Whether `_has_small_element_program` holds for the program.
+
+    Raises:
+        ValueError: The planning pass rejects the program or the limits. A
+            rejection is not kept, so every preparation raises it again.
+    """
+    key = (module_text, warp_max_elements, cta_chunk_elements)
+    small_element_program = _admitted.get(key)
+    if small_element_program is None:
+        import numpy
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native_swage,
+        )
+
+        module, small_element_program = _parsed_module(module_text)
+        native_swage._materialize_segmented_plan(
+            module,
+            offsets=numpy.zeros(1, dtype=numpy.int32),
+            value_count=0,
+            segment_count=0,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
+        )
+        with _memo_lock:
+            _admitted[key] = small_element_program
+    return small_element_program
 
 
 def _prepare_planned_reduction(
@@ -862,22 +912,27 @@ def _prepare_planned_reduction(
 
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
     target = f"sm_{major}{minor}"
-    module, small_element_program = _parsed_module(module_text)
-    warp_ids, cta_ids, partial_records, merge_records = (
-        native_swage._materialize_segmented_plan(
-            module,
-            offsets=host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
-        )
+    small_element_program = _admit_program(
+        module_text, warp_max_elements, cta_chunk_elements
     )
-    partial_count = len(partial_records) // 2
-    merge_count = len(merge_records) // 3
-    direct_warp_count = len(warp_ids)
-    direct_cta_count = len(cta_ids)
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, and
+    # the merge records, in that order.
+    (
+        records,
+        direct_warp_count,
+        direct_cta_count,
+        partial_count,
+        merge_count,
+    ) = native_swage._classify_segments(
+        host_offsets,
+        value_count=value_count,
+        segment_count=segment_count,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+    )
     direct_count = direct_warp_count + direct_cta_count
+    partial_records = records[direct_count:direct_count + 2 * partial_count]
+    merge_records = records[direct_count + 2 * partial_count:]
     # ponytail: a measured two-chunk rule, not a general cost model.
     # Retain splitting for sparse batches, larger tails, or mixed lengths.
     # Every segment is split when the merge count equals the segment count,
@@ -965,9 +1020,7 @@ def _prepare_planned_reduction(
     mixed_tasks = None
     if direct_count:
         mixed_tasks = torch.tensor(
-            numpy.concatenate((warp_ids, cta_ids)),
-            dtype=torch.int32,
-            device=device,
+            records[:direct_count], dtype=torch.int32, device=device
         )
     partial_ranges = None
     merge_ranges = None
@@ -1185,17 +1238,23 @@ def _prepare_persistent_sum(
     target = f"sm_{major}{minor}"
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
-    module, _ = _parsed_module(module_text)
-    warp_ids, cta_ids, partial_records, merge_records = (
-        native_swage._materialize_segmented_plan(
-            module,
-            offsets=host_offsets,
+    _admit_program(module_text, warp_max_elements, cta_chunk_elements)
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, and
+    # the merge records, in that order.
+    records, warp_count, cta_count, partial_count, merge_count = (
+        native_swage._classify_segments(
+            host_offsets,
             value_count=value_count,
             segment_count=segment_count,
             warp_max_elements=warp_max_elements,
             cta_chunk_elements=cta_chunk_elements,
         )
     )
+    direct_count = warp_count + cta_count
+    warp_ids = records[:warp_count]
+    cta_ids = records[warp_count:direct_count]
+    partial_records = records[direct_count:direct_count + 2 * partial_count]
+    merge_records = records[direct_count + 2 * partial_count:]
     if segment_count == 0:
 
         def no_launch():
@@ -1213,8 +1272,6 @@ def _prepare_persistent_sum(
         target=target,
     )
 
-    partial_count = len(partial_records) // 2
-    merge_count = len(merge_records) // 3
     warp_slots = _PERSISTENT_BLOCK // _WARP_BLOCK
     work_groups = (
         len(cta_ids) + partial_count + (len(warp_ids) + warp_slots - 1)

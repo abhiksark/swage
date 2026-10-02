@@ -693,6 +693,155 @@ TEST(CodegenCAPITest, APlanCallReportsInvalidMetadata) {
                  "offsets must be nondecreasing");
 }
 
+/// What one swageClassifySegments call left with its two callbacks.
+struct Classification {
+  bool succeeded = false;
+  std::vector<int32_t> records;
+  std::vector<intptr_t> counts;
+  int recordCalls = 0;
+  std::vector<std::string> errors;
+};
+
+void storeClassification(const int32_t *records, intptr_t warpCount,
+                         intptr_t ctaCount, intptr_t partialCount,
+                         intptr_t mergeCount, void *userData) {
+  auto *classification = static_cast<Classification *>(userData);
+  classification->records.assign(records, records + warpCount + ctaCount +
+                                              2 * partialCount +
+                                              3 * mergeCount);
+  classification->counts = {warpCount, ctaCount, partialCount, mergeCount};
+  ++classification->recordCalls;
+}
+
+void storeClassificationError(MlirStringRef message, void *userData) {
+  static_cast<Classification *>(userData)->errors.emplace_back(message.data,
+                                                               message.length);
+}
+
+Classification
+classify(const int32_t *offsets, intptr_t offsetCount, int64_t valueCount,
+         int64_t segmentCount, int64_t warpMaxElements = 32,
+         int64_t ctaChunkElements = 4096,
+         SwageTaskRecordsCallback recordsCallback = storeClassification,
+         SwageStringCallback errorCallback = storeClassificationError) {
+  Classification classification;
+  classification.succeeded = mlirLogicalResultIsSuccess(
+      swageClassifySegments(offsets, offsetCount, valueCount, segmentCount,
+                            warpMaxElements, ctaChunkElements, recordsCallback,
+                            &classification, errorCallback, &classification));
+  return classification;
+}
+
+void expectRejected(const Classification &classification,
+                    const std::string &message) {
+  EXPECT_FALSE(classification.succeeded);
+  EXPECT_EQ(classification.recordCalls, 0);
+  EXPECT_EQ(classification.errors, (std::vector<std::string>{message}));
+}
+
+TEST(CodegenCAPITest, AClassifyCallGivesTheRecordsOfThePlanWithoutAModule) {
+  // A warp segment, a CTA segment, and one segment of three chunks. No
+  // context exists when the classification runs.
+  const int32_t offsets[] = {0, 32, 132, 8325};
+
+  Classification classification = classify(offsets, 4, 8325, 3);
+
+  ASSERT_TRUE(classification.succeeded);
+  EXPECT_EQ(classification.recordCalls, 1);
+  EXPECT_TRUE(classification.errors.empty());
+  EXPECT_EQ(classification.counts, (std::vector<intptr_t>{1, 1, 3, 1}));
+
+  Session session;
+  const int64_t wideOffsets[] = {0, 32, 132, 8325};
+  Plan plan = materialize(session, wideOffsets, 4, 8325, 3);
+  ASSERT_TRUE(plan.succeeded);
+  std::vector<int32_t> expected = plan.warp;
+  expected.insert(expected.end(), plan.cta.begin(), plan.cta.end());
+  expected.insert(expected.end(), plan.partial.begin(), plan.partial.end());
+  expected.insert(expected.end(), plan.merge.begin(), plan.merge.end());
+  EXPECT_EQ(classification.records, expected);
+  EXPECT_EQ(
+      classification.records,
+      (std::vector<int32_t>{0, 1, 132, 4228, 4228, 8324, 8324, 8325, 2, 0, 3}));
+}
+
+TEST(CodegenCAPITest, AClassifyCallOfNoSegmentsGivesNoRecords) {
+  const int32_t offsets[] = {0};
+
+  Classification classification = classify(offsets, 1, 0, 0);
+
+  ASSERT_TRUE(classification.succeeded);
+  EXPECT_EQ(classification.recordCalls, 1);
+  EXPECT_TRUE(classification.records.empty());
+  EXPECT_EQ(classification.counts, (std::vector<intptr_t>{0, 0, 0, 0}));
+}
+
+TEST(CodegenCAPITest, AClassifyCallReportsRejectedArguments) {
+  const int32_t offsets[] = {0, 4};
+
+  expectRejected(classify(offsets, -1, 4, 1),
+                 "offsetCount must not be negative, got -1");
+  expectRejected(classify(nullptr, 2, 4, 1),
+                 "offsets must not be null when offsetCount is 2");
+  expectRejected(classify(offsets, 2, 4, 1, 32, 4096, nullptr),
+                 "recordsCallback must not be null");
+}
+
+TEST(CodegenCAPITest, AClassifyCallReportsInvalidMetadataToItsErrorCallback) {
+  const int32_t decreasing[] = {0, 4, 2};
+  const int32_t offsets[] = {0, 4};
+
+  expectRejected(classify(decreasing, 3, 4, 2),
+                 "offsets must be nondecreasing");
+  expectRejected(classify(offsets, 2, 3, 1),
+                 "final offset must not exceed value count");
+  expectRejected(classify(offsets, 2, 4, 2),
+                 "offset count must equal segment count plus one");
+  expectRejected(classify(offsets, 2, 4, 1, 33, 32),
+                 "warp max elements must not exceed CTA chunk elements");
+}
+
+TEST(CodegenCAPITest, AFailedClassifyCallNeedsNoErrorCallback) {
+  const int32_t decreasing[] = {0, 4, 2};
+
+  Classification classification =
+      classify(decreasing, 3, 4, 2, 32, 4096, storeClassification, nullptr);
+
+  EXPECT_FALSE(classification.succeeded);
+  EXPECT_EQ(classification.recordCalls, 0);
+  EXPECT_TRUE(classification.errors.empty());
+}
+
+TEST(CodegenCAPITest, ClassifyCallsMayRunAtTheSameTime) {
+  // The call takes no context and keeps no state, so threads share nothing
+  // but the offsets they read.
+  constexpr int threadCount = 4;
+  std::vector<int32_t> offsets = {0};
+  for (int32_t segment = 0; segment < 20000; ++segment)
+    offsets.push_back(offsets.back() + (segment * 37) % 6000);
+  const intptr_t offsetCount = static_cast<intptr_t>(offsets.size());
+  const Classification expected =
+      classify(offsets.data(), offsetCount, offsets.back(), offsetCount - 1);
+  ASSERT_TRUE(expected.succeeded);
+
+  std::vector<Classification> results(threadCount);
+  std::vector<std::thread> threads;
+  for (int index = 0; index < threadCount; ++index)
+    threads.emplace_back([&, index] {
+      for (int repeat = 0; repeat < 20; ++repeat)
+        results[index] = classify(offsets.data(), offsetCount, offsets.back(),
+                                  offsetCount - 1);
+    });
+  for (std::thread &thread : threads)
+    thread.join();
+
+  for (const Classification &result : results) {
+    ASSERT_TRUE(result.succeeded);
+    EXPECT_EQ(result.counts, expected.counts);
+    EXPECT_EQ(result.records, expected.records);
+  }
+}
+
 TEST(CodegenCAPITest, CompilesOnSeparateContextsMayRunAtTheSameTime) {
   // The header allows concurrent calls only on modules of different
   // contexts. Each thread owns its context for its whole life, and every

@@ -365,10 +365,10 @@ compile.
 compiled kernels in the process only and never use the persistent cache, so
 with the switch set they launch a kernel that the process already holds and
 raise the same `RuntimeError` for any other. A process that starts with the
-switch set therefore cannot run them. The host planning pass of a
-preparation is not a kernel compile and still runs. `SWAGE_CACHE_DIR`,
-`SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY` have no effect on the
-private helpers.
+switch set therefore cannot run them. The host planning pass is not a
+kernel compile and still runs, once per program and pair of planning limits.
+`SWAGE_CACHE_DIR`, `SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY`
+have no effect on the private helpers.
 
 A value other than the ones listed is an error, not a default. A mistyped
 variable raises a `ValueError` that names it at the first lookup, before

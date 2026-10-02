@@ -567,3 +567,35 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
                 mergeUserData);
   return mlirLogicalResultSuccess();
 }
+
+MlirLogicalResult swageClassifySegments(
+    const int32_t *offsets, intptr_t offsetCount, int64_t valueCount,
+    int64_t segmentCount, int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskRecordsCallback recordsCallback, void *recordsUserData,
+    SwageStringCallback errorCallback, void *errorUserData) {
+  auto fail = [&](const llvm::Twine &reason) {
+    if (errorCallback) {
+      std::string message = reason.str();
+      errorCallback(wrap(llvm::StringRef(message)), errorUserData);
+    }
+    return mlirLogicalResultFailure();
+  };
+  if (offsetCount < 0)
+    return fail("offsetCount must not be negative, got " +
+                llvm::Twine(offsetCount));
+  if (offsetCount && !offsets)
+    return fail("offsets must not be null when offsetCount is " +
+                llvm::Twine(offsetCount));
+  if (!recordsCallback)
+    return fail("recordsCallback must not be null");
+
+  auto records = swage_plan::classifyTaskRecords(
+      ArrayRef(offsets, static_cast<size_t>(offsetCount)), valueCount,
+      segmentCount, warpMaxElements, ctaChunkElements);
+  if (!records)
+    return fail(llvm::toString(records.takeError()));
+  recordsCallback(records->records.data(), records->warpCount,
+                  records->ctaCount, records->partialCount, records->mergeCount,
+                  recordsUserData);
+  return mlirLogicalResultSuccess();
+}

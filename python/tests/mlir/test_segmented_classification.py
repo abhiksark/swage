@@ -143,6 +143,26 @@ def _native_plan(module, offsets, warp_max_elements, cta_chunk_elements):
     )
 
 
+def _native_records(offsets, warp_max_elements, cta_chunk_elements):
+    """Classify host offsets through the binding that takes no module."""
+    return native_swage._classify_segments(
+        _i32(offsets),
+        value_count=offsets[-1],
+        segment_count=len(offsets) - 1,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+    )
+
+
+def _split_records(records, warp_count, cta_count, partial_count, merge_count):
+    """Cut one record buffer into its warp, CTA, partial, and merge arrays."""
+    bounds = numpy.cumsum(
+        [0, warp_count, cta_count, 2 * partial_count, 3 * merge_count]
+    )
+    assert len(records) == bounds[-1]
+    return [records[begin:end] for begin, end in pairwise(bounds)]
+
+
 def _matches_reference(plan, offsets, warp_max_elements, cta_chunk_elements):
     """Return whether four record arrays equal the reference plan."""
     expected = _reference_plan(offsets, warp_max_elements, cta_chunk_elements)
@@ -161,8 +181,10 @@ def test_native_classification_matches_the_python_reference(
     assert max(lengths) >= 3 * chunk
 
     plan = _native_plan(sum_module, offsets, warp_max, chunk)
+    records = _split_records(*_native_records(offsets, warp_max, chunk))
 
     assert _matches_reference(plan, offsets, warp_max, chunk)
+    assert _matches_reference(records, offsets, warp_max, chunk)
     warp, cta, partial, merge = _reference_plan(offsets, warp_max, chunk)
     assert sorted([*warp, *cta, *merge[0::3]]) == list(range(len(lengths)))
     partial_merges = _reference_partial_merges(merge, len(partial) // 2)
@@ -253,6 +275,98 @@ def test_buffer_offsets_keep_native_diagnostics(sum_module):
         )
     with pytest.raises(ValueError, match="planning limits must satisfy"):
         _native_plan(sum_module, [0, 1], 33, 32)
+
+
+def test_classification_without_a_module_returns_one_buffer_and_counts():
+    """Lay the four record lists out in one int32 array, in launch order."""
+    records, *counts = _native_records([0, 32, 65, 4162, 12354], 32, 4096)
+
+    assert isinstance(records, numpy.ndarray)
+    assert records.dtype == numpy.int32
+    assert counts == [1, 1, 4, 2]
+    assert all(type(count) is int for count in counts)
+    assert records.tolist() == [
+        0,
+        1,
+        *[65, 4161, 4161, 4162, 4162, 8258, 8258, 12354],
+        *[2, 0, 2, 3, 2, 4],
+    ]
+
+
+def test_classification_without_a_module_handles_no_segments():
+    """Classify a layout without segments into an empty buffer."""
+    records, *counts = _native_records([0], 32, 4096)
+
+    assert records.shape == (0,)
+    assert records.dtype == numpy.int32
+    assert counts == [0, 0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        numpy.asarray([0, 1], dtype=numpy.int64),
+        numpy.asarray([[0, 1]], dtype=numpy.int32),
+        numpy.asarray([0, 9, 1, 9], dtype=numpy.int32)[::2],
+        (0, 1),
+        [0, 1],
+    ],
+    ids=["int64", "rank-two", "strided", "tuple", "list"],
+)
+def test_classification_without_a_module_never_converts_offsets(offsets):
+    """Refuse what the plan binding refuses: only a host i32 buffer fits."""
+    with pytest.raises(TypeError):
+        native_swage._classify_segments(
+            offsets, value_count=1, segment_count=1
+        )
+
+
+@pytest.mark.parametrize(
+    ("offsets", "arguments", "message"),
+    [
+        ([0, 2, 1], {}, "offsets must be nondecreasing"),
+        ([0, -1], {}, "offset must be a nonnegative i32 value"),
+        ([1, 1], {}, "offsets must start at zero"),
+        (
+            [0, 2],
+            {"value_count": 1},
+            "final offset must not exceed value count",
+        ),
+        (
+            [0, 2],
+            {"segment_count": 2},
+            "offset count must equal segment count plus one",
+        ),
+        (
+            [0, 1],
+            {"warp_max_elements": 33, "cta_chunk_elements": 32},
+            "warp max elements must not exceed CTA chunk elements",
+        ),
+        (
+            [0, 1],
+            {"warp_max_elements": 0},
+            "warp max elements must be positive",
+        ),
+    ],
+)
+def test_classification_without_a_module_reports_the_classifier_reason(
+    sum_module, offsets, arguments, message
+):
+    """Raise the reason itself, which the plan binding wraps in a location."""
+    arguments = {
+        "value_count": max(offsets[-1], 0),
+        "segment_count": len(offsets) - 1,
+        **arguments,
+    }
+
+    with pytest.raises(ValueError) as error:
+        native_swage._classify_segments(_i32(offsets), **arguments)
+    assert str(error.value) == message
+    if "warp_max_elements" not in arguments:
+        with pytest.raises(ValueError, match=message):
+            native_swage._materialize_segmented_plan(
+                sum_module, offsets=_i32(offsets), **arguments
+            )
 
 
 def _outcome(function, *arguments):
@@ -581,12 +695,13 @@ def test_persistent_preparation_rejects_merges_that_do_not_partition(
     partial = [0, 4096, 4096, 8192, 8192, 8193]
     monkeypatch.setattr(
         native_swage,
-        "_materialize_segmented_plan",
+        "_classify_segments",
         lambda *_args, **_kwargs: (
-            _i32([]),
-            _i32([]),
-            _i32(partial),
-            _i32(merge),
+            _i32([*partial, *merge]),
+            0,
+            0,
+            len(partial) // 2,
+            len(merge) // 3,
         ),
     )
     monkeypatch.setattr(torch, "tensor", fail)
@@ -647,6 +762,7 @@ def test_a_program_is_parsed_and_inspected_once_for_many_layouts(monkeypatch):
         qualification, "_has_small_element_program", counting_inspect
     )
     monkeypatch.setattr(qualification, "_module_memo", {})
+    monkeypatch.setattr(qualification, "_admitted", {})
 
     for values, offsets, expected in cases:
         prepared = prepare(values, offsets)
@@ -655,3 +771,84 @@ def test_a_program_is_parsed_and_inspected_once_for_many_layouts(monkeypatch):
 
     assert counting_module.parsed == [text]
     assert len(inspections) == 1
+
+
+class _CountingCalls:
+    """Wrap one native entry and record the keyword arguments of each call."""
+
+    def __init__(self, function):
+        self._function = function
+        self.calls = []
+
+    def __call__(self, *arguments, **keywords):
+        self.calls.append(keywords)
+        return self._function(*arguments, **keywords)
+
+
+@requires_cuda
+def test_a_program_is_admitted_once_per_pair_of_limits(monkeypatch):
+    """Run the planning pass once, then classify each layout without it."""
+    layouts = [[1, 33, 5000], [40] * 7, [0, 9000, 2], [4097, 31]]
+    cases = [
+        _integer_case(lengths, seed=index)
+        for index, lengths in enumerate(layouts)
+    ]
+    plan = _CountingCalls(native_swage._materialize_segmented_plan)
+    classify = _CountingCalls(native_swage._classify_segments)
+    monkeypatch.setattr(native_swage, "_materialize_segmented_plan", plan)
+    monkeypatch.setattr(native_swage, "_classify_segments", classify)
+    monkeypatch.setattr(qualification, "_admitted", {})
+
+    def launch(case, **limits):
+        values, offsets, expected = case
+        output = torch.full((len(expected),), float("nan"), device="cuda")
+        prepared = qualification._prepare_planned_sum(
+            values.cuda(), offsets.cuda(), output, **limits
+        )
+        prepared.mixed()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+    for case in cases:
+        launch(case)
+    assert [call["segment_count"] for call in plan.calls] == [0]
+    assert [call["segment_count"] for call in classify.calls] == [3, 7, 3, 2]
+
+    launch(cases[0], warp_max_elements=16)
+    launch(cases[1], warp_max_elements=16)
+    qualification._prepare_persistent_sum(
+        cases[2][0].cuda(), cases[2][1].cuda(), torch.empty(3, device="cuda")
+    )
+    assert [
+        (call["warp_max_elements"], call["cta_chunk_elements"])
+        for call in plan.calls
+    ] == [(32, 4096), (16, 4096)]
+    assert len(classify.calls) == 7
+
+
+@requires_cuda
+def test_a_refused_program_or_limit_is_refused_at_every_preparation(
+    monkeypatch,
+):
+    """Keep no admission for what the planning pass rejects."""
+    values, offsets, _ = _integer_case([3, 40])
+    arguments = (values.cuda(), offsets.cuda(), torch.empty(2, device="cuda"))
+    monkeypatch.setattr(qualification, "_admitted", {})
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("a refused preparation must not classify or compile")
+
+    monkeypatch.setattr(native_swage, "_classify_segments", fail)
+    monkeypatch.setattr(qualification, "_compile_once", fail)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="planning limits must satisfy"):
+            qualification._prepare_planned_sum(
+                *arguments, warp_max_elements=33, cta_chunk_elements=32
+            )
+        with pytest.raises(ValueError, match="capture-free maps"):
+            qualification._prepare_planned_reduction(
+                *arguments,
+                module_text=qualification._SOFTMAX_MODULE,
+                kernel_name="ragged_softmax",
+            )
+    assert qualification._admitted == {}
+
