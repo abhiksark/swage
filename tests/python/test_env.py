@@ -222,17 +222,20 @@ def test_report_has_no_target_without_a_cuda_device(monkeypatch):
 
 def test_admitted_targets_match_the_compiler():
     """Keep the report's admitted list equal to the one the compiler uses."""
-    source = pathlib.Path(__file__).parents[2] / "lib" / "CAPI" / "Codegen.cpp"
+    root = pathlib.Path(__file__).parents[2]
+    source = root / "lib" / "Target" / "NVIDIATarget.cpp"
     if not source.is_file():
         pytest.skip("the compiler sources are not present")
+    # The processor list of the target description, which code generation
+    # and the native bindings read.
     body = re.search(
-        r"bool isPinnedProcessor\(unsigned value\) \{(.*?)\n\}",
+        r"constexpr uint16_t processors\[\] = \{(.*?)\};",
         source.read_text(),
         re.DOTALL,
     )
 
     assert body is not None
-    numbers = re.findall(r"case (\d+):", body[1])
+    numbers = re.findall(r"\d+", body[1])
     admitted = {f"sm_{number}" for number in numbers}
     assert admitted == env._ADMITTED_TARGETS
     assert env._QUALIFIED_TARGETS <= env._ADMITTED_TARGETS

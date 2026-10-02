@@ -18,4 +18,5 @@ add_mlir_conversion_library(MLIRSwageSegmentedReduction
   MLIRSCFDialect
   MLIRSwage
   MLIRSwagePlan
+  MLIRSwageTarget
 )

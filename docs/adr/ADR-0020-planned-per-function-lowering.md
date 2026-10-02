@@ -1,24 +1,28 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: proposed; awaiting maintainer review
+- Status: accepted; steps 0 and 1 of the migration sequence are implemented
 - Date: 2026-10-02
+- Accepted: 2026-10-02, with the recommended answer to every question at the
+  end
 
-This record is a proposal. Nothing it describes under "Proposed decision" is
-implemented, and the segmented lowering works today as "Context" describes.
-Byte-identical emission is the acceptance criterion the proposal sets for
-each migration step, not a result. The conversion mechanics were checked
-against the headers and sources of the pinned LLVM release and were not
-prototyped. The open questions at the end carry a recommended answer each
-and are for the maintainer to decide.
+The design is built one migration step at a time, and this page says which
+steps exist. Implemented: step 0 (the digest gate, dialect extensions in
+`swage-opt`, and a lit test of the nested NVVM pipeline) and step 1 (the
+target description). Not implemented: steps 2 to 10. Until its step lands, a
+part of the design is written in the conditional below, and the segmented
+lowering works as "Context" describes.
 
-Step 0 of the migration sequence stands on its own and does not depend on
-this record being accepted: a digest test over the emitted kernels, dialect
-extensions in `swage-opt`, and a lit test that runs the nested NVVM pipeline.
+Byte-identical emission is the acceptance criterion of every step through
+step 9: the committed digests of the lowered MLIR and of the PTX must not
+move. The conversion mechanics were checked against the headers and sources
+of the pinned LLVM release when this record was written and are proven in
+step 4.
 
 ## Context
 
-Line numbers refer to revision `d255f0d`. A bare line number refers to
+This section describes the tree before the migration started. Line numbers
+refer to revision `d255f0d`. A bare line number refers to
 `lib/Conversion/SegmentedReduction/SegmentedReduction.cpp`; every other file
 is named by its path. Python code is cited by function name.
 
@@ -212,7 +216,7 @@ tree.
 - Driver extensions: `registerAllExtensions`
   (`mlir/include/mlir/InitAllExtensions.h:25`).
 
-## Proposed decision
+## Decision
 
 ### Overview
 
@@ -528,9 +532,10 @@ C API (`lib/CAPI/Codegen.cpp`):
 
 ### Target description
 
-One struct, one instance, in a new library `MLIRSwageTarget`:
-`include/swage/Target/TargetDescription.h` and
-`lib/Target/NVIDIATarget.cpp`.
+Implemented in step 1. One struct, one instance, in the library
+`MLIRSwageTarget`: `include/swage/Target/TargetDescription.h` and
+`lib/Target/NVIDIATarget.cpp`. The struct also has a `subgroupCount`
+helper, which the block-size diagnostic prints.
 
 ```text
 struct TargetDescription {
@@ -553,31 +558,36 @@ struct TargetDescription {
 const TargetDescription &nvidiaTarget();
 ```
 
-The fence and the launch-width contract are code, so they would be two
-function members with one implementation each. There would be no
-enumeration with one case and no second record.
+The fence and the launch-width contract are code, so they are two function
+members with one implementation each. There is no enumeration with one case
+and no second record.
 
 Readers:
 
-- the planner: admitted and fixed block sizes, and the existing block-size
-  diagnostics;
-- the conversion: subgroup width, slots, claim batches, and the two hooks;
+- the segmented lowering, and from step 4 the planner: admitted and fixed
+  block sizes, and the existing block-size diagnostics;
+- the segmented lowering, and from step 4 the conversion: subgroup width,
+  slots, claim batches, and the two hooks;
 - `lib/Conversion/FixedBlockToGPU/FixedBlockToGPU.cpp`: the largest block
   and the launch-width hook;
-- `lib/CAPI/Codegen.cpp`: processors, prefix, triple;
-- the host: through a new `include/swage-c/Target.h`
+- `lib/CAPI/Codegen.cpp`: processors, prefix, triple, and the fixed block
+  widths;
+- the host: through `include/swage-c/Target.h`
   (`swageGetTargetDescription`, a plain C struct of the integers and the
   processor list) and a `_target_description()` binding in
   `python/SwageExtensionNanobind.cpp`.
 
-Host reading: `_segmented_qualification.py` would read the description
-lazily at first use, inside functions that already import the native
-package. The pure tier uses only `_compile_once` and `_load_once` from that
-module, so `tests/python` would stay free of the native package.
+Host reading: `_segmented_qualification.py` reads the description lazily at
+first use, inside functions that need the native package anyway, and an
+omitted block size or planning limit resolves to its value. The pure tier
+uses only `_compile_once` and `_load_once` from that module, so
+`tests/python` stays free of the native package.
 
 Copies deliberately kept: `_ADMITTED` in
-`python/tests/mlir/test_target_compile.py`, as an independent pin of the
-processor list, and the frozen benchmark scripts.
+`python/tests/mlir/test_target_compile.py` and `_ADMITTED_TARGETS` in
+`python/swage/env.py`, as independent pins of the processor list (the
+environment report works without the native package), and the frozen
+benchmark scripts.
 
 ### Private ABI changes and launch-site consequences
 
@@ -863,7 +873,9 @@ How the design would make the later work easier:
   body with no reduction, and the four-value segment makes an extent a
   subtraction.
 
-## Open questions, with recommended answers
+## Questions decided at acceptance
+
+Each question was answered as recommended.
 
 1. Plan granularity: six printed operations (this record), or a schedule
    attribute plus a transient site operation? Recommended: the six

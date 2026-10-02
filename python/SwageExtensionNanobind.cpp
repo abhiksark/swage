@@ -7,6 +7,7 @@
 
 #include "swage-c/Codegen.h"
 #include "swage-c/Dialects.h"
+#include "swage-c/Target.h"
 #include "swage/Python/BuildIdentity.h"
 
 #include "mlir-c/Dialect/Arith.h"
@@ -87,8 +88,11 @@ void launchKernel(uint64_t function, int64_t gridX, int64_t blockX,
     throw std::runtime_error("CUDA Driver library libcuda.so.1 is unavailable");
   if (gridX <= 0 || gridX > int64_t(UINT32_MAX))
     throw nb::value_error("grid_x must be a positive u32");
-  if (blockX <= 0 || blockX > 1024)
-    throw nb::value_error("block_x must be in 1..1024");
+  static const int64_t maxBlockThreads =
+      swageGetTargetDescription().maxBlockThreads;
+  if (blockX <= 0 || blockX > maxBlockThreads)
+    throw nb::value_error(
+        ("block_x must be in 1.." + std::to_string(maxBlockThreads)).c_str());
   if (pointers.size() + scalars.size() > maxArguments)
     throw nb::value_error("too many kernel arguments");
   std::array<void *, maxArguments> parameters;
@@ -393,6 +397,34 @@ NB_MODULE(_swageDialectsNanobind, m) {
   // behind and the next attempt is refused for the same reason.
   verifyLoadedFrontend(swageM);
 
+  // The target description the lowerings and the C API read, as plain
+  // values, so the host takes block widths, claim batches, and planning
+  // defaults from the compiler instead of repeating them.
+  const SwageTargetDescription target = swageGetTargetDescription();
+  swageM.def("_target_description", [target]() {
+    auto text = [](MlirStringRef value) {
+      return std::string(value.data, value.length);
+    };
+    nb::list processors;
+    for (intptr_t index = 0; index < target.processorCount; ++index)
+      processors.append(target.processors[index]);
+    nb::dict record;
+    record["name"] = text(target.name);
+    record["triple"] = text(target.triple);
+    record["processor_prefix"] = text(target.processorPrefix);
+    record["processors"] = nb::tuple(processors);
+    record["subgroup_width"] = target.subgroupWidth;
+    record["max_block_threads"] = target.maxBlockThreads;
+    record["cta_block_threads"] = target.ctaBlockThreads;
+    record["split_block_threads"] = target.splitBlockThreads;
+    record["persistent_block_threads"] = target.persistentBlockThreads;
+    record["persistent_partial_claim"] = target.persistentPartialClaim;
+    record["persistent_warp_claim"] = target.persistentWarpClaim;
+    record["default_warp_max_elements"] = target.defaultWarpMaxElements;
+    record["default_cta_chunk_elements"] = target.defaultCtaChunkElements;
+    return record;
+  });
+
   // The GIL is deliberately held across cuLaunchKernel: the enqueue is
   // microseconds, the driver never re-enters Python, and releasing it per
   // launch makes contended multithreaded dispatch an order of magnitude
@@ -492,13 +524,14 @@ NB_MODULE(_swageDialectsNanobind, m) {
   swageM.def("_materialize_segmented_plan", &materializeSegmentedPlanBuffers,
              nb::arg("module"), nb::arg("offsets").noconvert(),
              nb::arg("value_count"), nb::arg("segment_count"),
-             nb::arg("warp_max_elements") = 32,
-             nb::arg("cta_chunk_elements") = 4096);
+             nb::arg("warp_max_elements") = target.defaultWarpMaxElements,
+             nb::arg("cta_chunk_elements") = target.defaultCtaChunkElements);
   // The same offsets buffer and limits without a module. A program is
   // admitted once through `_materialize_segmented_plan`; this classifies
   // each of its layouts.
   swageM.def("_classify_segments", &classifySegments,
              nb::arg("offsets").noconvert(), nb::arg("value_count"),
-             nb::arg("segment_count"), nb::arg("warp_max_elements") = 32,
-             nb::arg("cta_chunk_elements") = 4096);
+             nb::arg("segment_count"),
+             nb::arg("warp_max_elements") = target.defaultWarpMaxElements,
+             nb::arg("cta_chunk_elements") = target.defaultCtaChunkElements);
 }

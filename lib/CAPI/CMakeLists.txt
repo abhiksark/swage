@@ -2,6 +2,7 @@
 add_mlir_public_c_api_library(SwageCAPI
   Codegen.cpp
   Dialects.cpp
+  Target.cpp
 
   LINK_COMPONENTS
   NVPTXCodeGen
@@ -27,6 +28,7 @@ add_mlir_public_c_api_library(SwageCAPI
   MLIRSwageFixedBlockToGPU
   MLIRSwagePlan
   MLIRSwageSegmentedReduction
+  MLIRSwageTarget
   MLIRTargetLLVM
   MLIRUBToLLVM
   MLIRVectorToLLVM

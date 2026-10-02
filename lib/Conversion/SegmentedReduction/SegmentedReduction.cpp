@@ -29,6 +29,7 @@
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
+#include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -609,18 +610,6 @@ void buildSequentialProgram(func::FuncOp function,
   func::ReturnOp::create(builder, loc);
 }
 
-/// Whether `blockSize` threads occupy a power-of-two number of warps, counting
-/// a partly filled last warp as one.
-///
-/// Every CTA-wide reduction lowers through `gpu.all_reduce`. Its second stage
-/// combines the per-warp partials with an XOR butterfly and stores the result
-/// from every participating lane. Each of those lanes holds the complete
-/// reduction only when the warp count is a power of two; for any other count
-/// the surviving store is unspecified and may carry an incomplete reduction.
-constexpr bool hasPowerOfTwoWarpCount(int64_t blockSize) {
-  return blockSize > 0 && llvm::isPowerOf2_64((blockSize - 1) / 32 + 1);
-}
-
 /// Clamp one half-open range loaded from device memory, as signed i32, so
 /// that `0 <= start <= end <= length`, and return it as index values.
 /// `length` is the i32 element count of the buffer the range indexes: the
@@ -664,7 +653,8 @@ Value isLoadedIndexInRange(OpBuilder &builder, Location loc, Value word,
 }
 
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
-                     const SegmentProgram &program, int64_t blockSize,
+                     const SegmentProgram &program,
+                     const TargetDescription &target, int64_t blockSize,
                      bool useTaskIds, bool fusedMixed, bool persistent) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
@@ -700,9 +690,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(
-      NVVM::NVVMDialect::getReqntidAttrName(),
-      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
+  target.pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
   Value claimBroadcast;
   if (persistent) {
     auto workgroupSpace = gpu::AddressSpaceAttr::get(
@@ -807,9 +795,10 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                                             : gpu::AllReduceOperation::MAXIMUMF;
       Value total = local.getResult(0);
       if (useWarpShuffle) {
-        for (int32_t offset = 1; offset < 32; offset <<= 1) {
+        for (int32_t offset = 1; offset < target.subgroupWidth; offset <<= 1) {
           auto shuffled = gpu::ShuffleOp::create(body, bodyLoc, total, offset,
-                                                 32, gpu::ShuffleMode::XOR);
+                                                 target.subgroupWidth,
+                                                 gpu::ShuffleMode::XOR);
           total = combine(body, bodyLoc, stage.kind, total,
                           shuffled.getShuffleResult());
         }
@@ -877,8 +866,12 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   if (persistent) {
     Value zeroI32 = arith::ConstantIntOp::create(builder, loc, 0, 32);
     Value oneI32 = arith::ConstantIntOp::create(builder, loc, 1, 32);
-    Value fourI32 = arith::ConstantIntOp::create(builder, loc, 4, 32);
-    Value eightI32 = arith::ConstantIntOp::create(builder, loc, 8, 32);
+    // The batch a block claims from the partial queue, and the batch a
+    // subgroup claims from the warp queue.
+    Value fourI32 = arith::ConstantIntOp::create(
+        builder, loc, target.persistentPartialClaim, 32);
+    Value eightI32 = arith::ConstantIntOp::create(
+        builder, loc, target.persistentWarpClaim, 32);
     Value firstThread = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, threadId, zero);
 
@@ -901,7 +894,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       if (warpBroadcast) {
         auto shuffled =
             gpu::ShuffleOp::create(body, claimLoc, leaderClaim.getResult(0), 0,
-                                   32, gpu::ShuffleMode::IDX);
+                                   target.subgroupWidth, gpu::ShuffleMode::IDX);
         return shuffled.getShuffleResult();
       }
       scf::IfOp::create(
@@ -1077,7 +1070,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 
           // NVPTX lowers the LLVM atomic to the legacy atom form on sm_86.
           // Make scratch publication explicit before exposing completion.
-          NVVM::MembarOp::create(publish, publishLoc, NVVM::MemScopeKind::GPU);
+          target.emitDeviceFence(publish, publishLoc);
           Value previousCompletion = LLVM::AtomicRMWOp::create(
               publish, publishLoc, LLVM::AtomicBinOp::add, completionAddress,
               oneI32, LLVM::AtomicOrdering::acq_rel);
@@ -1115,7 +1108,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     scf::IfOp::create(
         builder, loc, hasReadyMerge, [&](OpBuilder &merge, Location mergeLoc) {
           // Pair with every partial publisher before any lane reads scratch.
-          NVVM::MembarOp::create(merge, mergeLoc, NVVM::MemScopeKind::GPU);
+          target.emitDeviceFence(merge, mergeLoc);
           Value mergeId = arith::IndexCastOp::create(
               merge, mergeLoc, merge.getIndexType(), readyMergeI32);
           Value three = arith::ConstantIndexOp::create(merge, mergeLoc, 3);
@@ -1191,7 +1184,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     // Each physical warp independently drains the short-task queue. Only
     // lane zero performs the atomic claim and broadcasts the result within
     // that warp, so the sixteen workers do not require CTA-wide lockstep.
-    Value warp = arith::ConstantIndexOp::create(builder, loc, 32);
+    Value warp =
+        arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
     Value lane = arith::RemUIOp::create(builder, loc, threadId, warp);
     Value firstLane = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, lane, zero);
@@ -1235,9 +1229,13 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   }
 
   if (fusedMixed) {
-    Value three = arith::ConstantIndexOp::create(builder, loc, 3);
-    Value four = arith::ConstantIndexOp::create(builder, loc, 4);
-    Value warp = arith::ConstantIndexOp::create(builder, loc, 32);
+    // One warp task per subgroup of the block: `four` slots, and `three` to
+    // round the warp task count up to whole blocks.
+    int64_t slots = target.slotsPerBlock(static_cast<int32_t>(blockSize));
+    Value three = arith::ConstantIndexOp::create(builder, loc, slots - 1);
+    Value four = arith::ConstantIndexOp::create(builder, loc, slots);
+    Value warp =
+        arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
     Value warpTaskCount = arith::IndexCastOp::create(
         builder, loc, builder.getIndexType(), entry->getArgument(5));
     Value ctaTaskCount = arith::IndexCastOp::create(
@@ -1303,7 +1301,7 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
       builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
         if (useTaskIds)
           emitTaskSegment(body, bodyLoc, entry->getArgument(3), taskIndex,
-                          threadId, block, blockSize == 32);
+                          threadId, block, blockSize == target.subgroupWidth);
         else
           emitSegment(body, bodyLoc, taskIndex, Value(), threadId, block,
                       false);
@@ -1315,13 +1313,9 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
 }
 
 void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
-                          const ReductionStage &stage, bool merge) {
-  // 512 threads per split CTA: wide enough to stream oversized
-  // segments at memory bandwidth, still fully occupied by one 4096-element
-  // chunk (8 elements per thread).
-  constexpr int64_t blockSize = 512;
-  static_assert(hasPowerOfTwoWarpCount(blockSize),
-                "the split CTA reduces through gpu.all_reduce");
+                          const ReductionStage &stage,
+                          const TargetDescription &target, bool merge) {
+  const int64_t blockSize = target.splitBlockThreads;
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   std::string suffix = merge ? "__merge" : "__partial";
@@ -1344,9 +1338,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
       builder, loc, source.getName().str() + suffix, kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(
-      NVVM::NVVMDialect::getReqntidAttrName(),
-      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
+  target.pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -1488,15 +1480,17 @@ public:
 
   SegmentedReductionToGPUPass() = default;
   SegmentedReductionToGPUPass(const SegmentedReductionToGPUPass &other)
-      : PassWrapper(other) {
+      : PassWrapper(other), target(other.target) {
     blockSize = other.blockSize.getValue();
     useTaskIds = other.useTaskIds.getValue();
     fusedMixed = other.fusedMixed.getValue();
     persistent = other.persistent.getValue();
   }
-  SegmentedReductionToGPUPass(int64_t requestedBlockSize, bool requestedTaskIds,
+  SegmentedReductionToGPUPass(const TargetDescription &target,
+                              int64_t requestedBlockSize, bool requestedTaskIds,
                               bool requestedFusedMixed,
-                              bool requestedPersistent = false) {
+                              bool requestedPersistent = false)
+      : target(&target) {
     blockSize = requestedBlockSize;
     useTaskIds = requestedTaskIds;
     fusedMixed = requestedFusedMixed;
@@ -1524,21 +1518,22 @@ public:
           << blockSize.getValue();
       return signalPassFailure();
     }
-    if (blockSize > 1024) {
+    if (blockSize > target->maxBlockThreads) {
       getOperation().emitError()
-          << "block-size must be at most 1024, got " << blockSize.getValue();
+          << "block-size must be at most " << target->maxBlockThreads
+          << ", got " << blockSize.getValue();
       return signalPassFailure();
     }
-    if (fusedMixed && blockSize != 128) {
+    if (fusedMixed && blockSize != target->ctaBlockThreads) {
       getOperation().emitError()
-          << "fused mixed lowering requires block-size 128, got "
-          << blockSize.getValue();
+          << "fused mixed lowering requires block-size "
+          << target->ctaBlockThreads << ", got " << blockSize.getValue();
       return signalPassFailure();
     }
-    if (persistent && blockSize != 512) {
+    if (persistent && blockSize != target->persistentBlockThreads) {
       getOperation().emitError()
-          << "persistent lowering requires block-size 512, got "
-          << blockSize.getValue();
+          << "persistent lowering requires block-size "
+          << target->persistentBlockThreads << ", got " << blockSize.getValue();
       return signalPassFailure();
     }
     // The persistent and fused kernels have ABIs of their own and always
@@ -1556,13 +1551,13 @@ public:
           "kernel always loads segment IDs from its own task buffer");
       return signalPassFailure();
     }
-    if (!hasPowerOfTwoWarpCount(blockSize)) {
+    if (!target->admitsBlockThreads(blockSize)) {
       // Read the option first: streaming the option object itself prints its
       // value as a character.
       int64_t requested = blockSize;
       getOperation().emitError()
           << "block-size must give a power-of-two warp count, got " << requested
-          << " (" << (requested + 31) / 32 << " warps)";
+          << " (" << target->subgroupCount(requested) << " warps)";
       return signalPassFailure();
     }
     FailureOr<func::FuncOp> function = findSegmentedReduction(getOperation());
@@ -1579,11 +1574,12 @@ public:
     RegionOwner owner;
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
-    buildGPUProgram(getOperation(), *function, program, blockSize, useTaskIds,
-                    fusedMixed, persistent);
+    buildGPUProgram(getOperation(), *function, program, *target, blockSize,
+                    useTaskIds, fusedMixed, persistent);
   }
 
 private:
+  const TargetDescription *target = &nvidiaTarget();
   Option<int64_t> blockSize{*this, "block-size",
                             llvm::cl::desc("CTA x block size"),
                             llvm::cl::init(0)};
@@ -1642,7 +1638,7 @@ public:
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
     buildSplitGPUProgram(getOperation(), *function, program.reductions.front(),
-                         merge);
+                         nvidiaTarget(), merge);
   }
 
 private:
@@ -1715,11 +1711,11 @@ private:
   Option<int64_t> warpMaxElements{
       *this, "warp-max-elements",
       llvm::cl::desc("Maximum segment length admitted for warp policy"),
-      llvm::cl::init(32)};
+      llvm::cl::init(nvidiaTarget().defaultWarpMaxElements)};
   Option<int64_t> ctaChunkElements{
       *this, "cta-chunk-elements",
       llvm::cl::desc("Maximum input elements in one CTA task"),
-      llvm::cl::init(4096)};
+      llvm::cl::init(nvidiaTarget().defaultCtaChunkElements)};
 };
 
 } // namespace
@@ -1731,12 +1727,22 @@ std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
 std::unique_ptr<Pass> createSegmentedReductionToGPUPass(int64_t blockSize,
                                                         bool useTaskIds,
                                                         bool fusedMixed) {
-  return std::make_unique<SegmentedReductionToGPUPass>(blockSize, useTaskIds,
-                                                       fusedMixed);
+  return createSegmentedReductionToGPUPass(blockSize, useTaskIds, fusedMixed,
+                                           nvidiaTarget());
+}
+
+std::unique_ptr<Pass>
+createSegmentedReductionToGPUPass(int64_t blockSize, bool useTaskIds,
+                                  bool fusedMixed,
+                                  const TargetDescription &target) {
+  return std::make_unique<SegmentedReductionToGPUPass>(target, blockSize,
+                                                       useTaskIds, fusedMixed);
 }
 
 std::unique_ptr<Pass> createPersistentSegmentedReductionToGPUPass() {
-  return std::make_unique<SegmentedReductionToGPUPass>(512, false, false, true);
+  const TargetDescription &target = nvidiaTarget();
+  return std::make_unique<SegmentedReductionToGPUPass>(
+      target, target.persistentBlockThreads, false, false, true);
 }
 
 std::unique_ptr<Pass> createSplitPartialReductionToGPUPass() {

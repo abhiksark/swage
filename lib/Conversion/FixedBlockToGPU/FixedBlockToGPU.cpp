@@ -20,6 +20,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
+#include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
@@ -254,9 +255,7 @@ void buildKernel(ModuleOp module, func::FuncOp source, int64_t blockSize) {
       gpu::GPUFuncOp::create(builder, loc, source.getName(), kernelType);
   kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                   builder.getUnitAttr());
-  kernel->setAttr(
-      NVVM::NVVMDialect::getReqntidAttrName(),
-      builder.getDenseI32ArrayAttr({static_cast<int32_t>(blockSize), 1, 1}));
+  nvidiaTarget().pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);
@@ -321,9 +320,10 @@ public:
           << blockSize.getValue();
       return signalPassFailure();
     }
-    if (blockSize > 1024) {
+    if (blockSize > nvidiaTarget().maxBlockThreads) {
       getOperation().emitError()
-          << "block-size must be at most 1024, got " << blockSize.getValue();
+          << "block-size must be at most " << nvidiaTarget().maxBlockThreads
+          << ", got " << blockSize.getValue();
       return signalPassFailure();
     }
     auto functions = llvm::to_vector(getOperation().getOps<func::FuncOp>());

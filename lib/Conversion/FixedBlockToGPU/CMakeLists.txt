@@ -15,5 +15,6 @@ add_mlir_conversion_library(MLIRSwageFixedBlockToGPU
   MLIRPass
   MLIRSCFDialect
   MLIRSwage
+  MLIRSwageTarget
   MLIRVectorDialect
 )

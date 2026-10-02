@@ -20,8 +20,9 @@ import swage
 # Enough of the commit hash to identify a checkout in a bug report.
 _REVISION_LENGTH = 12
 _NATIVE_EXTENSION = "mlir_swage._mlir_libs._swageDialectsNanobind"
-# The NVPTX processors the compiler admits: `isPinnedProcessor` in
-# lib/CAPI/Codegen.cpp. Any other target is rejected during compilation.
+# The NVPTX processors the compiler admits: the processor list of the target
+# description in lib/Target/NVIDIATarget.cpp. Any other target is rejected
+# during compilation.
 _ADMITTED_TARGETS = frozenset(
     f"sm_{number}"
     for number in (80, 86, 87, 88, 89, 90, 100, 101, 103, 110, 120, 121)

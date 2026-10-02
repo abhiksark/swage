@@ -38,6 +38,7 @@
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
+#include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
@@ -81,36 +82,19 @@ bool isPTXIdentifier(llvm::StringRef name) {
 }
 
 bool isSupportedTarget(llvm::StringRef target, unsigned &value) {
-  llvm::StringRef digits = target.consume_front("sm_") ? target : "";
+  llvm::StringRef digits =
+      target.consume_front(swage::nvidiaTarget().processorPrefix) ? target : "";
   if (digits.size() < 2 || digits.size() > 3 ||
       !llvm::all_of(digits, llvm::isDigit))
     return false;
   return !digits.getAsInteger(10, value) && value >= 80 && value <= 129;
 }
 
-/// The admitted subset of the NVPTX processors defined by the pinned LLVM
-/// release (llvm/lib/Target/NVPTX/NVPTX.td in llvmorg-22.1.8). An unknown
-/// processor is only a warning to the MC layer, which then falls back to a
-/// subtarget that either aborts instruction selection or emits PTX no
-/// driver can load. Revisit when cmake/llvm-version.txt moves.
+/// Whether the target description admits the processor. An unknown processor
+/// is only a warning to the MC layer, which then falls back to a subtarget
+/// that either aborts instruction selection or emits PTX no driver can load.
 bool isPinnedProcessor(unsigned value) {
-  switch (value) {
-  case 80:
-  case 86:
-  case 87:
-  case 88:
-  case 89:
-  case 90:
-  case 100:
-  case 101:
-  case 103:
-  case 110:
-  case 120:
-  case 121:
-    return true;
-  default:
-    return false;
-  }
+  return llvm::is_contained(swage::nvidiaTarget().processors, value);
 }
 
 /// Replace libdevice calls with LLVM intrinsics the NVPTX backend lowers
@@ -177,9 +161,10 @@ LogicalResult validateCompileRequest(ModuleOp source,
   if (blockSize <= 0)
     return source.emitError()
            << "block_size must be a positive integer, got " << blockSize;
-  if (blockSize > 1024)
+  if (blockSize > swage::nvidiaTarget().maxBlockThreads)
     return source.emitError()
-           << "block_size must be at most 1024, got " << blockSize;
+           << "block_size must be at most "
+           << swage::nvidiaTarget().maxBlockThreads << ", got " << blockSize;
   // The pass manager verifies only after each pass, never before the first
   // one, so an unverified module would reach pass code that dereferences
   // region internals.
@@ -382,7 +367,7 @@ LogicalResult optimizeKernel(ModuleOp source, llvm::Module &llvmModule,
 
 LogicalResult emitPTX(ModuleOp source, gpu::GPUModuleOp gpuModule,
                       llvm::StringRef target, std::string &ptx) {
-  constexpr llvm::StringLiteral triple = "nvptx64-nvidia-cuda";
+  llvm::StringRef triple = swage::nvidiaTarget().triple;
   llvm::LLVMContext llvmContext;
   std::unique_ptr<llvm::Module> llvmModule = translateModuleToLLVMIR(
       gpuModule.getOperation(), llvmContext, gpuModule.getName());
@@ -433,8 +418,8 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
       failed(replaceLibdeviceCalls(gpuModule)))
     return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
-      context,
-      {NVVM::NVVMTargetAttr::get(context, 2, "nvptx64-nvidia-cuda", target)}));
+      context, {NVVM::NVVMTargetAttr::get(
+                   context, 2, swage::nvidiaTarget().triple, target)}));
 
   printLoweredModule(*module, lowered);
   initializeNVPTX();
@@ -522,7 +507,8 @@ MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 128, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName),
+                        swage::nvidiaTarget().ctaBlockThreads, unwrap(target),
                         KernelKind::SegmentedReduction, false, true, lowered,
                         ptx)))
     return mlirLogicalResultFailure();
@@ -539,7 +525,9 @@ MlirLogicalResult swageCompilePersistentSegmentedReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName),
+                        swage::nvidiaTarget().persistentBlockThreads,
+                        unwrap(target),
                         KernelKind::PersistentSegmentedReduction, false, false,
                         lowered, ptx)))
     return mlirLogicalResultFailure();
@@ -556,7 +544,8 @@ MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName),
+                        swage::nvidiaTarget().splitBlockThreads, unwrap(target),
                         KernelKind::SplitPartialReduction, false, false,
                         lowered, ptx)))
     return mlirLogicalResultFailure();
@@ -573,7 +562,8 @@ MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
-  if (failed(compilePTX(unwrap(module), unwrap(kernelName), 512, unwrap(target),
+  if (failed(compilePTX(unwrap(module), unwrap(kernelName),
+                        swage::nvidiaTarget().splitBlockThreads, unwrap(target),
                         KernelKind::SplitMergeReduction, false, false, lowered,
                         ptx)))
     return mlirLogicalResultFailure();

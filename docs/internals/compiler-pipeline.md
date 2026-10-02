@@ -135,6 +135,25 @@ every kernel family and the rotated loops,
 `python/tests/mlir/test_segmented_numerics.py` pins the arithmetic, and
 `python/tests/mlir/test_segmented_bounds.py` pins the device-side bounds.
 
+## Target description
+
+One record holds what the compiler assumes about the device:
+`mlir::swage::TargetDescription` in
+`include/swage/Target/TargetDescription.h`. It names the triple and the
+admitted processors, the subgroup width (one warp of 32 threads), the widest
+block, the block widths of the CTA, split, and persistent kernels, the
+persistent claim batches, and the planning defaults. Emitting a device fence
+and pinning the launch width of a kernel are two functions of the record.
+
+The segmented and fixed-block lowerings, the code generation C API, and the
+private runner all read this record, so a block width or a planning default
+is written once. The runner reads it on first use through
+`swageGetTargetDescription` in `include/swage-c/Target.h`.
+
+There is one instance, `nvidiaTarget()`. The record does not make Swage
+portable: the upstream all-reduce lowering and NVVM conversion hard-code the
+same subgroup width, and no second target exists.
+
 ## Ownership boundary
 
 Swage currently owns semantic operations, fail-closed admission, the narrow
