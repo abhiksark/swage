@@ -168,6 +168,44 @@ If CMake is asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install
 without Python bindings, configuration fails instead of silently omitting the
 package.
 
+### Copying the native package
+
+Native packaging is not provided yet. There is no native wheel, and no
+deployment step is tested: `cmake --install` carries install rules for
+`mlir_swage` that the MLIR build functions generate, and no test or
+workflow runs them.
+
+The build-tree package is not relocatable as it is.
+`build/python_packages/mlir_swage` holds absolute symbolic links into the
+LLVM install and into the checkout, so a copy that keeps the links stops
+importing where those paths do not exist. A copy that follows the links
+does not depend on them:
+
+```bash
+mkdir -p /path/to/site
+cp -rL build/python_packages/mlir_swage /path/to/site/
+cp -r python/swage /path/to/site/
+PYTHONPATH=/path/to/site python -m swage.env
+```
+
+This was checked by hand on the machine that built it, with only that
+directory on `PYTHONPATH` and with the build tree, the LLVM install, and the
+checkout hidden from the process. MLIR emission, a vector-add launch, a
+private segmented sum, and reuse of the persistent cache by a second process
+all worked. These limits apply:
+
+- No test in the repository covers the copy, and it was not tried on
+  another machine. The native libraries still load the C++ runtime, `libz`,
+  and `libzstd` from outside the copy.
+- The copy is larger than the build-tree package, because each link is
+  replaced by the file it points to.
+- The copy is not a checkout, so `python -m swage.env` prints
+  `revision: None` and `llvm_pin: None`, and the copy does not reuse
+  persistent cache entries that the checkout wrote.
+- A native build contains third-party code.
+  [`THIRD_PARTY_NOTICES.md`](https://github.com/abhiksark/swage/blob/main/THIRD_PARTY_NOTICES.md)
+  must go with any copy that leaves the machine that built it.
+
 Installation is complete when the relevant build and test commands succeed.
 Continue with the [Quickstart](quickstart.md), or use
 [Troubleshooting](troubleshooting.md) when a tool or package cannot be found.
