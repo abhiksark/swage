@@ -9,8 +9,12 @@
 // The records host classification writes and a split kernel reads, as data.
 // A record is a run of i32 words in a task buffer. The classifier fills the
 // words by these fields and a lowering loads them by the same fields, so
-// the two cannot disagree about a stride. The counters of the persistent
-// queue kernel are laid out here for the same reason.
+// the two cannot disagree about a stride.
+//
+// The counters of the persistent queue kernel are laid out here as well.
+// The conversion reads that layout from here. The private runner sizes the
+// counter buffer with a copy of the number of claim counters, which this
+// header does not reach.
 //
 //===----------------------------------------------------------------------===//
 
@@ -33,7 +37,8 @@ enum Field : unsigned { Segment, PartialBegin, PartialEnd, Words };
 
 /// The counters of the persistent queue kernel: the next unclaimed task of
 /// each queue, then one count of completed partial tasks per merge, so the
-/// counter of merge `m` is at `FirstCompletion + m`.
+/// counter of merge `m` is at `FirstCompletion + m` and a launch with `n`
+/// merges needs `FirstCompletion + n` counters.
 namespace persistent_counter {
 enum Slot : unsigned { WarpClaim, CtaClaim, PartialClaim, FirstCompletion };
 } // namespace persistent_counter

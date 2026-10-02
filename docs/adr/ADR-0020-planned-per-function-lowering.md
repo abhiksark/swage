@@ -1067,7 +1067,9 @@ Step 8. Split merge.
 Step 9. Persistent queue.
 
 - Files: `persistent_tasks` and `PersistentTasksPattern`; the persistent
-  schedule in the planner; the counter layout in `TaskRecords.h`; the
+  schedule in the planner; the counter layout in `TaskRecords.h`, which the
+  conversion reads and the private runner still mirrors as `3 +
+  merge_count`; the
   persistent emitter deleted, so `--swage-segmented-reduction-to-gpu` only
   validates its options, plans, and converts.
 - Emitted IR: none.

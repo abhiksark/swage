@@ -171,7 +171,7 @@ invalid metadata, invalid residency, compilation errors, allocation errors,
 and CUDA launch errors propagate to the caller.
 
 Continue with [Compiler Tools and Passes](compiler-tools.md) for the driver
-options that select each lowering mode, or [Verification](verification.md)
+options that select each schedule, or [Verification](verification.md)
 for the current evidence boundary. The static paths this kernel is compared
 with are on [Task Execution](task-execution.md) and
 [Split Execution](split-execution.md).
