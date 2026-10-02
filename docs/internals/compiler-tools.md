@@ -74,7 +74,8 @@ them.
 A segment function is a `func.func` that holds an operation of the `swage`
 dialect and declares its arguments with `swage.role`, as
 [Textual Swage IR](../language/swage-ir.md#argument-roles) describes. The
-four segmented passes treat a module the same way:
+three segmented lowerings and the planner, which are the passes that take
+`function`, treat a module the same way:
 
 - A pass lowers every segment function of the module and leaves the other
   functions as they are. A module without a segment function is left

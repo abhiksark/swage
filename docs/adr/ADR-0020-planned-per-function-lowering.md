@@ -855,20 +855,24 @@ Step 4. Plan stage and conversion for direct and task-id (softmax
 included).
 
 - Files: `SwagePlanOps.td` (`tasks`, `yield`, the attribute check;
-  `classify` and `task_range` removed), `SwagePlanDialect.cpp`,
-  `TaskRecords.h`, `TaskClassifier.cpp`, new `lib/Conversion/SwageToPlan/`,
-  new `lib/Conversion/SwagePlanToGPU/`, `SegmentedReduction.cpp` (the direct
-  and task-id branch deleted; the legacy pass routes these schedules through
-  the new path), `lib/CAPI/Codegen.cpp`, `_segmented_qualification.py`, the
-  status of this record and of ADR-0014, and the three internals pages.
+  `classify` and `task_range` removed), `SwagePlanDialect.cpp`, new
+  `lib/Conversion/SwageToPlan/` (admission, the planner, the element-work
+  estimate), new `lib/Conversion/SwagePlanToGPU/` (the emission functions
+  and the conversion), `SegmentedReduction.cpp` (the direct and task-id
+  branch deleted; the legacy pass routes these schedules through the new
+  path), `lib/CAPI/Codegen.cpp`, `_segmented_qualification.py`, the status
+  of this record and of ADR-0014, and the internals pages. `TaskRecords.h`
+  waits for step 6, the first step whose lowering reads a record of more
+  than one word.
 - Emitted IR: `--swage-to-plan` output becomes plan functions. GPU output is
   unchanged.
 - Gate: the seven direct and task-id lit files, the `DIRECT` and `TASKS`
   prefixes of the two bounds files, `invalid-block-size.mlir`,
   `invalid-segmented-task-ids.mlir`, the one-pipeline test,
   `test_segmented_bounds.py`.
-- This is the step that would prove the conversion mechanics. If it cannot
-  hold the goldens, the later steps do not start.
+- This step proved the conversion mechanics: the goldens and the digests
+  hold, with the two adjustments "The conversion" names and without the
+  fallback.
 
 Step 5. Oracle onto the shared patterns.
 
