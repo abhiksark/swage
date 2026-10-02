@@ -125,13 +125,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
         return output
     kernel_values, kernel_output = values, output
     if rank == 2:
-        # `[N, 1]` values are one column. Their elements are the values of
-        # a rank-one batch, which the schedules of rank one reduce. A view
-        # needs contiguous storage, which the kernels need as well.
-        for name, tensor in (("values", values), ("out", output)):
-            if not tensor.is_contiguous():
-                raise ValueError(f"{name} must be contiguous")
-        kernel_values, kernel_output = values.view(-1), output.view(-1)
+        kernel_values, kernel_output = _one_column_as_scalars(values, output)
     _qualification._launch_planned_reduction(
         kernel_values,
         offsets,
@@ -151,27 +145,35 @@ def segment_softmax(values, offsets, *, out=None):
     and enqueues one kernel on the current PyTorch CUDA stream. It returns
     without waiting for the result.
 
+    Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
+    delimit rows, and every column of a segment is normalized on its own
+    over the rows of that segment, as `torch.softmax(values[a:b], dim=0)`
+    does. Such a call runs one kernel with one block per segment, in which
+    a thread normalizes a column in row order. `[N, 1]` values are
+    normalized by the kernel of rank-one values.
+
     Args:
-        values: Contiguous rank-one `torch.float32` CUDA tensor on the
-            current device. It must not require grad: the call records no
-            gradient. float64 values are refused: the device has no 64-bit
-            exp2, so there is no float64 softmax kernel.
+        values: Contiguous `torch.float32` CUDA tensor on the current
+            device, of rank one or of rank two, `[N, D]`. It must not
+            require grad: the call records no gradient. float64 values are
+            refused: the device has no 64-bit exp2, so there is no float64
+            softmax kernel.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at the
-            number of values, so every value belongs to a segment. Two
-            equal neighbors describe an empty segment, which has no result
-            element. int64 offsets are checked and narrowed on the host,
-            and the kernel reads a private int32 copy that the call
-            uploads.
-        out: Optional result tensor: contiguous, rank one, `torch.float32`,
-            on the device of `values`, with exactly one element per value,
-            sharing no memory with `values` or `offsets`, and not requiring
-            grad. It is never resized.
+            number of values, or of rows for rank-two values, so every
+            value belongs to a segment. Two equal neighbors describe an
+            empty segment, which has no result element. int64 offsets are
+            checked and narrowed on the host, and the kernel reads a
+            private int32 copy that the call uploads.
+        out: Optional result tensor: contiguous, `torch.float32`, on the
+            device of `values`, with the shape of `values`, sharing no
+            memory with `values` or `offsets`, and not requiring grad. It
+            is never resized.
 
     Returns:
         `out`, or a new tensor on the device of `values` when `out` is
-        None, with one element per value. The kernel that writes it is
+        None, with the shape of `values`. The kernel that writes it is
         enqueued and may not have finished. The version counter of the
         tensor is advanced when a kernel is enqueued.
 
@@ -191,11 +193,13 @@ def segment_softmax(values, offsets, *, out=None):
     """
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
-    value_count = values.numel()
+    rank = values.dim()
+    if rank not in (1, 2):
+        raise TypeError("values must have rank one or two")
+    # One result per value: the result has the shape of the values.
+    shape = tuple(values.shape)
     element = "f32" if values.dtype == torch.float32 else None
-    _require_out(
-        torch, out, (value_count,), "value", values, offsets, element
-    )
+    _require_out(torch, out, shape, "value", values, offsets, element)
     _require_bindings("segment_softmax")
     _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
@@ -204,12 +208,27 @@ def segment_softmax(values, offsets, *, out=None):
             "values must have dtype torch.float32; segment_softmax has no "
             "float64 kernel because the device has no 64-bit exp2"
         )
-    output = _result(torch, out, (value_count,), values, torch.float32)
-    value_count, segment_count, host_offsets = (
-        _qualification._validate_shapes(
+    output = _result(torch, out, shape, values, torch.float32)
+    if rank == 2 and values.shape[1] != 1:
+        _qualification._launch_columns(
             values,
             offsets,
             output,
+            module_text=_qualification._softmax_text(2),
+            kernel_name="ragged_softmax_r2",
+            validate_offsets=_validate_covering_offsets,
+            int64_offsets=True,
+            clamp_rows_to_output=True,
+        )
+        return output
+    kernel_values, kernel_output = values, output
+    if rank == 2:
+        kernel_values, kernel_output = _one_column_as_scalars(values, output)
+    value_count, segment_count, host_offsets = (
+        _qualification._validate_shapes(
+            kernel_values,
+            offsets,
+            kernel_output,
             _validate_covering_offsets,
             int64_offsets=True,
         )
@@ -222,14 +241,29 @@ def segment_softmax(values, offsets, *, out=None):
         )
     _qualification._enqueue_softmax(
         torch,
-        values,
+        kernel_values,
         kernel_offsets,
-        output,
+        kernel_output,
         value_count,
         segment_count,
         _qualification._target_description().cta_block_threads,
     )
     return output
+
+
+def _one_column_as_scalars(values, output):
+    """View `[N, 1]` values and their result as tensors of rank one.
+
+    One column of rows is a run of scalars, which the kernels of rank-one
+    values take. A view needs contiguous storage, which the kernels need as
+    well, so a tensor that is not contiguous is refused here under its
+    public name. The views share the storage and the version counter of
+    their tensors.
+    """
+    for name, tensor in (("values", values), ("out", output)):
+        if not tensor.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+    return values.view(-1), output.view(-1)
 
 
 def _require_inputs(torch, values, offsets):
@@ -257,8 +291,8 @@ def _require_out(torch, out, shape, unit, values, offsets, element):
         torch: The PyTorch module.
         out: The `out` argument, or None when the call allocates the result.
         shape: The shape of the result: one element per segment or value,
-            or one row per segment and one column per feature for rank-two
-            values.
+            or, for rank-two values, one row per segment and one column per
+            feature, or the shape of the values.
         unit: What one element belongs to, `"segment"` or `"value"`.
         values: The values tensor, already known to be a tensor.
         offsets: The offsets tensor, already known to be a tensor.
@@ -275,9 +309,14 @@ def _require_out(torch, out, shape, unit, values, offsets, element):
         raise TypeError(f"out must have the dtype of values, {values.dtype}")
     if len(shape) == 2:
         if tuple(out.shape) != tuple(shape):
+            meaning = (
+                "the shape of values"
+                if unit == "value"
+                else f"one row per {unit} and one column per feature"
+            )
             raise ValueError(
-                f"out must have shape {tuple(shape)}, one row per {unit} and "
-                f"one column per feature; found {tuple(out.shape)}"
+                f"out must have shape {tuple(shape)}, {meaning}; found "
+                f"{tuple(out.shape)}"
             )
     else:
         (count,) = shape

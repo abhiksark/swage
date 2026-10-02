@@ -208,6 +208,20 @@ def _programs():
         ),
         _PROCESSORS,
     )
+    # The softmax over rank-two values: the three stages of a column in
+    # one thread, in the one kernel of a rank-two program.
+    programs["ragged-softmax-columns"] = (
+        qualification._softmax_text(2),
+        "ragged_softmax_r2",
+        (
+            (
+                "direct-128",
+                "_compile_segmented_reduction_ptx",
+                {"block_size": 128},
+            ),
+        ),
+        _NEWER_PROCESSORS,
+    )
     return programs
 
 

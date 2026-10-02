@@ -42,7 +42,12 @@ from test_public_segments import (
     _distributions,
     _host_case,
 )
-from test_segment_columns import _assert_columns_match, _rows
+from test_segment_columns import (
+    _assert_columns_match,
+    _assert_softmax_columns_match,
+    _logits,
+    _rows,
+)
 from test_segmented_runtime import _bits, _offsets
 from test_target_compile import _ADMITTED, add_kernel
 
@@ -64,6 +69,7 @@ _PROGRAMS = {
         for kind in _KINDS
     },
     "ragged_softmax": qualification._SOFTMAX_MODULE,
+    "ragged_softmax_r2": qualification._softmax_text(2),
 }
 _PROGRAM_NAMES = (
     "segmented_sum",
@@ -83,6 +89,7 @@ _PROGRAM_NAMES = (
     "segmented_min_f64_r2",
     "segmented_mean_f64_r2",
     "ragged_softmax",
+    "ragged_softmax_r2",
 )
 # The reductions over rank-one values, which the planned path runs.
 _PLANNED = _PROGRAM_NAMES[:8]
@@ -144,7 +151,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write forty-one kernels, the library, and what describes them."""
+    """Write forty-two kernels, the library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -154,7 +161,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 41
+    assert len(_kernel_ids()) == 42
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -229,7 +236,7 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
 def test_the_manifest_identifies_each_program(manifest):
     """Record the text digest and the planning admission of each program."""
     assert tuple(_PROGRAMS) == _PROGRAM_NAMES
-    # A reduction over rank-two values and the softmax have one kernel and
+    # A program over rank-two values and the softmax have one kernel and
     # are not planned, so the manifest records no admission for them.
     assert manifest["programs"] == [
         {
@@ -368,7 +375,7 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         "format_version: 2",
         "target: sm_86",
         "programs: " + ", ".join(_PROGRAM_NAMES),
-        "kernels: 41",
+        "kernels: 42",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -801,6 +808,8 @@ def _cases():
     for kind in _KINDS:
         cases[f"{kind}/rank-two"] = (kind, rows, row_offsets)
         cases[f"{kind}/rank-two-float64"] = (kind, wide_rows, row_offsets)
+    # Rank-two logits, which run the column kernel of the softmax.
+    cases["softmax/rank-two"] = ("softmax", *_logits(lengths, 130, 5))
     return cases
 
 
@@ -826,6 +835,7 @@ def _case_names():
         names += [f"{kind}/float64", f"{kind}/float64-direct-cta"]
     for kind in _KINDS:
         names += [f"{kind}/rank-two", f"{kind}/rank-two-float64"]
+    names.append("softmax/rank-two")
     return names
 
 
@@ -1039,6 +1049,8 @@ def test_artifact_results_match_pytorch_and_float64(name, child):
         # `torch.segment_reduce` raises for a batch without a segment.
         assert actual.shape == (0,)
         assert actual.dtype == torch.float32
+    elif kind == "softmax" and values.dim() == 2:
+        _assert_softmax_columns_match(values, offsets, actual)
     elif kind == "softmax":
         _assert_softmax_matches(values, offsets, actual)
     elif values.dim() == 2:
@@ -1138,6 +1150,7 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     rows = torch.ones(6, 5, device="cuda")
     row_offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
     swage.segment_reduce(rows, row_offsets, "min")
+    swage.segment_softmax(rows, row_offsets)
     torch.cuda.synchronize()
 
     def stated(program, role):
@@ -1165,9 +1178,11 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
         stated("segmented_mean", "partial"),
         stated("segmented_mean", "merge"),
         stated("segmented_min_r2", "column"),
+        stated("ragged_softmax_r2", "column"),
     ]
-    # The column kernel takes the feature count as its third count.
+    # A column kernel takes the feature count as its third count.
     assert stated("segmented_min_r2", "column") == (128, 3, 3)
+    assert stated("ragged_softmax_r2", "column") == (128, 3, 3)
     # The merge of a mean takes one pointer more than the merge of a sum.
     assert stated("segmented_mean", "merge")[1:] == (4, 3)
     assert stated("segmented_sum", "merge")[1:] == (3, 3)

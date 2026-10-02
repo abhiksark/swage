@@ -28,6 +28,7 @@ from swage._segmented_qualification import (
     _SOFTMAX_MODULE,
     _reduction_kernel,
     _semantic_module,
+    _softmax_text,
 )
 
 # The oldest admitted processor, the qualified one, and the newest admitted.
@@ -164,6 +165,15 @@ def _segmented_kernels():
                 {"block_size": block_size}, _NONE,
                 id=f"columns-{kind}-{element}-{block_size}",
             )
+    # The softmax over rank-two values runs its two reductions and its
+    # store in one thread per column, so it has none of the barriers and
+    # shuffles of the rank-one softmax below.
+    for block_size in (32, 128, 1024):
+        yield pytest.param(
+            _softmax_text(2), _DIRECT, "ragged_softmax_r2",
+            {"block_size": block_size}, _NONE,
+            id=f"columns-softmax-{block_size}",
+        )
     for block_size in (32, 128, 512):
         yield pytest.param(
             _SOFTMAX_MODULE, _DIRECT, "ragged_softmax",
@@ -318,11 +328,22 @@ def test_the_row_loop_of_a_column_kernel_is_rotated(kind, element):
         _reduction_kernel(kind, element, 2), {"block_size": 128}, "sm_86",
     )
     combine = {"sum": "add.rn", "mean": "add.rn", "max": "max"}[kind]
+
+    _assert_one_rotated_loop(ptx, rf"{re.escape(combine)}\S*\.{element}")
+    assert _backward_branches(ptx)[0] == 1
+
+
+def _assert_one_rotated_loop(ptx, instruction):
+    """Require one block with `instruction`, closed by a branch to itself.
+
+    The first branch of the block is conditional and goes back to its own
+    label: the loop tests its bound at the bottom, once per iteration.
+    """
     blocks = re.split(r"^(\$L__\w+):\n", ptx, flags=re.MULTILINE)
     rows = [
         (label, body)
         for label, body in zip(blocks[1::2], blocks[2::2])
-        if re.search(rf"^\s*{re.escape(combine)}\S*\.{element}\s", body, re.M)
+        if re.search(rf"^\s*{instruction}\s", body, re.M)
     ]
 
     assert len(rows) == 1
@@ -330,7 +351,27 @@ def test_the_row_loop_of_a_column_kernel_is_rotated(kind, element):
     branches = re.findall(r"^\s*(@!?%p\d+\s+bra|bra\.uni)\s+(\S+);", body, re.M)
     assert branches[0][0].endswith("bra") and branches[0][1] == label
     assert branches[0][0] != "bra.uni"
-    assert _backward_branches(ptx)[0] == 1
+
+
+def test_the_three_row_loops_of_a_softmax_column_are_rotated():
+    """Close each stage of a softmax column with one conditional branch.
+
+    A thread of the rank-two softmax walks the rows of its column three
+    times: for the maximum, for the sum of the exponentials, and for the
+    store. Each walk is a loop that tests its bound at the bottom. The
+    end of the column loop is placed before the stages, so two more
+    branches go backward once per column: the unconditional one after the
+    store loop, and the conditional one that skips the store loop of a
+    segment without rows.
+    """
+    ptx = _compile(
+        _softmax_text(2), _DIRECT, "ragged_softmax_r2", {"block_size": 128},
+        "sm_86",
+    )
+
+    for instruction in (r"max\.NaN\.f32", r"add\.rn\.f32", r"div\.rn\.f32"):
+        _assert_one_rotated_loop(ptx, instruction)
+    assert _backward_branches(ptx) == (1, 4)
 
 
 @pytest.mark.parametrize("target", _TARGETS)

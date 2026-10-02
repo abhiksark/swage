@@ -28,8 +28,8 @@ Three levels remain distinct:
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
 tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
 steps, and 512-thread split partial and merge steps. Rank-two values use a
-128-thread column step, in which a thread reduces one column of one
-segment.
+128-thread column step, in which a thread reduces or normalizes one column
+of one segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See

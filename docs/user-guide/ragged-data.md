@@ -39,9 +39,9 @@ For `N` segments over one values buffer:
 
 - `values` is a contiguous rank-one `torch.float32` or `torch.float64`
   tensor. A reduction takes both dtypes. A softmax takes `torch.float32`
-  only, and so does the private persistent sum. A reduction also takes
-  `[rows, columns]` values, which [Rows of features](#rows-of-features)
-  describes.
+  only, and so does the private persistent sum. Both public calls also
+  take `[rows, columns]` values, which
+  [Rows of features](#rows-of-features) describes.
 - `offsets` is a contiguous rank-one `torch.int32` tensor with `N + 1`
   entries. The two public calls also take `torch.int64` offsets, the
   default integer width of PyTorch.
@@ -69,20 +69,23 @@ with a float32 result is refused, and so is the reverse. Its size differs:
 
 ### Rows of features
 
-A reduction takes values of rank two: rows of `D` features, contiguous in
-row order. The contract above then reads with rows in place of values:
+Both public calls take values of rank two: rows of `D` features,
+contiguous in row order. The contract above then reads with rows in place
+of values:
 
 - The offsets delimit rows. The final offset is at most the number of rows,
-  and segment `i` is the rows from `offsets[i]` up to `offsets[i + 1]`.
+  and equal to it for a softmax, and segment `i` is the rows from
+  `offsets[i]` up to `offsets[i + 1]`.
 - The number of rows, the number of segments, and the number of columns are
   each below `2**31`. The number of elements, rows times columns, may
   exceed that.
-- The result has one row of `D` elements per segment: every column of a
-  segment is reduced on its own.
+- The result of a reduction has one row of `D` elements per segment, and
+  the result of a softmax has the shape of the values: every column of a
+  segment is reduced, or normalized, on its own.
 - A transposed tensor and a slice of columns are not contiguous in row
   order and are refused. Nothing is copied.
 
-Rows of one feature are a run of scalars and are reduced as one. Values of
+Rows of one feature are a run of scalars and are taken as one. Values of
 rank three or above are refused.
 [Segmented Calls](segmented-calls.md#rows-of-features) states what a call on
 rows costs and how it is rounded.

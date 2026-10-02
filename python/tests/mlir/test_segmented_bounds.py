@@ -18,7 +18,9 @@ index could reach between guards and require the guards to be unchanged.
 The column kernel of rank-two values takes one more count, the feature
 count. Its row ranges are clamped to the row count like any range into
 values, and its column loop is bounded by the feature count, which is what
-keeps a load inside `[N, D]` and a store inside `[S, D]`.
+keeps a load inside `[N, D]` and a store inside `[S, D]`. The column kernel
+of the softmax stores a row for every row it reads, so the same two bounds
+keep its stores inside the `[N, D]` output.
 """
 
 import re
@@ -34,9 +36,11 @@ from swage._segmented_qualification import (
     _SOFTMAX_MODULE,
     _launch_segmented_sum_tasks,
     _semantic_module,
+    _softmax_text,
     _validate_offsets,
     _validate_softmax_tensors,
     launch_gpu,
+    launch_softmax_gpu,
 )
 
 requires_cuda = pytest.mark.skipif(
@@ -152,6 +156,18 @@ CLAMPED_KERNELS = [
         },
         {3: 1},
         id="columns",
+    ),
+    # The softmax over rank-two values clamps the rows once for its three
+    # passes over a column.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "module_text": _softmax_text(2),
+            "kernel_name": "ragged_softmax_r2",
+        },
+        {3: 1},
+        id="softmax-columns",
     ),
 ]
 
@@ -560,6 +576,239 @@ def test_column_kernel_does_nothing_without_a_positive_feature_count(
     )
 
     _assert_only_stored(output_buffer, {})
+
+
+def _softmax_column_kernel(block_size=128):
+    """Compile and load the column kernel of the rank-two softmax."""
+    return _load(
+        "_compile_segmented_reduction_ptx",
+        entry="ragged_softmax_r2",
+        block_size=block_size,
+        module_text=_softmax_text(2),
+        kernel_name="ragged_softmax_r2",
+    )
+
+
+def _guarded_logits(row_count, columns):
+    """Build `[row_count, columns]` logits between NaN guards.
+
+    Returns:
+        The device view the kernel reads, as its elements in row order, and
+        a host copy of the rows. Every logit is a quarter multiple that
+        depends on its row and on its column, with a spread of three.
+    """
+    values, host_rows = _guarded_rows(row_count, columns)
+    values.div_(4)
+    return values, host_rows / 4
+
+
+def _column_softmax(host_rows, start, end):
+    """Normalize every column over rows `[start, end)` in float64."""
+    return torch.softmax(host_rows[start:end].double(), 0).float()
+
+
+@requires_cuda
+@pytest.mark.parametrize("columns", [3, 129], ids=["few", "second-pass"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_softmax_column_kernel_stores_only_rows_inside_the_clamped_ranges(
+    offsets, columns
+):
+    """Keep every load and every store inside `[N, D]`.
+
+    The launch goes through the driver, below the Python validation, with
+    row offsets that validation rejects. The values sit between NaN guards
+    and the output between canaries. A softmax output is positive, so the
+    canary of minus one shows a row that no thread stored. A row range that
+    was not clamped to the row count would read a guard and make a whole
+    column NaN, or store past the last row. The decreasing pair makes two
+    segments claim the same rows: either may win there, and both are
+    finite.
+    """
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_rows = _guarded_logits(_VALUE_COUNT, columns)
+    output, output_buffer = _canaried_output(_VALUE_COUNT * columns)
+
+    _runtime._get_driver().launch_segmented(
+        _softmax_column_kernel(),
+        (segment_count,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(offsets).data_ptr(),
+            output.data_ptr(),
+            _VALUE_COUNT,
+            segment_count,
+            columns,
+        ),
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(_VALUE_COUNT, columns)
+    claims = torch.zeros(_VALUE_COUNT, dtype=torch.int64)
+    expected = torch.full_like(stored, _CANARY)
+    for start, end in pairwise(offsets):
+        start = min(max(start, 0), _VALUE_COUNT)
+        end = min(max(end, start), _VALUE_COUNT)
+        claims[start:end] += 1
+        expected[start:end] = _column_softmax(host_rows, start, end)
+    once = claims <= 1
+    torch.testing.assert_close(stored[once], expected[once], rtol=1e-5, atol=0)
+    contested = stored[~once]
+    assert ((contested > 0) & (contested <= 1)).all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [1, 5, 127, 128, 129, 300])
+def test_softmax_column_kernel_stores_its_own_columns_and_nothing_else(
+    feature_count,
+):
+    """Bound the columns by the feature count and the blocks by the segments.
+
+    The grid holds two blocks more than there are segments, and a block
+    holds 128 threads whatever the number of columns. A block beyond the
+    segment count and a thread beyond the feature count store nothing: the
+    canaries around the output are unchanged, and every row holds the
+    softmax of its own column.
+    """
+    row_offsets = (0, 7, 7, 40)
+    segment_count = len(row_offsets) - 1
+    values, host_rows = _guarded_logits(row_offsets[-1], feature_count)
+    output, output_buffer = _canaried_output(row_offsets[-1] * feature_count)
+
+    _runtime._get_driver().launch_segmented(
+        _softmax_column_kernel(),
+        (segment_count + 2,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(row_offsets).data_ptr(),
+            output.data_ptr(),
+            row_offsets[-1],
+            segment_count,
+            feature_count,
+        ),
+    )
+
+    torch.cuda.synchronize()
+    expected = torch.cat(
+        [
+            _column_softmax(host_rows, start, end)
+            for start, end in pairwise(row_offsets)
+        ]
+    )
+    torch.testing.assert_close(
+        output.cpu().reshape(row_offsets[-1], feature_count),
+        expected,
+        rtol=1e-5,
+        atol=0,
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, -129, _INT32_MIN])
+def test_softmax_column_kernel_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no column for a feature count that names none."""
+    row_offsets = (0, 7, 40)
+    values, _ = _guarded_logits(row_offsets[-1], 4)
+    output, output_buffer = _canaried_output(row_offsets[-1] * 4)
+
+    _runtime._get_driver().launch_segmented(
+        _softmax_column_kernel(),
+        (2,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(row_offsets).data_ptr(),
+            output.data_ptr(),
+            row_offsets[-1],
+            2,
+            feature_count,
+        ),
+    )
+
+    _assert_only_stored(output_buffer, {})
+
+
+@requires_cuda
+def test_softmax_column_launch_passes_the_rows_of_the_shorter_buffer(
+    monkeypatch,
+):
+    """Give the kernel a row count that fits the values and the output.
+
+    The private launch admits an output of fewer rows than the values, as
+    it does for rank one. The kernel stores at the rows it reads, so the
+    count it clamps against is the smaller one. Without it the count would
+    be the ten rows of the values.
+    """
+    launches = []
+    monkeypatch.setattr(
+        _runtime._get_driver(),
+        "launch_segmented",
+        lambda *arguments: launches.append(arguments),
+    )
+    values = torch.ones(10, 3, device="cuda")
+    output = torch.zeros(6, 3, device="cuda")
+
+    launch_softmax_gpu(values, _device_i32((0, 2, 6)), output)
+
+    ((_, grid, _, _, arguments),) = launches
+    assert grid == (2,)
+    assert arguments[3:] == (6, 2, 3)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_softmax_column_store_stays_inside_the_validated_rows(block_size):
+    """Bound the store of a column by the rows the host validated.
+
+    The output has fewer rows than the values, and the row count the
+    kernel receives is the one of the output. The offsets then change
+    through a path the host cannot see, and the last segment claims every
+    row of the values. Its threads stop at the last row of the output.
+    """
+    covered, columns = 600, 5
+    values, host_rows = _guarded_logits(_VALUE_COUNT, columns)
+    output_buffer = torch.full(
+        ((covered + _VALUE_COUNT) * columns,), _CANARY, device="cuda"
+    )
+    output = output_buffer[: covered * columns]
+    stale = (0, 400, _VALUE_COUNT)
+
+    _runtime._get_driver().launch_segmented(
+        _softmax_column_kernel(block_size),
+        (2,),
+        block_size,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(stale).data_ptr(),
+            output.data_ptr(),
+            covered,
+            2,
+            columns,
+        ),
+    )
+    torch.cuda.synchronize()
+
+    assert (output_buffer[covered * columns :] == _CANARY).all()
+    expected = torch.cat(
+        [
+            _column_softmax(host_rows, 0, 400),
+            _column_softmax(host_rows, 400, covered),
+        ]
+    )
+    torch.testing.assert_close(
+        output.cpu().reshape(covered, columns), expected, rtol=1e-5, atol=0
+    )
 
 
 @requires_cuda

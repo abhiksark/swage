@@ -43,6 +43,7 @@ PROGRAM_TEXTS = {
         for kind in ("sum", "max", "min", "mean")
     },
     "ragged_softmax": qualification._SOFTMAX_MODULE,
+    "ragged_softmax_r2": qualification._softmax_text(2),
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
 
@@ -139,8 +140,8 @@ def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
             {
                 "name": program,
                 "sha256": _digest(PROGRAM_TEXTS[program]),
-                # The softmax and the reductions over rank-two values are
-                # not planned, so nothing was admitted for them.
+                # The softmax programs and the reductions over rank-two
+                # values are not planned, so nothing was admitted for them.
                 **(
                     {}
                     if program == "ragged_softmax" or program.endswith("_r2")
@@ -335,7 +336,7 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         ),
     ]
 
-    # A reduction over rank-two values has one kernel, the direct schedule
+    # A program over rank-two values has one kernel, the direct schedule
     # of its program, which takes the number of columns as a third count.
     column = [
         (
@@ -387,6 +388,7 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
             for kind in ("sum", "max", "min", "mean")
         },
         "ragged_softmax": softmax,
+        "ragged_softmax_r2": column,
     }
     assert len(mean[3][5]) == len(reduction[3][5]) + 1
     # An f64 program differs from its f32 program in the element pointers
@@ -1262,6 +1264,7 @@ def test_the_manifest_is_kept_for_reports(artifact_dir, monkeypatch):
         "segmented_min_f64_r2",
         "segmented_mean_f64_r2",
         "ragged_softmax",
+        "ragged_softmax_r2",
     )
 
 
@@ -1582,14 +1585,13 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 41 kernels of "
+        f"{artifact_dir} (format 2, target sm_86, 42 kernels of "
         "segmented_sum, segmented_max, segmented_min, segmented_mean, "
         "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
         "segmented_mean_f64, segmented_sum_r2, segmented_max_r2, "
         "segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, "
         "segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, "
-        "ragged_softmax, written by "
-        "swage "
+        "ragged_softmax, ragged_softmax_r2, written by swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"
     )

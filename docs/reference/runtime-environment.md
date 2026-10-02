@@ -329,6 +329,10 @@ Preparation and launch follow these rules:
   uploads the narrowed copy, as `segment_softmax` does. `[N, 1]` values
   take the rank-one path through a view, and `[N, 0]` values enqueue
   nothing.
+- `segment_softmax` on `[N, D]` values with more than one column enqueues
+  the column kernel of the softmax in the same way: one 128-thread block
+  per segment, and a thread per column. `[N, 1]` values run the rank-one
+  kernel through a view, and `[N, 0]` values enqueue nothing.
 - `segment_reduce` prepares nothing it does not launch. A batch compiles
   and loads the fused kernel when it has segments of up to 4096 elements
   and the partial and merge kernels when it has longer ones. A batch that

@@ -6,7 +6,8 @@ Stable ragged softmax executes all phases in one CTA per segment
 with fused maps. This page records the exact internal contracts;
 none of them is a public API. The public `swage.segment_softmax` launches
 this path with the default 128-thread block and requires offsets that cover
-every value.
+every value. For rank-two values it launches the column kernel that
+[Rank-two values](#rank-two-values) describes.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) and
@@ -38,6 +39,71 @@ map-store writes.
 
 *The one-CTA softmax schedule, with all-reduce as broadcast and phase barrier. [Open the full-size figure](../assets/figures/ragged-softmax-phases.svg).*
 
+## Rank-two values
+
+Over rank-two values the softmax normalizes one column of one segment per
+program instance, as `torch.softmax(values[a:b], dim=0)` does for the rows
+`a` to `b` of a segment. The program is the rank-one program with the
+second segment id of
+[Segmented Reductions](segmented-reductions.md#rank-two-values): it
+declares the `feature_count` role, `swage.make_segment` binds
+`swage.segment_id 1` as the column, and `swage.map_store` writes a
+rank-two output. Its kernel function is `ragged_softmax_r2`, and it takes
+the six parameters of the column kernel:
+
+```text
+values*, offsets*, output*, value_count:i32, segment_count:i32,
+feature_count:i32
+```
+
+`value_count` is the number of rows. `values` and `output` hold rows of
+`feature_count` elements in row order, and the store writes the element
+it read from: the row and the column of a value are the row and the column
+of its result.
+
+The kernel is the column tile of the reductions, with three stages in
+place of one:
+
+- **One block per segment.** The rows of the segment are loaded from the
+  offsets and clamped to `value_count`. The public call passes the number
+  of rows of the values, which is the number of rows of the output. The
+  private launch admits a shorter output and passes the smaller number.
+- **One column per thread at a time.** Thread `t` of a block of 128 takes
+  the columns `t`, `t + 128`, and so on. The loop over those columns is
+  bounded by `feature_count`.
+- **Three walks over a column.** A thread computes the maximum of its
+  column, then the sum of the shifted exponentials, then stores every
+  normalized element, each time in row order.
+- **One scalar per stage.** A thread holds the maximum and the sum of the
+  column it works on, never a value per column or per row.
+- **No combination across threads.** The kernel holds no shuffle, no
+  barrier, and no shared memory. The two all-reduce operations of the
+  rank-one kernel, which combine the threads of a block and separate its
+  phases, do not exist in it.
+- **No split and no warp schedule.** A segment occupies one block for its
+  whole length.
+
+The limits are those of the column tile. With few columns few threads of a
+block work: a segment of 10,000 rows and three columns is three walks of
+10,000 rows, one row after the other, in each of three threads. A batch
+with a heavy tail of long segments keeps few blocks busy for a long time.
+The bits of a column do not depend on the batch, on the block width, or on
+the GPU model.
+
+`swage.segment_softmax` runs this kernel for `[N, D]` values with more
+than one column. `[N, 1]` values run the rank-one kernel through a view,
+and `[N, 0]` values launch nothing. The CPU oracle lowers the same program
+to a loop over the segments, a loop over the columns, and the three stages
+over the rows. The kernel and the oracle add in the same order and differ
+in the exponential, `ex2.approx.f32` on the device and `exp2f` on the
+host, so the tests compare them within a tolerance and not bit for bit.
+
+The driver-level tests of `python/tests/mlir/test_segmented_bounds.py`
+launch the kernel below the Python validation: with row ranges that
+validation rejects, with more blocks than segments, with feature counts of
+zero and below, and with an output of fewer rows than the values. Values
+sit between NaN guards and the output between canaries.
+
 ## Accuracy
 
 The kernel computes each exponential in f32 as `exp2((v - max) * log2e)`,
@@ -68,9 +134,12 @@ where:
   neither the spread nor the natural logarithm of the segment length.
 - `E` is the relative error of `ex2.approx.f32` in units of `eps32`, counted
   once for the output and once for the normalizer. The bound uses 1.5.
-- `k` is `ceil(n / 128) + 6`, the rounding additions of the 128-lane sum
-  over a segment of `n` elements (see
-  [Segmented Reductions](segmented-reductions.md#sum-rounding)).
+- `k` is the number of rounding additions of the normalizer. For rank-one
+  values it is `ceil(n / 128) + 6`, the additions of the 128-lane sum over
+  a segment of `n` elements (see
+  [Segmented Reductions](segmented-reductions.md#sum-rounding)). For
+  rank-two values it is `n - 1`: a thread adds the `n` rows of its column
+  one after the other.
 - `1.5` covers the division and the higher-order terms.
 
 Both `d` and `dbar` are at most the spread of the segment, the difference
@@ -82,10 +151,19 @@ bound is therefore
 ```
 
 for any distribution of the logits, which is `2.4e-05` at spread 80 for a
-4096-element segment.
+4096-element segment of rank-one values. For rank-two values the term
+`k / 2` is `(n - 1) / 2` and grows with the number of rows, so the bound
+of a long segment is weaker than the rank-one bound: at 4096 rows it is
+`2.7e-04` at the same spread. The other terms are the same, and a column
+is bounded on its own.
 
-A test asserts the first form for every output against `torch.softmax` in
-float64, at spreads 8, 20, 50, and 80. Its segments hold logits on a grid
+The tests of rank-two values assert the first form with `k = n - 1` for
+every output of every column against `torch.softmax` in float64 along the
+rows of a segment, at 3, 64, 129, 200, and 1024 columns and for a segment
+of 100,003 rows.
+
+For rank-one values, a test asserts the first form for every output
+against `torch.softmax` in float64, at spreads 8, 20, 50, and 80. Its segments hold logits on a grid
 of eighths, uniformly drawn logits in segments of up to 4096 elements, and
 one maximum above a single far level. The largest errors it measures on the
 RTX A6000 (`sm_86`) are:

@@ -392,18 +392,16 @@ def test_segmented_calls_reject_values_outside_the_data_model(
         _call(function, _wrong_values(case), offsets)
 
 
-def test_each_call_names_the_ranks_of_values_it_takes():
-    """Take rank one and two in the reduction, and rank one in the softmax.
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_each_call_names_the_ranks_of_values_it_takes(function):
+    """Take rank one and rank two in both calls, and refuse rank three.
 
-    `test_segment_columns.py` covers the rank-two reduction.
+    `test_segment_columns.py` covers the rank-two calls.
     """
     _, offsets = _host_segments()
 
     with pytest.raises(TypeError, match="^values must have rank one or two$"):
-        swage.segment_reduce(_wrong_values("rank-three"), offsets, "sum")
-    for case in ("rank-two", "rank-three"):
-        with pytest.raises(TypeError, match="^values must have rank one$"):
-            swage.segment_softmax(_wrong_values(case), offsets)
+        _call(function, _wrong_values("rank-three"), offsets)
 
 
 @pytest.mark.parametrize("case", ["float16", "int32"])

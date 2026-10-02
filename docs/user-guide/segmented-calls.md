@@ -9,7 +9,8 @@ Two functions run a fixed program over every segment of a ragged batch:
   minimum, or a mean of float32 or float64 values. The values are a run of
   scalars or `[N, D]` rows of `D` features, which are reduced per column.
 - `swage.segment_softmax(values, offsets, *, out=None)` returns one float32
-  result per value, the softmax within its segment.
+  result per value, the softmax within its segment. `[N, D]` rows are
+  normalized per column.
 
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
@@ -73,22 +74,23 @@ The two calls differ in the values they take:
   float64 batch runs a float64 program: every value is loaded, combined,
   and stored as float64, and the result is float64. Any other dtype raises
   a `TypeError` that names the two.
-- `segment_reduce` takes values of rank one or of rank two.
-  [Rows of features](#rows-of-features) describes rank two. Any other rank
-  raises a `TypeError` that names the two.
-- `segment_softmax` takes rank-one `torch.float32` values only. float64 values raise
-  a `TypeError` that states the reason: the softmax kernel computes its
-  exponential with the `exp2` instruction of the device, which exists for
-  32-bit values and not for 64-bit ones.
+- `segment_softmax` takes `torch.float32` values only. float64 values
+  raise a `TypeError` that states the reason: the softmax kernel computes
+  its exponential with the `exp2` instruction of the device, which exists
+  for 32-bit values and not for 64-bit ones.
+
+Both calls take values of rank one or of rank two.
+[Rows of features](#rows-of-features) describes rank two. Any other rank
+raises a `TypeError` that names the two.
 
 They also differ in one offsets rule:
 
 - `segment_reduce` admits offsets that end below the number of values, as
   `torch.segment_reduce` does. The values past the final offset belong to no
   segment and reach no result.
-- `segment_softmax` requires offsets that end at the number of values. Its
-  result has one element per value, and an element that no segment covers
-  would be returned unwritten.
+- `segment_softmax` requires offsets that end at the number of values, or
+  of rows for `[N, D]` values. Its result has one element per value, and an
+  element that no segment covers would be returned unwritten.
 
 `out` is optional and keyword-only. When it is given, the call writes it and
 returns the same tensor. It must meet all of these rules:
@@ -97,8 +99,10 @@ returns the same tensor. It must meet all of these rules:
   `values`. A contiguous slice of a larger tensor is admitted.
 - It has rank one and exactly one element per segment for `segment_reduce`
   of rank-one values, and exactly one element per value for
-  `segment_softmax`. For `[N, D]` values it has the shape `[S, D]`, one row
-  per segment and one column per feature. It is never resized.
+  `segment_softmax`. For `[N, D]` values it has the shape `[S, D]` for
+  `segment_reduce`, one row per segment and one column per feature, and
+  the shape `[N, D]` of the values for `segment_softmax`. It is never
+  resized.
 - It shares no memory with `values` or `offsets`.
 - It does not require grad, and it is not a lazy negation or conjugate view.
 
@@ -186,7 +190,8 @@ results are rounded:
   by the length, bit for bit.
 - A softmax output has a relative error bound that grows with the distance
   of its logit below the segment maximum.
-  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) states it.
+  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) states it, for
+  scalars and for rows.
 
 ## Sum rounding
 
@@ -220,11 +225,13 @@ warp, split, or selected schedule.
 
 ## Rows of features
 
-`segment_reduce` takes `[N, D]` values: `N` rows of `D` features. The
-offsets delimit rows, so they start at zero and end at or below `N`, and
-every column of a segment is reduced on its own, as
-`torch.segment_reduce(values, kind, axis=0, ...)` does. The result is
-`[S, D]` for `S` segments.
+Both calls take `[N, D]` values: `N` rows of `D` features. The offsets
+delimit rows, and every column of a segment is taken on its own.
+
+`segment_reduce` reduces each column, as
+`torch.segment_reduce(values, kind, axis=0, ...)` does. Its offsets start
+at zero and end at or below `N`, and the result is `[S, D]` for `S`
+segments.
 
 ```python
 # Four rows of two features in three segments: rows 0 and 1, none, 2 and 3.
@@ -237,20 +244,35 @@ totals = swage.segment_reduce(rows, offsets, "sum")
 # [[3, 30], [0, 0], [7, 70]]
 ```
 
+`segment_softmax` normalizes each column over the rows of its segment, as
+`torch.softmax(values[a:b], dim=0)` does for the rows `a` to `b` of a
+segment. Its offsets start at zero and end at `N`, and the result is
+`[N, D]`, the shape of the values. Rows are float32, as for scalars.
+
+```python
+weights = swage.segment_softmax(rows, offsets)
+# Rows 0 and 1 share a segment, so each of their columns sums to one:
+# [[0.2689, 0.0000], [0.7311, 1.0000], [0.2689, 0.0000], [0.7311, 1.0000]]
+```
+
 Everything under [Arguments](#arguments) and [Results](#results) holds per
-column. Every column of an empty segment receives the value of the kind:
-`0.0`, an infinity, or NaN for a mean. The values must be contiguous in row
+column. Every column of an empty segment receives the value of the kind
+from a reduction: `0.0`, an infinity, or NaN for a mean. A softmax has no
+result row for an empty segment. The values must be contiguous in row
 order: a transposed tensor and a slice of columns are refused, and nothing
 is copied. Values of rank three or above are refused.
 
 A call on rows runs another kernel than a call on scalars, with one
 schedule:
 
-- One block of 128 threads per segment. Thread `t` reduces the columns `t`,
+- One block of 128 threads per segment. Thread `t` takes the columns `t`,
   `t + 128`, and so on, one after the other, each in row order.
 - No split. A segment occupies one block for its whole length, whatever
   that length is.
-- No thread combines with another, so a column is reduced by one thread.
+- No thread combines with another, so a column is reduced, or normalized,
+  by one thread. A softmax thread walks the rows of its column three
+  times: for the maximum, for the sum of the exponentials, and for the
+  results it stores.
 
 That schedule has these consequences, which are limits of this call and not
 of the data:
@@ -259,7 +281,7 @@ of the data:
 |---|---|---|
 | Threads of a block that work | `D` of 128 | 64 to 128 |
 | Additions of one thread per segment | `n` rows | `n * ceil(D / 128)` |
-| Weakness | A long segment is reduced by `D` threads: 10,000 rows of three columns are 10,000 additions, one after the other, in each of three threads | A long segment occupies one block for its whole length |
+| Weakness | A long segment is taken by `D` threads: 10,000 rows of three columns are 10,000 additions, one after the other, in each of three threads | A long segment occupies one block for its whole length |
 
 - **Rounding.** A column sum is added in row order, one addition per row.
   It lies within `(n - 1) * eps * sum(|x|)` of the exact sum of its `n`
@@ -267,7 +289,9 @@ of the data:
   weaker than the bound of rank-one values, whose trees add in parallel. A
   column mean divides that sum once and lies within `eps * sum(|x|)` of the
   exact mean, under the conditions of the rank-one mean. A maximum and a
-  minimum are exact.
+  minimum are exact. A softmax of rows has the bound of
+  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) with
+  `k = n - 1`, the additions of its normalizer in row order.
 - **Bits.** The bits of a column do not depend on the other segments of the
   batch, on the block width, or on the GPU model: a rank-two call has no
   schedule selection.
@@ -275,12 +299,15 @@ of the data:
   classifies nothing. It uploads no task record and allocates no scratch.
 - **One column and no column.** `[N, 1]` values are a run of scalars. They
   are reduced by the schedules of rank-one values, with their rounding and
-  their selection, and the result is `[S, 1]`. `[N, 0]` values return an
-  `[S, 0]` result and launch nothing.
+  their selection, and the result is `[S, 1]`. A softmax of `[N, 1]`
+  values runs the kernel of rank-one values and returns `[N, 1]`. `[N, 0]`
+  values return an `[S, 0]` result from a reduction and an `[N, 0]` result
+  from a softmax, and launch nothing.
 
-The schedules of rank-one values reduce a long run of scalars in parallel
-and split it. A caller reaches them for rows by passing each column as a
-contiguous `[N]` or `[N, 1]` tensor, at the price of one call per column.
+The schedules of rank-one values take a long run of scalars in parallel,
+and those of a reduction split it. A caller reaches them for rows by
+passing each column as a contiguous `[N]` or `[N, 1]` tensor, at the price
+of one call per column.
 
 ## What a call costs
 
@@ -331,8 +358,9 @@ The first calls of a process cost more:
   segments of up to 4096 elements, two for longer segments, and one for a
   batch that the selection rule of [Sum rounding](#sum-rounding) sends to
   the 128-lane tree. A reduction kind has one more kernel per dtype for
-  rows of features. The softmax has one. Kernels stay in the process for later calls and are
-  never written to the persistent cache. With an artifact selected, a call
+  rows of features. The softmax has one kernel for scalars and one for
+  rows. Kernels stay in the process for later calls and are never written
+  to the persistent cache. With an artifact selected, a call
   compiles nothing: the first call reads and verifies the directory, and
   each kernel is loaded from it when a call first needs it.
 - The first `segment_reduce` call on a device whose batch meets that

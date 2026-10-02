@@ -218,6 +218,10 @@ validation rejects, with more blocks than segments, and with feature counts
 of zero and below. Values sit between NaN guards and the output between
 canaries. All of this is measured on the RTX A6000 (`sm_86`).
 
+The softmax over rank-two values runs on the same tile, with three stages
+per column in place of one reduction.
+[Ragged Softmax](ragged-softmax.md#rank-two-values) describes it.
+
 ## Sum rounding
 
 A sum is a fixed tree of IEEE-754 round-to-nearest additions in the

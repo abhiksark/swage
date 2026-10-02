@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+from itertools import accumulate, pairwise
 
 import pytest
 import swage
@@ -238,6 +239,42 @@ def _run_column_kernels(results, element, dtype, offsets):
                 )
 
 
+def _run_softmax_columns(results, offsets):
+    """Launch the column kernel of the softmax over rank-two logits.
+
+    Like the column kernel of a reduction it holds no shared memory, and
+    it runs here for the same reason. A launch is reported as correct when
+    every output is within a relative `1e-3` of float64 `torch.softmax`
+    along the rows of its segment, which is above the bound of
+    docs/internals/ragged-softmax.md for the longest segment here.
+
+    Args:
+        results: Receives whether each launch was correct, by name.
+        offsets: The int32 row offsets, on the device.
+    """
+    bounds = list(accumulate(_LENGTHS, initial=0))
+    row = torch.arange(bounds[-1])[:, None]
+    for columns in (3, 130):
+        column = torch.arange(columns)[None, :]
+        host = ((row * 31 + column * 17) % 127 - 63).to(torch.float32) / 8
+        expected = torch.cat(
+            [
+                torch.softmax(host[begin:end].double(), 0)
+                for begin, end in pairwise(bounds)
+            ]
+        )
+        values = host.cuda()
+        for block_size in (32, 128):
+            output = torch.full_like(values, float("nan"))
+            launch_softmax_gpu(values, offsets, output, block_size)
+            torch.cuda.synchronize()
+            results[f"softmax columns {columns} block {block_size}"] = bool(
+                torch.allclose(
+                    output.cpu().double(), expected, rtol=1e-3, atol=0
+                )
+            )
+
+
 def _run_kernels():
     """Launch every segmented kernel family and report exactness by name.
 
@@ -251,7 +288,7 @@ def _run_kernels():
       the default limits and with the splitting ones.
     - softmax: the multi-phase map-store kernel.
     - columns: the kernel of rank-two values, in which a thread reduces a
-      column on its own.
+      column on its own, and the one in which a thread normalizes it.
 
     The direct, task-id, fused, and split families run once per element
     type. The f64 kernels reduce through shared slots of eight bytes, so
@@ -287,6 +324,7 @@ def _run_kernels():
     launch_softmax_gpu(values, offsets, softmax)
     torch.cuda.synchronize()
     results["softmax"] = bool(torch.isfinite(softmax).all())
+    _run_softmax_columns(results, offsets)
     return results
 
 
@@ -383,6 +421,7 @@ def test_segmented_kernels_have_no_shared_memory_hazard(tmp_path):
     assert sum(" f64" in name for name in results) == 40 + 16
     assert any(" mean " in name for name in results)
     assert sum(name.startswith("columns ") for name in results) == 32
+    assert sum(name.startswith("softmax columns ") for name in results) == 4
     assert all(results.values()), results
 
 

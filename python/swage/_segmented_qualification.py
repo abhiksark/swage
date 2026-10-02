@@ -890,36 +890,54 @@ def _enqueue_merge(
         )
 
 
-_SOFTMAX_MODULE = """
-module {
-  func.func @ragged_softmax(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %max = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
+def _softmax_text(rank):
+    """Return the softmax program over values of rank one or two.
+
+    Over rank-two values a program instance is one segment and one column,
+    as for a reduction: the softmax normalizes each column over the rows of
+    its segment and writes it to the same rows and column of the output.
+    """
+    rows = "memref<?xf32>" if rank == 1 else "memref<?x?xf32>"
+    name = "ragged_softmax" if rank == 1 else "ragged_softmax_r2"
+    features = column = bound = index = ""
+    if rank == 2:
+        features = (
+            ",\n      %feature_count: i32 "
+            "{swage.role = #swage.role<feature_count>}"
+        )
+        column = "\n    %column = swage.segment_id 1"
+        bound, index = " column(%column)", ", index"
+    closing = features + ") {"
+    return f"""
+module {{
+  func.func @{name}(
+      %values: {rows} {{swage.role = #swage.role<values>}},
+      %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
+      %output: {rows} {{swage.role = #swage.role<output>}},
+      %value_count: i32 {{swage.role = #swage.role<value_count>}},
+      %segment_count: i32 {{swage.role = #swage.role<segment_count>}}{closing}
+    %sid = swage.segment_id 0{column}
+    %segment = swage.make_segment %values, %offsets, %sid{bound}
+        : {rows}, memref<?xi32>, index{index} -> !swage.segment<f32>
+    %max = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {{
     ^bb0(%value: f32):
       swage.yield %value : f32
-    }
+    }}
     %shifted = swage.map %segment captures(%max : f32)
-        : !swage.segment<f32> -> !swage.segment<f32> {
+        : !swage.segment<f32> -> !swage.segment<f32> {{
     ^bb0(%value: f32, %m: f32):
       %log2e = arith.constant 1.44269502 : f32
       %centered = arith.subf %value, %m : f32
       %scaled = arith.mulf %centered, %log2e : f32
       %exponential = math.exp2 %scaled : f32
       swage.yield %exponential : f32
-    }
-    %total = swage.reduce %shifted kind<sum> : !swage.segment<f32> -> f32 {
+    }}
+    %total = swage.reduce %shifted kind<sum> : !swage.segment<f32> -> f32 {{
     ^bb0(%element: f32):
       swage.yield %element : f32
-    }
+    }}
     swage.map_store %segment, %output captures(%max, %total : f32, f32)
-        : !swage.segment<f32>, memref<?xf32> {
+        : !swage.segment<f32>, {rows} {{
     ^bb0(%value: f32, %m: f32, %t: f32):
       %log2e = arith.constant 1.44269502 : f32
       %centered = arith.subf %value, %m : f32
@@ -927,11 +945,15 @@ module {
       %exponential = math.exp2 %scaled : f32
       %normalized = arith.divf %exponential, %t : f32
       swage.yield %normalized : f32
-    }
+    }}
     return
-  }
-}
+  }}
+}}
 """
+
+
+# The rank-one program, whose text every artifact and digest records.
+_SOFTMAX_MODULE = _softmax_text(1)
 
 _SENTINEL = -1.0
 
@@ -987,6 +1009,7 @@ def _launch_columns(
     validate_offsets,
     int64_offsets=False,
     block_size=None,
+    clamp_rows_to_output=False,
 ):
     """Validate and enqueue the column kernel of one rank-two program.
 
@@ -1010,6 +1033,10 @@ def _launch_columns(
             kernel then reads a private int32 copy.
         block_size: Threads per block, or None for the CTA block of the
             target description.
+        clamp_rows_to_output: Whether the kernel writes the rows it reads,
+            as a map store does. The row count it receives is then the
+            number of rows of the shorter of the values and the output, as
+            `_validate_softmax_tensors` returns it for rank one.
     """
     torch = _runtime._import_torch()
     value_count, segment_count, host_offsets = _validate_shapes(
@@ -1021,6 +1048,8 @@ def _launch_columns(
         element=_program_element(module_text),
         rank=2,
     )
+    if clamp_rows_to_output:
+        value_count = min(value_count, output.shape[0])
     feature_count = values.shape[1]
     if block_size is None:
         block_size = _target_description().cta_block_threads
@@ -2322,9 +2351,21 @@ def launch_softmax_gpu(values, offsets, output, block_size=None):
 
     The kernel is compiled once per block size and target, and loaded once
     per CUDA context. An omitted block size is the CTA block of the target
-    description.
+    description. Rank-two values run the column kernel of the softmax,
+    which normalizes every column of a segment over its rows.
     """
     torch = _runtime._import_torch()
+    if getattr(values, "ndim", 1) == 2:
+        return _launch_columns(
+            values,
+            offsets,
+            output,
+            module_text=_softmax_text(2),
+            kernel_name="ragged_softmax_r2",
+            validate_offsets=_validate_softmax_offsets,
+            block_size=block_size,
+            clamp_rows_to_output=True,
+        )
     value_count, segment_count = _validate_softmax_tensors(
         values, offsets, output
     )
@@ -2845,13 +2886,30 @@ def cpu_oracle(values, offsets, kind):
 def cpu_softmax_oracle(values, offsets):
     """Execute the sequential softmax lowering with the MLIR runner.
 
-    Returns the exact f32 value the lowering stored for each covered element.
+    Returns the exact f32 value the lowering stored for each covered element,
+    or for each covered row of rank-two values.
     """
     torch = _runtime._import_torch()
     covered = int(offsets[-1]) if offsets.numel() else 0
-    output = torch.empty(covered, dtype=torch.float32)
-    _validate_softmax_tensors(values, offsets, output, require_cuda=False)
-    results = _execute_guarded(
-        values, offsets, _SOFTMAX_MODULE, "ragged_softmax", covered
+    rank = 2 if getattr(values, "ndim", 1) == 2 else 1
+    shape = (covered,) + tuple(values.shape[1:rank])
+    output = torch.empty(shape, dtype=torch.float32)
+    _validate_shapes(
+        values,
+        offsets,
+        output,
+        _validate_softmax_offsets,
+        require_cuda=False,
+        rank=rank,
     )
-    return torch.tensor(results, dtype=torch.float32)
+    # A result without a column holds nothing the runner could print.
+    if output.numel() == 0 and rank == 2:
+        return output
+    results = _execute_guarded(
+        values,
+        offsets,
+        _softmax_text(rank),
+        "ragged_softmax" if rank == 1 else "ragged_softmax_r2",
+        covered,
+    )
+    return torch.tensor(results, dtype=torch.float32).reshape(shape)

@@ -1,17 +1,16 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; steps 1 to 5 of the migration sequence are implemented
+- Status: accepted; steps 1 to 6 of the migration sequence are implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end
 
 This record widens what the segmented reductions compute and what they
 read: two more kinds, one more element type, a trailing feature dimension,
-and 64-bit offsets. It is built one migration step at a time, and
-"Migration sequence" says which steps exist. Until its step lands, a part
-of the design is written in the conditional, and the calls behave as the
-user guide states.
+and 64-bit offsets. It was built one migration step at a time, and all
+six steps exist. "Migration sequence" records what each step built and
+where it differs from what was proposed.
 
 ## Context
 
@@ -456,7 +455,61 @@ What was built against what was proposed for step 5:
 - NVIDIA Compute Sanitizer runs the column kernels with the other kernel
   families and reports nothing, as a kernel without shared memory must.
 
-Step 6. Rank-two softmax, f32. Not implemented.
+Step 6. Rank-two softmax, f32. Implemented.
+
+- The compiler did not change. The softmax program over rank-two values,
+  `ragged_softmax_r2`, is the rank-one program with the `feature_count`
+  role, `swage.segment_id 1` as the column of `swage.make_segment`, and a
+  rank-two output of `swage.map_store`. Step 5 admits, plans, and lowers
+  it: the direct schedule gives one kernel of `policy<column>`, in which a
+  thread runs the maximum, the sum of the exponentials, and the store of
+  its column one after the other.
+- The kernel holds one maximum, one addition, two `ex2.approx.f32`, and one
+  division, and no shuffle, barrier, or shared memory. A thread holds one
+  scalar per reduction stage. The store writes the flat index it loaded,
+  so the row clamp and the feature-count bound of the column tile bound
+  the stores as they bound the loads.
+- `swage.segment_softmax` takes `[N, D]` float32 values and returns
+  `[N, D]`. It validates offsets that cover every row and classifies
+  nothing. `[N, 1]` values run the rank-one kernel through a view, and
+  `[N, 0]` values launch nothing. float64 values stay refused. The
+  artifact holds one more program, `ragged_softmax_r2`, with the one role
+  `column`: eighteen programs and forty-two kernels.
+- `test/Conversion/SwageToPlan/ragged-softmax-columns.mlir` and the files
+  of the same name under `SwageToCPU`, with a runner file, and `SwageToGPU`
+  pin the plan, the oracle, and the kernel.
+  `python/tests/mlir/test_segment_columns.py` holds the public contract,
+  and `python/tests/mlir/test_segmented_bounds.py` the device bounds.
+- The digest matrix gains 2 pairs, the program at the launch width on
+  `sm_80` and `sm_86`. The 834 pairs before it did not move.
+
+What was built against what was proposed for step 6:
+
+- The proposal named the softmax module generator, `segment_softmax`, and
+  the artifact table as the files of the step. That held: no C++ file
+  changed.
+- The proposal gave the bound of the softmax page at `k = n - 1`. The
+  tests assert it for every output of every column against float64
+  `torch.softmax` along the rows of a segment, at 3, 64, 129, 200, and
+  1024 columns and for a segment of 100,003 rows. At one column the call
+  runs the rank-one kernel and keeps the rank-one `k`.
+- The comparison with the CPU oracle is within a tolerance and not
+  bitwise, unlike the reductions. Both add a column in row order, and they
+  differ in the exponential: `ex2.approx.f32` on the device and `exp2f` on
+  the host.
+- The private launch admits an output of fewer rows than the values, as
+  the rank-one softmax launch does, and passes the smaller row count to
+  the kernel. The public call requires the shape of the values.
+- A wrong `out` of a rank-two softmax is refused with
+  `out must have shape (N, D), the shape of values; found ...`, which the
+  proposal did not word.
+- On the device the special values follow `torch.softmax` per column: a
+  NaN, a positive infinity, or nothing but negative infinities in a column
+  of a segment makes that column of that segment NaN and nothing else. The
+  bits of a column do not change with the block width or with the other
+  segments of the batch.
+- NVIDIA Compute Sanitizer runs the kernel with the other kernel families
+  and reports nothing.
 
 ## Risks and the test that detects each
 
@@ -472,6 +525,7 @@ Step 6. Rank-two softmax, f32. Not implemented.
 | The private offsets copy is freed early | A lifetime test |
 | A column reads a neighbor or writes past `[S, D]` | Values that depend on the row and on the column in `python/tests/mlir/test_segment_columns.py`; the driver-level launches of `python/tests/mlir/test_segmented_bounds.py` with guards around the values and canaries around the output; `test/Conversion/SwageToGPU/segmented-columns.mlir` |
 | A thread holds one accumulator per column | The same lit file, which pins one iteration argument of the row loop; `python/tests/mlir/test_segmented_codegen.py` |
+| A softmax column stores a row the host did not validate, or a column beyond the feature count | The driver-level launches of the softmax column kernel in `python/tests/mlir/test_segmented_bounds.py`, with canaries around the `[N, D]` output and an output of fewer rows than the values; `test/Conversion/SwageToGPU/ragged-softmax-columns.mlir`, which pins the store at the loaded index |
 | The PTX scan passes arithmetic of the wrong type | The typed arithmetic scan |
 | An existing kernel's text moves | The 552 digest pairs |
 | f64 behaves differently on the device | The GPU tier, from step 3: the `eps64` bound against exactly rounded sums, the exact extremes, and the special values on every schedule |

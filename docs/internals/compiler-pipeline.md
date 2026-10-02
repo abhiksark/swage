@@ -123,7 +123,9 @@ launches the identity sum, maximum, minimum, and mean through this branch
 with the default limits. A program over rank-two values takes the direct
 schedule alone: the planner writes a task operation of `policy<column>`,
 and the conversion emits the column kernel, in which a thread reduces a
-column and no thread combines with another.
+column and no thread combines with another. The softmax over rank-two
+values takes the same schedule: a thread runs the two reductions and the
+map store of its column one after the other.
 
 This branch implements narrow rule-based classification and split task
 decomposition. One private experimental lowering consumes those materialized

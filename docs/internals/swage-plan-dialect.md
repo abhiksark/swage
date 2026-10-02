@@ -95,7 +95,10 @@ segment, a segment of scalars like any other, so the consumers of the
 region are the ones of a rank-one program. Nothing is combined across
 threads, and no task buffer is read. The planner absorbs
 `swage.segment_id 1` and the `column` of `swage.make_segment` as it absorbs
-the segment id of axis 0.
+the segment id of axis 0. A region with several reductions and a map
+store, the softmax, takes the column policy unchanged: a thread runs the
+consumers of its column in program order, and the store writes the
+rank-two output at the row and the column it read.
 
 The CPU oracle is planned too. A task operation of `policy<sequential>`
 visits every segment in order on one thread. Its function has no launch

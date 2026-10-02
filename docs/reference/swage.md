@@ -289,23 +289,30 @@ swage.segment_softmax(values, offsets, *, out=None)
 ```
 
 Apply a softmax within every segment of `values` on the GPU. The result
-holds the softmax of each segment at the positions of its values. The call
-validates its tensors, copies the offsets to the host to validate them,
-enqueues one kernel on the current PyTorch CUDA stream, and returns without
-waiting for it.
+holds the softmax of each segment at the positions of its values. For
+`[N, D]` values, `N` rows of `D` features, the offsets delimit rows and
+each column of a segment is normalized on its own over the rows of that
+segment, as `torch.softmax(values[a:b], dim=0)` does. The call validates
+its tensors, copies the offsets to the host to validate them, enqueues one
+kernel on the current PyTorch CUDA stream, and returns without waiting for
+it.
 
 Parameters
-:   `values`: as for `segment_reduce`, with two differences. The values
-    have rank one, and they are `torch.float32`. float64 values raise a `TypeError`, because the device
-    has no 64-bit `exp2` instruction for the exponential of the kernel.
+:   `values`: as for `segment_reduce`, with one difference. The values are
+    `torch.float32`. float64 values raise a `TypeError`, because the
+    device has no 64-bit `exp2` instruction for the exponential of the
+    kernel. `[N, D]` values run one kernel with one block per segment, in
+    which a thread normalizes a column in row order, and `[N, 1]` values
+    run the kernel of rank-one values.
 :   `offsets`: as for `segment_reduce`, with one difference. The final
-    offset must equal the number of values, so that every value belongs to
-    a segment.
-:   `out`: as for `segment_reduce`, with exactly one element per value.
+    offset must equal the number of values, or of rows for `[N, D]`
+    values, so that every value belongs to a segment.
+:   `out`: as for `segment_reduce`, with the shape of `values`: exactly one
+    element per value.
 
 Returns
 :   `out`, or a new `torch.float32` tensor on the device of `values` when
-    `out` is `None`, with one element per value. An empty segment has no
+    `out` is `None`, with the shape of `values`. An empty segment has no
     result element. A segment that holds a NaN or a positive infinity, or
     only negative infinities, gives NaN for each of its elements. The
     version counter of the result is advanced when a kernel is enqueued.
@@ -315,7 +322,9 @@ Raises
     that end below the number of values raise a `ValueError`. float64
     values raise the `TypeError`
     `values must have dtype torch.float32; segment_softmax has no float64
-    kernel because the device has no 64-bit exp2`.
+    kernel because the device has no 64-bit exp2`. For `[N, D]` values a
+    wrong `out` raises
+    `out must have shape (N, D), the shape of values; found ...`.
 
 Example
 
@@ -381,10 +390,10 @@ Options
 :   `--output`: the directory to create. It must not exist. Required.
 :   `--program`: a program to include: `sum`, `max`, `min`, `mean`,
     `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with
-    `_r2` appended, or `softmax`. A kind alone names the reduction over
-    rank-one float32 values, `_f64` the one over float64 values, and `_r2`
-    the one over rank-two values. It may be repeated. All seventeen are
-    included without it.
+    `_r2` appended, `softmax`, or `softmax_r2`. A kind alone names the
+    reduction over rank-one float32 values, `_f64` the one over float64
+    values, and `_r2` the program over rank-two values. It may be repeated.
+    All eighteen are included without it.
 :   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
     of the native build, for a serving host of another machine.
 

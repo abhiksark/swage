@@ -13,6 +13,7 @@ from swage._segmented_qualification import (
     _has_small_element_program,
     _reduction_kernel,
     _semantic_module,
+    _softmax_text,
 )
 
 
@@ -266,6 +267,69 @@ def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
         ):
             _plan(
                 module, kernel_name, [0, 1, 34], value_count=34, segment_count=2
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_the_rank_two_softmax_has_one_kernel_and_one_scalar_per_stage():
+    """The softmax over rank-two values compiles on the direct schedule only.
+
+    A thread runs the three stages of its column one after the other, so
+    the kernel needs none of the workgroup buffers, barriers, and shuffles
+    of the rank-one softmax. The two reduction loops carry one accumulator
+    each, and the store loop and the column loop carry none: a thread
+    never holds one value per column or per row.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_softmax_text(2))
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="ragged_softmax_r2",
+            block_size=128,
+            target="sm_86",
+        )
+
+        declaration = re.search(
+            r"\.entry ragged_softmax_r2\((.*?)\)", ptx, re.DOTALL
+        )
+        parameters = [
+            "pointer" if ".ptr" in parameter else parameter.split()[1]
+            for parameter in declaration[1].split(",")
+        ]
+        assert parameters == ["pointer"] * 3 + [".u32"] * 3
+        assert "shfl.sync" not in ptx and "bar.sync" not in ptx
+        assert ".shared" not in ptx and "__wg_" not in lowered
+        assert ".extern .func" not in ptx
+        assert ptx.count("ex2.approx.f32") == 2
+        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
+        assert sorted(header.count(": f32") for header in headers) == [
+            0,
+            0,
+            1,
+            1,
+        ]
+        for name, arguments in _RANK_ONE_SCHEDULES:
+            with pytest.raises(
+                ValueError, match="planning requires rank-one values"
+            ):
+                getattr(native_swage, name)(
+                    module,
+                    kernel_name="ragged_softmax_r2",
+                    target="sm_86",
+                    **arguments,
+                )
+        with pytest.raises(
+            ValueError, match="planning requires rank-one values"
+        ):
+            _plan(
+                module,
+                "ragged_softmax_r2",
+                [0, 1, 34],
+                value_count=34,
+                segment_count=2,
             )
         assert module.operation.get_asm(enable_debug_info=False) == original
 

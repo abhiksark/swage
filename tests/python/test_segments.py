@@ -435,9 +435,10 @@ def test_a_float64_reduction_takes_a_float64_out(monkeypatch):
         swage.segment_reduce(values, offsets, "sum", out=wide)
 
 
+@pytest.mark.parametrize("function", FUNCTIONS)
 @pytest.mark.parametrize("rank", [0, 3])
-def test_segment_reduce_rejects_values_of_another_rank_without_bindings(
-    rank, monkeypatch
+def test_segmented_calls_reject_values_of_another_rank_without_bindings(
+    rank, function, monkeypatch
 ):
     """Name the two ranks of values on a wheel-only install too."""
     torch = _fake_torch(monkeypatch)
@@ -445,7 +446,7 @@ def test_segment_reduce_rejects_values_of_another_rank_without_bindings(
     values = _Tensor(torch, 6, rank=rank)
 
     with pytest.raises(TypeError, match="^values must have rank one or two$"):
-        swage.segment_reduce(values, offsets, "sum")
+        _call(function, values, offsets)
 
 
 @pytest.mark.parametrize(
@@ -478,16 +479,51 @@ def test_out_of_rows_has_one_row_per_segment_and_one_column_per_feature(
         )
 
 
+@pytest.mark.parametrize(
+    ("out", "found"),
+    [
+        ({"count": 6, "rank": 2, "columns": 2}, r"\(6, 2\)"),
+        ({"count": 4, "rank": 2, "columns": 3}, r"\(4, 3\)"),
+        ({"count": 18}, r"\(18,\)"),
+        ({"count": 6, "rank": 3, "columns": 3}, r"\(6, 3, 1\)"),
+    ],
+)
+def test_a_softmax_out_of_rows_has_the_shape_of_the_values(
+    out, found, monkeypatch
+):
+    """State the shape a softmax of `[N, D]` values has, and the one found."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, rank=2, columns=3)
+    count = out.pop("count")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^out must have shape \(6, 3\), the shape of values; found "
+            rf"{found}$"
+        ),
+    ):
+        swage.segment_softmax(values, offsets, out=_Tensor(torch, count, **out))
+
+
 def test_rank_two_values_reach_the_missing_bindings_error(monkeypatch):
-    """Check `[N, D]` values and their `[S, D]` out before the bindings."""
+    """Check `[N, D]` values and their out before the bindings.
+
+    A reduction takes an `[S, D]` out and a softmax an `[N, D]` one.
+    """
     torch = _fake_torch(monkeypatch)
     _, offsets = _inputs(torch)
     values = _Tensor(torch, 6, rank=2, columns=3)
     out = _Tensor(torch, 4, rank=2, columns=3, pointer=0x9000)
+    weights = _Tensor(torch, 6, rank=2, columns=3, pointer=0x9000)
 
     for keywords in ({}, {"out": out}):
         with pytest.raises(RuntimeError, match="requires the build-tree"):
             swage.segment_reduce(values, offsets, "mean", **keywords)
+    for keywords in ({}, {"out": weights}):
+        with pytest.raises(RuntimeError, match="requires the build-tree"):
+            swage.segment_softmax(values, offsets, **keywords)
 
 
 def test_out_size_names_what_one_element_belongs_to(monkeypatch):

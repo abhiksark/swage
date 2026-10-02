@@ -1,10 +1,12 @@
 # python/tests/mlir/test_segment_columns.py
-"""Rank-two values in `swage.segment_reduce`.
+"""Rank-two values in `swage.segment_reduce` and `swage.segment_softmax`.
 
 `[N, D]` values are `N` rows of `D` features. The offsets delimit rows, and
 every column of a segment is reduced on its own, as `torch.segment_reduce`
-does along axis 0. One kernel serves a call: one block per segment, in
-which a thread reduces a column in row order. The tests here pin:
+does along axis 0, or normalized on its own, as `torch.softmax` does along
+dimension 0 of the rows of a segment. One kernel serves a call: one block
+per segment, in which a thread takes a column in row order. The tests here
+pin, for the reduction:
 
 - Agreement with `torch.segment_reduce(axis=0)` at 1, 3, 64, 129, 200, and
   1024 columns, for every kind and both dtypes, with a maximum and a
@@ -16,7 +18,12 @@ which a thread reduces a column in row order. The tests here pin:
   without a launch.
 - The refusals of the shape rules.
 
-The device-side bounds of the column kernel are in
+For the softmax, which takes float32 values only, they pin agreement with
+float64 `torch.softmax` inside the bound of docs/internals/ragged-softmax.md
+at `k = n - 1`, agreement with the CPU oracle, the special values, the two
+degenerate widths, and the refusals.
+
+The device-side bounds of the column kernels are in
 `test_segmented_bounds.py`.
 """
 
@@ -29,8 +36,20 @@ import swage
 import torch
 from swage import _runtime
 from swage import _segmented_qualification as qualification
-from swage._segmented_qualification import cpu_oracle, launch_gpu
-from test_segmented_runtime import _EPS32, _EPS64, _bits, _offsets
+from swage._segmented_qualification import (
+    cpu_oracle,
+    cpu_softmax_oracle,
+    launch_gpu,
+    launch_softmax_gpu,
+)
+from test_segmented_numerics import _softmax_bound
+from test_segmented_runtime import (
+    _EPS32,
+    _EPS64,
+    _assert_softmax_matches_oracle,
+    _bits,
+    _offsets,
+)
 
 _needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -555,3 +574,414 @@ def test_layouts_outside_the_contract_are_refused(case, message):
 
     with pytest.raises(ValueError, match=f"^{message}"):
         swage.segment_reduce(rows, offsets, "sum", **keywords)
+
+
+def _logits(lengths, columns, seed):
+    """Draw float32 logits with a standard deviation of four."""
+    generator = torch.Generator().manual_seed(seed)
+    values = 4 * torch.randn(sum(lengths), columns, generator=generator)
+    return values, torch.tensor(_offsets(lengths), dtype=torch.int32)
+
+
+def _softmax(host_values, host_offsets, **keywords):
+    """Run the public softmax on fresh device tensors."""
+    return swage.segment_softmax(
+        host_values.cuda(), host_offsets.cuda(), **keywords
+    ).cpu()
+
+
+def _assert_softmax_columns_match(host_values, host_offsets, actual):
+    """Compare a rank-two softmax with float64 `torch.softmax` along rows.
+
+    Every output lies within the relative bound of
+    docs/internals/ragged-softmax.md. A column of `n` rows is added by one
+    thread in row order, `k = n - 1` rounding additions. One column runs
+    the rank-one kernel and keeps the `k` of its tree. The outputs are
+    normal f32 numbers, which the bound requires.
+    """
+    assert actual.dtype == torch.float32
+    assert actual.shape == host_values.shape
+    for begin, end in pairwise(host_offsets.tolist()):
+        if begin == end:
+            continue
+        logits = host_values[begin:end].double()
+        reference = torch.softmax(logits, 0)
+        assert (reference >= torch.finfo(torch.float32).tiny).all()
+        relative = (actual[begin:end].double() - reference).abs() / reference
+        depth = None if host_values.shape[1] == 1 else end - begin - 1
+        bound = _softmax_bound(logits, reference, depth)
+        assert (relative <= bound).all(), (
+            f"rows [{begin}, {end}): relative error "
+            f"{relative.max().item():.3e} exceeds its bound"
+        )
+
+
+@_needs_cuda
+@pytest.mark.parametrize("features", FEATURES)
+def test_softmax_columns_match_pytorch_along_the_rows_of_a_segment(features):
+    """Normalize every column of every segment as `torch.softmax` does."""
+    host_values, host_offsets = _logits(LENGTHS, features, features)
+
+    actual = _softmax(host_values, host_offsets)
+
+    _assert_softmax_columns_match(host_values, host_offsets, actual)
+
+
+@_needs_cuda
+def test_softmax_columns_agree_with_the_cpu_oracle():
+    """Compare with the sequential lowering, which adds in the same order.
+
+    The oracle and the kernel add the exponentials of a column in row
+    order. They differ in the exponential: `ex2.approx.f32` on the device
+    and `exp2f` on the host, which is why the comparison has the tolerance
+    that `test_segmented_runtime.py` derives and is not bitwise. The logits
+    are quarter multiples with a spread of four, as that derivation needs,
+    and depend on the row and on the column.
+    """
+    lengths = [0, 1, 2, 33, 150, 0, 7]
+    host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    row = torch.arange(sum(lengths))[:, None]
+    column = torch.arange(5)[None, :]
+    host_values = ((row * 5 + column * 3) % 17 - 8).to(torch.float32) / 4
+
+    actual = _softmax(host_values, host_offsets)
+
+    expected = cpu_softmax_oracle(host_values, host_offsets)
+    assert expected.shape == host_values.shape
+    for index in range(host_values.shape[1]):
+        _assert_softmax_matches_oracle(
+            actual[:, index], expected[:, index], host_offsets
+        )
+
+
+@_needs_cuda
+@pytest.mark.parametrize("features", [3, 129, 300])
+def test_softmax_columns_read_and_write_their_own_rows_and_column(features):
+    """Normalize logits that depend on the row and on the column.
+
+    A result that took a neighboring column, or a window of rows moved by
+    one, differs from the reference by far more than the bound. The columns
+    beyond the block width run in the second pass of a thread.
+    """
+    lengths = [3, 0, 130, 1, 64, 2000]
+    host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    row = torch.arange(sum(lengths))[:, None]
+    column = torch.arange(features)[None, :]
+    host_values = ((row * 31 + column * 17) % 127 - 63).to(torch.float32) / 8
+
+    actual = _softmax(host_values, host_offsets)
+
+    _assert_softmax_columns_match(host_values, host_offsets, actual)
+    # Neighboring columns and neighboring rows do differ.
+    beside = torch.isclose(actual[:, :-1], actual[:, 1:], rtol=1e-3)
+    below = torch.isclose(actual[:-1], actual[1:], rtol=1e-3)
+    assert not beside.all(0).any()
+    assert not below.all(1).any()
+
+
+@_needs_cuda
+def test_softmax_columns_of_equal_logits_are_exactly_uniform():
+    """Return exactly `1 / n` in every column of `n` equal logits.
+
+    A shift by the maximum of equal logits is zero, `ex2.approx.f32` is
+    exact at zero, and `n` ones add exactly in any order, so the only
+    rounding is the division. One row gives exactly one.
+    """
+    lengths = [1, 2, 3, 7, 64, 100, 1]
+    host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    segment = torch.repeat_interleave(
+        torch.arange(len(lengths)), torch.tensor(lengths)
+    )
+    column = torch.arange(130)[None, :]
+    host_values = (segment[:, None] * 3 - column).to(torch.float32) / 4
+
+    actual = _softmax(host_values, host_offsets)
+
+    count = torch.tensor(lengths, dtype=torch.float32)[segment]
+    expected = (1 / count)[:, None].expand_as(actual)
+    assert _bits(actual) == _bits(expected.contiguous())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("length", [2, 33, 129, 4097])
+def test_softmax_columns_follow_pytorch_on_special_values(length):
+    """Match `torch.softmax` where a column of a segment holds a special.
+
+    A NaN, a positive infinity, or nothing but negative infinities makes
+    every row of that column NaN in that segment, and no other column and
+    no other segment. A negative infinity beside a finite maximum gives
+    exactly zero.
+    """
+    ramp = torch.linspace(-2.0, 2.0, length)
+    segment = torch.stack([ramp + column / 4 for column in range(6)], 1)
+    special = segment.clone()
+    special[length // 2, 1] = float("nan")
+    special[-1, 2] = float("inf")
+    special[:, 3] = float("-inf")
+    special[0, 4] = float("-inf")
+    host_values = torch.cat([segment, special, segment])
+    host_offsets = torch.tensor(_offsets([length] * 3), dtype=torch.int32)
+
+    actual = _softmax(host_values, host_offsets).reshape(3, length, 6)
+
+    reference = torch.softmax(
+        host_values.double().reshape(3, length, 6), 1
+    )
+    assert torch.equal(actual.isnan(), reference.isnan())
+    assert actual[1][:, 1:4].isnan().all()
+    assert actual.isnan().sum() == 3 * length
+    assert actual[1, 0, 4] == 0.0
+    finite = ~reference.isnan()
+    torch.testing.assert_close(
+        actual[finite].double(), reference[finite], rtol=1e-5, atol=0
+    )
+
+
+@_needs_cuda
+def test_a_long_segment_of_few_logit_columns_keeps_the_softmax_bound():
+    """Normalize 100,003 rows of three columns in three threads.
+
+    No segment of rank-two values is split, so each of the three threads
+    walks 100,003 rows three times: for the maximum, for the sum, and for
+    the store.
+    """
+    host_values, host_offsets = _logits([100_003, 2], 3, 3)
+
+    actual = _softmax(host_values, host_offsets)
+
+    _assert_softmax_columns_match(host_values, host_offsets, actual)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("block_size", [32, 64, 512, 1024])
+def test_softmax_column_bits_do_not_depend_on_the_block_size(block_size):
+    """A column is normalized by one thread, whatever the width of its block."""
+    host_values, host_offsets = _logits([0, 5, 300, 33], 129, 7)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+
+    def run(width):
+        output = torch.full((338, 129), float("nan"), device="cuda")
+        launch_softmax_gpu(values, offsets, output, width)
+        return output.cpu()
+
+    _assert_same_results(run(block_size), run(128))
+
+
+@_needs_cuda
+def test_softmax_column_bits_do_not_depend_on_the_batch():
+    """A segment alone has the bits it has among other segments."""
+    lengths = [7, 4500, 0, 33]
+    host_values, host_offsets = _logits(lengths, 6, 13)
+    together = _softmax(host_values, host_offsets)
+
+    for begin, end in pairwise(host_offsets.tolist()):
+        alone = _softmax(
+            host_values[begin:end],
+            torch.tensor([0, end - begin], dtype=torch.int32),
+        )
+        _assert_same_results(alone, together[begin:end])
+
+
+@_needs_cuda
+def test_one_column_of_logits_takes_the_kernel_of_rank_one(monkeypatch):
+    """Normalize `[N, 1]` values as the rank-one values they are.
+
+    The result has the bits of the rank-one call on the same elements,
+    with the shape `[N, 1]`, and the column kernel is never requested.
+    """
+    monkeypatch.setattr(
+        qualification,
+        "_launch_columns",
+        lambda *arguments, **keywords: pytest.fail("the column kernel ran"),
+    )
+    host_values, host_offsets = _logits([0, 3, 40, 9000], 1, 17)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+
+    column = swage.segment_softmax(values, offsets)
+    flat = swage.segment_softmax(values.view(-1), offsets).cpu()
+    out = torch.full((9043, 1), float("nan"), device="cuda")
+    returned = swage.segment_softmax(values, offsets, out=out)
+
+    assert column.shape == (9043, 1)
+    assert returned is out
+    _assert_same_results(column.cpu().view(-1), flat)
+    _assert_same_results(out.cpu(), column.cpu())
+    _assert_softmax_columns_match(host_values, host_offsets, column.cpu())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("rows", [0, 6])
+def test_no_column_of_logits_returns_an_empty_result_without_a_launch(
+    rows, monkeypatch
+):
+    """Return `[N, 0]` for `[N, 0]` values and enqueue nothing."""
+    driver = _runtime._get_driver()
+    monkeypatch.setattr(
+        driver,
+        "launch_segmented",
+        lambda *arguments: pytest.fail("a kernel was launched"),
+    )
+    values = torch.empty(rows, 0, device="cuda")
+    offsets = torch.tensor([0, 0, rows], dtype=torch.int32, device="cuda")
+    out = torch.empty(rows, 0, device="cuda")
+    version = out._version
+
+    result = swage.segment_softmax(values, offsets)
+    returned = swage.segment_softmax(values, offsets, out=out)
+
+    assert result.shape == (rows, 0)
+    assert result.dtype == torch.float32
+    assert result.device == values.device
+    assert returned is out
+    assert out._version == version
+
+
+@_needs_cuda
+def test_logit_rows_without_a_segment_return_no_row():
+    """Return `[0, D]` when there is no row and no segment."""
+    values = torch.empty(0, 3, device="cuda")
+    for segments in (0, 4):
+        offsets = torch.zeros(segments + 1, dtype=torch.int32, device="cuda")
+
+        result = swage.segment_softmax(values, offsets)
+
+        assert result.shape == (0, 3)
+
+
+@_needs_cuda
+def test_a_rank_two_softmax_compiles_one_kernel(monkeypatch):
+    """Validate the offsets, compile the column kernel, and launch it."""
+    monkeypatch.setattr(
+        qualification,
+        "_ptx_memo",
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
+    )
+    host_values, host_offsets = _logits([3, 9000, 0], 4, 23)
+
+    actual = _softmax(host_values, host_offsets)
+
+    _assert_softmax_columns_match(host_values, host_offsets, actual)
+    assert [
+        (compile_ptx.__name__, dict(options)["kernel_name"])
+        for compile_ptx, _, options in qualification._ptx_memo
+    ] == [("_compile_segmented_reduction_ptx", "ragged_softmax_r2")]
+
+
+@_needs_cuda
+def test_softmax_columns_take_int64_offsets_and_give_the_bits_of_int32():
+    """Narrow int64 offsets on the host, as the rank-one calls do."""
+    host_values, host_offsets = _logits(LENGTHS, 7, 29)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+
+    narrow = swage.segment_softmax(values, offsets).cpu()
+    wide = swage.segment_softmax(values, offsets.long()).cpu()
+
+    _assert_same_results(wide, narrow)
+
+
+@_needs_cuda
+def test_softmax_out_of_rows_is_written_in_place_and_its_version_advances():
+    """Write a caller's `[N, D]` tensor and return it."""
+    host_values, host_offsets = _logits([2, 0, 5], 3, 31)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    out = torch.full((7, 3), -5.0, device="cuda")
+    version = out._version
+
+    returned = swage.segment_softmax(values, offsets, out=out)
+
+    assert returned is out
+    assert out._version > version
+    _assert_softmax_columns_match(host_values, host_offsets, out.cpu())
+
+
+def test_logits_of_another_rank_are_refused():
+    """Admit rank one and rank two, and name both."""
+    values, offsets = _host_rows()
+
+    for wrong in (values[None], torch.tensor(1.0)):
+        with pytest.raises(
+            TypeError, match="^values must have rank one or two$"
+        ):
+            swage.segment_softmax(wrong, offsets)
+
+
+@pytest.mark.parametrize(
+    ("shape", "found"),
+    [
+        ((6,), r"\(6,\)"),
+        ((18,), r"\(18,\)"),
+        ((3, 6), r"\(3, 6\)"),
+        ((4, 3), r"\(4, 3\)"),
+        ((6, 3, 1), r"\(6, 3, 1\)"),
+        ((6, 2), r"\(6, 2\)"),
+    ],
+)
+def test_softmax_out_of_another_shape_is_refused_with_both_shapes(
+    shape, found
+):
+    """Require the shape of the values, exactly."""
+    values, offsets = _host_rows()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^out must have shape \(6, 3\), the shape of values; found "
+            rf"{found}$"
+        ),
+    ):
+        swage.segment_softmax(values, offsets, out=torch.empty(shape))
+
+
+def test_float64_logit_rows_are_refused_with_the_reason():
+    """There is no float64 softmax kernel at rank two either."""
+    values, offsets = _host_rows()
+
+    with pytest.raises(TypeError, match="has no float64 kernel"):
+        swage.segment_softmax(values.double(), offsets)
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("transposed", "values must be contiguous"),
+        ("sliced-columns", "values must be contiguous"),
+        ("one-sliced-column", "values must be contiguous"),
+        ("transposed-out", "out must be contiguous"),
+        ("offsets-past-rows", "final offset 24 exceeds value count 6"),
+        (
+            "offsets-short-of-rows",
+            "offsets must end at the value count for a softmax: final "
+            "offset 5, value count 6",
+        ),
+        ("overlap", "out must not overlap values"),
+    ],
+)
+def test_softmax_layouts_outside_the_contract_are_refused(case, message):
+    """Refuse a view that is not contiguous instead of copying it.
+
+    The offsets delimit rows and cover every row: the row count is the
+    value count of the refusal.
+    """
+    values = torch.arange(24, dtype=torch.float32, device="cuda")
+    rows = values.reshape(6, 4)
+    offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    keywords = {}
+    if case == "transposed":
+        rows, offsets = rows.t(), offsets.clamp(max=4)
+    elif case == "sliced-columns":
+        rows = rows[:, ::2]
+    elif case == "one-sliced-column":
+        rows = rows[:, 1:2]
+    elif case == "transposed-out":
+        keywords["out"] = torch.empty(4, 6, device="cuda").t()
+    elif case == "offsets-past-rows":
+        offsets = torch.tensor([0, 2, 24], dtype=torch.int32, device="cuda")
+    elif case == "offsets-short-of-rows":
+        offsets = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
+    else:
+        assert case == "overlap"
+        keywords["out"] = rows
+
+    with pytest.raises(ValueError, match=f"^{message}"):
+        swage.segment_softmax(rows, offsets, **keywords)

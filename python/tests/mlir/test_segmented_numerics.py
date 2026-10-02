@@ -37,12 +37,12 @@ from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage as swage_dialect
 from reduction_programs import reduction_module
 from swage._segmented_qualification import (
-    _SOFTMAX_MODULE,
     _element_of,
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _reduction_kernel,
     _semantic_module,
+    _softmax_text,
     launch_gpu,
     launch_softmax_gpu,
 )
@@ -1199,18 +1199,26 @@ def test_sum_kernels_add_in_round_to_nearest_without_contraction(
 
 
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])
-def test_softmax_kernel_rounds_to_nearest_around_the_approximate_exp2(target):
+@pytest.mark.parametrize("rank", [1, 2])
+def test_softmax_kernel_rounds_to_nearest_around_the_approximate_exp2(
+    rank, target
+):
     """Softmax is IEEE-754 arithmetic around one approximate instruction.
 
     The subtract, multiply, add, and divide are round to nearest and not
     contracted, so `ex2.approx.f32` is the only operation whose result
-    the IEEE-754 standard does not define.
+    the IEEE-754 standard does not define. The kernel of rank-two values
+    holds each operation of the program once: one maximum and one addition
+    per row of a column, in the thread of that column.
     """
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
-        module = ir.Module.parse(_SOFTMAX_MODULE)
+        module = ir.Module.parse(_softmax_text(rank))
         _, ptx = native_swage._compile_segmented_reduction_ptx(
-            module, kernel_name="ragged_softmax", target=target, block_size=128
+            module,
+            kernel_name="ragged_softmax" + "_r2" * (rank == 2),
+            target=target,
+            block_size=128,
         )
 
     violations, counts = _float_arithmetic(ptx)
@@ -1219,6 +1227,15 @@ def test_softmax_kernel_rounds_to_nearest_around_the_approximate_exp2(target):
     assert counts["ex2.approx.f32"] == 2
     for spelling in ("sub.rn.f32", "mul.rn.f32", "add.rn.f32", "div.rn.f32"):
         assert counts.get(spelling, 0) > 0, spelling
+    if rank == 2:
+        assert counts == {
+            "max.NaN.f32": 1,
+            "sub.rn.f32": 2,
+            "mul.rn.f32": 2,
+            "ex2.approx.f32": 2,
+            "add.rn.f32": 1,
+            "div.rn.f32": 1,
+        }
 
 
 # Relative error of ex2.approx.f32, in units of eps32, that the softmax
@@ -1320,8 +1337,13 @@ def _softmax_segments(spread, generator):
     return segments
 
 
-def _softmax_bound(logits, reference):
+def _softmax_bound(logits, reference, depth=None):
     """Bound the relative error of each f32 softmax output of one segment.
+
+    Rank-two logits are the rows of one segment, and every column is
+    bounded on its own. `depth` is k, the rounding additions of the
+    normalizer: the 128-lane tree of the rank-one kernel when it is None,
+    and `n - 1` for the column kernel, which adds a column in row order.
 
     Write d = max - v for the distance of a logit below its segment
     maximum and u = eps32 / 2 for the unit roundoff. The kernel computes
@@ -1350,9 +1372,10 @@ def _softmax_bound(logits, reference):
     spread evenly, and it cannot exceed the natural logarithm of the
     segment length.
     """
-    distance = logits.max() - logits
-    mean_distance = (reference * distance).sum()
-    depth = _summation_depth("cta", logits.numel())
+    distance = logits.amax(0) - logits
+    mean_distance = (reference * distance).sum(0)
+    if depth is None:
+        depth = _summation_depth("cta", logits.shape[0])
     return _EPS32 * (
         _SOFTMAX_SLOPE_EPS * (distance + mean_distance)
         + 2 * _EX2_RELATIVE_EPS

@@ -34,8 +34,9 @@ states what the first format held and why it was replaced.
 - `manifest.json`, which describes everything else.
 - One PTX text file per kernel, named `<program>.<role>.ptx`. A reduction
   over rank-one values has the roles `cta`, `mixed`, `partial`, and
-  `merge`. A reduction over rank-two values has the role `column`. The
-  softmax has the role `cta`.
+  `merge`. A program over rank-two values, a reduction or the softmax,
+  has the role `column`. The softmax over rank-one values has the role
+  `cta`.
 - `libSwageRuntime.so`, a C library that classifies offsets into task
   records and enqueues one kernel through `libcuda.so.1`. It needs nothing
   from LLVM.
@@ -54,7 +55,9 @@ reductions, the range records of the partial tasks, which the argument
 list of that kernel states in the manifest like any other. The reductions
 over rank-two values, named with the suffix `_r2`, were added in the same
 way. Each has one kernel, of the role `column`, which takes the number of
-columns as a third count and is launched at the CTA block width. A new role
+columns as a third count and is launched at the CTA block width. The
+softmax over rank-two values, `ragged_softmax_r2`, followed with the same
+role and the same arguments. A new role
 is part of the kernel table and not of the format: a `swage` that does not
 know the role refuses the artifact that lists it, as it refuses a program
 it does not know.
