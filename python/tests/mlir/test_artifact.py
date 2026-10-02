@@ -43,6 +43,7 @@ from test_public_segments import (
     _host_case,
 )
 from test_segmented_runtime import _bits, _offsets
+from test_target_compile import _ADMITTED, add_kernel
 
 _needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -268,6 +269,22 @@ def test_the_manifest_describes_each_kernel_as_its_ptx_declares_it(
     assert len(set(roles)) == len(roles)
 
 
+@pytest.mark.parametrize("processor", _ADMITTED)
+def test_the_command_writes_an_artifact_for_every_admitted_processor(
+    processor, tmp_path
+):
+    """Compile all eleven kernels for each processor, without a device."""
+    output = _written(tmp_path / "artifact", f"sm_{processor}")
+    kernels = sorted(output.glob("*.ptx"))
+
+    assert len(kernels) == 11
+    for kernel in kernels:
+        assert f".target sm_{processor}\n" in kernel.read_text()
+    assert json.loads((output / "manifest.json").read_text())["target"] == (
+        f"sm_{processor}"
+    )
+
+
 def test_the_command_reports_what_it_wrote(tmp_path):
     """Print the directory, the contents, and the digest of the manifest."""
     output = tmp_path / "artifact"
@@ -426,6 +443,26 @@ def test_the_command_refuses_a_target_the_compiler_rejects(target, tmp_path):
     assert not output.exists()
 
 
+def test_a_run_that_fails_while_writing_leaves_nothing_behind(
+    tmp_path, monkeypatch
+):
+    """Remove the staged directory when the artifact cannot be published."""
+    staged = []
+
+    def refuse(source, destination):
+        staged.append(sorted(path.name for path in source.iterdir()))
+        raise OSError("the rename was refused")
+
+    monkeypatch.setattr(os, "rename", refuse)
+    output = tmp_path / "artifact"
+
+    errors = _refused(tmp_path, "--target", "sm_86", "--output", output)
+
+    assert errors == "error: the rename was refused\n"
+    assert len(staged[0]) == 13
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_the_command_refuses_to_run_while_an_artifact_is_selected(
     written, tmp_path, monkeypatch
 ):
@@ -521,10 +558,21 @@ def test_a_runtime_library_of_another_machine_is_refused_at_load(
         _artifact.selected()
 
 
-def test_the_command_refuses_a_file_that_is_not_a_library(tmp_path):
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b"not a library",
+        # An ELF header that names a machine the command has no name for.
+        b"\x7fELF\x02\x01\x01" + bytes(11) + (243).to_bytes(2, "little"),
+        # A big-endian ELF header.
+        b"\x7fELF\x02\x02\x01" + bytes(11) + (62).to_bytes(2, "big"),
+    ],
+    ids=["text", "another-machine", "big-endian"],
+)
+def test_the_command_refuses_a_file_that_is_not_a_library(contents, tmp_path):
     """Name the file that cannot be the runtime library."""
     other = tmp_path / "notes.txt"
-    other.write_text("not a library")
+    other.write_bytes(contents)
 
     errors = _refused(
         tmp_path,
@@ -993,6 +1041,43 @@ def test_a_damaged_artifact_is_refused_before_the_offsets_are_copied(
             match="holds a segmented_sum.merge.ptx that does not match",
         ):
             call()
+
+
+@_needs_cuda
+def test_a_call_from_an_artifact_leaves_its_inputs_unchanged(
+    device_artifact, monkeypatch
+):
+    """Read the values and the offsets, as the manifest types them."""
+    values, offsets = _device_batch()
+    host_values, host_offsets = values.cpu(), offsets.cpu()
+    _select(monkeypatch, device_artifact)
+
+    swage.segment_reduce(values, offsets, "sum")
+    swage.segment_reduce(values, offsets, "max")
+    swage.segment_softmax(values, offsets)
+
+    assert _bits(values.cpu()) == _bits(host_values)
+    assert offsets.cpu().tolist() == host_offsets.tolist()
+
+
+@_needs_cuda
+def test_the_public_launch_does_not_read_the_artifact(
+    device_artifact, monkeypatch
+):
+    """Compile and launch the fixed vector add beside a selected artifact."""
+    _select(monkeypatch, device_artifact)
+    count, block = 1025, 64
+    x = torch.randn(count, device="cuda")
+    y = torch.randn(count, device="cuda")
+    output = torch.empty_like(x)
+
+    add_kernel.launch(
+        arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": count},
+        constexprs={"BLOCK": block},
+        grid=((count + block - 1) // block,),
+    )
+
+    assert _bits(output.cpu()) == _bits((x + y).cpu())
 
 
 @_needs_cuda

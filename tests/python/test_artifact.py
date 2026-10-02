@@ -1173,6 +1173,37 @@ def test_a_public_call_needs_no_bindings_with_an_artifact(
     assert sys.modules["mlir_swage"] is None
 
 
+def test_the_compile_command_stays_light_and_needs_the_bindings(tmp_path):
+    """Import nothing heavy, and name what a wheel-only install lacks."""
+    output = tmp_path / "artifact"
+    script = (
+        "import sys\n"
+        "sys.modules['mlir_swage'] = None\n"
+        "from swage import compile\n"
+        "for name in ('torch', 'numpy'):\n"
+        "    assert name not in sys.modules, name\n"
+        "sys.exit(compile.main(sys.argv[1:]))\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, "--target", "sm_86", "--output",
+         str(output)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == (
+        "error: writing an artifact requires the mlir_swage bindings, which "
+        "the swage-compiler wheel does not include. See "
+        "docs/getting-started/installation.md in "
+        "https://github.com/abhiksark/swage for the native build\n"
+    )
+    assert not output.exists()
+
+
 def test_the_environment_report_names_no_artifact_without_the_variable():
     """Say that segmented calls compile in the reporting process."""
     assert env.report()["artifact"] == "none (SWAGE_ARTIFACT_DIR is unset)"
