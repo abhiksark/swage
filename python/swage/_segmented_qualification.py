@@ -843,43 +843,25 @@ def _prepare_planned_sum(
     )
 
 
+# The element programs of a batch that selection may send to the pure CTA
+# kernel cost at most this many relative work units, as the native estimate
+# counts them.
+_ELEMENT_WORK_BUDGET = 32
+
+
 def _has_small_element_program(module):
-    """Conservatively bound work in already-admitted element regions."""
-    from mlir_swage import ir
-    from mlir_swage.dialects import arith, math, swage
+    """Conservatively bound work in already-admitted element regions.
 
-    cheap_operations = (
-        arith.AddFOp, arith.SubFOp, arith.MulFOp,
-        arith.MaximumFOp, arith.MinimumFOp,
+    The native estimate holds the weight of each operation. It gives no
+    estimate for a region that holds an operation without a weight, and
+    such a program is not small.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
     )
-    work = 0
-    eligible = True
 
-    def inspect(operation):
-        nonlocal work, eligible
-        if not isinstance(operation.opview, (swage.MapOp, swage.ReduceOp)):
-            return ir.WalkResult.ADVANCE
-        for instruction in operation.regions[0].blocks[0].operations:
-            if isinstance(instruction, (arith.ConstantOp, swage.YieldOp)):
-                continue
-            # Relative work units calibrated on the held-out GPU benchmarks.
-            # They are a bounded heuristic, not instruction latency estimates.
-            if isinstance(instruction, cheap_operations):
-                work += 1
-            elif isinstance(instruction, math.Exp2Op):
-                work += 8
-            elif isinstance(instruction, arith.DivFOp):
-                work += 16
-            else:
-                eligible = False
-                return ir.WalkResult.INTERRUPT
-            if work > 32:
-                eligible = False
-                return ir.WalkResult.INTERRUPT
-        return ir.WalkResult.SKIP
-
-    module.operation.walk(inspect, ir.WalkOrder.PRE_ORDER)
-    return eligible
+    work = native_swage._element_work(module)
+    return work is not None and work <= _ELEMENT_WORK_BUDGET
 
 
 # What a preparation needs to know about a program, none of which depends on

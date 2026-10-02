@@ -8,8 +8,9 @@
 //
 // Compiles a Swage semantic module to NVPTX assembly and classifies segment
 // metadata into task records. The contract below holds for every function in
-// this header that takes a module. swageClassifySegments takes none; its own
-// comment states what differs.
+// this header that takes a module, except swageEstimateElementWork, which
+// only reads its module. swageClassifySegments takes none; its own comment
+// states what differs.
 //
 // Module and context
 //   The module is read and never modified: a call clones it and lowers the
@@ -202,6 +203,18 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageClassifySegments(
     int64_t segmentCount, int64_t warpMaxElements, int64_t ctaChunkElements,
     SwageTaskRecordsCallback recordsCallback, void *recordsUserData,
     SwageStringCallback errorCallback, void *errorUserData);
+
+/// Estimates the relative work of the element programs of a module: the sum,
+/// over every `swage.map` and `swage.reduce` region, of one unit per add,
+/// subtract, multiply, minimum, and maximum, eight per `math.exp2`, and
+/// sixteen per division. Constants and yields are free. Returns -1 when a
+/// region holds any other operation, and for a null module.
+///
+/// The units are scheduling hints that a caller compares with a budget of
+/// its own. They are not instruction latency estimates. The call reads the
+/// module and changes neither it nor its context, and it emits no
+/// diagnostic.
+MLIR_CAPI_EXPORTED int64_t swageEstimateElementWork(MlirModule module);
 
 #ifdef __cplusplus
 }

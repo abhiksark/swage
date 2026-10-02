@@ -36,6 +36,7 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
+#include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
@@ -674,4 +675,10 @@ MlirLogicalResult swageClassifySegments(
                   records->ctaCount, records->partialCount, records->mergeCount,
                   recordsUserData);
   return mlirLogicalResultSuccess();
+}
+
+int64_t swageEstimateElementWork(MlirModule module) {
+  if (mlirModuleIsNull(module))
+    return -1;
+  return swage::estimateElementWork(unwrap(module).getOperation()).value_or(-1);
 }

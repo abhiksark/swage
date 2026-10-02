@@ -59,12 +59,14 @@ batch has at least as many segments as the device has SMs. The selected
 `mixed` callable aliases `cta`, and preparation skips split kernel compilation
 and scratch allocation. Selection does not execute or time the program.
 
-The element program must also fit a 32-unit relative work budget. The helper
-inspects typed operations in the admitted native MLIR: add, subtract, multiply,
-minimum, and maximum cost one unit each; `math.exp2` costs eight and division
-costs sixteen. Constants and yields are free. Work is counted across all map
+The element program must also fit a 32-unit relative work budget. The
+estimate is native: `swageEstimateElementWork` walks the typed operations of
+the admitted MLIR, where add, subtract, multiply, minimum, and maximum cost
+one unit each, `math.exp2` costs eight, and division costs sixteen.
+Constants and yields are free. Work is counted across all map
 and reduction regions, so splitting a long expression into maps does not
-bypass the limit. These empirically chosen weights are scheduling hints, not
+bypass the limit. The helper compares the estimate with the budget, which
+stays a host parameter of the selection rule. These empirically chosen weights are scheduling hints, not
 GPU instruction latency estimates. Larger programs retain split execution.
 
 This is a conservative rule measured on A6000 and RTX 5090, not a general cost

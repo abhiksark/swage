@@ -530,6 +530,21 @@ NB_MODULE(_swageDialectsNanobind, m) {
              nb::arg("segment_count"),
              nb::arg("warp_max_elements") = target.defaultWarpMaxElements,
              nb::arg("cta_chunk_elements") = target.defaultCtaChunkElements);
+  // The relative work of the element programs of a module, or None when a
+  // region holds an operation without a weight.
+  swageM.def(
+      "_element_work",
+      [](nb::object moduleObject) -> nb::object {
+        MlirModule module = unwrapModule(moduleObject);
+        // The estimate reads a module in the caller's context; keep it apart
+        // from a compile of that context that released the GIL.
+        ContextUse use(mlirModuleGetContext(module));
+        int64_t work = swageEstimateElementWork(module);
+        if (work < 0)
+          return nb::none();
+        return nb::int_(work);
+      },
+      nb::arg("module"));
   // The same offsets buffer and limits without a module. A program is
   // admitted once through `_materialize_segmented_plan`; this classifies
   // each of its layouts.

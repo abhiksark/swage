@@ -465,7 +465,7 @@ What stays on the host, and where it lives:
 |---|---|---|
 | `classifyTasks`, `classifyTaskRecords`, and their limits | `TaskClassifier.cpp`, unchanged | they need runtime offsets |
 | Record layouts | would move to a `TaskRecords.h`, read by `classifyTaskRecords` and by the lowering, in step 6: the direct and task-id kernels read one word per task, so step 4 has no second reader of a record layout | the strides would then exist once |
-| Element-work estimate | would move from `_has_small_element_program` to `swage_plan::estimateElementWork`, returned through the binding | the weights would then live once, in C++ |
+| Element-work estimate | `swage::estimateElementWork` in the planner library, through `swageEstimateElementWork` and the binding; `_has_small_element_program` compares it with the 32-unit budget | the weights live once, in C++, and the budget stays with the selection rule on the host |
 | The two-chunk selection rule | `_prepare_planned_reduction` | it needs the device SM count and the runtime layout |
 | Launch order, stream dependencies, scratch and counter storage, version and context checks | `_segmented_qualification.py` | runtime state |
 | Grid sizes | `_segmented_qualification.py`, computed from target description fields | launch-time arithmetic |

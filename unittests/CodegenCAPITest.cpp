@@ -895,6 +895,43 @@ void expectRejected(const Classification &classification,
   EXPECT_EQ(classification.errors, (std::vector<std::string>{message}));
 }
 
+TEST(CodegenCAPITest, EstimatesTheWorkOfTheElementPrograms) {
+  Session session;
+  // The identity reduction costs nothing.
+  EXPECT_EQ(swageEstimateElementWork(session.parse(segmentedSum)), 0);
+
+  // One unit per multiply, eight per exp2, sixteen per division, over the
+  // map and the reduction together; the constant and the yields are free.
+  std::string program = segmentedSum;
+  std::string reduction = "    %sum = swage.reduce %segment kind<sum>";
+  program.replace(program.find(reduction), reduction.size(),
+                  R"mlir(    %scaled = swage.map %segment
+        : !swage.segment<f32> -> !swage.segment<f32> {
+    ^bb0(%element: f32):
+      %half = arith.constant 0.5 : f32
+      %product = arith.mulf %element, %half : f32
+      %exponential = math.exp2 %product : f32
+      swage.yield %exponential : f32
+    }
+    %sum = swage.reduce %scaled kind<sum>)mlir");
+  std::string identity = "      swage.yield %value : f32";
+  program.replace(program.rfind(identity), identity.size(),
+                  "      %quotient = arith.divf %value, %value : f32\n"
+                  "      swage.yield %quotient : f32");
+  MlirModule weighted = session.parse(program);
+  ASSERT_FALSE(mlirModuleIsNull(weighted)) << joined(session.diagnostics);
+  EXPECT_EQ(swageEstimateElementWork(weighted), 1 + 8 + 16);
+
+  // An operation without a weight gives no estimate.
+  std::string unweighted = segmentedSum;
+  unweighted.replace(unweighted.rfind(identity), identity.size(),
+                     "      %root = math.sqrt %value : f32\n"
+                     "      swage.yield %root : f32");
+  EXPECT_EQ(swageEstimateElementWork(session.parse(unweighted)), -1);
+  EXPECT_EQ(swageEstimateElementWork(MlirModule{nullptr}), -1);
+  EXPECT_TRUE(session.diagnostics.empty()) << joined(session.diagnostics);
+}
+
 TEST(CodegenCAPITest, AClassifyCallGivesTheRecordsOfThePlanWithoutAModule) {
   // A warp segment, a CTA segment, and one segment of three chunks. No
   // context exists when the classification runs.

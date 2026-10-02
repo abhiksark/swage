@@ -499,6 +499,34 @@ LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
   return success();
 }
 
+std::optional<int64_t> estimateElementWork(Operation *root) {
+  int64_t work = 0;
+  bool weighted = true;
+  root->walk<WalkOrder::PreOrder>([&](Operation *operation) {
+    if (!isa<MapOp, ReduceOp>(operation))
+      return WalkResult::advance();
+    for (Operation &instruction : operation->getRegion(0).front()) {
+      if (isa<arith::ConstantOp, YieldOp>(instruction))
+        continue;
+      if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::MaximumFOp,
+              arith::MinimumFOp>(instruction)) {
+        work += 1;
+      } else if (isa<math::Exp2Op>(instruction)) {
+        work += 8;
+      } else if (isa<arith::DivFOp>(instruction)) {
+        work += 16;
+      } else {
+        weighted = false;
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::skip();
+  });
+  if (!weighted)
+    return std::nullopt;
+  return work;
+}
+
 void fuseAdmittedMaps(SegmentProgramAnalysis &analysis) {
   // The fusion function is applied to the admitted consumers directly. The
   // greedy pattern driver would also delete dead operations, and a program

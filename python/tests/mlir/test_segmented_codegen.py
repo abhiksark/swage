@@ -51,6 +51,34 @@ def test_direct_cta_element_work_guard(transform, eligible):
         assert _has_small_element_program(module) is eligible
 
 
+@pytest.mark.parametrize(
+    ("transform", "work"),
+    [
+        ("identity", 0), ("square", 1), ("affine4", 4), ("affine32", 32),
+        ("exp2", 8), ("exp2_chain", 72), ("rational8", 160),
+    ],
+)
+def test_native_element_work_estimate(transform, work):
+    """Count one unit per cheap operation, eight per exp2, 16 per divide."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module("sum", transform))
+        assert native_swage._element_work(module) == work
+
+
+def test_native_element_work_has_no_estimate_for_an_unweighted_operation():
+    """Give no estimate, and no small program, for an unknown operation."""
+    text = reduction_module("sum", "identity").replace(
+        "swage.yield %value : f32",
+        "%root = math.sqrt %value : f32\n      swage.yield %root : f32",
+    )
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(text)
+        assert native_swage._element_work(module) is None
+        assert not _has_small_element_program(module)
+
+
 def test_direct_cta_work_budget_spans_maps_and_reduction():
     """Individually small regions must share the per-element work budget."""
     operations = []

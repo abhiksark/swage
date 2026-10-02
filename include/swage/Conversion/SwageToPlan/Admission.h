@@ -22,6 +22,9 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 
+#include <cstdint>
+#include <optional>
+
 namespace mlir::swage {
 
 /// Where a segment function takes each of its arguments. The positions come
@@ -78,6 +81,17 @@ LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis);
 
 /// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis);
+
+/// The relative work of the element programs under `root`: one unit per
+/// add, subtract, multiply, minimum, and maximum in a `swage.map` or
+/// `swage.reduce` region, eight per `math.exp2`, and sixteen per division.
+/// Constants and yields are free. Null when a region holds an operation
+/// that has no weight.
+///
+/// The weights were calibrated on held-out GPU benchmarks. They are
+/// scheduling hints for the host, which compares the sum with a budget, and
+/// not instruction latency estimates.
+std::optional<int64_t> estimateElementWork(Operation *root);
 
 /// Fuse every map of an admitted function into its consumer. This is the
 /// first change a lowering makes, so it runs only after every function has
