@@ -820,3 +820,26 @@ def test_row_rejects_a_wrong_looping_task_kernel(
             kernels=kernels,
             values_kind=values_kind,
         )
+
+
+def test_a_family_left_out_by_option_is_not_reported_as_skipped(comparison):
+    """Keep excluded, by option, apart from skipped, by inability."""
+    torch = pytest.importorskip("torch")
+
+    row, _ = _row(
+        comparison,
+        torch,
+        "power-law",
+        segment_count=2048,
+        only=["torch", "triton_looped_b256_w4", "triton_planned"],
+        free_bytes=lambda: 1000,
+    )
+
+    assert row["candidate_order"] == ["torch", "triton_looped_b256_w4"]
+    # Asked for and unable to run: skipped. Not asked for: excluded,
+    # whether or not the row could have run it.
+    assert set(row["skipped"]) == {"triton_planned"}
+    assert {"torch_padded", "swage_mixed"} <= set(row["excluded"])
+    assert not any(
+        name.startswith("triton_planned_w") for name in row["excluded"]
+    )

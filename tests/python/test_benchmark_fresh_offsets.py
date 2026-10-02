@@ -311,9 +311,6 @@ def test_looped_candidates_cover_the_declared_sweep(fresh_offsets):
         name.replace("triton_looped", "triton_planned_looped")
         for name in looped
     )
-    assert fresh_offsets._candidate_names(
-        triton_available=True, skipped=("torch_pad_to_max", "triton_planned")
-    ) == (*names[:3], *looped, *names[23:])
 
 
 def test_looped_sweep_has_no_longest_segment_floor(triton_comparison):
@@ -778,8 +775,10 @@ def test_pad_to_max_is_skipped_with_its_bytes_when_it_does_not_fit(
         max(layout.lengths)
         for layout in fresh_offsets._layout_pool("power-law", 64, 4, 7)
     )
-    candidates = fresh_offsets._candidate_names(
-        triton_available=True, skipped=("torch_pad_to_max",)
+    candidates = fresh_offsets._select(
+        fresh_offsets._candidate_names(triton_available=True),
+        None,
+        ["torch_pad_to_max"],
     )
     assert "torch_pad_to_max" not in candidates
     assert set(row["raw_samples_us"]) == set(candidates)
@@ -1709,3 +1708,30 @@ def test_configuration_states_the_filter_and_the_warm_step(fresh_offsets):
     )
     assert off["warm_step"]["calls"] == 0
     assert off["warm_step"]["step"].startswith("none")
+
+
+def test_a_family_left_out_by_option_is_not_reported_as_skipped(
+    fresh_offsets,
+):
+    """Keep excluded, by option, apart from skipped, by inability."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "power-law",
+        segment_count=2048,
+        only=["torch", "triton_looped_b256_w4"],
+        free_bytes=lambda: 1000,
+        warm_calls=0,
+    )
+
+    # Neither pad-to-max nor the one-block planned baseline can run on
+    # this row, but neither was asked for.
+    assert row["skipped"] == {}
+    assert row["candidates"] == ["torch", "triton_looped_b256_w4"]
+    assert {"torch_pad_to_max", "triton_planned_w1", "swage_mixed"} <= set(
+        row["excluded"]
+    )
+    names = fresh_offsets._candidate_names(triton_available=True)
+    assert sorted(row["candidates"] + row["excluded"]) == sorted(names)

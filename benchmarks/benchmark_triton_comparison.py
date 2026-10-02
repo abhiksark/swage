@@ -198,6 +198,26 @@ def _select(names, only, exclude) -> list[str]:
     ]
 
 
+def _wanted_skips(unable, wanted):
+    """Return the reasons of the families a run asked for and cannot time.
+
+    Args:
+        unable: Reason by family for every family the row cannot run.
+        wanted: The candidates the filter keeps, of every family.
+
+    Returns:
+        The entries of ``unable`` whose family the filter keeps. A family
+        that the filter leaves out is excluded by option, whether or not
+        the row could have run it.
+    """
+    families = {_family(name) for name in wanted}
+    return {
+        family: reason
+        for family, reason in unable.items()
+        if family in families
+    }
+
+
 def _check_selectors(selectors, names):
     """Require every selector to name a candidate or a family.
 
@@ -1075,22 +1095,22 @@ def _segmented_row(
     tolerance = tolerance.to(device)
     useful_bytes = _useful_bytes(statistics_summary["total"], segment_count)
 
-    skipped = {}
+    unable = {}
     triton_configs = _triton_sum_configs(max_length)
     if not triton_configs:
-        skipped["triton_fixed"] = (
+        unable["triton_fixed"] = (
             "no swept block covers the longest segment of "
             f"{max_length} elements"
         )
     if max_length > _PLANNED_CTA_BLOCK:
-        skipped["triton_planned"] = (
+        unable["triton_planned"] = (
             f"its CTA kernel reads one block of {_PLANNED_CTA_BLOCK} "
             f"elements and the longest segment has {max_length}"
         )
     padded_bytes = segment_count * max_length * _PADDED_BYTES_PER_ELEMENT
     memory_budget = free_bytes()
     if padded_bytes > memory_budget:
-        skipped["torch_padded"] = (
+        unable["torch_padded"] = (
             f"padding {segment_count} segments to {max_length} elements "
             f"needs {padded_bytes} bytes and {memory_budget} are free"
         )
@@ -1181,7 +1201,7 @@ def _segmented_row(
             lambda candidate=candidate, block=block, warps=warps:
             fixed(candidate, block, warps)
         )
-    for warps in () if "triton_planned" in skipped else _PLANNED_WARPS:
+    for warps in _PLANNED_WARPS:
         candidate = f"triton_planned_w{warps}"
         setups[candidate] = (
             lambda candidate=candidate, warps=warps: planned(candidate, warps)
@@ -1198,9 +1218,16 @@ def _segmented_row(
             lambda candidate=candidate, block=block, warps=warps:
             planned(candidate, warps, block)
         )
-    if "torch_padded" not in skipped:
-        setups["torch_padded"] = padded
-    selected = _select(setups, only, exclude)
+    setups["torch_padded"] = padded
+    # Every candidate of the row is timed, excluded by the filter, or
+    # skipped because the filter keeps it and the row cannot run it.
+    skipped = _wanted_skips(
+        unable, _select(_segmented_candidates(), only, exclude)
+    )
+    wanted = _select(setups, only, exclude)
+    selected = [
+        candidate for candidate in wanted if _family(candidate) not in unable
+    ]
     if not selected:
         raise ValueError(
             f"the candidate filter leaves no candidate that can run on "
@@ -1262,7 +1289,7 @@ def _segmented_row(
         "check": check,
         "skipped": skipped,
         "excluded": [
-            candidate for candidate in setups if candidate not in launches
+            candidate for candidate in setups if candidate not in wanted
         ],
         "candidate_order": list(launches),
         "triton_sweep_configs": [

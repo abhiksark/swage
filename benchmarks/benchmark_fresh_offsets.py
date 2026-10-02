@@ -64,6 +64,7 @@ from benchmark_triton_comparison import (
     _triton_looped_configs,
     _useful_bytes,
     _values,
+    _wanted_skips,
 )
 from distributions import generate_lengths, summarize_lengths, worst_case_total
 
@@ -394,12 +395,11 @@ def _nvidia_driver():
     return versions[0]
 
 
-def _candidate_names(*, triton_available, skipped=()):
-    """Return the names of the candidates a row can time, in a fixed order.
+def _candidate_names(*, triton_available):
+    """Return the names of every candidate, in a fixed order.
 
     Args:
         triton_available: Whether Triton is installed.
-        skipped: Families the row cannot run, which are left out.
 
     Returns:
         The candidate names: the Swage candidates, the PyTorch baselines,
@@ -412,7 +412,7 @@ def _candidate_names(*, triton_available, skipped=()):
         names.extend(f"triton_looped_b{b}_w{w}" for b, w in looped)
         names.extend(f"triton_planned_w{w}" for w in _PLANNED_WARPS)
         names.extend(f"triton_planned_looped_b{b}_w{w}" for b, w in looped)
-    return tuple(name for name in names if _family(name) not in skipped)
+    return tuple(names)
 
 
 def _require_available(candidates, triton_available):
@@ -1112,21 +1112,23 @@ def _run_distribution(
     longest = max(max(layout.lengths) for layout in pool)
     padded_bytes = segment_count * longest * _PADDED_BYTES_PER_ELEMENT
     budget = free_bytes()
-    skipped = {}
+    unable = {}
     if padded_bytes > budget:
-        skipped["torch_pad_to_max"] = (
+        unable["torch_pad_to_max"] = (
             f"padding {segment_count} segments to {longest} elements needs "
             f"{padded_bytes} bytes and {budget} are free"
         )
     if kernels is not None and longest > _PLANNED_CTA_BLOCK:
-        skipped["triton_planned"] = (
+        unable["triton_planned"] = (
             f"its task kernel reads one block of {_PLANNED_CTA_BLOCK} "
             f"elements and the longest segment of the row has {longest}"
         )
-    able = _candidate_names(
-        triton_available=kernels is not None, skipped=skipped
-    )
-    names = _select(able, only, exclude)
+    # Every candidate is timed, excluded by the filter, or skipped because
+    # the filter keeps it and the row cannot run it.
+    universe = _candidate_names(triton_available=kernels is not None)
+    wanted = _select(universe, only, exclude)
+    skipped = _wanted_skips(unable, wanted)
+    names = [name for name in wanted if _family(name) not in unable]
     if not names:
         raise ValueError(
             "the candidate filter leaves no candidate that can run on "
@@ -1211,7 +1213,7 @@ def _run_distribution(
         "values": values_kind,
         "candidates": list(names),
         "excluded": [
-            candidate for candidate in able if candidate not in names
+            candidate for candidate in universe if candidate not in wanted
         ],
         "skipped": skipped,
         "warm_layout_seed": pool[-1].seed if warm_calls else None,
