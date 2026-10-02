@@ -36,6 +36,15 @@ _SEED = 7
 _WARP_MAX_ELEMENTS = 32
 _LOOPED_BLOCKS = (128, 256, 512, 1024)
 _PLANNED_CTA_BLOCK = 4096
+_PLANNED_WARPS = (1, 2, 4, 8)
+# A candidate filter names a candidate or its family: the name without the
+# block and warp suffix of a sweep. The longest prefix is listed first.
+_FAMILIES = (
+    ("triton_planned_looped_b", "triton_planned_looped"),
+    ("triton_planned_w", "triton_planned"),
+    ("triton_looped_b", "triton_looped"),
+    ("triton_b", "triton_fixed"),
+)
 _I32_MAX = (1 << 31) - 1
 # The seven distributions of the recorded campaign, in its run order.
 _DISTRIBUTIONS = (
@@ -108,9 +117,23 @@ def _arguments(argv=None):
             "multiples, or seeded standard normal values."
         ),
     )
+    _add_candidate_filter(parser)
     arguments = parser.parse_args(argv)
     if arguments.samples <= 0 or arguments.warmups < 0:
         parser.error("samples must be positive and warmups nonnegative")
+    filtered = arguments.candidates is not None or arguments.exclude_candidates
+    if filtered and arguments.suite != "segmented-sum":
+        parser.error(
+            "--candidates and --exclude-candidates filter the segmented-sum "
+            "suite; pass --suite segmented-sum"
+        )
+    try:
+        _check_selectors(
+            [*(arguments.candidates or ()), *arguments.exclude_candidates],
+            _segmented_candidates(),
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if arguments.segment_count <= 0:
         parser.error("segment-count must be positive")
     for name in arguments.distributions:
@@ -121,6 +144,97 @@ def _arguments(argv=None):
                 f"{total} elements, which does not fit i32 offsets"
             )
     return arguments
+
+
+def _add_candidate_filter(parser):
+    """Add the two candidate filter options to a harness parser."""
+    parser.add_argument(
+        "--candidates",
+        nargs="+",
+        metavar="NAME",
+        help=(
+            "Time only these candidates. A name is a candidate, such as "
+            "triton_looped_b256_w4, or a family, such as triton_looped. The "
+            "default is every candidate."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-candidates",
+        nargs="+",
+        default=[],
+        metavar="NAME",
+        help="Leave these candidates or families out.",
+    )
+
+
+def _family(name: str) -> str:
+    """Return the family of a candidate: its name without a sweep suffix."""
+    for prefix, family in _FAMILIES:
+        if name.startswith(prefix):
+            return family
+    return name
+
+
+def _select(names, only, exclude) -> list[str]:
+    """Return the candidates a filter keeps, in their given order.
+
+    Args:
+        names: Candidate names.
+        only: Selectors to keep, or None to keep every candidate.
+        exclude: Selectors to leave out; they win over ``only``.
+
+    Returns:
+        The kept names. A selector matches a candidate by its name or by
+        its family.
+    """
+
+    def named(selectors, name):
+        return name in selectors or _family(name) in selectors
+
+    return [
+        name
+        for name in names
+        if (only is None or named(only, name)) and not named(exclude, name)
+    ]
+
+
+def _check_selectors(selectors, names):
+    """Require every selector to name a candidate or a family.
+
+    Raises:
+        ValueError: If a selector matches nothing. A misspelled selector
+            would otherwise run, or leave out, something else than asked.
+    """
+    known = {*names, *map(_family, names)}
+    unknown = [selector for selector in selectors if selector not in known]
+    if unknown:
+        families = sorted({_family(name) for name in names})
+        raise ValueError(
+            f"unknown candidates {', '.join(unknown)}; the families are "
+            f"{', '.join(families)}, and a single configuration is named "
+            "like triton_looped_b256_w4"
+        )
+
+
+def _segmented_candidates() -> list[str]:
+    """Return every segmented-sum candidate name, in run order.
+
+    A row runs the ones it can: the fixed sweep keeps the blocks that cover
+    its longest segment, and a baseline that cannot produce a correct sum
+    on the row is skipped.
+    """
+    looped = _triton_looped_configs()
+    return [
+        "swage_warp",
+        "swage_cta",
+        "swage_mixed",
+        "torch",
+        *(f"triton_b{b}_w{w}" for b, w in _triton_sum_configs(0)),
+        *(f"triton_planned_w{w}" for w in _PLANNED_WARPS),
+        *(f"triton_looped_b{b}_w{w}" for b, w in looped),
+        *(f"triton_planned_looped_b{b}_w{w}" for b, w in looped),
+        "torch_padded",
+    ]
 
 
 def _git_metadata(root: pathlib.Path) -> dict[str, object]:
@@ -679,6 +793,111 @@ def _make_triton_planned_sum():
     return packed_warp_kernel, cta_task_kernel
 
 
+def _make_triton_looped_task_sum():
+    """Define a looping Triton sum over a task list lazily.
+
+    One program per task walks its segment in fixed blocks, as the looped
+    kernel does, but reads its segment id from a task list. Together with
+    the packed warp kernel it is the planned Triton scheduler whose long
+    tasks loop instead of provisioning one block for the longest segment.
+    """
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def looped_task_kernel(values, offsets, output, task_ids,
+                           BLOCK: tl.constexpr):
+        segment_id = tl.load(task_ids + tl.program_id(0))
+        begin = tl.load(offsets + segment_id)
+        end = tl.load(offsets + segment_id + 1)
+        total = tl.zeros((BLOCK,), dtype=tl.float32)
+        for start in range(begin, end, BLOCK):
+            index = start + tl.arange(0, BLOCK)
+            total += tl.load(values + index, mask=index < end, other=0.0)
+        tl.store(output + segment_id, tl.sum(total, axis=0))
+
+    return looped_task_kernel
+
+
+def _make_triton_kernels():
+    """Define every Triton segmented-sum kernel of the harnesses lazily."""
+    packed, cta = _make_triton_planned_sum()
+    return types.SimpleNamespace(
+        fixed=_make_triton_segmented_sum(),
+        looped=_make_triton_looped_sum(),
+        packed=packed,
+        cta=cta,
+        cta_looped=_make_triton_looped_task_sum(),
+    )
+
+
+def _partition_tasks(torch, offsets):
+    """Split the segment ids into warp and CTA task lists.
+
+    This is the planning step of the planned Triton baselines, written as a
+    Triton user would: on the device that holds the offsets, with two
+    ``nonzero`` calls that each wait for the device to learn their size.
+
+    Returns:
+        The int32 ids of the segments of at most 32 elements and of the
+        longer ones, each in segment order.
+    """
+    lengths = offsets[1:] - offsets[:-1]
+    short = lengths <= _WARP_MAX_ELEMENTS
+    return (
+        torch.nonzero(short).flatten().to(torch.int32),
+        torch.nonzero(~short).flatten().to(torch.int32),
+    )
+
+
+def _launch_triton_planned(kernels, values, offsets, output, warp_ids,
+                           cta_ids, *, warps: int, block: int | None = None):
+    """Launch the planned Triton sum over two task lists.
+
+    Args:
+        kernels: The Triton kernels ``packed``, ``cta``, and ``cta_looped``.
+        values: Device values.
+        offsets: Device offsets.
+        output: Device output, one sum per segment.
+        warp_ids: Ids of the short segments, four packed per program.
+        cta_ids: Ids of the longer segments, one program each.
+        warps: Warps of a CTA program.
+        block: Block of the looping task kernel. None launches the one-block
+            task kernel, which reads at most 4096 elements of a segment.
+
+    Returns:
+        The output.
+    """
+    warp_count = warp_ids.numel()
+    if warp_count:
+        kernels.packed[((warp_count + 3) // 4,)](
+            values,
+            offsets,
+            output,
+            warp_ids,
+            warp_count,
+            TASKS=4,
+            WARP=32,
+            num_warps=4,
+        )
+    cta_count = cta_ids.numel()
+    if cta_count and block is None:
+        kernels.cta[(cta_count,)](
+            values,
+            offsets,
+            output,
+            cta_ids,
+            cta_count,
+            BLOCK=_PLANNED_CTA_BLOCK,
+            num_warps=warps,
+        )
+    elif cta_count:
+        kernels.cta_looped[(cta_count,)](
+            values, offsets, output, cta_ids, BLOCK=block, num_warps=warps
+        )
+    return output
+
+
 def _triton_sum_configs(max_length: int) -> list[tuple[int, int]]:
     """Return legal Triton segmented-sum sweep configs."""
     configs = []
@@ -734,18 +953,20 @@ def _launch_triton_looped(kernel, values, offsets, output, segment_count,
     return output
 
 
-def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
-    """Require exact looped sums on position-dependent values.
+def _check_on_exact_values(torch, family, launch, configs, offsets,
+                           segment_count):
+    """Require exact sums of a swept baseline on position-dependent values.
 
-    The timed input is all ones, where any in-bounds window of the right
-    length gives the right sum. This check runs every looped configuration
-    on values that make a shifted, short, or long read visible. It uses its
-    own values and output and leaves the timed inputs alone.
+    On all-one values any in-bounds window of the right length gives the
+    right sum. This check runs every configuration on values that make a
+    shifted, short, or long read visible. It uses its own values and output
+    and leaves the timed inputs alone.
 
     Args:
         torch: The PyTorch module.
-        kernel: The looped Triton kernel.
-        configs: The looped block and warp configurations.
+        family: Family name of the baseline, for the failure message.
+        launch: Callable taking values, an output, a block, and warps.
+        configs: The block and warp configurations to check.
         offsets: Device offsets of the distribution being measured.
         segment_count: Number of segments.
 
@@ -762,19 +983,30 @@ def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
     output = torch.empty(segment_count, device=offsets.device)
     for block, warps in configs:
         output.fill_(float("nan"))
-        _launch_triton_looped(
-            kernel, values, offsets, output, segment_count, block, warps
-        )
+        launch(values, output, block, warps)
         torch.testing.assert_close(
             output,
             expected,
             rtol=0,
             atol=0,
             msg=lambda message, block=block, warps=warps: (
-                f"triton_looped_b{block}_w{warps} on position-dependent "
+                f"{family}_b{block}_w{warps} on position-dependent "
                 f"values: {message}"
             ),
         )
+
+
+def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
+    """Check the looped Triton sweep on position-dependent values."""
+
+    def launch(values, output, block, warps):
+        _launch_triton_looped(
+            kernel, values, offsets, output, segment_count, block, warps
+        )
+
+    _check_on_exact_values(
+        torch, "triton_looped", launch, configs, offsets, segment_count
+    )
 
 
 def _segmented_row(
@@ -790,13 +1022,15 @@ def _segmented_row(
     device,
     free_bytes: Callable[[], int],
     synchronize,
+    only=None,
+    exclude=(),
 ) -> dict[str, object]:
-    """Check and time every candidate on one distribution and seed.
+    """Check and time the selected candidates on one distribution and seed.
 
     Args:
         torch: The PyTorch module.
-        kernels: The Triton kernels ``fixed``, ``looped``, ``packed``, and
-            ``cta``.
+        kernels: The Triton kernels ``fixed``, ``looped``, ``packed``,
+            ``cta``, and ``cta_looped``.
         prepare: The private planned-sum preparation function.
         measure: Callable taking a launch and the bytes it has to move and
             returning its timings.
@@ -808,14 +1042,19 @@ def _segmented_row(
         free_bytes: Callable returning the bytes the padded baseline may
             use; it is called once the row's inputs are on the device.
         synchronize: Callable that waits for all work on that device.
+        only: Candidate filter selectors to keep, or None for all.
+        exclude: Candidate filter selectors to leave out.
 
     Returns:
         The record row. A baseline that cannot produce a correct sum on the
         row is left out of ``timings`` and listed in ``skipped`` with the
-        reason; it is never timed on a wrong result.
+        reason; it is never timed on a wrong result. A candidate the filter
+        left out is listed in ``excluded``; it is not prepared, launched,
+        or checked. ``candidate_order`` is the order the candidates ran in.
 
     Raises:
         AssertionError: If a candidate that ran is wrong in any segment.
+        ValueError: If the filter leaves no candidate the row can run.
     """
     lengths = generate_lengths(name, segment_count, seed)
     statistics_summary = summarize_lengths(lengths)
@@ -856,144 +1095,162 @@ def _segmented_row(
             f"needs {padded_bytes} bytes and {memory_budget} are free"
         )
     triton_looped_configs = _triton_looped_configs()
-    warp_ids = [
-        index
-        for index, length in enumerate(lengths)
-        if length <= _WARP_MAX_ELEMENTS
-    ]
-    cta_ids = [
-        index
-        for index, length in enumerate(lengths)
-        if length > _WARP_MAX_ELEMENTS
-    ]
-    device_warp_ids = torch.tensor(warp_ids, device=device, dtype=torch.int32)
-    device_cta_ids = torch.tensor(cta_ids, device=device, dtype=torch.int32)
-
-    def unwritten():
-        # A result that was never written must not pass the check.
-        return torch.full((segment_count,), float("nan"), device=device)
-
-    outputs = {
-        "swage_warp": unwritten(),
-        "swage_cta": unwritten(),
-        "swage_mixed": unwritten(),
-    }
+    warp_ids, cta_ids = _partition_tasks(torch, offsets)
+    outputs = {}
     allocated = {}
-    prepared = prepare(
-        values,
-        offsets,
-        outputs["swage_mixed"],
-        warp_max_elements=_WARP_MAX_ELEMENTS,
-    )
-    swage_warp = prepare(
-        values,
-        offsets,
-        outputs["swage_warp"],
-        warp_max_elements=_WARP_MAX_ELEMENTS,
-    ).warp
-    swage_cta = prepare(
-        values,
-        offsets,
-        outputs["swage_cta"],
-        warp_max_elements=_WARP_MAX_ELEMENTS,
-    ).cta
 
-    def launch_torch():
-        allocated["torch"] = torch.segment_reduce(
-            values, "sum", offsets=offsets
+    def unwritten(candidate):
+        # A result that was never written must not pass the check.
+        outputs[candidate] = torch.full(
+            (segment_count,), float("nan"), device=device
         )
-        return allocated["torch"]
+        return outputs[candidate]
 
-    launches = {
-        "swage_warp": swage_warp,
-        "swage_cta": swage_cta,
-        "swage_mixed": prepared.mixed,
-        "torch": launch_torch,
-    }
-    for block, warps in triton_configs:
-        output = unwritten()
-        launch_name = f"triton_b{block}_w{warps}"
-        outputs[launch_name] = output
-        launches[launch_name] = (
-            lambda out=output, block=block, warps=warps:
-            kernels.fixed[(segment_count,)](
+    def swage(policy):
+        return getattr(
+            prepare(
                 values,
                 offsets,
-                out,
-                segment_count,
-                BLOCK=block,
-                num_warps=warps,
-            )
+                unwritten(f"swage_{policy}"),
+                warp_max_elements=_WARP_MAX_ELEMENTS,
+            ),
+            policy,
         )
-    for warps in () if "triton_planned" in skipped else (1, 2, 4, 8):
-        output = unwritten()
-        launch_name = f"triton_planned_w{warps}"
-        outputs[launch_name] = output
 
-        def launch_planned(out=output, cta_warps=warps):
-            if warp_ids:
-                kernels.packed[((len(warp_ids) + 3) // 4,)](
-                    values,
-                    offsets,
-                    out,
-                    device_warp_ids,
-                    len(warp_ids),
-                    TASKS=4,
-                    WARP=32,
-                    num_warps=4,
-                )
-            if cta_ids:
-                kernels.cta[(len(cta_ids),)](
-                    values,
-                    offsets,
-                    out,
-                    device_cta_ids,
-                    len(cta_ids),
-                    BLOCK=_PLANNED_CTA_BLOCK,
-                    num_warps=cta_warps,
-                )
-            return None
-
-        launches[launch_name] = launch_planned
-    # Registered after the recorded candidates so those keep their order.
-    for block, warps in triton_looped_configs:
-        output = unwritten()
-        launch_name = f"triton_looped_b{block}_w{warps}"
-        outputs[launch_name] = output
-        launches[launch_name] = (
-            lambda out=output, block=block, warps=warps:
-            _launch_triton_looped(
-                kernels.looped,
-                values,
-                offsets,
-                out,
-                segment_count,
-                block,
-                warps,
+    def torch_reduce():
+        def launch():
+            allocated["torch"] = torch.segment_reduce(
+                values, "sum", offsets=offsets
             )
+            return allocated["torch"]
+
+        return launch
+
+    def fixed(candidate, block, warps):
+        output = unwritten(candidate)
+        return lambda: kernels.fixed[(segment_count,)](
+            values,
+            offsets,
+            output,
+            segment_count,
+            BLOCK=block,
+            num_warps=warps,
         )
-    if "torch_padded" not in skipped:
+
+    def planned(candidate, warps, block=None):
+        output = unwritten(candidate)
+        return lambda: _launch_triton_planned(
+            kernels,
+            values,
+            offsets,
+            output,
+            warp_ids,
+            cta_ids,
+            warps=warps,
+            block=block,
+        )
+
+    def looped(candidate, block, warps):
+        output = unwritten(candidate)
+        return lambda: _launch_triton_looped(
+            kernels.looped, values, offsets, output, segment_count, block, warps
+        )
+
+    def padded():
         # The padding is prepared outside the timed launch, as the Swage
         # plan and the Triton task lists are.
-        padded, mask = _padded_inputs(torch, values, offsets)
+        matrix, mask = _padded_inputs(torch, values, offsets)
 
-        def launch_padded():
-            allocated["torch_padded"] = _padded_sum(padded, mask)
+        def launch():
+            allocated["torch_padded"] = _padded_sum(matrix, mask)
             return allocated["torch_padded"]
 
-        launches["torch_padded"] = launch_padded
+        return launch
+
+    # Every candidate the row can run, in run order, with the setup that
+    # makes its launch. Only a selected candidate is set up.
+    setups = {
+        "swage_warp": lambda: swage("warp"),
+        "swage_cta": lambda: swage("cta"),
+        "swage_mixed": lambda: swage("mixed"),
+        "torch": torch_reduce,
+    }
+    for block, warps in triton_configs:
+        candidate = f"triton_b{block}_w{warps}"
+        setups[candidate] = (
+            lambda candidate=candidate, block=block, warps=warps:
+            fixed(candidate, block, warps)
+        )
+    for warps in () if "triton_planned" in skipped else _PLANNED_WARPS:
+        candidate = f"triton_planned_w{warps}"
+        setups[candidate] = (
+            lambda candidate=candidate, warps=warps: planned(candidate, warps)
+        )
+    for block, warps in triton_looped_configs:
+        candidate = f"triton_looped_b{block}_w{warps}"
+        setups[candidate] = (
+            lambda candidate=candidate, block=block, warps=warps:
+            looped(candidate, block, warps)
+        )
+    for block, warps in triton_looped_configs:
+        candidate = f"triton_planned_looped_b{block}_w{warps}"
+        setups[candidate] = (
+            lambda candidate=candidate, block=block, warps=warps:
+            planned(candidate, warps, block)
+        )
+    if "torch_padded" not in skipped:
+        setups["torch_padded"] = padded
+    selected = _select(setups, only, exclude)
+    if not selected:
+        raise ValueError(
+            f"the candidate filter leaves no candidate that can run on "
+            f"{name} with {segment_count} segments"
+        )
+    launches = {candidate: setups[candidate]() for candidate in selected}
     for launch in launches.values():
         launch()
     synchronize()
     for output_name, output in {**outputs, **allocated}.items():
         _check_sums(torch, output_name, output, reference, tolerance)
-    _check_triton_looped(
-        torch,
-        kernels.looped,
-        triton_looped_configs,
-        offsets,
-        segment_count,
-    )
+    for family, launch_family in (
+        (
+            "triton_looped",
+            lambda values, output, block, warps: _launch_triton_looped(
+                kernels.looped,
+                values,
+                offsets,
+                output,
+                segment_count,
+                block,
+                warps,
+            ),
+        ),
+        (
+            "triton_planned_looped",
+            lambda values, output, block, warps: _launch_triton_planned(
+                kernels,
+                values,
+                offsets,
+                output,
+                warp_ids,
+                cta_ids,
+                warps=warps,
+                block=block,
+            ),
+        ),
+    ):
+        _check_on_exact_values(
+            torch,
+            family,
+            launch_family,
+            [
+                (block, warps)
+                for block, warps in triton_looped_configs
+                if f"{family}_b{block}_w{warps}" in launches
+            ],
+            offsets,
+            segment_count,
+        )
     return {
         "case": "segmented-sum",
         "distribution": name,
@@ -1004,6 +1261,10 @@ def _segmented_row(
         "useful_bytes": useful_bytes,
         "check": check,
         "skipped": skipped,
+        "excluded": [
+            candidate for candidate in setups if candidate not in launches
+        ],
+        "candidate_order": list(launches),
         "triton_sweep_configs": [
             {"block": block, "num_warps": warps}
             for block, warps in triton_configs
@@ -1014,11 +1275,15 @@ def _segmented_row(
         ],
         "triton_planned": {
             "warp_threshold": _WARP_MAX_ELEMENTS,
-            "warp_tasks": len(warp_ids),
-            "cta_tasks": len(cta_ids),
+            "warp_tasks": warp_ids.numel(),
+            "cta_tasks": cta_ids.numel(),
             "warp_tasks_per_program": 4,
             "cta_block": _PLANNED_CTA_BLOCK,
-            "cta_num_warps_sweep": [1, 2, 4, 8],
+            "cta_num_warps_sweep": list(_PLANNED_WARPS),
+            "looped_cta_sweep_configs": [
+                {"block": block, "num_warps": warps}
+                for block, warps in triton_looped_configs
+            ],
         },
         "timings": {
             launch_name: measure(launch, useful_bytes)
@@ -1031,13 +1296,7 @@ def _run_segmented_sum(torch, measure, arguments) -> list[dict[str, object]]:
     """Benchmark private segmented sum against Triton and torch baselines."""
     from swage._segmented_qualification import _prepare_planned_sum
 
-    packed, cta = _make_triton_planned_sum()
-    kernels = types.SimpleNamespace(
-        fixed=_make_triton_segmented_sum(),
-        looped=_make_triton_looped_sum(),
-        packed=packed,
-        cta=cta,
-    )
+    kernels = _make_triton_kernels()
     return [
         _segmented_row(
             torch,
@@ -1051,6 +1310,8 @@ def _run_segmented_sum(torch, measure, arguments) -> list[dict[str, object]]:
             device="cuda",
             free_bytes=lambda: _free_device_bytes(torch),
             synchronize=torch.cuda.synchronize,
+            only=arguments.candidates,
+            exclude=arguments.exclude_candidates,
         )
         for name in arguments.distributions
         for seed in arguments.seeds
@@ -1139,8 +1400,17 @@ def main():
             ),
             "candidate_order": (
                 "each candidate is timed to completion in the order of the "
-                "timings mapping; candidates are not interleaved"
+                "row's candidate_order; candidates are not interleaved"
             ),
+            "candidate_filter": {
+                "candidates": arguments.candidates,
+                "exclude_candidates": arguments.exclude_candidates,
+                "note": (
+                    "a name selects one candidate or a family; a row lists "
+                    "what the filter left out under excluded, apart from "
+                    "what it could not run under skipped"
+                ),
+            },
             "compilation_excluded": True,
             "correctness_checked_before_timing": True,
             "correctness": (
@@ -1164,10 +1434,23 @@ def main():
                 "one program per segment, a loop over the segment in fixed "
                 "blocks; no block is excluded for the longest segment"
             ),
+            "triton_planned": (
+                "the task lists come from a device nonzero over the segment "
+                "lengths, outside the timed launch; short tasks are packed "
+                "four per program and each longer task reads one block of "
+                "4096 elements, so a longer segment skips the baseline"
+            ),
+            "triton_planned_looped": (
+                "the same task lists and packed short tasks; each longer "
+                "task loops over its segment in fixed blocks, with the "
+                "block and warp sweep of triton_looped, so no segment "
+                "length skips it"
+            ),
             "triton_looped_check": (
-                "besides the check shared by every candidate, each looped "
-                "configuration is checked exactly before timing on seeded "
-                "nonzero quarter multiples against CPU torch.segment_reduce"
+                "besides the check shared by every candidate, each "
+                "triton_looped and triton_planned_looped configuration is "
+                "checked exactly before timing on seeded nonzero quarter "
+                "multiples against CPU torch.segment_reduce"
             ),
             "torch_padded": (
                 "pure PyTorch: every segment padded with zeros to the "
