@@ -181,27 +181,40 @@ llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
   if (offsets.size() != static_cast<uint64_t>(segmentCount) + uint64_t{1})
     return invalidMetadata("offset count must equal segment count plus one");
 
-  // One walk validates and counts. A negative or decreasing offset makes a
-  // length negative, or is the first offset itself, because every offset
-  // before the first invalid one is at least zero. The counts of an invalid
-  // walk are never used.
+  // One walk validates and counts. A negative or decreasing offset is a
+  // decrease, or is the first offset itself, because every offset before the
+  // first invalid one is at least zero. Valid offsets lie in [0, i32Max], so
+  // their differences fit in i32; the counts of an invalid walk are never
+  // used. The body has no branch and stays in 32-bit values so that it
+  // vectorizes; the partial tasks, which need a division per split segment,
+  // are counted in a second walk only when a segment is split.
   const int32_t *const data = offsets.data();
-  bool ordered = data[0] >= 0;
-  uint64_t warpCount = 0;
-  uint64_t mergeCount = 0;
-  uint64_t partialCount = 0;
-  int64_t begin = data[0];
+  const int32_t warpLimit = static_cast<int32_t>(warpMaxElements);
+  const int32_t chunkLimit = static_cast<int32_t>(ctaChunkElements);
+  uint32_t disorder = data[0] < 0;
+  uint32_t warpSegments = 0;
+  uint32_t splitSegments = 0;
   for (int64_t segmentId = 0; segmentId < segmentCount; ++segmentId) {
-    const int64_t end = data[segmentId + 1];
-    const int64_t length = end - begin;
-    ordered &= length >= 0;
-    warpCount += length <= warpMaxElements;
-    if (length > ctaChunkElements) {
-      ++mergeCount;
-      partialCount += static_cast<uint64_t>(length / ctaChunkElements) +
-                      static_cast<uint64_t>(length % ctaChunkElements != 0);
+    const int32_t begin = data[segmentId];
+    const int32_t end = data[segmentId + 1];
+    const int32_t length = static_cast<int32_t>(static_cast<uint32_t>(end) -
+                                                static_cast<uint32_t>(begin));
+    disorder |= end < begin;
+    warpSegments += length <= warpLimit;
+    splitSegments += length > chunkLimit;
+  }
+  const bool ordered = disorder == 0;
+  const uint64_t warpCount = warpSegments;
+  const uint64_t mergeCount = splitSegments;
+  uint64_t partialCount = 0;
+  if (ordered && mergeCount != 0) {
+    for (int64_t segmentId = 0; segmentId < segmentCount; ++segmentId) {
+      const int64_t length =
+          static_cast<int64_t>(data[segmentId + 1]) - data[segmentId];
+      if (length > ctaChunkElements)
+        partialCount += static_cast<uint64_t>(length / ctaChunkElements) +
+                        static_cast<uint64_t>(length % ctaChunkElements != 0);
     }
-    begin = end;
   }
   if (!ordered)
     return firstOffsetError(offsets);
@@ -231,7 +244,7 @@ llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
   int32_t *partialMerge = merge + 3 * mergeCount;
   int32_t scratchIndex = 0;
   int32_t mergeIndex = 0;
-  begin = 0;
+  int64_t begin = 0;
   for (int64_t segmentId = 0; segmentId < segmentCount; ++segmentId) {
     const int64_t end = data[segmentId + 1];
     const int64_t length = end - begin;
