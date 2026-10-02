@@ -160,6 +160,11 @@ per-launch ctypes marshaling, resolves `libcuda.so.1` with `dlopen` once
 per process, and deliberately holds the GIL across the microsecond
 enqueue. When the compiled bindings are absent, a ctypes path submits the
 same driver call with the same error shape and a slower per-launch cost.
+A process that runs the segmented calls from an artifact without the
+bindings has a third lane, which the figure below does not show: the
+launcher of the runtime library of the artifact, called through `ctypes`.
+It replaces the ctypes path when the artifact serves its first kernel, and
+it raises the errors of the compiled launcher in the same words.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -278,8 +283,12 @@ A call makes its checks in a fixed order, all before the first enqueue:
    requires.
 2. Arguments that need no native build: `kind`, the tensor type of `values`
    and `offsets`, the grad state of `values`, and every rule of `out`.
-3. The native bindings. A wheel-only install stops here with a
-   `RuntimeError` that names the installation page.
+3. The selected artifact, or the native bindings. With
+   `SWAGE_ARTIFACT_DIR` set, the directory is read and verified at the
+   first call of the process, the bindings are not needed, and a directory
+   that cannot be used stops the call here. Without the variable, a
+   wheel-only install stops here with a `RuntimeError` that names the
+   installation page.
 4. CUDA graph capture, and for `segment_reduce` the inference state of
    `offsets`.
 5. The shared validation of dtype, rank, layout, lazy views, the offsets on
@@ -316,7 +325,10 @@ Preparation and launch follow these rules:
   over repeated calls with new offsets.
 - Compiled kernels are kept in the in-process caches of the private
   helpers, which [Module lifetime](#module-lifetime) describes, and are not
-  written to the persistent cache. The first `segment_reduce` call on a
+  written to the persistent cache. With an artifact selected, the same
+  caches hold kernels that were read from the artifact, and nothing is
+  compiled; [Artifacts](#artifacts) states the rules. The first
+  `segment_reduce` call on a
   device also uploads the shared segment ids that
   [Task Execution](../internals/task-execution.md) describes, which hold
   4 MiB of device memory for the life of the process.
@@ -334,8 +346,12 @@ Four conditions are refused with an error instead of being handled:
   inference tensor does not have. Offsets made outside
   `torch.inference_mode()`, or cloned outside it, are admitted, also when
   the call runs inside it. `segment_softmax` accepts inference tensors.
-- `SWAGE_NO_COMPILE=1` with a kernel the process does not hold;
-  [Cache variables](#cache-variables) states the rule.
+- `SWAGE_NO_COMPILE=1` with a kernel the process does not hold and no
+  artifact selected; [Cache variables](#cache-variables) states the rule.
+
+A fifth refusal exists only with `SWAGE_ARTIFACT_DIR` set: an artifact that
+cannot be used, or that does not hold the kernels of the call, raises a
+`RuntimeError`. [Artifacts](#artifacts) lists the cases.
 
 A call works on a thread that has not used CUDA: its first PyTorch CUDA
 operation makes the context of the current device current there.
@@ -526,14 +542,76 @@ only and never use the persistent cache, so with the switch set they launch
 a kernel that the process already holds and raise the same `RuntimeError`
 for any other. A process that starts with the switch set therefore cannot
 run a segmented call, except on a batch without segments, which needs no
-kernel. The host planning pass is not a kernel compile and still runs, once
-per program and pair of planning limits. `SWAGE_CACHE_DIR`,
+kernel, and except from an artifact: a kernel that is read from the
+directory `SWAGE_ARTIFACT_DIR` selects is not compiled, so the switch does
+not refuse it. The host planning pass is not a kernel compile and still
+runs, once per program and pair of planning limits. `SWAGE_CACHE_DIR`,
 `SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY` have no effect on
 the segmented calls or the private helpers.
 
 A value other than the ones listed is an error, not a default. A mistyped
 variable raises a `ValueError` that names it at the first lookup, before
 anything is compiled.
+
+## Artifacts
+
+`SWAGE_ARTIFACT_DIR` names a directory that `python -m swage.compile`
+wrote. With it set, `swage.segment_reduce` and `swage.segment_softmax` run
+from that directory.
+[Running Without the Compiler](../user-guide/deployment.md) describes the
+command, the files, and the manifest. This section states what the runtime
+does.
+
+The variable is read at every segmented call. Unset and empty mean that no
+artifact is selected. A directory is read and verified when it is first
+named, under the lock that serializes compiles and loads, and is then kept
+for the process: later calls read nothing from it, and a change to its
+files is not seen. Naming another directory loads that directory. A
+directory that fails verification is read again at the next call.
+
+Verification covers the whole directory before anything is used:
+
+- The directory and every file it uses must exist, must be a directory and
+  regular files after symbolic links are followed, and must not have the
+  group-write or the other-write permission bit. The owner is not compared
+  with the current user, and a read-only directory is admitted.
+- The manifest must be JSON of format version 1 with every field of the
+  expected type.
+- Each kernel file and the runtime library must have the SHA-256 digest the
+  manifest states, and the manifest may name only files directly in the
+  directory.
+- Each kernel must be one that this `swage` requests, with the entry name,
+  the block size, and the argument list it launches with, and each program
+  must have all of its kernels. A missing kernel is therefore found here,
+  not at the first batch that needs it.
+- The runtime library must be built for the machine of the host, must have
+  interface version 1 in the manifest and when asked, and must load.
+
+A call then uses the artifact in place of the native bindings:
+
+- Each kernel request is answered from the artifact, once per kernel, and
+  kept in the in-process cache. The request is refused when the target of
+  the current device is not the target of the artifact, when the artifact
+  does not hold the program, and when the program text of the artifact has
+  another SHA-256 digest than the text this `swage` would compile.
+- The planning admission of a reduction is answered from the manifest, for
+  the planning limits the manifest records. The planning pass does not run.
+- Offsets are classified by the runtime library, which admits and refuses
+  what the native classifier does, with the same messages.
+- Nothing is compiled. A private qualification helper that asks for a
+  kernel outside the artifact is refused in the same way.
+
+Every refusal is a `RuntimeError` that names the directory, raised before a
+kernel is loaded or enqueued. The process never compiles in place of an
+artifact it cannot use.
+
+An artifact concerns the segmented calls only. The public `launch()` of the
+fixed vector add does not read it and behaves as the sections above state.
+When `mlir_swage` is importable beside a selected artifact, the kernels and
+the classification still come from the artifact, and the driver wrapper
+still takes its launcher from the bindings, which loads the compiler
+libraries. A process that must map no LLVM or MLIR library must therefore
+not have `mlir_swage` importable.
 
 ## Debug dumps
 
@@ -560,9 +638,9 @@ Python version, platform, PyTorch version, the CUDA version used to build
 PyTorch, actual CUDA driver version when available, CUDA availability, GPU
 name and compute capability, the qualification of the device target,
 repository LLVM pin when discoverable, the LLVM version the native bindings
-were linked against, the native extension file, backend status, and the
-state of the persistent cache. It exits cleanly when optional components are
-absent and reports them as unavailable.
+were linked against, the native extension file, backend status, the state
+of the persistent cache, and the selected artifact. It exits cleanly when
+optional components are absent and reports them as unavailable.
 
 With the bindings importable, here from a build tree, the report looks like
 this:
@@ -588,6 +666,7 @@ backends: {'mlir': 'available (linked LLVM 22.1.8)'}
 cache_dir: /home/user/.cache/swage
 cache: active (reads and writes; 12 of at most 1024 entries)
 compile_on_miss: allowed
+artifact: none (SWAGE_ARTIFACT_DIR is unset)
 ```
 
 Seven fields identify the code and the native build:
@@ -682,6 +761,16 @@ differ.
 
 The report only reads. It does not create the cache root, remove anything
 from it, or warn.
+
+`artifact` describes the directory that `SWAGE_ARTIFACT_DIR` selects for
+the segmented calls of the reporting process:
+
+- `none (SWAGE_ARTIFACT_DIR is unset)` without the variable.
+- The directory, followed by its manifest format, its target, the number
+  of kernels and the programs they belong to, and the `swage` version and
+  source revision that wrote it, when the directory passes verification.
+  The report loads the runtime library of the artifact to verify it.
+- `rejected (<reason>)` with the error a segmented call would raise.
 
 `llvm_pin` is the release tag in `cmake/llvm-version.txt` and `llvm_linked`
 is a bare version, so a build against the pinned release shows

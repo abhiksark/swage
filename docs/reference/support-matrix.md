@@ -126,6 +126,32 @@ The GPU tests of the segmented calls ran on one NVIDIA RTX A6000 with
 PyTorch 2.12.0+cu130 and Python 3.13, on the branch that added the calls.
 They have not run through the `ci-gpu` workflow, which runs on `main` only.
 
+## Artifacts
+
+`python -m swage.compile` writes the kernels of the two segmented calls
+ahead of time, and `SWAGE_ARTIFACT_DIR` makes a process run the calls from
+the result.
+[Running Without the Compiler](../user-guide/deployment.md) describes both.
+These rows use the statuses of the tables above, and **Checked by hand** as
+the next section defines it.
+
+| Aspect | Status | Evidence |
+|---|---|---|
+| Writing an artifact for each admitted processor, with no device and no PyTorch | Tested in the native tier | `python/tests/mlir/test_artifact.py` writes one per processor, and one in a process where PyTorch cannot be imported and no device is visible |
+| Selection, verification, the trust rule, and every refusal | Tested in the pure Python tier | `tests/python/test_artifact.py`, with a stand-in for the runtime library |
+| The classifier of the runtime library | Tested in the native tier | `unittests/RuntimeTest.cpp` and `python/tests/mlir/test_segmented_classification.py` compare it with the compiler's classifier |
+| Both calls from an artifact, in a process that cannot import `mlir_swage` | Tested in the GPU tier on `sm_86` | `python/tests/mlir/test_artifact.py`: no LLVM or MLIR library is mapped, the results agree with PyTorch and float64 references, and they equal the compiled path bit for bit |
+| The same in a fresh virtual environment that holds the pure wheel, PyTorch 2.12.0+cu130, `numpy` 2.1.2, and no checkout or build tree on any path | Checked by hand | Run once on the Linux x86-64 machine with the NVIDIA RTX A6000, Python 3.13 |
+| An artifact for another target than the device | Rejected | A `RuntimeError` before any kernel is loaded; the same file |
+| An artifact directory owned by another account | Tested with a simulated owner | `tests/python/test_artifact.py` reports another owner and another effective user to the loader; no test uses a second account |
+| A read-only artifact directory | Tested in the pure Python tier | The same file removes every write permission before loading |
+| An artifact on a host of another machine, such as AArch64 | Unknown | No runtime library was built for another machine. The loader refuses an artifact whose library names another machine; the same files |
+| An artifact loaded by a `swage` of another source revision | Rejected when a program text differs, otherwise unknown | The loader compares the digest of each program text and the launch description of each kernel, and nothing else of the two revisions |
+
+The GPU rows ran on one NVIDIA RTX A6000 with PyTorch 2.12.0+cu130 and
+Python 3.13, on the branch that added the feature. They have not run
+through the `ci-gpu` workflow, which runs on `main` only.
+
 ## Native wheel
 
 No native wheel is published. `scripts/build_native_wheel.sh` builds

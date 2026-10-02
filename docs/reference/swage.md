@@ -5,15 +5,18 @@
 The public API is intentionally small. The `swage` package exports `jit`,
 `CompilationError`, `segment_reduce`, `segment_softmax`, and `__version__`;
 captured kernels expose `emit_mlir()` and `launch()`; `swage.env` reports
-the environment. The two segmented calls run fixed programs. Segmented
+the environment, and `swage.compile` writes the kernels of the segmented
+calls ahead of time. The two segmented calls run fixed programs. Segmented
 Python syntax is not public, and neither are the prepared launches, the
 scheduling policies, and the planning limits of the runner behind the calls.
 
 Compile-only emission and execution require the build-tree `mlir_swage`
 package from [Installation](../getting-started/installation.md). On its own
 the pure Python package captures kernels, checks a kernel against the kernel
-language, and reports the environment. That page lists what the released
-`0.5.1` wheel lacks, which includes the two segmented calls.
+language, and reports the environment. It also runs the two segmented calls
+from an artifact directory that `swage.compile` wrote on a host with that
+package. The installation page lists what the released `0.5.1` wheel lacks,
+which includes the two segmented calls.
 
 ## swage.jit
 
@@ -223,15 +226,18 @@ Raises
     are an inference tensor or break the offsets contract; an `out` of the
     wrong size or one that overlaps an input.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
-    native bindings, unavailable CUDA, a current stream that is capturing a
-    CUDA graph, a kernel that the process does not hold while
-    `SWAGE_NO_COMPILE=1` is set, or a runtime driver failure.
+    native bindings while no artifact is selected, an artifact selected by
+    `SWAGE_ARTIFACT_DIR` that cannot be used or does not hold the kernels of
+    the call, unavailable CUDA, a current stream that is capturing a CUDA
+    graph, a kernel that the process does not hold while
+    `SWAGE_NO_COMPILE=1` is set and no artifact is selected, or a runtime
+    driver failure.
 
 The checks run in this order: the PyTorch check, `kind`, the tensor type of
-`values` and `offsets` and the grad state of `values`, `out`, the native
-bindings, CUDA graph capture, the inference state of `offsets`, and then
-the shared validation of dtype, rank, layout, offsets, and device. All of
-them precede the first enqueue.
+`values` and `offsets` and the grad state of `values`, `out`, the selected
+artifact or the native bindings, CUDA graph capture, the inference state of
+`offsets`, and then the shared validation of dtype, rank, layout, offsets,
+and device. All of them precede the first enqueue.
 
 Example
 
@@ -312,8 +318,9 @@ The public surface uses four exception classes:
 - `RuntimeError` reports direct kernel calls, symbolic language calls
   outside a captured kernel, missing native bindings, a missing or
   unsupported PyTorch for launch, unavailable CUDA, a refused compile under
-  `SWAGE_NO_COMPILE=1`, a segmented call under CUDA graph capture, and
-  runtime driver or cache failures.
+  `SWAGE_NO_COMPILE=1`, a segmented call under CUDA graph capture, an
+  artifact directory that cannot be used, and runtime driver or cache
+  failures.
 
 ## swage.\_\_version\_\_
 
@@ -322,6 +329,45 @@ swage.__version__
 ```
 
 The installed package version string.
+
+## swage.compile
+
+```bash
+python -m swage.compile --target TARGET --output DIRECTORY
+    [--program {sum,max,softmax}] [--runtime-library LIBRARY]
+```
+
+Compile every kernel that `segment_reduce` and `segment_softmax` can launch
+for one NVPTX processor, and write the PTX, the runtime library, and a
+manifest to a new directory. The command needs the native `mlir_swage`
+package and `numpy`. It needs no GPU and no PyTorch.
+
+Options
+:   `--target`: the NVPTX processor of the device that will run the
+    kernels, such as `sm_86`. Required.
+:   `--output`: the directory to create. It must not exist. Required.
+:   `--program`: a program to include, `sum`, `max`, or `softmax`. It may
+    be repeated. All three are included without it.
+:   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
+    of the native build, for a serving host of another machine.
+
+Output and exit status
+:   On success the command prints the directory, the manifest format, the
+    target, the programs, the number of kernels, the runtime library with
+    its machine, and the SHA-256 digest of the manifest, one `key: value`
+    line each, and exits with status 0.
+:   Otherwise it prints `error:` and the reason on standard error, writes
+    nothing, and exits with status 1: for missing bindings, a target the
+    compiler rejects, an output directory that exists, a set
+    `SWAGE_ARTIFACT_DIR`, `SWAGE_NO_COMPILE=1`, and a runtime library that
+    is not an ELF library for `x86_64` or `aarch64`.
+
+The module has no other public name. A process runs the two calls from the
+directory when `SWAGE_ARTIFACT_DIR` names it.
+[Running Without the Compiler](../user-guide/deployment.md) describes the
+files and the manifest, and
+[Runtime and Environment](runtime-environment.md#artifacts) states what the
+runtime verifies.
 
 ## swage.env
 
@@ -333,8 +379,9 @@ Print the environment report as flat key and value lines. The report
 never fails: unavailable components are reported as absent instead of
 raising. Its keys, in order, are `swage`, `revision`, `swage_file`,
 `python`, `platform`, `torch`, `torch_cuda_build`, `cuda_driver`, `cuda`,
-`gpu`, `target`, `llvm_pin`, `llvm_linked`, `mlir_swage_file`, `backends`,
-`cache_dir`, `cache`, and `compile_on_miss`.
+`gpu`, `target`, `llvm_pin`, `llvm_linked`, `native_version`,
+`native_revision`, `mlir_swage_file`, `backends`, `cache_dir`, `cache`,
+`compile_on_miss`, and `artifact`.
 
 - `swage_file` and `mlir_swage_file` name the package file and the native
   extension that were imported.
@@ -345,6 +392,8 @@ raising. Its keys, in order, are `swage`, `revision`, `swage_file`,
   linked against.
 - `cache_dir`, `cache`, and `compile_on_miss` describe the persistent
   cache as the reporting process would use it.
+- `artifact` names the directory that `SWAGE_ARTIFACT_DIR` selects for the
+  segmented calls, or the reason it is rejected.
 
 [Runtime and Environment](runtime-environment.md#environment-report)
 defines every field.

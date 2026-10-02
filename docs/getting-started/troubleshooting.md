@@ -188,6 +188,35 @@ enqueued in these cases:
 [Segmented Calls](../user-guide/segmented-calls.md) lists every refusal and
 the reason for it.
 
+## An artifact directory is rejected
+
+With `SWAGE_ARTIFACT_DIR` set, the two segmented calls run from that
+directory and never compile in its place. The environment report shows
+what a call would raise:
+
+```text
+artifact: rejected (<reason>)
+```
+
+The reason names the directory. These are the common ones:
+
+- A file or the directory `is writable by its group or by other users`. A
+  copy made under a umask of `002` sets that permission. Remove it with
+  `chmod -R go-w` on the directory.
+- A file `does not match its manifest`. The copy is incomplete or a file
+  was changed; copy the artifact again.
+- The artifact `holds kernels for` another target than `the current device
+  needs`. Write an artifact for the processor that `python -m swage.env`
+  prints as `target` on the serving host.
+- The artifact `was compiled from another` program than this `swage` runs.
+  The artifact and the installed package come from different source
+  revisions; write the artifact again with the `swage` that loads it.
+- The runtime library `was built for` another machine. An artifact runs
+  only on hosts of the machine its runtime library was built for.
+
+[Running Without the Compiler](../user-guide/deployment.md#refusals) lists
+every refusal.
+
 ## The build uses the wrong LLVM/MLIR
 
 Compare `cmake/llvm-version.txt` with the selected install. `python -m
