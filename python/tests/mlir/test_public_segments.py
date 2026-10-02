@@ -165,7 +165,8 @@ def test_public_package_exports_exactly_the_two_segmented_calls():
         "segment_softmax",
     ]
     public = {name for name in vars(swage) if not name.startswith("_")}
-    assert public - {"env", "language"} == set(swage.__all__)
+    # The submodules that another test of the run may have imported.
+    assert public - {"compile", "env", "language"} == set(swage.__all__)
 
 
 @pytest.mark.parametrize("kind", ["mean", "min", "SUM", "", None, 0, b"sum"])

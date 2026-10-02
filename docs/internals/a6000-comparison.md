@@ -4,53 +4,83 @@
 
 This study asks a narrow question: **when segment lengths vary at runtime, is
 it useful to derive different fixed GPU tasks from one segment-local
-program?** On an NVIDIA RTX A6000, the answer is yes, but a matched Triton
-scheduler shows that task derivation, rather than an inherent code-generation
-advantage, explains most of the result. Swage remains competitive while
-making that scheduling model part of its compiler architecture.
+program?** Two records on one NVIDIA RTX A6000 answer it, and the answer has
+three parts:
+
+- Deriving tasks helps on the rows of short segments and on the one row
+  with segments above 4,096 elements.
+- It does not help on the four rows that mix short segments with segments
+  of up to 4,096 elements. There a looped Triton kernel with no planner is
+  faster than the Swage mixed policy.
+- A planned Triton scheduler that receives the same task lists matches or
+  beats the mixed policy on most rows, so the gain comes from the schedule
+  and not from Swage's code generation.
 
 !!! warning "Exploratory evidence, not a release claim"
 
-    This page reports one local campaign from clean commit `80f222d` on one
-    GPU. It is not a trusted GPU qualification, continuously enforced gate,
-    or public performance contract. Segmented execution is private
-    contributor machinery, not public Swage API. The complete local record is
-    [`benchmarks/results/swage-triton-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/swage-triton-a6000-sm86.json).
-    Every timing below describes the PTX of that commit. Kernels generated
-    now also pass through an LLVM pass pipeline before PTX emission, which
-    this campaign did not measure.
+    This page reports two local campaigns on one GPU. Neither is a trusted
+    GPU qualification, a continuously enforced gate, or a public performance
+    contract. Both time the private prepared launch with one frozen layout
+    per row, not the public `swage.segment_reduce` call, which prepares on
+    every call. With a new offsets layout on every call the private path is
+    slower than `torch.segment_reduce`; [Benchmarks](benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
+    reports that regime.
 
-## Executive result
+## The two records
 
-Against a swept **fixed-shape** Triton kernel, Swage is faster on six of seven
-segmented distributions. The largest graph-replay differences are 6.60x on
-`one-outlier`, 2.58x on `many-tiny`, and 1.90x on `few-huge`.
+| Record | Revision | Processes | Rows | Triton baselines | Kernels |
+|---|---|---|---|---|---|
+| [`swage-triton-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/swage-triton-a6000-sm86.json) | `80f222d` | 1 | 7 | One block per segment, and a matched planned scheduler whose longer tasks read one block | Before the LLVM pass pipeline and the device-side bounds |
+| [`segmented-sum-a6000-sm86-453c56e`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md) | `453c56e` | 5 | 9 | The same two, a looped kernel, and a planned scheduler whose longer tasks loop | The ones generated now |
 
-Against a **matched heterogeneous Triton scheduler** with the same 32-element
-cutoff, packed four-warp programs, and separate CTA tasks, the result narrows:
+The older record is what it is: a comparison with a Triton kernel that
+provisions one block for the longest segment, and with a matched planned
+scheduler, at an older revision. Its tables are kept below unchanged. The
+newer record repeats the comparison at the current revision with baselines
+that do not provision for the longest segment. Where the two disagree, the
+newer one describes the current code and the stronger baselines.
+
+Under graph replay at 32,768 segments, the newer record says:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-statements.inc"
+
+Each "best" is chosen after the run from a sweep, separately for every row,
+so the Triton figures are optimistic for a user who must pick one
+configuration in advance.
+
+## The `80f222d` record: one block per segment and matched planned Triton
+
+Against a swept fixed-shape Triton kernel, which reads one block per
+segment, Swage is faster on six of seven segmented distributions in this
+record. The largest graph-replay differences are 6.60x on `one-outlier`,
+2.58x on `many-tiny`, and 1.90x on `few-huge`. Those gaps measure the cost
+of provisioning a block for the longest segment. They are not a comparison
+with Triton in general.
+
+Against a matched heterogeneous Triton scheduler with the same 32-element
+cutoff, packed four-warp programs, and separate CTA tasks, the result
+narrows:
 
 - Swage is 16.2% faster on `log-normal`;
 - Swage and matched Triton are within 1.3% on `uniform`, `bimodal`,
   `zipf-like`, `few-huge`, and `one-outlier`; and
 - matched Triton is 8.3% faster on `many-tiny` under graph replay.
 
-This is the central finding: **heterogeneous task derivation matters, and both
-compiler stacks benefit when given it**. Swage's interesting property is that
-one semantic segment program already lowers through this planning model; the
-result is not evidence that Triton cannot express an equivalent schedule.
-
 The fixed vector-add control is also close under graph replay, with Swage
 between parity and 7.0% behind Triton across the sweep. Host-visible calls
 still favor Triton because Swage's Python launch path costs more.
 
-## What is being compared
+Every timing in this section describes the PTX of commit `80f222d`, one
+process, and all-one values.
+
+### What is being compared
 
 All segmented implementations compute an identity f32 sum from one packed
 values array and an i32 offsets array. Compilation, classification,
 allocation, and module loading happen before timing. Every output is checked
 exactly against the known all-one result before samples are collected.
 
-### Swage
+#### Swage
 
 The same semantic segmented-sum module is classified from runtime offsets:
 
@@ -64,7 +94,7 @@ CTA tasks follow at one segment per block. See [Task Planning](planning.md),
 [Task Execution](task-execution.md), and [Split Execution](split-execution.md)
 for the exact private contracts.
 
-### Triton
+#### Triton
 
 The campaign includes two Triton baselines.
 
@@ -95,14 +125,14 @@ compiler automation. It demonstrates that Triton can express the scheduling
 strategy and separates the value of task derivation from the value of a
 particular kernel language.
 
-### PyTorch
+#### PyTorch
 
 `torch.segment_reduce(values, "sum", offsets=offsets)` is the framework
 baseline. PyTorch 2.12 does not expose an `out=` argument for this operation,
 so its measured Python call includes output allocation. Batched CUDA events
 primarily expose device work but do not erase that semantic difference.
 
-## Test distributions
+### Test distributions
 
 Each distribution contains 32,768 segments generated with seed 7. Total work
 and skew vary substantially.
@@ -121,7 +151,7 @@ The `uniform` case has over 15x more values than `few-huge`. Absolute latency
 therefore should not be compared across rows as if every distribution had the
 same amount of work. Ratios within a row are the meaningful comparison.
 
-## Segmented-sum results
+### Segmented-sum results
 
 The primary table reports graph-replay median microseconds per semantic
 launch. Each graph contains 32 launches and is replayed 100 times. Graph
@@ -140,18 +170,21 @@ better. Each column selects its best measured policy or configuration.
 
 A ratio below 1 favors Swage. Comparing Swage only with fixed Triton makes the
 planning result look like a language result. Planned Triton closes nearly all
-of that gap. The remaining `log-normal` difference is the strongest kernel
-result in this campaign; the other mixed distributions are effectively
-parity under graph replay.
+of that gap. In this record `log-normal` is the one row where Swage is ahead
+of matched planned Triton by more than 2 percent, and the other mixed
+distributions are effectively parity under graph replay. The matched
+baseline is not the fastest Triton on that row. The `453c56e` record below
+times a looped kernel and a planned scheduler whose longer tasks loop, and
+both are faster than Swage on `log-normal`.
 
 Batched CUDA events retain launcher submission while amortizing it over 32
 calls. They show the same broad picture, with Swage at 0.840x planned Triton
 on `log-normal`, between 0.967x and 1.004x on four other distributions,
 1.072x on `many-tiny`, and 0.918x on `one-outlier`.
 
-## Why the mixed policy helps
+### Why the mixed policy helps
 
-### It avoids maximum-length provisioning
+#### It avoids maximum-length provisioning
 
 For the one-program Triton baseline, a 4096-element maximum requires a
 4096-lane logical block even when almost every segment contains only a few
@@ -164,7 +197,11 @@ gets CTA work while the remaining segments get warp work. Runtime segment
 identity stays in SSA values and task IDs rather than types, preserving the
 semantic program.
 
-### It amortizes short-segment scheduling
+A Triton kernel that loops over its segment in fixed blocks avoids the same
+provisioning without a planner. This record has no such baseline. The
+`453c56e` record measures it.
+
+#### It amortizes short-segment scheduling
 
 The fused mixed kernel places four independent short segments into four warp
 slots of one 128-thread block. It therefore avoids launching one full CTA per
@@ -177,14 +214,14 @@ segment. Packing four tasks per planned Triton program changes graph time from
 21.850 to 7.776 microseconds and slightly beats Swage's 8.480 microseconds.
 This isolates packed task organization as the source of the large gain.
 
-### It retains a sensible uniform path
+#### It retains a sensible uniform path
 
 On uniformly distributed lengths through 4096, pure CTA is Swage's best
 policy and is within 0.5% of the best Triton result. Classification does not
 create a win when the workload has little exploitable shape separation, but
 the selected homogeneous policy does not materially lose either.
 
-## The vector-add control
+### The vector-add control
 
 Vector add uses the public fixed-block Swage path and direct equivalents in
 Triton and PyTorch. Triton blocks 128, 256, 512, and 1024 are swept. These are
@@ -205,7 +242,7 @@ separate Swage loss: batched event timing is roughly 2x slower than Triton for
 small vectors. Graph replay shows that this is primarily dispatch overhead,
 not a 2x device-kernel deficit.
 
-## Host-visible call latency
+### Host-visible call latency
 
 Synchronized wall-clock timing includes Python dispatch and synchronization.
 Compared with matched planned Triton, mixed Swage measures 15.529 versus
@@ -219,25 +256,79 @@ calls measure about 14 microseconds for Swage, 9 for Triton, and 6 for
 PyTorch. Device graph parity therefore should not be presented as dispatch
 parity.
 
-## What this result supports
+## The `453c56e` record: looped and looping planned Triton
 
-The evidence supports discussing these propositions:
+The newer record was made on 2026-10-02 at revision `453c56e` from a clean
+tree, with five independent processes, 32,768 segments, seed 7, all-one
+values, and nine distributions: the seven above, `alternating-empty`, and
+`power-law`, whose longest segment exceeds 4,096 elements and takes the
+split path. Its [summary page](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md)
+holds every table, the method, and the machine conditions. The machine was
+not quiet: a desktop session ran on the same GPU and the CPU frequency
+governor was `powersave`. Every number in this section is generated from
+the committed summaries by `benchmarks/campaign_tables.py`.
 
-1. **Runtime shape information selects useful fixed GPU work shapes.** One
-   semantic operation need not imply one physical tile for every segment.
-2. **The scheduler explains most of the original win.** Giving Triton matched
-   task lists changes six large fixed-baseline gaps into near parity.
-3. **Packing matters for tiny tasks.** Four tasks per program turns Triton's
-   `many-tiny` result from a large loss into a modest win.
-4. **Swage remains a credible compiler architecture result.** It reaches
-   matched hand-written performance while preserving one segment-local
-   semantic program and automatic task derivation.
-5. **The current result is specialized.** It covers one identity f32 sum on
-   one NVIDIA architecture through private APIs.
+A comparator cell gives the median time of the comparator in microseconds
+under graph replay and, in parentheses, the median ratio of the Swage mixed
+policy to it. A ratio above one means Swage took longer:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-overview.inc"
+
+The Swage policies and the PyTorch baselines of the same run:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-swage.inc"
+
+Against the looped Triton kernel, with the range of the ratio across the
+five processes and the number of the 15 configurations that are faster than
+the Swage mixed policy:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-looped.inc"
+
+### What changed against the older record
+
+- `log-normal` is no longer a Swage win. The mixed policy is still ahead
+  of the matched planned baseline there, which reads one block of 4,096
+  elements per longer task. A looped kernel and a planned scheduler whose
+  longer tasks loop are both faster than the mixed policy on that row.
+- The looped kernel, which has no planner, is faster than the mixed policy
+  on four rows: `log-normal`, `bimodal`, `zipf-like`, and `few-huge`. These
+  rows mix short segments with segments of up to 4,096 elements. The older
+  record has no such baseline.
+- Matched planned Triton is ahead of the mixed policy on the three rows of
+  packed short segments, and the two are equal on four rows.
+- The mixed policy keeps a clear lead over a looped kernel on the rows of
+  short segments and on `power-law`, the one row that takes the split path.
+  On `power-law` it is also ahead of the looping planned scheduler.
+- The comparison now has five processes and ranges, where the older record
+  has one process.
+
+## What the two records support
+
+The evidence supports these propositions:
+
+1. **Runtime shape information selects useful fixed GPU work shapes.**
+   Packing short segments and splitting very long ones beat a per-segment
+   kernel, with one block or with a loop, on the rows where such segments
+   dominate.
+2. **The schedule explains the result, not the code generator.** A planned
+   Triton scheduler that receives the same task lists matches or beats the
+   Swage mixed policy on most rows.
+3. **A per-segment loop is the better shape for CTA-sized segments.** A
+   looped Triton kernel is faster than the mixed policy on the four rows
+   that mix short segments with segments of up to 4,096 elements, so the
+   CTA task of the mixed policy is its weak part.
+4. **Swage derives the schedule from one segment-local program.** It needs
+   no hand-written orchestration. In these records that does not buy speed
+   over hand-written Triton.
+5. **The result is specialized.** It covers one identity f32 sum on one
+   NVIDIA architecture through private prepared launches with a frozen
+   layout.
 
 It does **not** establish that Swage is generally faster than Triton, that
-Triton cannot express a comparable scheduler, or that public Swage users can
-run segmented kernels today.
+Triton cannot express a comparable scheduler, or that the public
+`swage.segment_reduce` call has these timings. The public call prepares on
+every call, and [Benchmarks](benchmarks.md#where-swage-loses) reports what
+that preparation costs.
 
 ## Presenting the result
 
@@ -249,9 +340,11 @@ A technical walkthrough can follow five steps:
    thread or block IDs in semantic Swage IR.
 3. **Task derivation:** classify the same offsets into warp, CTA, and split
    descriptors; then show the four-warp-slot fused block.
-4. **Evidence:** first show the fixed Triton gaps, then show how matched
-   planned Triton closes them. Use `log-normal` as Swage's remaining win,
-   `many-tiny` as Triton's packed-task win, and `uniform` as the control.
+4. **Evidence:** first show the fixed Triton gaps of the older record, then
+   the `453c56e` table. Matched planned Triton closes the gaps, a looped
+   kernel is faster than Swage on four rows, and Swage keeps a lead over the
+   looped kernel only on the rows of short segments and on `power-law`. Use
+   `uniform` as the control.
 5. **Open question:** test whether Swage's compiler representation makes this
    scheduling strategy easier to generalize to new operations and device-side
    planning than equivalent hand-written Triton orchestration.
@@ -268,43 +361,33 @@ Open questions for discussion:
 ## Reproduce the campaign
 
 Triton is an optional benchmark-time import and is not a Swage dependency.
-The committed record is the output of one process of
-`benchmarks/benchmark_triton_comparison.py`. It records 25 warmups and 100
-samples and holds both the segmented-sum and the vector-add results. A rerun
-must not write into `benchmarks/results/`: the committed records are
-evidence and are not replaced by a rerun.
+The `453c56e` record was produced by the commands below, with the native
+build, CUDA-enabled PyTorch, and Triton available, from a clean worktree,
+and with `OUT` set to a new directory outside the checkout. The last command
+is the frozen comparison of this page; the six before it are the
+fresh-offsets runs that [Benchmarks](benchmarks.md) reports:
 
-With the native build, CUDA-enabled PyTorch, and Triton available, rerun the
-same configuration in independent processes through the process driver,
-with an output directory outside the checkout:
-
-```bash
-OUT="$(mktemp -d)"
-PYTHONPATH="$PWD/python:$PWD/build/python_packages" \
-python benchmarks/benchmark_processes.py \
-  --processes 5 \
-  --output-dir "$OUT/swage-triton" \
-  -- benchmarks/benchmark_triton_comparison.py \
-  --suite all \
-  --warmups 25 \
-  --samples 100
-```
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-reproduce.inc"
 
 The driver passes `--output` to each process itself, writes one record per
 process, and summarizes the per-process medians.
-[Benchmarks](benchmarks.md#independent-processes) describes the summary, and
-the rest of its harness section describes the options, the correctness
-check, and the provenance that the harness records today. The harness has
-changed since the committed record, so a rerun is a new measurement and not
-a reproduction of that record bit for bit.
+[Benchmarks](benchmarks.md#independent-processes) describes the summary. A
+rerun is a new measurement: it must not write into `benchmarks/results/`,
+and the committed records are not replaced by it.
 
-For publishable evidence, run from a clean revision on an idle or exclusively
-allocated GPU, retain the complete raw JSON of every process, and report the
-clock and power policy. A matched one-launch fused Triton variant remains
-future work; the current planned Triton path uses separate packed-warp and
-CTA launches.
+The `80f222d` record is the output of one process of
+`benchmarks/benchmark_triton_comparison.py` at that commit. It records 25
+warmups and 100 samples and holds both the segmented-sum and the vector-add
+results. The harness has changed since, so it cannot be reproduced bit for
+bit from the current tree.
+
+For publishable evidence, run on an idle or exclusively allocated GPU,
+retain the complete raw JSON of every process, and report the clock and
+power policy. A matched one-launch fused Triton variant remains future
+work; the current planned Triton paths use separate packed-warp and CTA
+launches.
 
 This is the last page of the internals section. Continue with the
 [ADR Index](../decisions/index.md) for the decisions behind each boundary.
-[Benchmarks](benchmarks.md) holds the earlier RTX 5090 recorded snapshot, and
+[Benchmarks](benchmarks.md) holds the other records, and
 [Verification](verification.md) holds the exact status boundaries.

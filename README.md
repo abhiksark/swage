@@ -18,9 +18,10 @@ Segments are usable from Python through two calls with fixed programs:
 `swage.segment_reduce` computes a sum or a maximum per segment, and
 `swage.segment_softmax` computes a softmax within each segment, over
 rank-one f32 values and int32 offsets on one CUDA device. Both are newer
-than the released wheel and need a native build. There is no public segment
-syntax: the kernel language compiles and launches one kernel, a fixed-block
-vector add.
+than the released wheel. They need a native build, or an artifact directory
+that a native build wrote ahead of time. There is no public segment syntax:
+the kernel language compiles and launches one kernel, a fixed-block vector
+add.
 
 ## Current release boundary
 
@@ -45,9 +46,20 @@ release, except for the items marked as completed after it.
   the current CUDA device, and nothing else: no other dtype, kind, or rank,
   and no gradient. A call validates and classifies its offsets on the host
   every time, so with offsets that change on every call it is slower than
-  `torch.segment_reduce`; no committed record measures that yet.
+  `torch.segment_reduce`. A committed record measures the private
+  preparation that the call repeats, not the call itself.
   [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
   and the cost.
+- Not part of `v0.5.1`, completed after that release: ahead-of-time
+  artifacts for the two segmented calls. On a host with the native build,
+  `python -m swage.compile --target <processor> --output <directory>`
+  writes the kernels of both calls, a small runtime library, and a manifest,
+  without a GPU. A process that sets `SWAGE_ARTIFACT_DIR` to the directory
+  runs the two calls from it without `mlir_swage` and with no LLVM in the
+  process. It still needs PyTorch and `numpy`, the artifact serves no other
+  kernel, and the runtime library has been built for Linux x86-64 only.
+  [Running Without the Compiler](docs/user-guide/deployment.md) states what
+  an artifact holds, when it is refused, and what it does not deliver.
 
 ### Private qualification
 
@@ -76,7 +88,8 @@ Each item of evidence was recorded on one NVIDIA RTX A6000 (`sm_86`):
   [ADR-0016](docs/adr/ADR-0016-fused-mixed-policy-schedule.md) before the
   passing run. Both ratios describe the PTX of the revision they were
   measured at. Kernels generated now also pass through an LLVM pass pipeline
-  before PTX emission, and no committed record measures them.
+  before PTX emission. The gate has not been rerun on them; a later
+  committed record measures them with another harness.
 - Split correctness: exact and nontrivial f32 split sums match PyTorch and
   the CPU oracle. Split execution is a correctness result and does not retune
   the frozen benchmark.
@@ -139,7 +152,11 @@ one Python version and carries the plain `linux_x86_64` tag; only a CPython
 
 The published wheel remains useful for package import, source capture, and
 diagnostics, but does not independently emit MLIR, execute kernels, or run a
-segmented call.
+segmented call. The pure package of the current source tree runs the two
+segmented calls from an artifact directory that
+`python -m swage.compile` wrote on a host with the native build. That needs
+PyTorch, `numpy`, and a CUDA GPU, and no `mlir_swage`;
+[Running Without the Compiler](docs/user-guide/deployment.md) describes it.
 
 Three committed examples use the native build.
 `examples/emit_fixed_vector_add.py` emits MLIR with the native build alone and

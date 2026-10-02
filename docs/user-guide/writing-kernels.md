@@ -2,10 +2,11 @@
 
 # Writing Kernels
 
-[Segmented Calls](segmented-calls.md) ran two fixed programs over segments.
-This page leaves segments aside: the public kernel language has no segment
-syntax, and the one kernel that can be written and launched is a
-fixed-block vector add.
+[Segmented Calls](segmented-calls.md) ran two fixed programs over segments,
+and [Running Without the Compiler](deployment.md) served them from kernels
+that were compiled ahead of time. This page leaves segments aside: the
+public kernel language has no segment syntax, and the one kernel that can
+be written and launched is a fixed-block vector add.
 
 A Swage kernel is ordinary-looking Python that is captured, never
 executed. This page explains what each line of the canonical kernel

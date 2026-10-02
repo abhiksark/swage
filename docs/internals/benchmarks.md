@@ -4,26 +4,47 @@
 
 !!! warning "Recorded evidence"
 
-    This page reports recorded measurements from one benchmark campaign
-    on one machine. It is not a continuously enforced gate and not a
-    public performance contract.
+    This page reports recorded measurements from three campaigns, each on
+    one machine. None is a continuously enforced gate, and none is a public
+    performance contract.
 
-## Environment and provenance
+The page reads in the order the records were made. Each section says which
+record it reports, and the last record is the only one that describes the
+kernels the compiler generates now.
 
-Unless a section names another campaign, numbers below were recorded on
+| Record | Date | GPU | What it measures |
+|---|---|---|---|
+| [`perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json) | 2026-08-27 | RTX 5090 (`sm_120`) | One frozen layout per row against `torch.segment_reduce` and a Triton kernel that reads one block per segment; dispatch cost; vector add |
+| [`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json) | 2026-09-02 | RTX A6000 (`sm_86`) | The predeclared persistent gate against static mixed execution |
+| [`segmented-sum-a6000-sm86-453c56e`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md) | 2026-10-02 | RTX A6000 (`sm_86`) | A new offsets layout on every call, and one frozen layout per row against looped and planned Triton, five processes each |
+
+The first two records were made before kernels passed through the LLVM pass
+pipeline and with earlier revisions of the harnesses. The third was made at
+revision `453c56e` with the harnesses that
+[Harness methods](#harness-methods) describes. One more record, the first
+Swage and Triton comparison on the A6000 at revision `80f222d`, is reported
+on the [A6000 comparison study](a6000-comparison.md) beside the third.
+
+## The RTX 5090 snapshot
+
+The numbers in this section, in [Segmented sum under graph timing](#segmented-sum-under-graph-timing),
+and in [Dispatch cost](#dispatch-cost) were recorded on
 2026-08-27 on an NVIDIA GeForce RTX 5090 (`sm_120`), driver 580.173.02,
 CUDA 13.0, PyTorch 2.13.0+cu130, and Triton 3.7.1, on a co-tenant GPU. The
 committed snapshot
 [`benchmarks/results/perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json)
 records the aggregated medians, quartiles, and per-number provenance.
 Each value is the median of three independent process runs unless its
-provenance field states otherwise. The Triton baseline is the per-segment
-kernel at the best of the swept and autotuned configurations.
+provenance field states otherwise. The Triton baseline of this snapshot is a
+per-segment kernel that reads one block per segment, at the best of the
+swept and autotuned configurations. The snapshot holds no looped and no
+planned Triton baseline and no measurement with changing offsets.
 
-Every timing on this page describes the PTX that the source revision of its
-record generated. Those revisions emitted PTX without the LLVM pass pipeline
-that kernels go through now (see [Compiler Pipeline](compiler-pipeline.md)),
-so no number here is a measurement of currently generated code.
+Every timing describes the PTX that the source revision of its record
+generated. The revisions of this snapshot and of the persistent gate emitted
+PTX without the LLVM pass pipeline that kernels go through now (see
+[Compiler Pipeline](compiler-pipeline.md)), so their numbers do not measure
+currently generated code. The `453c56e` record does.
 
 ## Timing methods
 
@@ -44,13 +65,211 @@ Three timing methods separate host dispatch cost from kernel quality:
 
 *How each timing method sees dispatch and kernel time. [Open the full-size figure](../assets/figures/timing-methods.svg).*
 
+## Segmented sum under graph timing
+
+This section reports the RTX 5090 snapshot. Under graph replay, with one
+frozen layout per row, the best Swage policy per distribution is faster than
+`torch.segment_reduce` on all seven distributions of the snapshot. It is
+faster than the snapshot's Triton baseline on six of seven, and the
+uniform-4k row is parity, nominally Triton (2.5 versus Swage's 2.6
+microseconds).
+
+That Triton baseline is a per-segment kernel that reads one block per
+segment (`BLOCK=256`, `num_warps=8`, raw-log implementation name
+`triton-naive`), and the campaign's raw log is not committed. Such a kernel
+provisions its block for the longest segment, which later baselines avoid.
+The [A6000 comparison study](a6000-comparison.md) adds a matched planned
+Triton scheduler, and the
+[`453c56e` record](#fresh-offsets-and-the-frozen-comparison-at-453c56e)
+below adds a looped Triton kernel, which is faster than the Swage mixed
+policy on four of its nine rows. Read the six-of-seven count as a comparison
+with a one-block-per-segment kernel, not with hand-written Triton in
+general.
+
+The bimodal and few-huge Swage bars time one captured mixed sequence, the
+planner's fused warp launch plus the 512-thread split kernels; their
+provenance fields in the snapshot record the single-sequence caveat.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Grouped bars of graph-replay medians for Swage, Triton, and torch across seven distributions](../assets/figures/segsum-graph-comparison.svg)
+
+</div>
+
+*Segmented sum graph-replay medians per distribution in the RTX 5090 snapshot; lower is better. [Open the full-size figure](../assets/figures/segsum-graph-comparison.svg).*
+
+## Dispatch cost
+
+This section also reports the RTX 5090 snapshot. The campaign reduced warm
+per-launch dispatch from 7714.5 to 36.1
+microseconds by caching the compiler identity and skipping emission on
+cache hits, then to 24.7 microseconds through the compiled nanobind
+launcher. Triton's compiled-C launcher measures 20.4 microseconds and
+torch dispatch about 14, so pure dispatch narrowed but was not won.
+Cold start went the other way: the first vector-add launch in a fresh
+process took 144 milliseconds for Swage against 1116 milliseconds for
+Triton's autotuning stack.
+
+<div class="doc-figure" tabindex="0" markdown="1">
+
+![Log-scale bars following warm dispatch cost across the campaign stages](../assets/figures/dispatch-ladder.svg)
+
+</div>
+
+*The warm dispatch ladder and the cold-start comparison. [Open the full-size figure](../assets/figures/dispatch-ladder.svg).*
+
+## Persistent tail-skew gate
+
+A separate 2026-09-02 campaign on the NVIDIA RTX A6000 (`sm_86`) evaluated
+the frozen gate in
+[ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md). Its 32,768
+segments contain 32,767 seeded lengths in `[1, 32]` and one final
+16,777,216-element outlier. Both policies consume the same host-materialized
+warp, partial, and merge plan. Timed static execution contains fused direct,
+split partial, and split merge kernels; timed persistent execution contains
+its counter reset and one 168-block resident kernel.
+
+Adversarial testing invalidated the original 115.712-microsecond run: a final
+publisher could observe completion before another CTA's scratch store was
+globally visible. Compute Sanitizer then invalidated the first fenced run by
+finding a shared queue-claim race at the CTA-to-partial phase handoff. Both raw
+records remain in the repository, but neither is qualification evidence.
+
+With publication fences and the phase barrier, the clean persistent median was
+117.520 microseconds and static mixed measured 118.784 microseconds.
+Persistent was 1.06% faster, but the 0.9894 ratio failed the predeclared
+`persistent <= 0.95 * static_mixed` gate. Persistent qualification therefore
+remains incomplete: the gate failed by a small margin, and the run is not a
+performance success.
+The canonical
+[raw record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json)
+and all earlier clean runs preserve every sample and source revision. Runs
+that predate either synchronization fix are explicitly excluded from semantic
+qualification.
+
+## Fresh offsets and the frozen comparison at `453c56e`
+
+The newest record was made on 2026-10-02 on one NVIDIA RTX A6000 (`sm_86`)
+at revision `453c56e`, from a clean tree, with five independent processes
+per run. It holds two measurements that the older records lack: a call that
+sees a new offsets layout every time, and a frozen-layout comparison with
+looped and planned Triton baselines on nine distributions. Its
+[summary page](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md)
+holds every table, the machine conditions, and the commands. Every number
+in this section and in [Where Swage loses](#where-swage-loses) is generated
+from the committed summaries by `benchmarks/campaign_tables.py`.
+
+The machine was not quiet. A desktop session ran on the same GPU, the CPU
+frequency governor was `powersave`, and one of the 35 processes started
+beside another compute process. The summary page states these conditions
+from the records.
+
+### A new offsets layout on every call
+
+`benchmark_fresh_offsets.py` times every candidate from offsets in to result
+out on a layout that no earlier call used, at 2,048, 8,192, and 32,768
+segments. The Swage candidate is the private preparation with schedule
+selection disabled, followed by the mixed launch. The public
+`swage.segment_reduce` call is not a candidate.
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-call-statement.inc"
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-looped-statement.inc"
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-planned-statement.inc"
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-pad-statement.inc"
+
+The range of each ratio over the nine distributions:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-ranges.inc"
+
+At 32,768 segments, in microseconds, with the median ratio and its range
+across the five processes in brackets. The preparation column is the part
+of the `swage_mixed` sample spent in the private preparation:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-32768.inc"
+
+Triton in the same regime at 32,768 segments. "Best planned" is taken over
+the one-block and the looping planned configurations together, with the
+partition timed, and the fifth column counts the looped configurations at
+or below torch:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-triton-32768.inc"
+
+### One frozen layout, repeated launches
+
+`benchmark_triton_comparison.py` prepares one layout per row once and times
+repeated launches, at 32,768 segments with all-one values. Under graph
+replay:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-statements.inc"
+
+A comparator cell below gives the median time of the comparator in
+microseconds and, in parentheses, the median ratio of `swage_mixed` to it.
+Each Triton column is the best configuration of a sweep, chosen after the
+run and separately for every row:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-overview.inc"
+
+Against the looped Triton kernel, with the range of the ratio across
+processes and the number of the 15 configurations that are faster than
+`swage_mixed`:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-looped.inc"
+
+### What changed against the older records
+
+- The regime with changing offsets is measured for the first time. The
+  older records time only prepared launches of one layout.
+- The Triton baselines are stronger. The RTX 5090 snapshot and the first
+  A6000 comparison used a kernel that reads one block per segment; this
+  record adds a looped kernel and a planned scheduler whose longer tasks
+  loop.
+- The kernels are the ones generated now, after the LLVM pass pipeline and
+  the device-side bounds were added.
+- Every figure is the median of five processes with its range, where the
+  older records hold one process or three.
+
+The record does not support a statement about another GPU, another seed, or
+a quiet machine, and its Triton columns are optimistic for Triton because
+each is chosen after the run. The summary page lists every limit.
+
+## Where Swage loses
+
+The losses are listed by record, in the order the records were made.
+
+In the RTX 5090 snapshot:
+
+- Pure warm dispatch stays with Triton (20.4 versus 24.7 microseconds)
+  and torch (about 14).
+- uniform-4k segmented sum is parity, nominally Triton (2.5 versus
+  2.6 microseconds).
+- Vector add under graph timing shows two stable Swage losses to
+  Triton: n = 2^18 (1.38 versus 1.19 microseconds, about 16 percent)
+  and n = 2^20 (3.17 versus 2.49, about 27 percent); torch also leads
+  Swage at both sizes. The other measured sizes are within a few
+  percent, including an 8 percent Swage edge at n = 2^16 that stays
+  below the snapshot's win bar of at least 10 percent over the best
+  baseline. The snapshot records the full sweep; Swage claims no
+  vector-add win.
+
+On the RTX A6000 on 2026-09-02, the persistent queue missed its predeclared
+gate, as [Persistent tail-skew gate](#persistent-tail-skew-gate) states.
+
+On the RTX A6000 at `453c56e`, from the record above:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-losses.inc"
+
 ## Harness methods
 
 The scripts under `benchmarks/` are research harnesses, not CI gates. This
 section states what they measure and what they write into a record. It
-describes the harnesses as they are now. The recorded numbers on this page
-come from earlier revisions of the harnesses, so a committed record carries
-one of the fields below only if the harness wrote it at the time.
+describes the harnesses as they are now. The `453c56e` record was written by
+these harnesses. The older records come from earlier revisions, so they
+carry one of the fields below only if the harness wrote it at the time.
 
 ### What each harness measures
 
@@ -70,8 +289,7 @@ The fresh-offsets harness and the comparison harness time these candidates:
   record says so. The comparison times the warp, CTA, and mixed policies.
   The public `swage.segment_reduce` prepares and launches the mixed policy
   on every call, with automatic schedule selection, which the fresh-offsets
-  candidate disables. No harness times the public call itself, and no
-  committed record holds a fresh-offsets result.
+  candidate disables. No harness times the public call itself.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.
@@ -358,97 +576,9 @@ A gate record also describes its samples without changing the decision:
 - `timer` gives the observed tick, each median in ticks, and the range of
   the gate ratio that half a tick on each median allows.
 
-## Persistent tail-skew gate
-
-A separate 2026-09-02 campaign on the NVIDIA RTX A6000 (`sm_86`) evaluated
-the frozen gate in
-[ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md). Its 32,768
-segments contain 32,767 seeded lengths in `[1, 32]` and one final
-16,777,216-element outlier. Both policies consume the same host-materialized
-warp, partial, and merge plan. Timed static execution contains fused direct,
-split partial, and split merge kernels; timed persistent execution contains
-its counter reset and one 168-block resident kernel.
-
-Adversarial testing invalidated the original 115.712-microsecond run: a final
-publisher could observe completion before another CTA's scratch store was
-globally visible. Compute Sanitizer then invalidated the first fenced run by
-finding a shared queue-claim race at the CTA-to-partial phase handoff. Both raw
-records remain in the repository, but neither is qualification evidence.
-
-With publication fences and the phase barrier, the clean persistent median was
-117.520 microseconds and static mixed measured 118.784 microseconds.
-Persistent was 1.06% faster, but the 0.9894 ratio failed the predeclared
-`persistent <= 0.95 * static_mixed` gate. Persistent qualification therefore
-remains incomplete: the gate failed by a small margin, and the run is not a
-performance success.
-The canonical
-[raw record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json)
-and all earlier clean runs preserve every sample and source revision. Runs
-that predate either synchronization fix are explicitly excluded from semantic
-qualification.
-
-## Segmented sum under graph timing
-
-Under graph replay, the best Swage policy per distribution beats
-`torch.segment_reduce` on all seven distributions and the Triton baseline on
-six of seven. The snapshot records that baseline as a per-segment kernel
-(`BLOCK=256`, `num_warps=8`, raw-log implementation name `triton-naive`), and
-the campaign's raw log is not committed. The later
-[A6000 comparison study](a6000-comparison.md), on a different GPU and
-distribution set, adds a matched Triton scheduler that receives the same
-heterogeneous tasks. There Swage is 16.2% faster on one distribution, within
-1.3% on five, and matched Triton is 8.3% faster on one. The uniform-4k
-row is parity, nominally
-Triton (2.5 versus Swage's 2.6 microseconds). The bimodal and few-huge Swage
-bars time one captured mixed sequence, the planner's fused warp launch
-plus the 512-thread split kernels; their provenance fields in the
-snapshot record the single-sequence caveat.
-
-<div class="doc-figure" tabindex="0" markdown="1">
-
-![Grouped bars of graph-replay medians for Swage, Triton, and torch across seven distributions](../assets/figures/segsum-graph-comparison.svg)
-
-</div>
-
-*Segmented sum graph-replay medians per distribution; lower is better. [Open the full-size figure](../assets/figures/segsum-graph-comparison.svg).*
-
-## Dispatch cost
-
-The campaign reduced warm per-launch dispatch from 7714.5 to 36.1
-microseconds by caching the compiler identity and skipping emission on
-cache hits, then to 24.7 microseconds through the compiled nanobind
-launcher. Triton's compiled-C launcher measures 20.4 microseconds and
-torch dispatch about 14, so pure dispatch narrowed but was not won.
-Cold start went the other way: the first vector-add launch in a fresh
-process took 144 milliseconds for Swage against 1116 milliseconds for
-Triton's autotuning stack.
-
-<div class="doc-figure" tabindex="0" markdown="1">
-
-![Log-scale bars following warm dispatch cost across the campaign stages](../assets/figures/dispatch-ladder.svg)
-
-</div>
-
-*The warm dispatch ladder and the cold-start comparison. [Open the full-size figure](../assets/figures/dispatch-ladder.svg).*
-
-## Where Swage loses
-
-- Pure warm dispatch stays with Triton (20.4 versus 24.7 microseconds)
-  and torch (about 14).
-- uniform-4k segmented sum is parity, nominally Triton (2.5 versus
-  2.6 microseconds).
-- Vector add under graph timing shows two stable Swage losses to
-  Triton: n = 2^18 (1.38 versus 1.19 microseconds, about 16 percent)
-  and n = 2^20 (3.17 versus 2.49, about 27 percent); torch also leads
-  Swage at both sizes. The other measured sizes are within a few
-  percent, including an 8 percent Swage edge at n = 2^16 that stays
-  below the snapshot's win bar of at least 10 percent over the best
-  baseline. The snapshot records the full sweep; Swage claims no
-  vector-add win.
-
-Continue with the [A6000 comparison study](a6000-comparison.md) for a
-separate exploratory Swage/Triton campaign across skewed segment
-distributions, [Persistent Execution](persistent-execution.md) for the failed
+Continue with the [A6000 comparison study](a6000-comparison.md), which
+sets the two Swage and Triton records on the A6000 side by side. Use
+[Persistent Execution](persistent-execution.md) for the failed
 resident-queue qualification, [Verification](verification.md) for the
 executable proof behind each boundary, or
 [Task Execution](task-execution.md) for the execution contracts these

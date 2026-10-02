@@ -7,8 +7,14 @@ derive the plan a second time in Python. The Python derivation lives here as
 a reference, and a seeded property test compares the native classifier with
 it. The scalar validation loop is kept here in the same way, as the reference
 for the exception types and messages of the array validation.
+
+A process that runs from an artifact classifies with the runtime library
+instead, which holds a second implementation of the classifier. The same
+seeded layouts and the same refusals hold it to the native one.
 """
 
+import contextlib
+import io
 import random
 from itertools import accumulate, pairwise
 
@@ -18,6 +24,7 @@ import torch
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
+from swage import _artifact, compile
 from swage import _segmented_qualification as qualification
 
 requires_cuda = pytest.mark.skipif(
@@ -392,6 +399,198 @@ def test_classification_without_a_module_reports_the_classifier_reason(
             native_swage._materialize_segmented_plan(
                 sum_module, "segmented_sum", offsets=_i32(offsets), **arguments
             )
+
+
+@pytest.fixture(scope="module")
+def runtime_classifier(tmp_path_factory):
+    """Return the classifier of the runtime library an artifact ships."""
+    directory = tmp_path_factory.mktemp("classifier") / "artifact"
+    with contextlib.redirect_stdout(io.StringIO()):
+        status = compile._main(
+            ["--target", "sm_86", "--output", str(directory)]
+            + ["--program", "softmax"]
+        )
+    assert status == 0
+    return _artifact._Artifact(directory)._classify_segments
+
+
+@pytest.mark.parametrize(("warp_max", "chunk"), _LIMITS)
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_runtime_library_classification_matches_the_native_classifier(
+    runtime_classifier, seed, warp_max, chunk
+):
+    """Hold the runtime library to the native records on seeded layouts."""
+    lengths = _random_lengths(seed, warp_max, chunk)
+    offsets = _offsets(lengths)
+    arguments = {
+        "value_count": offsets[-1],
+        "segment_count": len(lengths),
+        "warp_max_elements": warp_max,
+        "cta_chunk_elements": chunk,
+    }
+
+    expected, *expected_counts = native_swage._classify_segments(
+        _i32(offsets), **arguments
+    )
+    records, *counts = runtime_classifier(_i32(offsets), **arguments)
+
+    assert isinstance(records, numpy.ndarray)
+    assert records.dtype == numpy.int32
+    assert records.tolist() == expected.tolist()
+    assert counts == expected_counts
+    assert all(type(count) is int for count in counts)
+    *lists, merge_of_partial = _split_records(records, *counts)
+    assert _matches_reference(lists, offsets, warp_max, chunk)
+    assert merge_of_partial.tolist() == _reference_partial_merges(
+        lists[3].tolist(), counts[2]
+    )
+
+
+def test_runtime_library_classification_uses_the_default_limits(
+    runtime_classifier,
+):
+    """Classify with 32 and 4096 when a call names no limit."""
+    records, *counts = runtime_classifier(
+        _i32([0, 32, 65, 4162, 12354]), value_count=12354, segment_count=4
+    )
+
+    assert counts == [1, 1, 4, 2]
+    assert records.tolist() == [
+        0,
+        1,
+        *[65, 4161, 4161, 4162, 4162, 8258, 8258, 12354],
+        *[2, 0, 2, 3, 2, 4],
+        *[0, 0, 1, 1],
+    ]
+
+
+def test_runtime_library_classification_handles_no_segments(
+    runtime_classifier,
+):
+    """Classify a layout without segments into an empty buffer."""
+    records, *counts = runtime_classifier(
+        _i32([0]), value_count=0, segment_count=0
+    )
+
+    assert records.shape == (0,)
+    assert records.dtype == numpy.int32
+    assert counts == [0, 0, 0, 0]
+
+
+def _classified(classify, offsets, arguments):
+    """Return the records and counts as lists, or the raised error."""
+    try:
+        records, *counts = classify(_i32(offsets), **arguments)
+    except Exception as error:  # noqa: BLE001 (the comparison needs any type)
+        return type(error), str(error)
+    return records.tolist(), counts
+
+
+@pytest.mark.parametrize("seed", range(300))
+def test_runtime_library_classification_refuses_what_the_native_one_refuses(
+    runtime_classifier, seed
+):
+    """Raise the same error for the same malformed offsets and counts."""
+    offsets, value_count = _random_offsets(seed)
+    rng = random.Random(seed)
+    arguments = {
+        "value_count": value_count,
+        "segment_count": len(offsets) - 1 + rng.choice([0, 0, 0, 1, -1]),
+        "warp_max_elements": 7,
+        "cta_chunk_elements": 16,
+    }
+
+    assert _classified(runtime_classifier, offsets, arguments) == _classified(
+        native_swage._classify_segments, offsets, arguments
+    )
+
+
+@pytest.mark.parametrize(
+    ("offsets", "arguments", "message"),
+    [
+        ([0, 2, 1], {}, "offsets must be nondecreasing"),
+        ([0, -1], {}, "offset must be a nonnegative i32 value"),
+        ([1, 1], {}, "offsets must start at zero"),
+        (
+            [0, 2],
+            {"value_count": 1},
+            "final offset must not exceed value count",
+        ),
+        (
+            [0, 2],
+            {"segment_count": 2},
+            "offset count must equal segment count plus one",
+        ),
+        (
+            [0, 1],
+            {"warp_max_elements": 33, "cta_chunk_elements": 32},
+            "warp max elements must not exceed CTA chunk elements",
+        ),
+        (
+            [0, 1],
+            {"warp_max_elements": 0},
+            "warp max elements must be positive",
+        ),
+        (
+            [0, 1],
+            {"cta_chunk_elements": 0},
+            "CTA chunk elements must be positive",
+        ),
+        (
+            [0, 1],
+            {"value_count": -1},
+            "value count must be a nonnegative i32 value",
+        ),
+        (
+            [0, 1],
+            {"cta_chunk_elements": _I32_LIMIT},
+            "CTA chunk elements must be a nonnegative i32 value",
+        ),
+        (
+            [],
+            {"value_count": 0},
+            "segment count must be a nonnegative i32 value",
+        ),
+        (
+            [0, _I32_LIMIT - 1],
+            {"warp_max_elements": 1, "cta_chunk_elements": 1},
+            "descriptor count must fit in i32",
+        ),
+    ],
+)
+def test_runtime_library_classification_reports_the_classifier_reason(
+    runtime_classifier, offsets, arguments, message
+):
+    """Raise each reason of the native classifier, word for word."""
+    arguments = {
+        "value_count": max(offsets[-1], 0) if offsets else 0,
+        "segment_count": len(offsets) - 1,
+        **arguments,
+    }
+
+    for classify in (runtime_classifier, native_swage._classify_segments):
+        with pytest.raises(ValueError) as error:
+            classify(_i32(offsets), **arguments)
+        assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        numpy.asarray([0, 1], dtype=numpy.int64),
+        numpy.asarray([[0, 1]], dtype=numpy.int32),
+        numpy.asarray([0, 9, 1, 9], dtype=numpy.int32)[::2],
+        (0, 1),
+        [0, 1],
+    ],
+    ids=["int64", "rank-two", "strided", "tuple", "list"],
+)
+def test_runtime_library_classification_never_converts_offsets(
+    runtime_classifier, offsets
+):
+    """Refuse what the native binding refuses: only a host i32 buffer."""
+    with pytest.raises(TypeError):
+        runtime_classifier(offsets, value_count=1, segment_count=1)
 
 
 def _outcome(function, *arguments):

@@ -12,7 +12,7 @@ import weakref
 from collections.abc import Callable
 from typing import NamedTuple
 
-from . import _runtime
+from . import _artifact, _runtime
 
 _I32_LIMIT = 1 << 31
 _target_record = None
@@ -27,11 +27,23 @@ def _target_description():
     kernel. The native package is imported here and not when this module is,
     which keeps `import swage` free of it.
 
+    A selected artifact answers instead of the native package, which is then
+    not imported: it gives the widths its kernels were compiled for and the
+    planning limits its programs were admitted under.
+
     Returns:
         A namespace with one attribute per field of the description, for
         example `subgroup_width`, `cta_block_threads`, and
-        `default_cta_chunk_elements`.
+        `default_cta_chunk_elements`. An artifact gives the fields the
+        kernels it holds are launched with, and no others.
+
+    Raises:
+        RuntimeError: `SWAGE_ARTIFACT_DIR` names an artifact that cannot be
+            used. The bindings are not tried instead.
     """
+    artifact = _artifact.selected()
+    if artifact is not None:
+        return artifact.target_description
     global _target_record
     if _target_record is None:
         from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -461,6 +473,27 @@ def _identity_ids(torch, device, count):
     return ids
 
 
+def _native_swage():
+    """Return what classifies, admits, and compiles for the planned path.
+
+    A selected artifact stands in for the native `swage` bindings, which
+    are then not imported: the artifact answers with kernels that were
+    compiled ahead of time. Without one, the bindings are imported.
+
+    Raises:
+        RuntimeError: `SWAGE_ARTIFACT_DIR` names an artifact that cannot be
+            used. The bindings are not tried instead.
+    """
+    artifact = _artifact.selected()
+    if artifact is not None:
+        return artifact
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    return native_swage
+
+
 def _compile_once(compile_ptx, module_text, *, module=None, **options):
     """Compile one kernel at most once per process and return its PTX.
 
@@ -478,11 +511,14 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
     Returns:
         The PTX text of the compiled kernel. A failed compile is not kept.
         A kernel compiled before is returned without taking a lock, so it
-        never waits for another thread's compile.
+        never waits for another thread's compile. While an artifact is
+        selected, the kernel comes from the artifact and nothing is
+        compiled.
 
     Raises:
         RuntimeError: SWAGE_NO_COMPILE=1 is set and this process does not
-            hold the kernel. Nothing is parsed or compiled.
+            hold the kernel, or the selected artifact cannot answer the
+            request. Nothing is parsed or compiled.
         ValueError: SWAGE_NO_COMPILE has a value other than 0 or 1.
     """
     key = (compile_ptx, module_text, tuple(sorted(options.items())))
@@ -492,6 +528,12 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
     with _memo_lock:
         ptx = _ptx_memo.get(key)
         if ptx is None:
+            artifact = _artifact.selected()
+            if artifact is not None:
+                ptx = _ptx_memo[key] = artifact.kernel(
+                    compile_ptx.__name__, module_text, options
+                )
+                return ptx
             if _runtime._switch_on("SWAGE_NO_COMPILE"):
                 raise _compile_refusal(options)
             if module is None:
@@ -931,7 +973,15 @@ def _admit_program(
     Raises:
         ValueError: Planning admission rejects the program or the limits. A
             rejection is not kept, so every preparation raises it again.
+        RuntimeError: The selected artifact does not hold the program
+            under these limits.
     """
+    artifact = _artifact.selected()
+    if artifact is not None:
+        # The build host ran planning admission and recorded its answer.
+        return artifact.admit(
+            module_text, warp_max_elements, cta_chunk_elements
+        )
     key = (module_text, kernel_name, warp_max_elements, cta_chunk_elements)
     small_element_program = _admitted.get(key)
     if small_element_program is None:
@@ -982,10 +1032,7 @@ def _classifying_validator(warp_max_elements, cta_chunk_elements):
     classification = []
 
     def validate(host_offsets, value_count, output_count):
-        from mlir_swage._mlir_libs._swageDialectsNanobind import (
-            swage as native_swage,
-        )
-
+        native_swage = _native_swage()
         segment_count = len(host_offsets) - 1
         try:
             classification.append(
@@ -1072,10 +1119,7 @@ def _prepare_planned_reduction(
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
 
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
+    native_swage = _native_swage()
     target = _target(torch, torch.cuda.current_device())
     small_element_program = _admit_program(
         module_text, kernel_name, warp_max_elements, cta_chunk_elements
@@ -1667,10 +1711,7 @@ def _enqueue_softmax(
     if segment_count == 0:
         return None
 
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
+    native_swage = _native_swage()
     target = _target(torch, torch.cuda.current_device())
     kernel_name = "ragged_softmax"
     ptx = _compile_once(

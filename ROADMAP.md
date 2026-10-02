@@ -36,7 +36,9 @@ The phrase "no public segmented launch" in the M7 and M8 rows records the
 boundary at those gates. Since then two public calls, `swage.segment_reduce`
 for sum and max and `swage.segment_softmax`, run fixed f32 programs through
 the M4 to M8 paths with default limits. They belong to no phase gate above
-and are not part of a release yet. Captured stages, split softmax, general
+and are not part of a release yet. The same holds for the ahead-of-time
+artifacts of those two calls, which let a process run them without the
+native package. Captured stages, split softmax, general
 cost inference, public segment syntax, and public execution of
 caller-written segment programs remain follow-up work.
 

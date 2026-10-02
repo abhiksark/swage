@@ -9,6 +9,7 @@ add_unittest(check-swage-unit SwageUnitTests
   CodegenCAPITest.cpp
   DialectsCAPITest.cpp
   KernelLayoutTest.cpp
+  RuntimeTest.cpp
   TargetDescriptionTest.cpp
   TaskClassifierTest.cpp
 )
@@ -16,6 +17,8 @@ add_unittest(check-swage-unit SwageUnitTests
 # The C API tests reach Swage only through SwageCAPI and the MLIR C API, as a
 # C embedder would. MLIRCAPIGPU is for one test that parses a gpu.module. The
 # target description test lowers a module through the C++ pass factory.
+# SwageRuntime is the library a process without the compiler loads; its test
+# compares it with the classifier of MLIRSwagePlan.
 target_link_libraries(SwageUnitTests
   PRIVATE
   MLIRCAPIArith
@@ -30,4 +33,5 @@ target_link_libraries(SwageUnitTests
   MLIRSwageSegmentedReduction
   MLIRSwageTarget
   SwageCAPI
+  SwageRuntime
 )

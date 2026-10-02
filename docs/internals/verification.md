@@ -50,6 +50,7 @@ the paths the calls run through.
 | Composable split sum/max, ordering, failures, and f32 parity | Private qualification | `unittests/TaskClassifierTest.cpp`, `test/Conversion/SwageToGPU/split-partial.mlir`, `split-merge.mlir`, and `invalid-split.mlir`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; `ninja -C build check-swage-unit`; trusted GPU workflow |
 | Persistent claims, fenced split completion, poisoned scratch, graph replay, randomized plans, and failure paths | Experimental; predeclared performance gate failed | `test/Conversion/SwageToGPU/persistent.mlir` and `invalid-persistent.mlir`, `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_persistent_runtime.py`, `benchmarks/results/persistent-sum-a6000-sm86.json` | `ninja -C build check-swage`; `ninja -C build check-swage-python`; trusted GPU workflow after merge |
 | Recorded RTX 5090 performance snapshot | Recorded evidence | `benchmarks/results/perf-5090-sm120.json` | Not re-executable in CI |
+| Recorded fresh-offsets and frozen comparison runs on RTX A6000 at `453c56e`, their generated summary page, and the documentation fragments | Recorded evidence | `benchmarks/results/segmented-sum-a6000-sm86-453c56e/`, `tests/python/test_campaign_tables.py` | `python -m pytest tests/python/test_campaign_tables.py -q`; the measurements are not re-executable in CI |
 | Public segment syntax, and public launch of a segment program that the caller writes | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |
 
@@ -104,6 +105,35 @@ The public segmented calls have these checks in
 
 These checks were executed on that device from the branch that added the
 calls. The trusted GPU workflow has not executed them yet.
+
+Calls that run from an artifact, which
+[Running Without the Compiler](../user-guide/deployment.md) describes, have
+these checks:
+
+- The writer, in `python/tests/mlir/test_artifact.py` without a device: an
+  artifact is written for every admitted processor, each shipped kernel
+  equals an independent compile of the same request, and each manifest
+  entry states the entry name, the launch width, and the parameters that
+  the PTX declares.
+- The classifier of the runtime library, in `unittests/RuntimeTest.cpp` and
+  `python/tests/mlir/test_segmented_classification.py`: it returns the
+  records of the compiler's classifier on seeded layouts that hold every
+  classification boundary, and refuses malformed input with the same
+  message.
+- The loader, in `tests/python/test_artifact.py` without the native build:
+  selection, every refusal, and the permission rule.
+- Execution, in `python/tests/mlir/test_artifact.py` on the RTX A6000
+  (`sm_86`): a process that cannot import `mlir_swage` runs both calls from
+  an artifact on batches with the length shape of each of the nine
+  benchmark distributions, on a batch that reaches the direct-CTA
+  selection, and on one segment of 100,003 elements. The process maps no
+  file whose name contains `LLVM`, `MLIR`, `mlir`, `SwagePythonCAPI`,
+  `swageDialects`, or `nanobind`. Its results pass the comparisons of the
+  public calls above and equal the results of the compiled path bit for
+  bit.
+
+These checks were executed from the branch that added artifacts. The
+trusted GPU workflow has not executed them yet.
 
 The trusted GPU workflow runs only on `main` through the self-hosted
 `swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every

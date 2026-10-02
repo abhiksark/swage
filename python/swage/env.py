@@ -219,6 +219,36 @@ def _cache_info() -> dict:
     }
 
 
+def _artifact_info() -> dict:
+    """Describe the artifact the reporting process would run from.
+
+    Returns:
+        `artifact`, which names the directory that `SWAGE_ARTIFACT_DIR`
+        selects with its manifest format, target, kernels, and origin. It
+        reads `none` when the variable is unset and `rejected` with the
+        reason when a segmented call would refuse the directory.
+    """
+    try:
+        from . import _artifact
+
+        artifact = _artifact.selected()
+    except Exception as error:
+        # The report never fails; it states the refusal a call would raise.
+        return {"artifact": f"rejected ({error})"}
+    if artifact is None:
+        return {"artifact": f"none ({_artifact._ENVIRONMENT} is unset)"}
+    manifest = artifact.manifest
+    return {
+        "artifact": (
+            f"{artifact.directory} (format {manifest['format_version']}, "
+            f"target {artifact.target}, {len(manifest['kernels'])} kernels "
+            f"of {', '.join(artifact.programs)}, written by swage "
+            f"{manifest.get('swage_version')} at revision "
+            f"{manifest.get('source_revision')})"
+        )
+    }
+
+
 def report() -> dict:
     """Build the full environment report as a dictionary."""
     info = _torch_info()
@@ -242,6 +272,7 @@ def report() -> dict:
         "mlir_swage_file": native["file"],
         "backends": {"mlir": _mlir_backend(native)},
         **_cache_info(),
+        **_artifact_info(),
     }
 
 

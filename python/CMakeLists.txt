@@ -87,6 +87,26 @@ add_custom_target(SwageBuildIdentity
 add_dependencies(SwagePythonModules.extension._swageDialectsNanobind.dso
   SwageBuildIdentity)
 
+# The runtime library travels with the bindings. `python -m swage.compile`
+# copies it from this package into every artifact it writes, so a native
+# wheel carries it too.
+set(SWAGE_PYTHON_LIBRARY_DIR
+  "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs")
+add_custom_target(SwageRuntimeInPackage
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    "${MLIR_BINARY_DIR}/${SWAGE_PYTHON_LIBRARY_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "$<TARGET_FILE:SwageRuntime>"
+    "${MLIR_BINARY_DIR}/${SWAGE_PYTHON_LIBRARY_DIR}/"
+  DEPENDS SwageRuntime
+  COMMENT "Placing the Swage runtime library beside the bindings"
+  VERBATIM
+)
+add_dependencies(SwagePythonModules SwageRuntimeInPackage)
+install(TARGETS SwageRuntime
+  LIBRARY DESTINATION "${SWAGE_PYTHON_LIBRARY_DIR}"
+  COMPONENT SwagePythonModules)
+
 add_custom_target(check-swage-python
   COMMAND ${CMAKE_COMMAND} -E env
     "PYTHONPATH=${MLIR_BINARY_DIR}/python_packages"

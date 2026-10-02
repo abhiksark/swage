@@ -21,7 +21,9 @@ Both calls need the CUDA GPU tier: the native build, PyTorch 2.6 or newer,
 [Installation](../getting-started/installation.md) include, and an NVIDIA
 GPU. They are not part of the released `0.5.1` wheel. The
 [Support Matrix](../reference/support-matrix.md) lists the versions and the
-GPU the tests run on.
+GPU the tests run on. An artifact directory that a native build wrote ahead
+of time can take the place of the native build;
+[Running Without the Compiler](deployment.md) describes that.
 
 ## A first call
 
@@ -179,20 +181,33 @@ records, the scratch, and the event are released when the call returns.
 
 `torch.segment_reduce` does none of the host work. When the offsets change on
 every call, expect `segment_reduce` to be slower than `torch.segment_reduce`.
-[Benchmarks](../internals/benchmarks.md#harness-methods) describes the
-harness that times this regime. No committed record of it exists yet, so
-this page states no number.
+One committed record measures that regime, on one NVIDIA RTX A6000 at
+revision `453c56e`:
 
-The recorded comparisons on that page were taken with a private prepared
-launch, which prepares one layout once and launches it many times. That path
-is not public, and its numbers do not describe these calls.
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
+
+The measured candidate is not this call. It is the private preparation with
+schedule selection disabled, followed by the mixed launch into a caller's
+output. `segment_reduce` runs the same preparation with automatic schedule
+selection and allocates its result when no `out` is passed, and no harness
+times it. Read the figures as the cost of the preparation that a call
+repeats, not as a measurement of the call.
+[Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
+reports the record and its limits: one GPU, one seed per distribution, and a
+machine that was not quiet.
+
+The other recorded comparisons on that page were taken with a private
+prepared launch, which prepares one layout once and launches it many times.
+That path is not public, and its numbers do not describe these calls.
 
 The first calls of a process cost more:
 
 - A call compiles each kernel it needs that the process does not hold yet,
   and loads it into the CUDA context. A reduction kind has up to five
   kernels and the softmax has one. Kernels stay in the process for later
-  calls and are never written to the persistent cache.
+  calls and are never written to the persistent cache. With an artifact
+  selected, a call compiles nothing: the first call reads and verifies the
+  directory, and each kernel is loaded from it when a call first needs it.
 - The first `segment_reduce` call on a device uploads a table of segment
   ids that holds 4 MiB of device memory for the life of the process.
 
@@ -216,10 +231,17 @@ Every refusal below raises before anything is enqueued.
 - **`SWAGE_NO_COMPILE=1`.** A call whose kernels the process does not hold
   raises a `RuntimeError`, because the segmented kernels are not in the
   persistent cache. A process that starts with the switch set cannot run a
-  segmented call that has work to do. A batch without segments needs no
-  kernel and returns.
-- **A wheel-only install.** A call raises a `RuntimeError` that names the
-  installation page, after the argument checks that need no native build.
+  segmented call that has work to do, unless an artifact is selected: a
+  kernel taken from an artifact is not compiled. A batch without segments
+  needs no kernel and returns.
+- **A wheel-only install without an artifact.** A call raises a
+  `RuntimeError` that names the installation page, after the argument
+  checks that need no native build.
+- **An artifact that cannot serve the call.** With `SWAGE_ARTIFACT_DIR`
+  set, a call raises a `RuntimeError` when the directory is damaged, unsafe,
+  or written for another target, and when it does not hold the program of
+  the call. It does not compile instead.
+  [Running Without the Compiler](deployment.md#refusals) lists the cases.
 - **PyTorch older than 2.6.** A call raises the `RuntimeError` of
   `launch()`, before it looks at an argument.
 
@@ -230,6 +252,6 @@ Two more rules follow from how PyTorch handles streams and threads:
   for any PyTorch operation that crosses streams.
 - A call works on a thread that has not used CUDA before.
 
-Continue with [Writing Kernels](writing-kernels.md). That page turns to the
-kernel language, which has no segment syntax: the one kernel it accepts is a
-fixed-block vector add.
+Continue with [Running Without the Compiler](deployment.md), which compiles
+the kernels of these two calls ahead of time and serves the calls from the
+result, in a process that holds no compiler.

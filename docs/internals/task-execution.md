@@ -109,8 +109,10 @@ revision `dcbcf39`, reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
 for fused mixed execution. These numbers describe the PTX of that revision.
 Kernels generated now also pass through the LLVM pass pipeline described in
-[Compiler Pipeline](compiler-pipeline.md), and no committed record measures
-them. The fused schedule the benchmark measures is the one drawn
+[Compiler Pipeline](compiler-pipeline.md). The gate has not been rerun on
+them. The `453c56e` record on [Benchmarks](benchmarks.md) measures the
+current kernels with another harness. The fused schedule the benchmark
+measures is the one drawn
 above. The mixed-to-best-pure ratio is `0.939394`, which passes the
 predeclared maximum of `1.05`; the first two-launch schedule measured
 `1.238806` on the same frozen input and failed that gate before the fused

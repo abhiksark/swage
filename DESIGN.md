@@ -122,7 +122,9 @@ selection.
 - Swage reads raw pointers only after validation and launches through the
   CUDA Driver API.
 - PTX is emitted in process through LLVM NVPTX. NVRTC is not a production
-  dependency.
+  dependency. The two public segmented calls can instead read PTX that the
+  same compiler emitted ahead of time into an artifact directory; a process
+  that runs from one compiles nothing and does not import `mlir_swage`.
 - Launch is asynchronous. Submitted tensors are recorded on the stream.
 - No path silently casts, changes devices, creates a context, or falls back
   to another backend or policy. The public launch path also does not copy. A

@@ -148,6 +148,12 @@ under `lib/cmake/swage`. A consumer loads it with
   `LLVM_INCLUDE_DIRS`.
 - The package finds MLIR itself and reports Swage as not found when that
   MLIR is not the release Swage was built against.
+- The install also holds `lib/libSwageRuntime.so` and its header
+  `swage-c/Runtime.h`: the task classifier and a kernel launcher in plain
+  C, which link against nothing from LLVM or MLIR.
+  [Running Without the Compiler](../user-guide/deployment.md) describes
+  what uses it. It is a plain shared library and not an imported target of
+  the package.
 
 No workflow builds a consumer project against the installed package, so the
 package is an install rule and not a tested interface. Swage itself does not
