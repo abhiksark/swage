@@ -10,8 +10,8 @@ private experiment, not a public API or completed qualification.
 !!! warning "Performance gate failed"
 
     Correctness tests exercise the implementation, but the semantically
-    qualified NVIDIA RTX A6000 run was 1.06% faster than static mixed
-    execution and missed the
+    qualified NVIDIA RTX A6000 run, at revision `205f629`, was 1.06% faster
+    than static mixed execution and missed the
     predeclared 5% requirement. Consequently
     [ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains
     proposed and no current release status depends on this path.

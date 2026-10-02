@@ -50,7 +50,7 @@ verified Swage semantic MLIR
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
         |
         v
-LLVM NVPTX -> PTX -> CUDA Driver API
+curated LLVM passes -> LLVM NVPTX -> PTX -> CUDA Driver API
 ```
 
 MLIR is the only production IR between Python and LLVM. The Python frontend

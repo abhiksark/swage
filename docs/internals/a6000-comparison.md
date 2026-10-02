@@ -16,6 +16,9 @@ making that scheduling model part of its compiler architecture.
     or public performance contract. Segmented execution is private
     contributor machinery, not public Swage API. The complete local record is
     [`benchmarks/results/swage-triton-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/swage-triton-a6000-sm86.json).
+    Every timing below describes the PTX of that commit. Kernels generated
+    now also pass through an LLVM pass pipeline before PTX emission, which
+    this campaign did not measure.
 
 ## Executive result
 

@@ -104,9 +104,13 @@ kernel reads no value for it and stores nothing (ADR-0012). CUDA graph
 capture needs an earlier launch that observed task storage ready, so the
 protocol is launch, synchronize, launch again, then capture.
 
-For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark reports medians of
+For identity sum, the frozen NVIDIA RTX A6000 `sm_86` benchmark, measured at
+revision `dcbcf39`, reports medians of
 `0.067584 ms` for pure warp, `0.070656 ms` for pure CTA, and `0.063488 ms`
-for fused mixed execution. The fused schedule it measures is the one drawn
+for fused mixed execution. These numbers describe the PTX of that revision.
+Kernels generated now also pass through the LLVM pass pipeline described in
+[Compiler Pipeline](compiler-pipeline.md), and no committed record measures
+them. The fused schedule the benchmark measures is the one drawn
 above. The mixed-to-best-pure ratio is `0.939394`, which passes the
 predeclared maximum of `1.05`; the first two-launch schedule measured
 `1.238806` on the same frozen input and failed that gate before the fused

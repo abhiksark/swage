@@ -20,6 +20,11 @@ Each value is the median of three independent process runs unless its
 provenance field states otherwise. The Triton baseline is the per-segment
 kernel at the best of the swept and autotuned configurations.
 
+Every timing on this page describes the PTX that the source revision of its
+record generated. Those revisions emitted PTX without the LLVM pass pipeline
+that kernels go through now (see [Compiler Pipeline](compiler-pipeline.md)),
+so no number here is a measurement of currently generated code.
+
 ## Timing methods
 
 Three timing methods separate host dispatch cost from kernel quality:
