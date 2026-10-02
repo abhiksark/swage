@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
+#include "swage/Conversion/SwagePlanToGPU/Emission.h"
 
 #include <limits>
 #include <optional>
@@ -114,17 +115,6 @@ LogicalResult verifyRegion(Operation *owner, Region &region,
   if (!yield || !yield.getValue().getType().isF32())
     return owner->emitError("segment region must yield an f32 value");
   return success();
-}
-
-/// Clone a verified region inline at the builder's insertion point and
-/// return the mapped yielded value.
-Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
-  Block &body = region.front();
-  IRMapping mapping;
-  mapping.map(body.getArguments(), arguments);
-  for (Operation &operation : body.without_terminator())
-    builder.clone(operation, mapping);
-  return mapping.lookup(cast<YieldOp>(body.getTerminator()).getValue());
 }
 
 /// A per-element expression: the region of a consumer after map fusion,
@@ -675,24 +665,6 @@ Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
   return inlineRegion(builder, *element.region, arguments);
 }
 
-/// The identity element of a reduction kind.
-Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind) {
-  FloatType f32 = builder.getF32Type();
-  APFloat identity = kind == ReductionKind::Sum
-                         ? APFloat(f32.getFloatSemantics(), 0)
-                         : APFloat::getInf(f32.getFloatSemantics(), true);
-  return arith::ConstantFloatOp::create(builder, loc, f32, identity);
-}
-
-/// Combine an accumulator with one element.
-Value combine(OpBuilder &builder, Location loc, ReductionKind kind,
-              Value accumulator, Value value) {
-  if (kind == ReductionKind::Sum)
-    return arith::AddFOp::create(builder, loc, accumulator, value).getResult();
-  return arith::MaximumFOp::create(builder, loc, accumulator, value)
-      .getResult();
-}
-
 void buildSequentialProgram(func::FuncOp function, const SegmentABI &abi,
                             const SegmentProgram &program) {
   Block &entry = function.getBody().front();
@@ -765,48 +737,6 @@ void buildSequentialProgram(func::FuncOp function, const SegmentABI &abi,
                                            SwageDialect::getRoleAttrName()));
 }
 
-/// Clamp one half-open range loaded from device memory, as signed i32, so
-/// that `0 <= start <= end <= length`, and return it as index values.
-/// `length` is the i32 element count of the buffer the range indexes: the
-/// value count for a range into values, the partial count for a range into
-/// scratch.
-///
-/// Host validation sees a snapshot of the range, but the kernel reloads it at
-/// every launch, so a range that changed after validation would otherwise
-/// index outside that buffer. A decreasing pair becomes an empty range. For
-/// validated ranges both clamps are the identity.
-std::pair<Value, Value> clampRange(OpBuilder &builder, Location loc,
-                                   Value startI32, Value endI32, Value length) {
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
-  Value startFloored = arith::MaxSIOp::create(builder, loc, startI32, zero);
-  Value startClamped =
-      arith::MinSIOp::create(builder, loc, startFloored, length);
-  Value endFloored = arith::MaxSIOp::create(builder, loc, endI32, startClamped);
-  Value endClamped = arith::MinSIOp::create(builder, loc, endFloored, length);
-  Value start = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                           startClamped);
-  Value end = arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                         endClamped);
-  return {start, end};
-}
-
-/// Whether `word`, an i32 index loaded from device memory, names one of
-/// `count` elements, where `count` is an i32 count that the ABI carries. The
-/// comparison is unsigned, so a negative word fails it too.
-///
-/// Host validation sees a snapshot of the buffer the index came from, but the
-/// kernel reloads it at every launch. This applies to a segment ID from a task
-/// buffer, the merge ID of a persistent partial, and the output segment of a
-/// merge record. The caller skips an index that fails this test: no store or
-/// counter update takes it. It is not clamped, because a clamped index would
-/// store a wrong result in a valid slot. For validated indices the test is
-/// always true.
-Value isLoadedIndexInRange(OpBuilder &builder, Location loc, Value word,
-                           Value count) {
-  return arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ult, word,
-                               count);
-}
-
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program,
                      const TargetDescription &target, int64_t blockSize,
@@ -865,140 +795,40 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   // The direct kernel compares the segment count with the block index. The
   // others bound each loaded segment ID with it.
   Value segmentCount = argument(KernelArgument::SegmentCount);
-  auto loadTaskWord = [&](OpBuilder &body, Location bodyLoc, Value words,
-                          Value wordIndex) {
-    Value wordIndex64 =
-        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), wordIndex);
-    Value wordAddress =
-        LLVM::GEPOp::create(body, bodyLoc, pointer, i32, words, wordIndex64);
-    return Value(LLVM::LoadOp::create(body, bodyLoc, i32, wordAddress));
-  };
   auto loadTaskIndex = [&](OpBuilder &body, Location bodyLoc, Value words,
                            Value wordIndex) {
     Value word = loadTaskWord(body, bodyLoc, words, wordIndex);
     return Value(
         arith::IndexCastOp::create(body, bodyLoc, body.getIndexType(), word));
   };
-  // Reduce one segment. `segmentInRange` is null when the segment ID is the
-  // block index, which the caller already compared with the segment count.
-  // For a segment ID loaded from a task buffer it is the result of
-  // `isLoadedIndexInRange`. The bound is applied to the addresses and not to
-  // the control flow: an out-of-range ID reads offsets[0] for both ends of
-  // its range, which makes the range empty, and takes no output store. Every
-  // thread therefore still reaches each barrier and shuffle below, whatever
-  // the task buffer holds.
+  // Reduce one segment for the thread `logicalThreadId`: bind its range,
+  // run one stage per reduction in program order, then the terminal.
+  // `segmentInRange` is null when the segment ID is the block index, and the
+  // result of `isLoadedIndexInRange` for an ID loaded from a task buffer.
   auto emitSegment = [&](OpBuilder &body, Location bodyLoc, Value segmentId,
                          Value segmentInRange, Value logicalThreadId,
                          Value stride, bool useWarpShuffle) {
-    Value segmentId64 =
-        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), segmentId);
-    Value startIndex64 = segmentId64;
-    if (segmentInRange) {
-      Value startIndex = arith::SelectOp::create(body, bodyLoc, segmentInRange,
-                                                 segmentId, zero);
-      startIndex64 = arith::IndexCastOp::create(body, bodyLoc,
-                                                body.getI64Type(), startIndex);
-    }
-    Value startAddress =
-        LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
-                            argument(KernelArgument::Offsets), startIndex64);
-    Value startI32 = LLVM::LoadOp::create(body, bodyLoc, i32, startAddress);
-    Value endIndex = arith::AddIOp::create(body, bodyLoc, segmentId, one);
-    if (segmentInRange)
-      endIndex = arith::SelectOp::create(body, bodyLoc, segmentInRange,
-                                         endIndex, zero);
-    Value endIndex64 =
-        arith::IndexCastOp::create(body, bodyLoc, body.getI64Type(), endIndex);
-    Value endAddress =
-        LLVM::GEPOp::create(body, bodyLoc, pointer, i32,
-                            argument(KernelArgument::Offsets), endIndex64);
-    Value endI32 = LLVM::LoadOp::create(body, bodyLoc, i32, endAddress);
-    // The offsets come from the caller's buffer at launch time; bound them
-    // here because host validation only saw an earlier snapshot.
-    Value start;
-    Value end;
-    std::tie(start, end) =
-        clampRange(body, bodyLoc, startI32, endI32, valueCount);
-    Value first = arith::AddIOp::create(body, bodyLoc, start, logicalThreadId);
-
+    BoundSegment bound = emitSegmentBinding(
+        body, bodyLoc, argument(KernelArgument::Values),
+        argument(KernelArgument::Offsets), valueCount, segmentId,
+        segmentInRange, logicalThreadId, stride, zero, one);
     SmallVector<Value> results;
-    for (const ReductionStage &stage : program.reductions) {
-      Value identity = identityFor(body, bodyLoc, stage.kind);
-      auto local = scf::ForOp::create(
-          body, bodyLoc, first, end, stride, ValueRange(identity),
-          [&](OpBuilder &loop, Location loopLoc, Value index,
-              ValueRange accumulator) {
-            Value index64 = arith::IndexCastOp::create(
-                loop, loopLoc, loop.getI64Type(), index);
-            Value address =
-                LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                    argument(KernelArgument::Values), index64);
-            Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
-            value = evaluateElement(loop, stage.element, value, results);
-            scf::YieldOp::create(
-                loop, loopLoc,
-                combine(loop, loopLoc, stage.kind, accumulator.front(), value));
-          });
-      gpu::AllReduceOperation gpuKind = stage.kind == ReductionKind::Sum
-                                            ? gpu::AllReduceOperation::ADD
-                                            : gpu::AllReduceOperation::MAXIMUMF;
-      Value total = local.getResult(0);
-      if (useWarpShuffle) {
-        for (int32_t offset = 1; offset < target.subgroupWidth; offset <<= 1) {
-          auto shuffled = gpu::ShuffleOp::create(body, bodyLoc, total, offset,
-                                                 target.subgroupWidth,
-                                                 gpu::ShuffleMode::XOR);
-          total = combine(body, bodyLoc, stage.kind, total,
-                          shuffled.getShuffleResult());
-        }
-      } else {
-        auto operation =
-            gpu::AllReduceOperationAttr::get(module.getContext(), gpuKind);
-        // uniform = true, so the result is broadcast to every thread and the
-        // lowering's trailing barrier fences this stage from the next.
-        total = gpu::AllReduceOp::create(body, bodyLoc, total, operation, true);
-      }
-      results.push_back(total);
-    }
-
+    for (const ReductionStage &stage : program.reductions)
+      results.push_back(emitReductionStage(
+          body, bodyLoc, target, stage.kind, f32, bound.segment, useWarpShuffle,
+          [&](OpBuilder &loop, Value value) {
+            return evaluateElement(loop, stage.element, value, results);
+          }));
     if (program.terminal == TerminalKind::ScalarStore) {
-      Value total = results[program.storedReduction];
-      Value mayStore = arith::CmpIOp::create(
-          body, bodyLoc, arith::CmpIPredicate::eq, logicalThreadId, zero);
-      if (segmentInRange)
-        mayStore =
-            arith::AndIOp::create(body, bodyLoc, mayStore, segmentInRange);
-      scf::IfOp::create(
-          body, bodyLoc, mayStore, [&](OpBuilder &store, Location storeLoc) {
-            Value outputAddress = LLVM::GEPOp::create(
-                store, storeLoc, pointer, f32, argument(KernelArgument::Output),
-                segmentId64);
-            LLVM::StoreOp::create(store, storeLoc, total, outputAddress);
-            scf::YieldOp::create(store, storeLoc);
-          });
+      emitScalarStore(body, bodyLoc, results[program.storedReduction],
+                      argument(KernelArgument::Output), bound.segmentId64,
+                      logicalThreadId, zero, segmentInRange);
       return;
     }
-
-    // Guard-free on purpose: every thread runs the same block-stride loop it
-    // ran for each reduction stage, and an empty segment makes it zero-trip.
-    // A thread-dependent guard here would put a predicate around code the
-    // barriers above already made CTA-uniform. An out-of-range segment ID
-    // needs no guard either, because its range is empty.
-    scf::ForOp::create(
-        body, bodyLoc, first, end, stride, ValueRange(),
-        [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {
-          Value index64 = arith::IndexCastOp::create(loop, loopLoc,
-                                                     loop.getI64Type(), index);
-          Value address =
-              LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                  argument(KernelArgument::Values), index64);
-          Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
-          value = evaluateElement(loop, program.mapStore, value, results);
-          Value outputAddress =
-              LLVM::GEPOp::create(loop, loopLoc, pointer, f32,
-                                  argument(KernelArgument::Output), index64);
-          LLVM::StoreOp::create(loop, loopLoc, value, outputAddress);
-          scf::YieldOp::create(loop, loopLoc);
+    emitMapStore(
+        body, bodyLoc, f32, bound.segment, argument(KernelArgument::Output),
+        [&](OpBuilder &loop, Value value) {
+          return evaluateElement(loop, program.mapStore, value, results);
         });
   };
 
@@ -1600,9 +1430,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
                                            accumulator.front(), value));
             });
         auto operation = gpu::AllReduceOperationAttr::get(
-            module.getContext(), stage.kind == ReductionKind::Sum
-                                     ? gpu::AllReduceOperation::ADD
-                                     : gpu::AllReduceOperation::MAXIMUMF);
+            module.getContext(), allReduceOperationFor(stage.kind));
         Value total = gpu::AllReduceOp::create(
             body, bodyLoc, local.getResult(0), operation, true);
         Value mayStore = arith::CmpIOp::create(
