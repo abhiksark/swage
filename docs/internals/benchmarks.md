@@ -170,7 +170,8 @@ from the records.
 out on a layout that no earlier call used, at 2,048, 8,192, and 32,768
 segments. The Swage candidate is the private preparation with schedule
 selection disabled, followed by the mixed launch. The public
-`swage.segment_reduce` call is not a candidate.
+`swage.segment_reduce` call was not a candidate when these records were
+taken.
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
@@ -287,9 +288,11 @@ The fresh-offsets harness and the comparison harness time these candidates:
   its preparation (`swage_mixed`). The private runner has no mixed-only
   preparation: one call returns the warp, CTA, and mixed policies, and the
   record says so. The comparison times the warp, CTA, and mixed policies.
-  The public `swage.segment_reduce` prepares and launches the mixed policy
-  on every call, with automatic schedule selection, which the fresh-offsets
-  candidate disables. No harness times the public call itself.
+- In fresh offsets only, `swage_public_call`: one public
+  `swage.segment_reduce` call into a caller's buffer. It enqueues the mixed
+  policy alone, with automatic schedule selection, which `swage_mixed`
+  disables, so the two can run different kernels on one layout. No
+  committed record holds this candidate.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import types
+from unittest import mock
 
 import pytest
 import swage
@@ -503,6 +504,67 @@ def test_a_kernel_lends_the_launcher_to_a_driver_without_one(
     artifact.kernel(*_request())
 
     assert compiled._native_launch is print
+
+
+def _bindings_that_must_stay_unimported(monkeypatch):
+    """Make the bindings importable and fail the test if they are asked."""
+    monkeypatch.setattr(
+        _artifact._runtime.ctypes, "CDLL", lambda name: mock.MagicMock()
+    )
+    asked = []
+
+    def native_bindings():
+        asked.append("bindings")
+        return types.SimpleNamespace(_launch_kernel=print)
+
+    monkeypatch.setattr(_artifact._runtime, "_native_bindings", native_bindings)
+    return asked
+
+
+def test_a_driver_takes_its_launcher_from_a_selected_artifact(
+    artifact_dir, monkeypatch
+):
+    """Launch through the runtime library and leave the bindings alone.
+
+    The compiled launcher of the bindings loads LLVM with them. A process
+    that selected an artifact must not depend on the bindings being absent
+    to stay free of LLVM, so its driver does not ask for them.
+    """
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    artifact = _load(monkeypatch, artifact_dir)
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch == artifact._launch_kernel
+    assert asked == []
+
+
+def test_a_driver_takes_the_bindings_without_an_artifact(monkeypatch):
+    """Keep the compiled launcher of the bindings as the default."""
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch is print
+    assert asked == ["bindings"]
+
+
+def test_a_driver_does_not_fall_back_to_the_bindings_for_a_bad_artifact(
+    tmp_path, monkeypatch
+):
+    """Leave the launcher open when the selected directory cannot be used.
+
+    The call that needs the artifact reports why it is refused. The driver
+    serves other launches through ctypes meanwhile, and a kernel of an
+    artifact that loads later lends it the launcher.
+    """
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    _select(monkeypatch, tmp_path / "missing")
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch is None
+    assert asked == []
 
 
 @pytest.mark.parametrize(
@@ -1219,6 +1281,8 @@ def _fake_torch(monkeypatch):
     )
     torch.empty = _reached("result allocation")
     monkeypatch.setitem(sys.modules, "torch", torch)
+    # The calls also require numpy; a stand-in keeps this tier free of it.
+    monkeypatch.setitem(sys.modules, "numpy", types.ModuleType("numpy"))
     return torch
 
 
@@ -1262,6 +1326,29 @@ def test_a_public_call_needs_no_bindings_with_an_artifact(
     _select(monkeypatch, artifact_dir)
 
     with pytest.raises(_Reached, match="^capture check$"):
+        call(values, offsets)
+
+    assert sys.modules["mlir_swage"] is None
+
+
+@pytest.mark.parametrize("call", CALLS, ids=["reduce", "softmax"])
+def test_a_public_call_from_an_artifact_names_numpy_when_it_is_missing(
+    call, artifact_dir, monkeypatch
+):
+    """Require numpy with an artifact too, which classifies through it."""
+    torch = _fake_torch(monkeypatch)
+    values = _Tensor(torch, 6)
+    offsets = _Tensor(torch, 5, integer=True, pointer=0x2000)
+    _select(monkeypatch, artifact_dir)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"^Swage segment_(reduce|softmax)\(\) requires numpy, which "
+            "cannot be imported; nothing was launched"
+        ),
+    ):
         call(values, offsets)
 
     assert sys.modules["mlir_swage"] is None

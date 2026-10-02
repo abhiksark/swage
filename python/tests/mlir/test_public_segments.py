@@ -21,6 +21,7 @@ import collections
 import gc
 import importlib.util
 import pathlib
+import sys
 import threading
 import weakref
 from itertools import pairwise
@@ -413,6 +414,27 @@ def test_segmented_calls_reject_host_tensors_after_validating_them(function):
     assert torch.all(out == _SENTINEL)
 
 
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_name_numpy_when_it_cannot_be_imported(
+    function, monkeypatch
+):
+    """Raise for a missing numpy before the result is allocated."""
+    values, offsets = _host_segments()
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    monkeypatch.setattr(
+        torch, "empty", lambda *a, **k: pytest.fail("a result was allocated")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^Swage {function.__name__}\\(\\) requires numpy, which "
+            "cannot be imported; nothing was launched"
+        ),
+    ):
+        _call(function, values, offsets)
+
+
 @_needs_cuda
 @pytest.mark.parametrize("function", FUNCTIONS)
 def test_segmented_calls_reject_an_out_on_another_device(function):
@@ -757,6 +779,174 @@ def test_segment_reduce_sum_is_the_default_mixed_schedule_of_its_batch():
     assert _bits(second.cpu()) == _bits(first.cpu())
 
 
+def _prepared_mixed(kind, values, offsets):
+    """Run the private prepared `mixed` launch at its defaults."""
+    output = torch.full(
+        (offsets.numel() - 1,), float("nan"), device=values.device
+    )
+    qualification._prepare_planned_reduction(
+        values,
+        offsets,
+        output,
+        module_text=qualification._semantic_module(kind),
+        kernel_name=f"segmented_{kind}",
+    ).mixed()
+    return output
+
+
+def _assert_equals_the_prepared_launch(kind, host_values, host_offsets):
+    """Compare a public reduction with the prepared launch, bit for bit."""
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    expected = _prepared_mixed(kind, values, offsets).cpu()
+
+    actual = swage.segment_reduce(values, offsets, kind).cpu()
+
+    assert not actual.isnan().any()
+    assert _bits(actual) == _bits(expected)
+
+
+@_needs_cuda
+@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("name", DISTRIBUTIONS)
+def test_segment_reduce_equals_the_prepared_mixed_launch(name, kind, seed):
+    """Keep the bits of the path that prepares all three policies.
+
+    The public call validates, classifies, and enqueues the mixed schedule
+    in one step and prepares nothing else. For every batch of the
+    differential suite it returns the bits of `mixed` of a preparation with
+    the default limits and automatic selection.
+    """
+    lengths = _distributions.generate_lengths(
+        name, _SEGMENT_COUNTS[name], seed
+    )
+    generator = torch.Generator().manual_seed(seed)
+
+    _assert_equals_the_prepared_launch(
+        kind, *_host_case(lengths, generator)
+    )
+
+
+def _selection_lengths(segments):
+    """Return lengths of 4097 to 8192 elements for a batch of `segments`."""
+    generator = torch.Generator().manual_seed(5)
+    return torch.randint(4097, 8193, (segments,), generator=generator).tolist()
+
+
+@_needs_cuda
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    "case", ["selected", "one-short-of-selection", "one-long", "empty-only"]
+)
+def test_segment_reduce_equals_the_prepared_launch_at_the_edges(case, kind):
+    """Match the prepared launch where the schedule changes.
+
+    A batch that the selection rule sends to the pure CTA kernel, the same
+    batch with one segment fewer, which is split, one segment of hundreds
+    of chunks, and a batch of empty segments.
+    """
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    lengths = {
+        "selected": _selection_lengths(count),
+        "one-short-of-selection": _selection_lengths(count - 1),
+        "one-long": [300_001],
+        "empty-only": [0] * 70,
+    }[case]
+    generator = torch.Generator().manual_seed(len(lengths))
+
+    _assert_equals_the_prepared_launch(
+        kind, *_host_case(lengths, generator)
+    )
+
+
+def _held_kernels():
+    """Return what the process holds, as (compile function, options)."""
+    return sorted(
+        (
+            compile_ptx.__name__,
+            tuple(
+                (name, value)
+                for name, value in options
+                if name in ("block_size", "use_task_ids")
+            ),
+        )
+        for compile_ptx, _, options in qualification._ptx_memo
+    )
+
+
+_TASK_ID_CTA = (
+    "_compile_segmented_reduction_ptx",
+    (("block_size", 128), ("use_task_ids", True)),
+)
+_FUSED = ("_compile_fused_segmented_reduction_ptx", ())
+_PARTIAL = ("_compile_split_partial_reduction_ptx", ())
+_MERGE = ("_compile_split_merge_reduction_ptx", ())
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    ("case", "kernels"),
+    [
+        ("short", [_FUSED]),
+        ("short-and-long", sorted([_FUSED, _PARTIAL, _MERGE])),
+        ("long", sorted([_PARTIAL, _MERGE])),
+        ("selected", [_TASK_ID_CTA]),
+    ],
+)
+def test_segment_reduce_prepares_only_the_kernels_it_launches(
+    case, kernels, empty_kernel_memo, driver_calls
+):
+    """Compile and load nothing for a policy the call does not launch.
+
+    The pure warp kernel is never compiled. The pure CTA kernel is compiled
+    only for a batch that the selection rule sends to it, which then needs
+    no fused, partial, or merge kernel.
+    """
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    lengths = {
+        "short": [3, 40, 0, 4096],
+        "short-and-long": [3, 40, 0, 4100],
+        "long": [4100, 9000],
+        "selected": _selection_lengths(count),
+    }[case]
+    generator = torch.Generator().manual_seed(3)
+    host_values, host_offsets = _host_case(lengths, generator)
+
+    actual = _reduce("sum", host_values, host_offsets)
+
+    assert _held_kernels() == kernels
+    assert driver_calls["cuModuleLoadData"] == len(kernels)
+    _assert_reduction_matches("sum", host_values, host_offsets, actual)
+
+
+@_needs_cuda
+def test_segment_reduce_reads_the_shared_segment_ids_only_when_selected(
+    monkeypatch,
+):
+    """Leave the table of segment ids alone unless the CTA kernel runs."""
+    host_values, host_offsets = _host_segments([3, 40, 0, 4100])
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    expected = swage.segment_reduce(values, offsets, "sum").cpu()
+    used = []
+    identity_ids = qualification._identity_ids
+
+    def recording(*arguments):
+        used.append(arguments[2])
+        return identity_ids(*arguments)
+
+    monkeypatch.setattr(qualification, "_identity_ids", recording)
+
+    actual = swage.segment_reduce(values, offsets, "sum").cpu()
+    assert used == []
+    assert _bits(actual) == _bits(expected)
+
+    count = torch.cuda.get_device_properties(0).multi_processor_count
+    lengths = _selection_lengths(count)
+    selected = torch.tensor(_offsets(lengths), dtype=torch.int32).cuda()
+    swage.segment_reduce(torch.ones(sum(lengths)).cuda(), selected, "sum")
+    assert used == [count]
+
+
 @_needs_cuda
 def test_segment_reduce_sum_bits_can_change_with_the_batch():
     """Show that the public call does not pin the sum schedule.
@@ -858,49 +1048,47 @@ def test_an_overwritten_out_fails_a_backward_pass_that_saved_it():
 
 
 @_needs_cuda
-def test_segment_reduce_rejects_offsets_made_under_inference_mode():
-    """Refuse an inference tensor as offsets and name the remedy."""
-    host_values, host_offsets = _host_segments()
-    values = host_values.cuda()
-    out = torch.full((4,), _SENTINEL, device="cuda")
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_take_tensors_made_under_inference_mode(function):
+    """Serve inside `torch.inference_mode()` with tensors made inside it.
+
+    The offsets, the values, and `out` are all inference tensors. A call
+    enqueues what it classified before it returns, so it compares no
+    version counter, which an inference tensor does not have. The result
+    has no counter to advance either.
+    """
+    host_values, host_offsets = _host_segments([3, 40, 0, 4100])
+    expected = _call(function, host_values.cuda(), host_offsets.cuda()).cpu()
     with torch.inference_mode():
-        offsets = host_offsets.cuda()
+        values, offsets = host_values.cuda(), host_offsets.cuda()
+        out = torch.full_like(expected, float("nan"), device="cuda")
+        assert all(tensor.is_inference() for tensor in (values, offsets, out))
 
-        with pytest.raises(
-            ValueError,
-            match=(
-                "^offsets must not be an inference tensor; create or clone "
-                r"the offsets outside torch.inference_mode\(\)$"
-            ),
-        ):
-            swage.segment_reduce(values, offsets, "sum", out=out)
+        allocated = _call(function, values, offsets)
+        written = _call(function, values, offsets, out=out)
 
-    torch.cuda.synchronize()
-    assert torch.all(out == _SENTINEL)
-    # The remedy: a clone made outside the context is admitted.
-    result = swage.segment_reduce(values, offsets.clone(), "sum")
-    assert result.tolist() == [3.0, 0.0, 12.0, 6.0]
+        assert written is out
+        assert allocated.is_inference()
+        assert _bits(allocated.cpu()) == _bits(expected)
+        assert _bits(out.cpu()) == _bits(expected)
 
 
 @_needs_cuda
-def test_segmented_calls_run_inside_inference_mode():
-    """Serve under inference mode with offsets made outside it.
-
-    The softmax also takes offsets made inside the context, because it
-    compares no version counter.
-    """
-    host_values, host_offsets = _host_segments()
-    offsets = host_offsets.cuda()
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_mix_inference_and_ordinary_tensors(function):
+    """Take offsets from either side of the context, inside or outside it."""
+    host_values, host_offsets = _host_segments([3, 40, 0, 4100])
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    expected = _call(function, values, offsets).cpu()
     with torch.inference_mode():
-        values = host_values.cuda()
-        total = swage.segment_reduce(values, offsets, "sum")
-        inside = swage.segment_softmax(values, host_offsets.cuda())
-        outside = swage.segment_softmax(values, offsets)
+        inside = host_offsets.cuda()
+        from_outside = _call(function, values, offsets)
 
-        assert total.is_inference()
-        assert total.tolist() == [3.0, 0.0, 12.0, 6.0]
-        assert _bits(inside.cpu()) == _bits(outside.cpu())
-    _assert_softmax_matches(host_values, host_offsets, inside.cpu())
+    from_inside = _call(function, values, inside)
+
+    assert _bits(from_outside.cpu()) == _bits(expected)
+    assert _bits(from_inside.cpu()) == _bits(expected)
+    assert not from_inside.is_inference()
 
 
 @_needs_cuda
@@ -1103,40 +1291,37 @@ def test_no_compile_mode_serves_an_empty_batch(empty_kernel_memo, monkeypatch):
 
 
 @_needs_cuda
-def test_a_reduction_can_advance_the_out_version_without_writing(
-    empty_kernel_memo, monkeypatch
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_a_call_that_enqueues_nothing_leaves_the_out_version_alone(
+    function, empty_kernel_memo, monkeypatch
 ):
-    """Advance the counter of `out` while preparing, before any kernel.
+    """Advance the counter of `out` once, and only after an enqueue.
 
-    `segment_reduce` advances the counter once during preparation, to learn
-    whether the offsets share it. A call that is refused after that point,
-    or that has no segment, leaves `out` unwritten with its counter moved.
-    That errs toward a backward pass that raises. `segment_softmax`
-    advances the counter only when it enqueues.
+    A call that is refused and a call on a batch without segments write
+    nothing, and their `out` keeps its counter. A call that enqueues
+    advances it by one.
     """
     host_values, host_offsets = _host_segments([3, 40, 0, 4100])
     values, offsets = host_values.cuda(), host_offsets.cuda()
     no_segments = torch.zeros(1, dtype=torch.int32, device="cuda")
     no_values = torch.empty(0, device="cuda")
-    reduced = torch.full((4,), _SENTINEL, device="cuda")
-    weights = torch.full((values.numel(),), _SENTINEL, device="cuda")
+    out = torch.full(
+        (_result_count(function, values, offsets),), _SENTINEL, device="cuda"
+    )
     empty = torch.empty(0, device="cuda")
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
 
     with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
-        swage.segment_reduce(values, offsets, "sum", out=reduced)
-    with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
-        swage.segment_softmax(values, offsets, out=weights)
+        _call(function, values, offsets, out=out)
+    _call(function, no_values, no_segments, out=empty)
     torch.cuda.synchronize()
 
-    assert (reduced._version, weights._version) == (1, 0)
-    assert torch.all(reduced == _SENTINEL)
-    assert torch.all(weights == _SENTINEL)
+    assert (out._version, empty._version) == (0, 0)
+    assert torch.all(out == _SENTINEL)
 
-    swage.segment_softmax(no_values, no_segments, out=empty)
-    assert empty._version == 0
-    swage.segment_reduce(no_values, no_segments, "sum", out=empty)
-    assert empty._version == 1
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "0")
+    _call(function, values, offsets, out=out)
+    assert out._version == 1
 
 
 @pytest.fixture
@@ -1202,12 +1387,12 @@ def test_calls_with_fresh_offsets_leave_nothing_behind(
     """Run many calls and keep memory, modules, and events flat.
 
     Every call gets offsets it has not seen, so it classifies them,
-    uploads task records, allocates split scratch, and records one event.
-    After two warming calls, 300 further ones must load no module, wait
-    for the context never, unload nothing, compile nothing, and end with
-    the device memory of the start. The cycle collector is off for the
-    loop and finds nothing afterwards, so each call freed what it prepared
-    when it returned, by reference counting alone.
+    uploads task records, and allocates split scratch. After two warming
+    calls, 300 further ones must load no module, wait for the context
+    never, unload nothing, compile nothing, create no CUDA event, and end
+    with the device memory of the start. The cycle collector is off for
+    the loop and finds nothing afterwards, so each call freed what it
+    prepared when it returned, by reference counting alone.
     """
     segments, calls = 257, 300
     values = torch.randn(segments * 200 + 14_000, device="cuda")
@@ -1256,4 +1441,4 @@ def test_calls_with_fresh_offsets_leave_nothing_behind(
     assert driver_calls["cuModuleUnload"] == 0
     assert driver_calls["cuCtxSynchronize"] == 0
     assert len(qualification._ptx_memo) == kernels
-    assert event_counts == {"created": calls, "destroyed": calls}
+    assert event_counts == {}

@@ -3,6 +3,8 @@
 
 import gc
 import os
+import pathlib
+import re
 import threading
 import weakref
 from itertools import pairwise
@@ -10,6 +12,7 @@ from itertools import pairwise
 import pytest
 import torch
 from reduction_programs import reduction_module
+from swage import _segmented_qualification as qualification
 from swage._segmented_qualification import (
     _execute,
     _launch_segmented_sum_tasks,
@@ -750,6 +753,100 @@ def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
         actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
     )
     assert not marker.exists()
+
+
+def _checkout_build():
+    """Return the build directory beside the imported `swage` checkout."""
+    return pathlib.Path(qualification.__file__).resolve().parents[2] / "build"
+
+
+def test_cpu_oracle_takes_its_build_directory_from_the_checkout(monkeypatch):
+    """Without the variable, use `build` beside the imported package."""
+    monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
+    assert qualification._oracle_build() == _checkout_build()
+
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", "")
+    assert qualification._oracle_build() == _checkout_build()
+
+
+def test_cpu_oracle_takes_its_build_directory_from_the_environment(
+    tmp_path, monkeypatch
+):
+    """Run the oracle with the tools of a build directory named elsewhere.
+
+    A `swage` that was installed from a wheel has no `build` beside it.
+    The named directory here holds a `swage-opt` that records its use and
+    then runs the real one, so the test shows which tool the oracle ran.
+    """
+    real = _checkout_build()
+    named = tmp_path / "another-build"
+    (named / "bin").mkdir(parents=True)
+    (named / "CMakeCache.txt").write_text(
+        (real / "CMakeCache.txt").read_text()
+    )
+    marker = tmp_path / "used"
+    tool = named / "bin" / "swage-opt"
+    tool.write_text(
+        f'#!/bin/sh\ntouch {marker}\nexec {real / "bin" / "swage-opt"} "$@"\n'
+    )
+    tool.chmod(0o755)
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", str(named))
+    values, offsets = _case([3, 4])
+
+    assert qualification._oracle_build() == named
+    actual = cpu_oracle(values, offsets, "sum")
+
+    torch.testing.assert_close(
+        actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
+    )
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("present", ["CMakeCache.txt", "bin/swage-opt"])
+def test_cpu_oracle_names_what_a_named_build_directory_lacks(
+    present, tmp_path, monkeypatch
+):
+    """Refuse a directory that is not a Swage build, in its own words."""
+    named = tmp_path / "not-a-build"
+    (named / present).parent.mkdir(parents=True, exist_ok=True)
+    (named / present).write_text("")
+    lacking = {"CMakeCache.txt", "bin/swage-opt"} - {present}
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", str(named))
+    values, offsets = _case([3, 4])
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^SWAGE_ORACLE_BUILD_DIR names {re.escape(str(named))}, which "
+            f"lacks {lacking.pop()}; the CPU oracle needs a Swage build "
+            "directory"
+        ),
+    ):
+        cpu_oracle(values, offsets, "sum")
+
+
+def test_cpu_oracle_names_the_variable_when_no_checkout_build_exists(
+    tmp_path, monkeypatch
+):
+    """Say how to name a build directory to a `swage` outside a checkout."""
+    installed = tmp_path / "site-packages" / "swage"
+    monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
+    monkeypatch.setattr(
+        qualification,
+        "__file__",
+        str(installed / "_segmented_qualification.py"),
+    )
+    values, offsets = _case([3, 4])
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^{re.escape(str(tmp_path / 'build'))} lacks CMakeCache.txt and "
+            "bin/swage-opt; the CPU oracle needs a Swage build directory. "
+            "Set SWAGE_ORACLE_BUILD_DIR to one$"
+        ),
+    ):
+        cpu_oracle(values, offsets, "sum")
 
 
 def _fake_tool(directory, name):

@@ -128,10 +128,13 @@ With an artifact selected, a call behaves as
   artifact, and unsetting it returns the process to compiling.
 
 If `mlir_swage` is importable in a process that has an artifact selected,
-the kernels and the classification still come from the artifact. The CUDA
-driver wrapper then takes its launcher from `mlir_swage`, which loads LLVM
-into the process. Leave `mlir_swage` out of a serving environment that must
-not load it.
+the kernels and the classification still come from the artifact, and so
+does the launcher: the CUDA driver wrapper takes it from the runtime
+library of the artifact and does not import `mlir_swage`. A process that
+runs only the two calls therefore loads no LLVM whether or not `mlir_swage`
+is installed, provided `SWAGE_ARTIFACT_DIR` is set before the process first
+uses the driver. A `launch()` of the fixed vector add in the same process
+still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
@@ -145,8 +148,10 @@ An artifact for all three programs holds thirteen files:
 
 The roles of a reduction are `warp` and `cta` for the two pure schedules,
 `mixed` for the fused kernel, and `partial` and `merge` for split segments.
-The softmax has one `cta` kernel. `segment_reduce` prepares the `warp`
-kernel with the others and does not launch it.
+The softmax has one `cta` kernel. `segment_reduce` does not request the
+`warp` kernel. Format version 1 lists it for every reduction, and the
+loader requires it, so that the kernel table stays that of the private
+planned path.
 
 The manifest is JSON. This one is shortened to the first kernel:
 
@@ -309,7 +314,9 @@ For a serving host of another machine, such as an AArch64 host with an
   an artifact in a process that cannot import `mlir_swage`, checks that the
   process maps no LLVM or MLIR library, compares the results with
   `torch.segment_reduce`, `torch.softmax`, and float64 references, and
-  requires the bits of the compiled path.
+  requires the bits of the compiled path. A second process, in which
+  `mlir_swage` is importable, runs both calls from the artifact with no
+  LLVM or MLIR library mapped and then launches the fixed vector add.
 - `tests/python/test_artifact.py` covers selection, every refusal, and the
   trust rule, without the native build.
 - `unittests/RuntimeTest.cpp` and

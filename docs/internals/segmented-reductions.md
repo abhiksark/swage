@@ -107,13 +107,14 @@ schedule with the private helpers today:
   length of each segment and the limits alone.
 - Use `_prepare_planned_sum`, which always disables selection.
 
-The public `swage.segment_reduce` offers none of them. Every call launches
-`mixed` of a preparation with the default limits and `select_schedule=True`,
-so the bits of a public sum can change with the composition of its batch,
-and its bound is the one of the second case under
-[Error bound](#error-bound). A test compares the public sum with that
-private launch bit for bit, and a second one shows the change between a
-batch of one segment fewer than the device has SMs and a batch of as many.
+The public `swage.segment_reduce` offers none of them. Every call enqueues
+the `mixed` schedule under the default limits with automatic selection, in a
+one-shot step that shares the selection rule with the prepared path, so the
+bits of a public sum can change with the composition of its batch, and its
+bound is the one of the second case under [Error bound](#error-bound). Tests
+compare the public result with the prepared `mixed` launch bit for bit over
+the differential batches, and one shows the change between a batch of one
+segment fewer than the device has SMs and a batch of as many.
 
 ### Error bound
 

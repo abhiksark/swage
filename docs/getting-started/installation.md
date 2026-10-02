@@ -22,7 +22,7 @@ python -m pip install swage-compiler
 
 The base package imports without PyTorch. Install the optional PyTorch
 dependency when using metadata inference, CUDA launch, or the segmented
-calls:
+calls. The extra also declares `numpy`, which the segmented calls need:
 
 ```bash
 python -m pip install "swage-compiler[pytorch]"
@@ -165,8 +165,9 @@ PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
 commands need `pytest` and PyTorch, because several binding test modules
 import `torch`. The hosted CI job installs a CPU-only PyTorch build for them,
 and the CUDA tests skip without a GPU. The segmented calls and the private
-qualification helpers behind them also import `numpy`, which the binding
-requirements above already install. Importing `swage`, capturing a kernel,
+qualification helpers behind them also import `numpy`, which the `pytorch`
+extra declares and the binding requirements above already install. A
+segmented call without it raises a `RuntimeError` that names it. Importing `swage`, capturing a kernel,
 emitting MLIR, and launching the fixed vector add do not need it. The
 second command imports `swage`
 from the installed package, so it needs the editable install from the same

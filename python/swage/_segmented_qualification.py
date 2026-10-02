@@ -1,6 +1,7 @@
 # python/swage/_segmented_qualification.py
 """Private qualification runner for native segmented programs."""
 
+import os
 import pathlib
 import re
 import shutil
@@ -1054,6 +1055,46 @@ def _classifying_validator(warp_max_elements, cta_chunk_elements):
     return validate, classification
 
 
+def _selects_direct_cta(
+    torch,
+    device,
+    host_offsets,
+    segment_count,
+    merge_count,
+    cta_chunk_elements,
+    small_element_program,
+):
+    """Return whether a batch runs the pure CTA kernel instead of splitting.
+
+    The prepared path and the one-shot path both ask here, so a batch gets
+    the same schedule, and a sum the same bits, on either.
+
+    Args:
+        torch: The PyTorch module.
+        device: CUDA device of the batch.
+        host_offsets: The validated offsets on the host.
+        segment_count: Number of segments of the batch.
+        merge_count: Number of merge tasks of its classification.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+        small_element_program: What `_admit_program` returned.
+    """
+    # ponytail: a measured two-chunk rule, not a general cost model.
+    # Retain splitting for sparse batches, larger tails, or mixed lengths.
+    # Every segment is split when the merge count equals the segment count,
+    # so the longest segment is read only then.
+    return bool(
+        segment_count > 0
+        and cta_chunk_elements
+        == _target_description().default_cta_chunk_elements
+        and merge_count == segment_count
+        and int((host_offsets[1:] - host_offsets[:-1]).max())
+        <= 2 * cta_chunk_elements
+        and segment_count
+        >= torch.cuda.get_device_properties(device).multi_processor_count
+        and small_element_program
+    )
+
+
 def _prepare_planned_reduction(
     values,
     offsets,
@@ -1146,22 +1187,14 @@ def _prepare_planned_reduction(
         merge_count,
     ) = classification[0]
     direct_count = direct_warp_count + direct_cta_count
-    # ponytail: a measured two-chunk rule, not a general cost model.
-    # Retain splitting for sparse batches, larger tails, or mixed lengths.
-    # Every segment is split when the merge count equals the segment count,
-    # so the longest segment is read only then.
-    use_direct_cta = (
-        select_schedule
-        and segment_count > 0
-        and cta_chunk_elements == blocks.default_cta_chunk_elements
-        and merge_count == segment_count
-        and int((host_offsets[1:] - host_offsets[:-1]).max())
-        <= 2 * cta_chunk_elements
-        and segment_count
-        >= torch.cuda.get_device_properties(
-            values.device
-        ).multi_processor_count
-        and small_element_program
+    use_direct_cta = select_schedule and _selects_direct_cta(
+        torch,
+        values.device,
+        host_offsets,
+        segment_count,
+        merge_count,
+        cta_chunk_elements,
+        small_element_program,
     )
     if segment_count == 0:
 
@@ -1405,6 +1438,228 @@ def _prepare_planned_reduction(
         return None
 
     return _PreparedReduction(warp, cta, cta if use_direct_cta else mixed)
+
+
+def _launch_planned_reduction(
+    values, offsets, output, *, module_text, kernel_name
+):
+    """Validate, classify, and enqueue the mixed schedule of one batch.
+
+    This is `_prepare_planned_reduction(...).mixed()` with the default
+    limits and automatic selection, for a caller that launches once: the
+    same validation, classification, selection rule, kernels, and launch
+    arguments, and therefore the same result bits. It prepares nothing it
+    does not launch. No pure warp kernel is compiled or loaded, the pure
+    CTA kernel and the shared segment ids are used only for a batch the
+    selection rule sends there, and no CUDA event is created.
+
+    Everything `_validate_shapes` checks is checked, and the kernels keep
+    their device-side bounds. Four guards of a prepared launch are left
+    out, because they protect the time between a preparation and a later
+    launch, which does not exist here:
+
+    - The offsets version counter is not compared. The offsets are copied
+      to the host and their records are enqueued within this call, and the
+      caller runs nothing in between. An inference tensor, which has no
+      counter, is therefore admitted.
+    - The storage of the tensors is not compared. The data pointers are
+      read after validation and passed to the driver in the same call.
+    - The CUDA context is not compared. The kernels are loaded, or found
+      loaded, in the context that is current at this call.
+    - No event orders the task records before the kernels. They are
+      uploaded and read on the one stream that is current at this call.
+
+    A write to the offsets by another thread or by a kernel on another
+    stream, between the host copy and the enqueue, is not detected. The
+    result is then not a validated one. The kernels clamp every range they
+    load, so such a write cannot move an access outside the buffers.
+
+    Args:
+        values: Contiguous rank-one CUDA f32 input tensor.
+        offsets: Contiguous rank-one CUDA i32 segment offsets.
+        output: Disjoint contiguous CUDA f32 output, one value per segment.
+        module_text: Native qualification MLIR with the semantic program.
+        kernel_name: Name of the segment function in the module.
+
+    Returns:
+        None. The version counter of the output is advanced once, after the
+        enqueue; a batch without segments enqueues nothing and leaves it.
+    """
+    torch = _runtime._import_torch()
+    warp_max_elements, cta_chunk_elements = _planning_limits(None, None)
+    blocks = _target_description()
+    validate, classification = _classifying_validator(
+        warp_max_elements, cta_chunk_elements
+    )
+    value_count, segment_count, host_offsets = _validate_shapes(
+        values, offsets, output, validate
+    )
+    native_swage = _native_swage()
+    device = offsets.device
+    target = _target(torch, device.index)
+    small_element_program = _admit_program(
+        module_text, kernel_name, warp_max_elements, cta_chunk_elements
+    )
+    if not classification:
+        # The classifier refused offsets that are valid. The program and
+        # the limits are admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
+        )
+    (
+        records,
+        direct_warp_count,
+        direct_cta_count,
+        partial_count,
+        merge_count,
+    ) = classification[0]
+    if segment_count == 0:
+        return None
+    driver = _runtime._get_driver()
+    values_pointer = values.data_ptr()
+    offsets_pointer = offsets.data_ptr()
+    output_pointer = output.data_ptr()
+    if _selects_direct_cta(
+        torch,
+        device,
+        host_offsets,
+        segment_count,
+        merge_count,
+        cta_chunk_elements,
+        small_element_program,
+    ):
+        # One task per segment, in segment order, on the pure CTA kernel.
+        cta_ptx = _compile_once(
+            native_swage._compile_segmented_reduction_ptx,
+            module_text,
+            kernel_name=kernel_name,
+            block_size=blocks.cta_block_threads,
+            target=target,
+            use_task_ids=True,
+        )
+        _, cta_function = _load_once(driver, cta_ptx, kernel_name)
+        all_tasks = _identity_ids(torch, device, segment_count)
+        stream = torch.cuda.current_stream()
+        driver.launch_segmented_tasks(
+            cta_function,
+            (segment_count,),
+            blocks.cta_block_threads,
+            stream.cuda_stream,
+            (
+                values_pointer,
+                offsets_pointer,
+                output_pointer,
+                all_tasks.data_ptr(),
+                value_count,
+                segment_count,
+                segment_count,
+            ),
+        )
+        retained = (values, offsets, output, all_tasks)
+    else:
+        # Every kernel is held before anything is uploaded or enqueued, so
+        # a refused compile leaves the device untouched.
+        direct_count = direct_warp_count + direct_cta_count
+        mixed_function = partial_function = merge_function = None
+        if direct_count:
+            mixed_ptx = _compile_once(
+                native_swage._compile_fused_segmented_reduction_ptx,
+                module_text,
+                kernel_name=kernel_name,
+                target=target,
+            )
+            _, mixed_function = _load_once(driver, mixed_ptx, kernel_name)
+        if partial_count:
+            partial_ptx = _compile_once(
+                native_swage._compile_split_partial_reduction_ptx,
+                module_text,
+                kernel_name=kernel_name,
+                target=target,
+            )
+            merge_ptx = _compile_once(
+                native_swage._compile_split_merge_reduction_ptx,
+                module_text,
+                kernel_name=kernel_name,
+                target=target,
+            )
+            _, partial_function = _load_once(
+                driver, partial_ptx, f"{kernel_name}__partial"
+            )
+            _, merge_function = _load_once(
+                driver, merge_ptx, f"{kernel_name}__merge"
+            )
+        # One upload carries every record: the warp ids, the CTA ids, the
+        # partial ranges, and the merge records, in that order.
+        task_records = torch.tensor(records, dtype=torch.int32, device=device)
+        mixed_pointer = task_records.data_ptr()
+        partial_pointer = mixed_pointer + 4 * direct_count
+        merge_pointer = partial_pointer + 8 * partial_count
+        retained = (values, offsets, output, task_records)
+        stream = torch.cuda.current_stream()
+        if direct_count:
+            # A fused block serves one warp task per subgroup.
+            warp_slots = blocks.cta_block_threads // blocks.subgroup_width
+            driver.launch_segmented_mixed(
+                mixed_function,
+                (
+                    (direct_warp_count + warp_slots - 1) // warp_slots
+                    + direct_cta_count,
+                ),
+                blocks.cta_block_threads,
+                stream.cuda_stream,
+                (
+                    values_pointer,
+                    offsets_pointer,
+                    output_pointer,
+                    mixed_pointer,
+                    value_count,
+                    direct_warp_count,
+                    direct_cta_count,
+                    segment_count,
+                ),
+            )
+        if partial_count:
+            scratch = torch.empty(
+                partial_count, dtype=torch.float32, device=device
+            )
+            retained += (scratch,)
+            driver.launch_segmented(
+                partial_function,
+                (partial_count,),
+                blocks.split_block_threads,
+                stream.cuda_stream,
+                (
+                    values_pointer,
+                    partial_pointer,
+                    scratch.data_ptr(),
+                    value_count,
+                    partial_count,
+                ),
+            )
+            driver.launch_segmented(
+                merge_function,
+                (merge_count,),
+                blocks.split_block_threads,
+                stream.cuda_stream,
+                (
+                    scratch.data_ptr(),
+                    output_pointer,
+                    merge_pointer,
+                    partial_count,
+                    merge_count,
+                    segment_count,
+                ),
+            )
+    for tensor in retained:
+        tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
+    return None
 
 
 def _prepare_persistent_sum(
@@ -1861,12 +2116,49 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
     return "\n".join(lines)
 
 
-def _llvm_root(root):
-    """Find the pinned install used to configure the current build."""
-    cache = root / "build" / "CMakeCache.txt"
+# Names the Swage build directory the CPU oracle takes its tools from. It is
+# a test and development setting: a `swage` that was installed from a wheel
+# has no build directory beside it.
+_ORACLE_BUILD = "SWAGE_ORACLE_BUILD_DIR"
+_ORACLE_BUILD_FILES = ("CMakeCache.txt", "bin/swage-opt")
+
+
+def _oracle_build():
+    """Return the Swage build directory the CPU oracle takes its tools from.
+
+    The oracle runs `bin/swage-opt` of a build directory and reads its
+    `CMakeCache.txt` to find the LLVM install that build was configured
+    with. `SWAGE_ORACLE_BUILD_DIR` names the directory. Without it, the
+    directory is `build` in the checkout this module was imported from.
+    The variable is read at every call.
+
+    Raises:
+        RuntimeError: The directory lacks one of the two files.
+    """
+    named = os.environ.get(_ORACLE_BUILD)
+    if named:
+        build = pathlib.Path(named)
+        subject, remedy = f"{_ORACLE_BUILD} names {build}, which", ""
+    else:
+        build = pathlib.Path(__file__).resolve().parents[2] / "build"
+        subject, remedy = str(build), f". Set {_ORACLE_BUILD} to one"
+    missing = [
+        name for name in _ORACLE_BUILD_FILES if not (build / name).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{subject} lacks {' and '.join(missing)}; the CPU oracle needs "
+            f"a Swage build directory{remedy}"
+        )
+    return build
+
+
+def _llvm_root(build):
+    """Find the pinned install that a Swage build was configured with."""
+    cache = build / "CMakeCache.txt"
     match = re.search(r"^MLIR_DIR:[^=]*=(.+)$", cache.read_text(), re.MULTILINE)
     if not match:
-        raise RuntimeError("build/CMakeCache.txt does not identify MLIR_DIR")
+        raise RuntimeError(f"{cache} does not identify MLIR_DIR")
     return pathlib.Path(match.group(1)).parents[2]
 
 
@@ -1912,9 +2204,9 @@ def _execute(module_text):
     is reinterpreted as the f32 it encodes, so the returned Python floats
     hold the computed values with no decimal rounding in between.
     """
-    root = pathlib.Path(__file__).resolve().parents[2]
-    llvm_root = _llvm_root(root)
-    swage_opt = root / "build" / "bin" / "swage-opt"
+    build = _oracle_build()
+    llvm_root = _llvm_root(build)
+    swage_opt = build / "bin" / "swage-opt"
     mlir_opt = _llvm_tool(llvm_root, "mlir-opt")
     mlir_runner = _llvm_tool(llvm_root, "mlir-runner")
     lowered = _run(
