@@ -1,22 +1,46 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 to 4 of the migration sequence are implemented
+- Status: accepted; all ten steps of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
 
-The design is built one migration step at a time, and this page says which
-steps exist. Implemented: step 0 (the digest gate, dialect extensions in
-`swage-opt`, and a lit test of the nested NVVM pipeline), step 1 (the
-target description), step 2 (argument roles, the kernel layouts,
-admission per function, any number of segment functions in a module, and
-the symbol checks before mutation), step 3 (map fusion), and step 4 (the
-plan stage and the conversion for the direct and task-id schedules, softmax
-included). Not implemented: steps 5 to 10. Until
-its step lands, a part of the design is written in the conditional below,
-and the segmented lowering works as "Context" describes, except where an
-implemented step replaced it.
+The design was built one migration step at a time, and every step is in
+the tree: step 0 (the digest gate, dialect extensions in `swage-opt`, and a
+lit test of the nested NVVM pipeline), step 1 (the target description),
+step 2 (argument roles, the kernel layouts, admission per function, any
+number of segment functions in a module, and the symbol checks before
+mutation), step 3 (map fusion), step 4 (the plan stage and the conversion
+for the direct and task-id schedules, softmax included), step 5 (the CPU
+oracle on the shared patterns), step 6 (the split partial stage, schedule
+lists, and the record layouts), step 7 (the fused mixed kernel), step 8
+(the split merge stage), step 9 (the persistent queue kernel), and step 10
+(the removal of the three legacy passes).
+
+What was built:
+
+- A segment function declares its arguments with `swage.role`, and a
+  module may hold any number of segment functions.
+- `--swage-to-plan` admits each selected function, fuses its maps, and
+  replaces it by one plan function per schedule of its list: `direct`,
+  `task-ids`, `fused-mixed`, `split-partial`, `split-merge`, `persistent`,
+  or `sequential` alone.
+- A plan function has the parameter list of its kernel, its launch width
+  as an attribute, and one task operation that takes every buffer and
+  every device bound as an operand. The dialect has five task operations
+  and `swage_plan.yield`.
+- `--swage-plan-to-gpu` is a dialect conversion with one pattern per
+  operation, and `--swage-plan-to-scf` converts the sequential oracle with
+  the same consumer patterns.
+- One target description is read by the planner, the conversion, the C
+  API, and the host.
+- The code generation C API keeps its six compile entry points and runs
+  the planner and the conversion as two passes.
+
+What differs from the proposal is listed in "Migration sequence", once for
+steps 1 to 4 and once for steps 5 to 10. No difference changed a kernel:
+the digests of the lowered MLIR and of the PTX did not move in any step.
 
 Byte-identical emission is the acceptance criterion of every step through
 step 9: the committed digests of the lowered MLIR and of the PTX must not
@@ -234,17 +258,17 @@ swage_plan (plan functions: kernel signature + task ops with explicit bounds)
 gpu + scf + arith + llvm           unchanged from today, byte for byte
 ```
 
-How the design would answer each objection the two external reviews raised:
+How the design answers each objection the two external reviews raised:
 
 | Objection | Answer |
 |---|---|
 | The lowerings recognize one function shape and emit kernels over a positional ABI | a per-function conversion with operation patterns; any number of functions; the ABI declared by `swage.role` and by the plan function signature |
-| `swage_plan` is not a pipeline stage and nothing consumes it | the lowering would consume plan operations; `classify`, `task_range`, and the companion would be removed |
-| Memory safety is enforced by the host and by argument position, not in the IR | each device bound would be a required operand of a plan operation |
-| The emitters check module-level symbol constraints only through the verifier, after they have mutated | symbol checks would move into admission; the conversion rolls back on failure |
-| The dialect does not say when a mapped segment is evaluated | a mapped segment would be a lazy view; fusion would be a rewrite rooted at the consumer |
+| `swage_plan` is not a pipeline stage and nothing consumes it | the conversion consumes plan operations; `classify`, `task_range`, and the companion are removed |
+| Memory safety is enforced by the host and by argument position, not in the IR | each device bound is a required operand of a plan operation |
+| The emitters check module-level symbol constraints only through the verifier, after they have mutated | symbol checks are part of admission; the conversion rolls back on failure |
+| The dialect does not say when a mapped segment is evaluated | a mapped segment is a lazy view; fusion is a rewrite rooted at the consumer |
 | `swage-opt` aborts on the nested NVVM pipeline | `registerAllExtensions` in `swage-opt` (step 0) |
-| Everything below the semantic IR is specific to one vendor, with a literal warp width of 32 | one target description read by planner, lowering, C API, and host; the use of NVVM would be reduced to two hooks |
+| Everything below the semantic IR is specific to one vendor, with a literal warp width of 32 | one target description read by planner, conversion, C API, and host; the use of NVVM is reduced to two hooks |
 
 The absence of an optimization pipeline and of libdevice, and the fixed
 vector-add recognizer, are out of scope.
@@ -302,7 +326,9 @@ Swage dialect.
 
 ### Functions, kernel layouts, and symbols
 
-Implemented in step 2, in the passes that exist before the plan stage.
+Implemented in step 2, in the passes that existed before the plan stage.
+The planner and the conversion apply the same rules since step 4, and after
+step 10 "a pass" below is the planner.
 
 - A pass lowers every function that holds a Swage operation and leaves the
   other functions as they are. A module without a segment function is left
@@ -323,8 +349,8 @@ Implemented in step 2, in the passes that exist before the plan stage.
 
 ### The plan stage
 
-Implemented in step 4 for the direct and task-id schedules. The other
-schedules are written in the conditional.
+Implemented in step 4 for the direct and task-id schedules and in steps 5
+to 9 for the others.
 
 Principle: plan IR holds what the lowering consumes. A planning parameter
 that no kernel depends on stays a host parameter.
@@ -392,8 +418,7 @@ func.func @segmented_sum(%values: memref<?xf32> {...}, %offsets: memref<?xi32> {
 Each operand group carries its types, so the optional groups (`ids`,
 `task_count`, `into`) parse without ambiguity.
 
-Operations. `tasks` and `yield` exist; each of the others would be added in
-the step whose lowering consumes it:
+Operations. All six exist:
 
 | Operation | Operands | Regions | Bounds the operation requires |
 |---|---|---|---|
@@ -401,7 +426,7 @@ the step whose lowering consumes it:
 | `swage_plan.partial_tasks` | values, value_count, ranges, partial_count, scratch | 1 | range clamped to value_count; task below partial_count |
 | `swage_plan.merge_tasks` | scratch, partial_count, merges, merge_count, output, segment_count | 1 | range clamped to partial_count; output index below segment_count |
 | `swage_plan.fused_tasks` | values, offsets, output, ids, value_count, warp_task_count, cta_task_count, segment_count | 2 (warp, CTA) | as `tasks` with ids |
-| `swage_plan.persistent_tasks` | the ten buffers and six counts | 4 (CTA, partial, merge, warp) | all of the above, plus merge id below merge_count |
+| `swage_plan.persistent_tasks` | the ten buffers and six counts of the persistent layout | 4 (CTA, partial, merge, warp) | all of the above, plus merge id below merge_count |
 | `swage_plan.yield` | optional scalar | terminator | none |
 
 Notes on the operations:
@@ -417,35 +442,57 @@ Notes on the operations:
   values.
 - `into` and a yielded scalar come together. A region that ends in a map
   store yields nothing and has no `into`.
-- The merge region would hold an identity `swage.reduce` of the same kind
-  over scratch. "The merge never runs the element program" would become a
-  property of plan IR, checked by FileCheck.
+- The two regions of `fused_tasks` hold the same program: the planner
+  fills the warp region and copies it into the block region. They yield a
+  scalar and hold no store. `policyOfRegion` gives `warp` for the first
+  region and `cta` for the second.
+- The merge region holds an identity `swage.reduce` of the same kind over
+  scratch, which the planner writes instead of moving the reduction of the
+  function. "The merge never runs the element program" is a property of
+  plan IR: `SwageToPlan/split-merge.mlir` plans a program with a map and a
+  transformed reduction and finds no arithmetic in the merge plan.
+- The four regions of `persistent_tasks` are task regions like the
+  others: the block and warp regions bind a segment of the values and
+  yield into the output, the partial region binds a chunk of the values
+  and yields into scratch, and the merge region binds a range of scratch
+  and yields into the output. The planner fills the block region with the
+  program, copies it into the partial and warp regions, and writes the
+  identity reduction of the merge. `policyOfRegion` gives `warp` for the
+  last region and `cta` for the three before it. The operation says
+  nothing about claims, barriers, or fences; those belong to the
+  conversion.
 - `policy` reuses the `#swage_plan.policy` attribute. The task-id schedule
   uses `warp` exactly when `block_threads` equals the subgroup width. The
   direct schedule always uses `cta`.
-- `policy` would gain a third case, `sequential`, for the oracle (step 5).
-  The host classifier would never produce it.
+- `policy` has a third case, `sequential`, for the oracle (step 5). The
+  host classifier never produces it. A sequential task operation takes no
+  task buffer, and a function with a launch width cannot hold one; the
+  dialect verifies both.
 
 One function to one or more kernels: the planner replaces the semantic
 function by the plan function of the requested kernel. With a list of
-schedules it would clone the function once per kernel.
+schedules it plans one function per kernel, in the order of the list: every
+kernel but the last is planned from a copy of the semantic function.
 
 | `schedule=` | Plan function | Operation | Block threads | Exists |
 |---|---|---|---|---|
 | `direct` | `@f` | `tasks` | `block-threads` option, checked by the target | yes |
 | `task-ids` | `@f` | `tasks` with ids | same | yes |
-| `fused-mixed` | `@f` | `fused_tasks` | target value (128) | step 7 |
-| `split-partial` | `@f__partial` | `partial_tasks` | target value (512) | step 6 |
-| `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | step 8 |
-| `persistent` | `@f` | `persistent_tasks` | target value (512) | step 9 |
-| `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | step 5 |
+| `fused-mixed` | `@f` | `fused_tasks` | target value (128) | yes |
+| `split-partial` | `@f__partial` | `partial_tasks` | target value (512) | yes |
+| `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | yes |
+| `persistent` | `@f` | `persistent_tasks` | target value (512) | yes |
+| `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | yes |
 
 - `schedule` defaults to `direct` and `block-threads` to the block-task
   width of the target, 128.
-- The option would take a list, for example
-  `schedule=split-partial,split-merge`, which gives two plan functions and
-  later two `gpu.module` operations.
-- Two kernels that would both be named `@f` would be a diagnostic.
+- The option takes a list, for example `schedule=task-ids,split-partial`,
+  which gives two plan functions and later two `gpu.module` operations.
+  `block-threads` applies to the direct and task-id kernels; the target
+  fixes the width of every other kernel.
+- Two schedules that name the same kernel, such as `direct,task-ids`, are a
+  diagnostic, and the sequential schedule, which keeps its function, stands
+  alone.
 - A `function=<symbol>` option restricts planning to one function. Without
   it every function with segment operations is planned, and bystanders are
   untouched. The passes of step 2 already work this way.
@@ -464,7 +511,7 @@ What stays on the host, and where it lives:
 | Item | Where | Why |
 |---|---|---|
 | `classifyTasks`, `classifyTaskRecords`, and their limits | `TaskClassifier.cpp`, unchanged | they need runtime offsets |
-| Record layouts | would move to a `TaskRecords.h`, read by `classifyTaskRecords` and by the lowering, in step 6: the direct and task-id kernels read one word per task, so step 4 has no second reader of a record layout | the strides would then exist once |
+| Record layouts | `include/swage/Dialect/SwagePlan/IR/TaskRecords.h`, read by `classifyTaskRecords`, by the plan call, and by the lowerings that load a record (step 6) | the strides exist once on the compiler side; the runtime library of an artifact, which is plain C without LLVM, keeps its own and is compared with the classifier by `RuntimeTest` |
 | Element-work estimate | `swage::estimateElementWork` in the planner library, through `swageEstimateElementWork` and the binding; `_has_small_element_program` compares it with the 32-unit budget | the weights live once, in C++, and the budget stays with the selection rule on the host |
 | The two-chunk selection rule | `_prepare_planned_reduction` | it needs the device SM count and the runtime layout |
 | Launch order, stream dependencies, scratch and counter storage, version and context checks | `_segmented_qualification.py` | runtime state |
@@ -472,14 +519,16 @@ What stays on the host, and where it lives:
 
 `swageMaterializeSegmentedPlan` no longer runs a pass. It checks the
 limits, runs the planner's admission on the named function
-(`admitTaskProgram`), and classifies. It still classifies through
-`classifyTasks` and regroups the descriptors, because it takes i64 offsets
-and `classifyTaskRecords` takes i32. `swageClassifySegments` is unchanged.
+(`admitTaskProgram`), and classifies. Since step 6 it classifies through
+`classifyTaskRecords` and hands each callback its slice of the one record
+buffer. It takes i64 offsets and the record classifier takes i32, so it
+first refuses an offset outside i32, with the message and the precedence of
+the descriptor classifier. `swageClassifySegments` is unchanged.
 
 ### The conversion: `--swage-plan-to-gpu`
 
-Implemented in step 4 for `tasks`. The patterns of the other task
-operations are written in the conditional.
+Implemented in step 4 for `tasks` and in steps 6 to 9 for the other task
+operations.
 
 Location and shape:
 
@@ -519,12 +568,13 @@ Patterns:
 
 | Pattern | Root | Emits | Exists |
 |---|---|---|---|
-| `PlanKernelFuncPattern` | `func.func` with `swage_plan.block_threads` | module, kernel shell, launch width through the target hook; would add the workgroup claim slots when the body holds `persistent_tasks` | yes |
+| `PlanKernelFuncPattern` | `func.func` with `swage_plan.block_threads` | module, kernel shell, launch width through the target hook; the two workgroup claim slots when the body holds `persistent_tasks` | yes |
 | `PlanKernelReturnPattern` | `func.return` of a plan function | `gpu.return` | yes |
 | `TasksPattern` | `tasks` | prelude, block-uniform guard, binding (offsets loads, `clampRange`, `isLoadedIndexInRange`), then the sink | yes |
-| `PartialTasksPattern`, `MergeTasksPattern` | the operation | the same shape over records | steps 6 and 8 |
-| `FusedTasksPattern` | `fused_tasks` | the fused skeleton, with slots `block_threads / subgroupWidth` | step 7 |
-| `PersistentTasksPattern` | `persistent_tasks` | the persistent skeleton: claims, barriers, fences | step 9 |
+| `PartialTasksPattern` | `partial_tasks` | prelude, guard, the range record of the chunk (`loadRecordField`, `clampRange`), then the store of the result in the scratch slot of the task | yes |
+| `MergeTasksPattern` | `merge_tasks` | the same shape over merge records: the loaded segment is compared with the segment count and gates the store | yes |
+| `FusedTasksPattern` | `fused_tasks` | the fused skeleton, with slots `block_threads / subgroupWidth`; each of its two sites binds and converts a region through `convertSegmentTask`, which `TasksPattern` uses too | yes |
+| `PersistentTasksPattern` | `persistent_tasks` | the persistent skeleton: claims, barriers, fences. The block and warp regions go through `convertSegmentTask`, the partial and merge regions through `convertRangeTask`, which `PartialTasksPattern` and `MergeTasksPattern` use too | yes |
 | `ReducePattern` | `swage.reduce` | identity, strided `scf.for`, element program, combine; then the shuffle tree (warp) or `gpu.all_reduce uniform` (CTA) | yes |
 | `MapStorePattern` | `swage.map_store` | the guard-free strided store loop | yes |
 
@@ -586,11 +636,36 @@ Failure behavior:
   matter for plan IR written by hand; the planner produces only plan
   functions that pass. `SwagePlanToGPU/invalid.mlir` holds the cases.
 
+The oracle (`--swage-plan-to-scf`, `lib/Conversion/SwagePlanToSCF/`),
+implemented in step 5:
+
+- The sequential schedule plans a function in place: it keeps its
+  signature, its roles, and its callers and gets no launch width.
+- `SequentialTasksPattern` emits one loop over the segments, reads the
+  range of each segment from the offsets without a clamp, binds the segment
+  to the values memref, and legalizes and moves the consumers as the kernel
+  pattern does.
+- `ReducePattern` and `MapStorePattern` are the ones the kernel conversion
+  uses, in `ConsumerPatterns.cpp`. The emission functions load and store
+  through a memref or a pointer by the type of the buffer they are given,
+  and `policy<sequential>` combines nothing across threads.
+- The conversion removes the `swage.role` attributes of the function, so
+  its output parses without the Swage dialects. `buildSequentialProgram` is
+  deleted, and the oracle is `--swage-to-plan='schedule=sequential'`
+  followed by this conversion.
+- The conversion checks the element and word types and the element
+  programs of every sequential task operation before it changes anything,
+  as the kernel conversion does.
+
 C API (`lib/CAPI/Codegen.cpp`):
 
-- The compile functions run the legacy pass with `function=kernelName`,
-  which plans and converts for the direct and task-id schedules, then the
-  unchanged nested NVVM steps.
+- The compile functions add two passes, the planner with
+  `function=kernelName` and the schedule of the entry point and then the
+  conversion, ahead of the unchanged nested NVVM steps. The pass manager
+  verifies the plan between the two.
+- The entry point of the direct and task-id kernels takes the launch width
+  from its caller and checks it before it plans, so its diagnostic still
+  names the power-of-two warp rule.
 - The `gpu.module` is selected by symbol (`<expected kernel>_module`)
   instead of by count.
 - The six compile entry points and their signatures stay.
@@ -681,10 +756,10 @@ benchmark scripts.
 
 ### Private ABI changes and launch-site consequences
 
-Kernel parameter layouts would not change. All six rows of the layout table
-in the context section would be reproduced by `kernelLayout`, so every
-launch tuple in `_segmented_qualification.py` and every slice in the
-`_CudaDriver` helpers would stay as it is.
+Kernel parameter layouts did not change. All six rows of the layout table
+in the context section are reproduced by `kernelLayout`, so every launch
+tuple in `_segmented_qualification.py` and every slice in the `_CudaDriver`
+helpers stayed as it was.
 
 The pinned evidence is the signature counts in
 `python/tests/mlir/test_segmented_codegen.py` (lines 241-242, 273-274,
@@ -698,6 +773,7 @@ Private interface changes that are not kernel ABIs:
 | `_materialize_segmented_plan` gains `kernel_name` | 2 | one call site, in `_admit_program` |
 | Module constants replaced by the description | 1 | same values; the four block constants, `_CTA_CHUNK_ELEMENTS`, `_validate_warp_count`, `_launch_segmented_sum_tasks`, `mixed`, and `_prepare_persistent_sum` |
 | Element-work walk replaced by a native call | 4 | `_has_small_element_program` and its caller `_parsed_module` |
+| The oracle command of the private runner names the planner and the conversion | 10 | `_execute`, which runs `swage-opt` |
 
 ### Tests: what would stay, what would change, how equivalence is shown
 
@@ -710,10 +786,12 @@ signature gaining role attributes in step 2:
   `invalid-block-size.mlir`.
 - All positive and runner tests in `test/Conversion/SwageToCPU/`, plus
   `invalid-unverified.mlir`.
-- The fixed vector-add tests would not be touched at all.
+- The fixed vector-add tests were not touched at all.
 
-The legacy pass names would stay as entry points that call the planner and
-the conversion. That is why the RUN lines would hold.
+The legacy pass names stayed through step 9 as entry points that called the
+planner and a conversion, which is why the RUN lines held. Step 10 rewrote
+the RUN lines to the planner and a conversion and left every CHECK line of
+a kernel as it was.
 
 Changes, with the reason:
 
@@ -730,8 +808,10 @@ Changes, with the reason:
 New tests: role round trip and negatives, `fuse-maps.mlir`,
 `two-kernels.mlir`, `invalid-kernel-symbols.mlir`, one hand-written plan-IR
 file per operation under `test/Conversion/SwagePlanToGPU/`, plan operation
-round trip and negatives, and a one-pipeline test for the plan-then-lower
-case that fails today.
+round trip and negatives, and, through step 9, one pipeline test per
+schedule that compared the legacy flag with the planner and the conversion.
+Step 10 removed those comparisons with the flags; `nvvm-pipeline.mlir`
+runs the planned pipeline through the nested NVVM conversion.
 
 Equivalence:
 
@@ -801,8 +881,8 @@ Equivalence:
 Every step is gated by the full set unless noted: lit, C++ unit,
 `tests/python`, and `python/tests/mlir` on the qualification GPU, with the
 digest test at 552 of 552. Rollback for every step is a revert of that
-step's commits. No step changes a launch tuple, and the legacy pass names
-and the signatures of the six compile entry points hold until step 10.
+step's commits. No step changes a launch tuple. The legacy pass names held
+until step 10, and the six compile entry points keep their signatures.
 
 What steps 1 to 4 built differently from the first sketch of this record.
 Each point is also stated where its subject is described:
@@ -819,7 +899,8 @@ Each point is also stated where its subject is described:
   and the symbol clash.
 - Fixed-block lowering. The symbol checks of step 2 cover the segmented
   lowerings, the planner, and the conversion. `--swage-fixed-block-to-gpu`
-  does not have them yet.
+  got the same checks in a commit of its own after step 5, with
+  `invalid-fixed-kernel-symbols.mlir`.
 - Semantic ABI predicate. `hasCanonicalSemanticABI` accepted the five
   arguments in any order from step 2, because roles free the order, until
   step 4 removed it with `swage_plan.classify`.
@@ -828,22 +909,49 @@ Each point is also stated where its subject is described:
 - Fusion driver. The lowerings and the planner apply the fusion rewrite to
   the admitted consumers directly instead of running the greedy driver,
   which would also delete a reduction that nothing reads.
-- Planner options. `--swage-to-plan` takes one schedule, not a list, and no
-  planning limit. Without options it plans the direct kernel at 128
-  threads. The limit rule, "planning limits must satisfy", is checked by
+- Planner options. `--swage-to-plan` takes no planning limit. Without
+  options it plans the direct kernel at 128 threads. The schedule list
+  arrived in step 6, with the first second kernel of one function. The limit rule, "planning limits must satisfy", is checked by
   `swageMaterializeSegmentedPlan` and pinned by `CodegenCAPITest` and
   `test_segmented_classification.py`.
 - Conversion mechanics. Consumers are legalized one by one and the results
   moved with `moveOpBefore`, and the function pattern legalizes its body
   before it moves it. "The conversion" gives the reasons. The fallback was
   not needed.
-- Classification in the plan call. `swageMaterializeSegmentedPlan` still
-  classifies through `classifyTasks` and regroups the descriptors, and
-  `TaskRecords.h` waits for step 6.
+- Classification in the plan call. `swageMaterializeSegmentedPlan`
+  classified through `classifyTasks` until step 6, which moved it to
+  `classifyTaskRecords` behind a range check and added `TaskRecords.h`.
 - Reduction kinds. Three functions in `Emission.h` instead of a table type.
 - Commits. Step 4 is four commits (the shared emission functions, the
   admission move, the plan stage and conversion, the element-work
   estimate), each with the digests unchanged.
+
+What steps 5 to 10 built differently from the first sketch:
+
+- Oracle. The sequential schedule is a third case of the policy attribute
+  of `swage_plan.tasks`, as decided before step 5. It plans a function in
+  place, so it stands alone in a schedule list.
+- Schedule lists. `schedule=` takes a list from step 6, and the planner
+  refuses a list in which two schedules name the same kernel. After step
+  10 that rule is what replaces the option-combination diagnostics of the
+  legacy pass.
+- Checks on plan IR written by hand. The conversion checks, before it
+  changes anything, what the dialect verifier does not promise: the launch
+  width the target admits, whole subgroups for a fused block, the
+  persistent width, and the identity sum of the persistent regions.
+- Persistent claim slots. The function pattern adds them and the
+  persistent pattern finds them through the kernel of its operands, as
+  step 9 describes.
+- Pass factories. `createSwageToPlanPass` and `createSwagePlanToGPUPass`
+  have an overload that takes the options and the target description, for
+  the C API and for the unit test that lowers with another subgroup width.
+- Width diagnostics. The planner reports one rule for `block-threads`,
+  "a launch width the target admits". The C API keeps the wording of the
+  legacy pass for its direct and task-id entry point, which
+  `test_segmented_bounds.py` pins.
+- Pipeline comparisons. The tests that compared a legacy flag with the
+  two-pass pipeline were removed with the flags in step 10.
+  `SwagePlanToGPU/schedule-list.mlir` keeps the schedule list case.
 
 Step 0. Gates. This step does not depend on the decision.
 
@@ -918,30 +1026,40 @@ included).
 Step 5. Oracle onto the shared patterns.
 
 - Files: new `lib/Conversion/SwagePlanToSCF/` (a `tasks policy<sequential>`
-  pattern; `ReducePattern` and `MapStorePattern` dispatch on a memref or
-  pointer base); `buildSequentialProgram` deleted.
-- Emitted IR: none.
+  pattern; `ReducePattern` and `MapStorePattern` move to
+  `ConsumerPatterns.cpp` and dispatch on a memref or pointer base); the
+  sequential schedule in the planner; `buildSequentialProgram` deleted.
+- Emitted IR: none. The oracle output of every lit input is byte-identical
+  to the output before the step.
 - Gate: all of `SwageToCPU/`, the four runner tests,
   `test_segmented_numerics.py`.
 
 Step 6. Split partial.
 
-- Files: `partial_tasks` and `PartialTasksPattern`; the partial half of
-  `buildSplitGPUProgram` deleted.
+- Files: `partial_tasks` and `PartialTasksPattern`; the split-partial
+  schedule and the schedule list in the planner; `TaskRecords.h`; the plan
+  call on `classifyTaskRecords`; the partial half of `buildSplitGPUProgram`
+  deleted, and the merge half moved onto the shared emission functions.
+- Emitted IR: none.
 - Gate: `split-partial.mlir`; the `PARTIAL` and `SPLIT` prefixes;
   `invalid-split.mlir`.
 
 Step 7. Fused mixed.
 
-- Files: `fused_tasks` and `FusedTasksPattern`; the fused branch
-  (1237-1294) deleted.
+- Files: `fused_tasks` and `FusedTasksPattern`; the fused-mixed schedule
+  in the planner; the fused branch deleted, which leaves the persistent
+  kernel as the one schedule of `--swage-segmented-reduction-to-gpu` that
+  is emitted without a plan.
+- Emitted IR: none.
 - Gate: `fused-mixed.mlir` including the `SYNC` run; the `FUSED` prefixes;
   the mixed cases of `test_segmented_runtime.py`; racecheck run locally.
 
 Step 8. Split merge.
 
-- Files: `merge_tasks` and `MergeTasksPattern`; the rest of
-  `buildSplitGPUProgram` deleted.
+- Files: `merge_tasks` and `MergeTasksPattern`; the split-merge schedule
+  in the planner; the rest of the split emitter deleted, so
+  `--swage-split-segmented-reduction-to-gpu` only plans and converts.
+- Emitted IR: none.
 - Gate: `split-merge.mlir` with its `--implicit-check-not=arith.mulf` and
   `RANGE` runs; the `MERGE` prefixes; a plan-level check that the merge
   region is an identity reduce.
@@ -949,20 +1067,48 @@ Step 8. Split merge.
 Step 9. Persistent queue.
 
 - Files: `persistent_tasks` and `PersistentTasksPattern`; the persistent
-  branch (877-1235) deleted.
+  schedule in the planner; the counter layout in `TaskRecords.h`, which the
+  conversion reads and the private runner still mirrors as `3 +
+  merge_count`; the
+  persistent emitter deleted, so `--swage-segmented-reduction-to-gpu` only
+  validates its options, plans, and converts.
+- Emitted IR: none.
 - Gate: `persistent.mlir` (all four prefixes and the round trip);
   `invalid-persistent.mlir`; the `PERSISTENT` prefixes;
-  `test_persistent_runtime.py`; racecheck; ten consecutive native-tier
-  runs.
+  `test_persistent_runtime.py`, run alone thirty times; racecheck; ten
+  consecutive native-tier runs.
+- What was built differently from the sketch:
+  - The persistent pattern runs while the plan function is still its
+    parent, so it finds the claim slots through the kernel that owns the
+    parameters its operands were replaced by. The function pattern adds
+    the slots, as sketched.
+  - The conversion checks two more rules before it changes anything, for
+    plan functions written by hand: the launch width is the persistent
+    width of the target, and every region holds one capture-free identity
+    `kind<sum>` reduction. The planner admits no other program for this
+    schedule, and the queue kernel has been run with no other.
+  - The record index arithmetic of the queue kernel stays as the emitter
+    wrote it, because the kernel text is pinned: the kernel reuses its
+    index constant one for the fields of a record, and the leader
+    predicate of the prelude for its stores, where the split patterns
+    create a constant and a comparison per site.
 
 Step 10. Remove the legacy surface.
 
-- Files: `lib/Conversion/SegmentedReduction/` and its header deleted; RUN
-  lines rewritten to `--swage-to-plan=... --swage-plan-to-gpu`;
-  option-combination tests replaced by planner option tests;
-  documentation.
-- Emitted IR: none.
-- Gate: CHECK lines unchanged; digests.
+- Files: `lib/Conversion/SegmentedReduction/` and its header deleted, with
+  the three pass names `--swage-segmented-reduction-to-scf`,
+  `--swage-segmented-reduction-to-gpu`, and
+  `--swage-split-segmented-reduction-to-gpu`; `lib/CAPI/Codegen.cpp` on
+  the planner and conversion pass factories; RUN lines rewritten to
+  `--swage-to-plan=...` followed by `--swage-plan-to-gpu` or
+  `--swage-plan-to-scf`; the option-combination prefixes of
+  `persistent.mlir`, `fused-mixed.mlir`, and `invalid-persistent.mlir`
+  replaced by schedule list tests, and the messages of
+  `invalid-block-size.mlir` by the planner's width rule; the oracle command
+  of the private runner; documentation.
+- Emitted IR: none. For every lit input, the planner and a conversion
+  print what the legacy flag printed at step 9, and fail where it failed.
+- Gate: CHECK lines of the kernels unchanged; digests.
 
 ## Risks and the test that would detect each
 
@@ -1002,8 +1148,8 @@ How the design would make the later work easier:
   their operands. A new type would be a row in the admission tables plus
   host scalar widths (`launchKernel` takes `int32_t` today), not an emitter
   edit.
-- Reduction kinds. One row in `ReductionKindTable`. The planner would decide
-  whether a kind may be split.
+- Reduction kinds. One case in each of the three kind functions of
+  `Emission.h`. The planner would decide whether a kind may be split.
 - `map_store` only, and `swage.extent`. The task region already admits a
   body with no reduction, and the four-value segment makes an extent a
   subtraction.

@@ -1,7 +1,9 @@
 // test/Conversion/SwageToGPU/ragged-softmax.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=NOSYNC
 
 // Three phases in one kernel, one CTA per segment. The emitter synchronizes

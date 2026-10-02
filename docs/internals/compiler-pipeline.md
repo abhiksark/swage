@@ -83,18 +83,20 @@ Exact admitted module shapes and internal ABIs live in
 
 ## Plan stage
 
-The direct kernel and the task-id kernel are lowered in two steps. The
-planner replaces an admitted segment function by a plan function: the
-parameter list of the kernel, its launch width, and one `swage_plan.tasks`
+Every segmented kernel and the sequential CPU oracle are lowered in two
+steps. The planner replaces an admitted segment function by a plan
+function: the parameter list of the kernel, its launch width, and one task
 operation that takes every buffer and every bound as an operand and holds
 the reductions and stores of one bound segment. A dialect conversion then
 turns each plan function into a `gpu.module`, with one pattern per
-operation. `--swage-to-plan` and `--swage-plan-to-gpu` run the two steps
-from text, and `--swage-segmented-reduction-to-gpu` runs both for these two
-schedules. The fused mixed, split, and persistent kernels are emitted by
-their lowerings without a plan stage;
+operation. The oracle is planned in place with `policy<sequential>` and
+converted to loops over its memrefs by `--swage-plan-to-scf`, which lowers
+reductions and stores with the patterns the kernel conversion uses.
+`--swage-to-plan` and the two conversions run the steps from text, and the
+code generation C API runs the planner and the kernel conversion as two
+passes.
 [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
-order in which they move.
+order in which the schedules moved to this shape.
 
 ```text
 swage (roles on arguments)
@@ -102,6 +104,8 @@ swage (roles on arguments)
 swage_plan (kernel signature + task operation with explicit bounds)
   --swage-plan-to-gpu              dialect conversion, no options
 gpu + scf + arith + llvm
+  --swage-plan-to-scf              the same for policy<sequential>
+scf + arith + memref
 ```
 
 ## Private SwagePlan branch

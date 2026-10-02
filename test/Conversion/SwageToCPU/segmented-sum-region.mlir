@@ -1,5 +1,5 @@
 // test/Conversion/SwageToCPU/segmented-sum-region.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // A non-identity reduction region is inlined into the sequential element loop.

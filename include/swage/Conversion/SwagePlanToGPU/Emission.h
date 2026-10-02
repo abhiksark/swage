@@ -7,10 +7,9 @@
 //===----------------------------------------------------------------------===//
 //
 // The pieces every segmented kernel is built from: the bounded range of a
-// segment, one reduction stage, and the two sinks. The conversion patterns
-// and the schedules that are still emitted by the segmented lowering call
-// the same functions, so a kernel has the same text whichever path built
-// it. This header is internal to the Swage conversions.
+// segment, one reduction stage, and the two sinks. Every conversion
+// pattern calls the same functions, so a reduction or a store has the same
+// text in every kernel. This header is internal to the Swage conversions.
 //
 //===----------------------------------------------------------------------===//
 
@@ -31,8 +30,12 @@ struct TargetDescription;
 /// and every `stride`-th element after it below `end`, in the buffer at
 /// `base`. A consumer of a bound segment needs these four values and
 /// nothing else.
+///
+/// A kernel addresses its buffers through pointers. The sequential oracle
+/// keeps them as memrefs. Loads and stores follow the type of the buffer
+/// they are given.
 struct SegmentBinding {
-  Value base;   ///< Pointer to the values buffer.
+  Value base;   ///< The values buffer: a pointer in a kernel, or a memref.
   Value first;  ///< Index of the first element this thread reads.
   Value end;    ///< Index one past the last element of the segment.
   Value stride; ///< Index distance between two elements of one thread.
@@ -42,6 +45,16 @@ struct SegmentBinding {
 struct BoundSegment {
   SegmentBinding segment;
   Value segmentId64; ///< The segment ID as i64, for the scalar store.
+};
+
+/// How the threads that ran one reduction loop combine their accumulators.
+enum class ThreadCombination {
+  /// One thread ran the whole loop; there is nothing to combine.
+  None,
+  /// A shuffle tree over the lanes of one subgroup.
+  Subgroup,
+  /// A block-wide reduction.
+  Block,
 };
 
 /// Applies an element program to one loaded element at the insertion point
@@ -94,6 +107,19 @@ Value isLoadedIndexInRange(OpBuilder &builder, Location loc, Value word,
 Value loadTaskWord(OpBuilder &builder, Location loc, Value words,
                    Value wordIndex);
 
+/// Load one field of a task record: the i32 word at index
+/// `recordBase + field` of the task buffer `records`, where `recordBase` is
+/// the word index of the record. The fields of each record are in
+/// `TaskRecords.h`.
+Value loadRecordField(OpBuilder &builder, Location loc, Value records,
+                      Value recordBase, unsigned field);
+
+/// Store `total` at `sink[slot]` from the thread whose `threadId` is zero,
+/// and only when `slotInRange`, if given, holds. `slot` is an index; the
+/// thread that stores converts it.
+void emitLeaderStore(OpBuilder &builder, Location loc, Value total, Value sink,
+                     Value slot, Value threadId, Value zero, Value slotInRange);
+
 /// Bind segment `segmentId` for the thread `logicalThreadId`: load its range
 /// from `offsets`, clamp it to `valueCount`, and give the thread its first
 /// element.
@@ -114,13 +140,15 @@ BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
                                 Value one);
 
 /// Reduce the bound segment with `kind`: every thread folds its elements,
-/// then the threads combine their accumulators, through a shuffle tree over
-/// one subgroup when `useWarpShuffle` is set and through a block-wide
-/// reduction otherwise. Returns the result, which every thread holds.
+/// then the threads combine their accumulators as `combination` says.
+/// Returns the result, which every thread holds. `target` gives the width
+/// of a subgroup and is read for `ThreadCombination::Subgroup` only, so it
+/// may be null otherwise.
 Value emitReductionStage(OpBuilder &builder, Location loc,
-                         const TargetDescription &target, ReductionKind kind,
+                         const TargetDescription *target, ReductionKind kind,
                          Type elementType, const SegmentBinding &segment,
-                         bool useWarpShuffle, ElementProgramFn element);
+                         ThreadCombination combination,
+                         ElementProgramFn element);
 
 /// Store `total` at `output[segmentId64]` from the thread whose
 /// `logicalThreadId` is zero, and only when `segmentInRange`, if given,
@@ -130,7 +158,7 @@ void emitScalarStore(OpBuilder &builder, Location loc, Value total,
                      Value zero, Value segmentInRange);
 
 /// Write the element program of every element of the bound segment to the
-/// same index of `output`.
+/// same index of `output`, which is a pointer or a memref.
 void emitMapStore(OpBuilder &builder, Location loc, Type elementType,
                   const SegmentBinding &segment, Value output,
                   ElementProgramFn element);

@@ -1,5 +1,6 @@
 # lib/Conversion/SwagePlanToGPU/CMakeLists.txt
 add_mlir_conversion_library(MLIRSwagePlanToGPU
+  ConsumerPatterns.cpp
   Emission.cpp
   SwagePlanToGPU.cpp
 
@@ -12,6 +13,7 @@ add_mlir_conversion_library(MLIRSwagePlanToGPU
   MLIRGPUDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIRMemRefDialect
   MLIRNVVMDialect
   MLIRPass
   MLIRSCFDialect

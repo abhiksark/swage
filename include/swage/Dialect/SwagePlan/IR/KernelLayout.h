@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The parameter list of every kernel the segmented lowerings emit, as data.
+// The parameter list of every kernel the plan conversion emits, as data.
 // An emitter asks a layout where an argument is instead of counting
 // positions, and the host launches with the same order. A kernel takes its
 // buffers first, as pointers, and then its counts, as i32.
@@ -23,7 +23,7 @@
 
 namespace mlir::swage_plan {
 
-/// The kernels the segmented lowerings emit.
+/// The kernels the plan conversion emits.
 enum class KernelKind {
   /// One block per segment; the block index is the segment index.
   Direct,

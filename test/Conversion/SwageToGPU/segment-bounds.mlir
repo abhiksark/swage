@@ -1,19 +1,26 @@
 // test/Conversion/SwageToGPU/segment-bounds.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=32' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=32' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=DIRECT,CHECK
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=DIRECT,CHECK
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=32 use-task-ids=true' %s \
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=32' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=TASKS,CHECK
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128 use-task-ids=true' %s \
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=TASKS,CHECK
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128 fused-mixed=true' %s \
+// RUN: swage-opt --swage-to-plan='schedule=fused-mixed' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=FUSED,CHECK
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' %s \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=PERSISTENT,CHECK
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=PARTIAL,SPLIT
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu='merge' %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=MERGE,SPLIT
 
 // The kernel re-reads offsets[sid] and offsets[sid + 1] from device memory at

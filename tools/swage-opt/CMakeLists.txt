@@ -4,8 +4,8 @@ set(LIBS
   MLIRSwagePlan
   MLIRSwageTransforms
   MLIRSwageFixedBlockToGPU
-  MLIRSwageSegmentedReduction
   MLIRSwagePlanToGPU
+  MLIRSwagePlanToSCF
   MLIRSwageToPlan
   MLIROptLib
   MLIRRegisterAllExtensions

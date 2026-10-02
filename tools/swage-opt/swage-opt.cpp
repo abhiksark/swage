@@ -21,8 +21,8 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
-#include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
+#include "swage/Conversion/SwagePlanToSCF/SwagePlanToSCF.h"
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/Transforms/FuseMaps.h"
@@ -31,9 +31,9 @@
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::swage::registerFixedBlockToGPUPass();
-  mlir::swage::registerSegmentedReductionPasses();
   mlir::swage::registerSwageToPlanPass();
   mlir::swage::registerSwagePlanToGPUPass();
+  mlir::swage::registerSwagePlanToSCFPass();
   mlir::swage::registerFuseMapsPass();
 
   mlir::DialectRegistry registry;

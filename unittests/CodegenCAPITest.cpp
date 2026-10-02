@@ -494,6 +494,35 @@ TEST(CodegenCAPITest, RejectsBlockSizesNoDeviceLaunches) {
   }
 }
 
+TEST(CodegenCAPITest, RejectsBlockSizesWithoutAPowerOfTwoWarpCount) {
+  struct Case {
+    int64_t blockSize;
+    const char *message;
+  };
+  const Case cases[] = {
+      {96, "block-size must give a power-of-two warp count, got 96 (3 warps)"},
+      {160,
+       "block-size must give a power-of-two warp count, got 160 (5 warps)"},
+  };
+  for (const Case &testCase : cases) {
+    SCOPED_TRACE(testCase.blockSize);
+    // The direct kernel and the task-id kernel take the width of the call.
+    for (bool useTaskIds : {false, true}) {
+      Session session;
+      Compiled compiled;
+      StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
+      StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+
+      MlirLogicalResult result = swageCompileSegmentedReductionToPTX(
+          session.parse(segmentedSum), ref("segmented_sum"), testCase.blockSize,
+          ref("sm_86"), useTaskIds, storeString, &lowered, storeString, &ptx);
+      compiled.succeeded = mlirLogicalResultIsSuccess(result);
+
+      expectRejected(compiled, session, testCase.message);
+    }
+  }
+}
+
 TEST(CodegenCAPITest, RejectsAKernelNameTheModuleDoesNotDefine) {
   for (const EntryPoint &entryPoint : entryPoints()) {
     SCOPED_TRACE(entryPoint.name);
@@ -617,9 +646,8 @@ TEST(CodegenCAPITest, RejectsANamedMemorySpaceWithoutAborting) {
 }
 
 TEST(CodegenCAPITest, RejectsAModuleThatDefinesTheSymbolOfTheKernelModule) {
+  // Every lowering, the fixed-block one included.
   for (const EntryPoint &entryPoint : entryPoints()) {
-    if (entryPoint.program != segmentedSum)
-      continue;
     SCOPED_TRACE(entryPoint.name);
     Session session;
     MlirDialectHandle gpu = mlirGetDialectHandle__gpu__();
@@ -630,11 +658,12 @@ TEST(CodegenCAPITest, RejectsAModuleThatDefinesTheSymbolOfTheKernelModule) {
     Compiled compiled = session.compile(
         entryPoint.compile,
         session.parse(beforeFirstFunction(
-            segmentedSum, "gpu.module @" + symbol + " {\n  }\n  ")),
-        "segmented_sum", "sm_86");
+            entryPoint.program, "gpu.module @" + symbol + " {\n  }\n  ")),
+        entryPoint.kernelName, "sm_86");
 
     expectRejected(compiled, session,
-                   "lowering @segmented_sum creates @" + symbol +
+                   std::string("lowering @") + entryPoint.kernelName +
+                       " creates @" + symbol +
                        ", which the module already defines");
   }
 }
@@ -847,6 +876,38 @@ TEST(CodegenCAPITest, APlanCallReportsInvalidMetadata) {
 
   expectRejected(materialize(session, offsets, 3, 4, 2), session,
                  "offsets must be nondecreasing");
+}
+
+TEST(CodegenCAPITest, APlanCallReportsOffsetsOutsideI32) {
+  const int64_t wide = int64_t{1} << 40;
+  {
+    // The plan call takes i64 offsets and classifies i32 records, so an
+    // offset that does not fit is refused before it is narrowed.
+    Session session;
+    const int64_t offsets[] = {0, wide};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
+  {
+    Session session;
+    const int64_t offsets[] = {0, -wide};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
+  {
+    // The first invalid offset decides, as it does for offsets that fit.
+    Session session;
+    const int64_t offsets[] = {0, 4, 2, wide};
+    expectRejected(materialize(session, offsets, 4, 4, 3), session,
+                   "offsets must be nondecreasing");
+  }
+  {
+    // A value that would wrap to a valid i32 is still refused.
+    Session session;
+    const int64_t offsets[] = {0, (int64_t{1} << 32) + 4};
+    expectRejected(materialize(session, offsets, 2, 4, 1), session,
+                   "offset must be a nonnegative i32 value");
+  }
 }
 
 /// What one swageClassifySegments call left with its two callbacks.

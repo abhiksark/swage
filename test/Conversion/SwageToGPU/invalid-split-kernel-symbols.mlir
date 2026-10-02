@@ -3,7 +3,7 @@
 // name of the kernel and the name of its gpu.module must both be free, and
 // nothing may refer to the function.
 //
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 
 module {

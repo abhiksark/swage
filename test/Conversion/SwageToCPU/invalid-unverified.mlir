@@ -1,9 +1,10 @@
 // test/Conversion/SwageToCPU/invalid-unverified.mlir
 // RUN: swage-opt --mlir-very-unsafe-disable-verifier-on-parsing \
-// RUN:   --swage-segmented-reduction-to-scf \
+// RUN:   --swage-to-plan='schedule=sequential' --swage-plan-to-scf \
 // RUN:   --verify-diagnostics --split-input-file %s
 // RUN: swage-opt --mlir-very-unsafe-disable-verifier-on-parsing \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128' \
+// RUN:   --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 
 // A pass manager verifies after each pass and never before the first one, so

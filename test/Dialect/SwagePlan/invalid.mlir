@@ -332,7 +332,7 @@ module {
         segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
         value_count(%value_count : i32) segment_count(%segment_count : i32) {
     ^bb0(%segment: !swage.segment<f32>):
-      // expected-error@+1 {{'swage.extent' op is not allowed in a task region; the region holds swage.reduce and swage.map_store operations and ends in swage_plan.yield}}
+      // expected-error@+1 {{'swage.extent' op is not allowed in the region of 'swage_plan.tasks'; the region holds swage.reduce and swage.map_store operations and ends in swage_plan.yield}}
       %length = swage.extent %segment : !swage.segment<f32>
       swage_plan.yield
     }
@@ -429,9 +429,58 @@ module {
 
 // -----
 
+// The oracle visits every segment in order on one thread: it has no task
+// buffer and no launch width.
+module {
+  func.func @sequential_with_ids(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op policy<sequential> visits every segment in order and takes no ids}}
+    swage_plan.tasks policy<sequential>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi32>) task_count(%task_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.block_threads gives the launch width of a kernel, and policy<sequential> runs on one thread without a kernel; a function has one or the other}}
+  func.func @sequential_with_a_launch_width(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<sequential>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
 module {
   func.func @yield_outside_a_task_region() {
-    // expected-error@+1 {{'swage_plan.yield' op expects parent op 'swage_plan.tasks'}}
+    // expected-error@+1 {{'swage_plan.yield' op expects parent op to be one of 'swage_plan.tasks, swage_plan.partial_tasks, swage_plan.merge_tasks, swage_plan.fused_tasks, swage_plan.persistent_tasks'}}
     swage_plan.yield
   }
 }

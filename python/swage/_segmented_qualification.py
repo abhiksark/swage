@@ -2210,7 +2210,12 @@ def _execute(module_text):
     mlir_opt = _llvm_tool(llvm_root, "mlir-opt")
     mlir_runner = _llvm_tool(llvm_root, "mlir-runner")
     lowered = _run(
-        [swage_opt, "--swage-segmented-reduction-to-scf"], module_text
+        [
+            swage_opt,
+            "--swage-to-plan=schedule=sequential",
+            "--swage-plan-to-scf",
+        ],
+        module_text,
     )
     llvm = _run([mlir_opt, f"--pass-pipeline={_LOWERING_PIPELINE}"], lowered)
     runner_utils = llvm_root / "lib" / "libmlir_runner_utils.so"

@@ -1,30 +1,31 @@
 // test/Conversion/SwageToGPU/nvvm-pipeline.mlir
 // RUN: swage-opt --split-input-file %s \
-// RUN:   --pass-pipeline='builtin.module(swage-segmented-reduction-to-gpu{block-size=128},gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' \
+// RUN:   --pass-pipeline='builtin.module(swage-to-plan{schedule=direct block-threads=128},swage-plan-to-gpu,gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' \
 // RUN:   | FileCheck %s --check-prefixes=CHECK,CTA \
 // RUN:       --implicit-check-not=swage. --implicit-check-not=scf. \
 // RUN:       --implicit-check-not=math. --implicit-check-not=gpu.func \
 // RUN:       --implicit-check-not=gpu.all_reduce \
 // RUN:       --implicit-check-not=gpu.shuffle --implicit-check-not=gpu.barrier
 // RUN: swage-opt --split-input-file %s \
-// RUN:   --pass-pipeline='builtin.module(swage-segmented-reduction-to-gpu{block-size=32 use-task-ids},gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' \
+// RUN:   --pass-pipeline='builtin.module(swage-to-plan{schedule=task-ids block-threads=32},swage-plan-to-gpu,gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' \
 // RUN:   | FileCheck %s --check-prefixes=CHECK,WARP \
 // RUN:       --implicit-check-not=swage. --implicit-check-not=scf. \
 // RUN:       --implicit-check-not=math. --implicit-check-not=gpu.func \
 // RUN:       --implicit-check-not=gpu.all_reduce \
 // RUN:       --implicit-check-not=gpu.shuffle --implicit-check-not=gpu.barrier
 // RUN: swage-opt --split-input-file \
-// RUN:     --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN:     --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | swage-opt --split-input-file \
 // RUN:     --pass-pipeline='builtin.module(gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' \
 // RUN:   | FileCheck %s --check-prefixes=CHECK,CTA
 
-// The code generation C API lowers a kernel with this pipeline: the Swage
-// pass, then the two upstream conversions nested on the GPU module. The
-// driver runs the same pipeline from text, in one invocation or with the
-// lowered module printed and parsed in between. The upstream conversions
-// find their patterns through dialect extensions, so this test also holds
-// the driver to registering them.
+// The code generation C API lowers a kernel with this pipeline: the planner
+// and the plan conversion, then the two upstream conversions nested on the
+// GPU module. The driver runs the same pipeline from text, in one invocation
+// or with the lowered module printed and parsed in between. The upstream
+// conversions find their patterns through dialect extensions, so this test
+// also holds the driver to registering them.
 
 module {
   func.func @segmented_sum(
@@ -62,8 +63,8 @@ module {
 // CTA: nvvm.shfl.sync {{ *}}bfly
 // CTA: nvvm.barrier0
 
-// One warp reduces with the butterfly the Swage pass emits: five steps for
-// 32 lanes, and no block barrier.
+// One warp reduces with the butterfly the plan conversion emits: five steps
+// for 32 lanes, and no block barrier.
 // WARP-COUNT-5: nvvm.shfl.sync {{ *}}bfly
 // WARP-NOT: nvvm.shfl.sync
 // WARP-NOT: nvvm.barrier0

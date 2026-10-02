@@ -2,23 +2,29 @@
 // The function option names a segment function of the module. Every
 // segmented pass reports a name that does not.
 //
-// RUN: not swage-opt --swage-segmented-reduction-to-scf='function=absent' \
+// RUN: not swage-opt --swage-to-plan='schedule=sequential function=absent' \
+// RUN:   --swage-plan-to-scf \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=ABSENT
 // RUN: not swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 function=absent' \
+// RUN:   --swage-to-plan='schedule=direct block-threads=128 function=absent' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=ABSENT
 // RUN: not swage-opt \
-// RUN:   --swage-split-segmented-reduction-to-gpu='function=absent' \
+// RUN:   --swage-to-plan='schedule=split-partial function=absent' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=ABSENT
 // RUN: not swage-opt --swage-to-plan='function=absent' \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=ABSENT
-// RUN: not swage-opt --swage-segmented-reduction-to-scf='function=bystander' \
+// RUN: not swage-opt --swage-to-plan='schedule=sequential function=bystander' \
+// RUN:   --swage-plan-to-scf \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=BYSTANDER
 // RUN: not swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 function=bystander' \
+// RUN:   --swage-to-plan='schedule=direct block-threads=128 function=bystander' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=BYSTANDER
 // RUN: not swage-opt \
-// RUN:   --swage-split-segmented-reduction-to-gpu='function=bystander' \
+// RUN:   --swage-to-plan='schedule=split-partial function=bystander' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=BYSTANDER
 // RUN: not swage-opt --swage-to-plan='function=bystander' \
 // RUN:   %s 2>&1 | FileCheck %s --check-prefix=BYSTANDER

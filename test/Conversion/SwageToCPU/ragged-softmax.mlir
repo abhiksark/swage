@@ -1,5 +1,5 @@
 // test/Conversion/SwageToCPU/ragged-softmax.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | FileCheck %s --implicit-check-not=swage.
 
 // The canonical ragged softmax: a maximum stage, a sum over the shifted

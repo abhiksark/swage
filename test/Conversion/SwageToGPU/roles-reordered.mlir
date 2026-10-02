@@ -4,11 +4,14 @@
 // function is the one in segmented-sum.mlir with its arguments reversed, and
 // it lowers to the same module.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %S/segmented-sum.mlir > %t.ordered
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | diff %t.ordered -
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s
 
 // CHECK: gpu.func @segmented_sum(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: i32, %{{.*}}: i32)

@@ -4,9 +4,10 @@
 // it lowers may have callers, because the function stays. The function
 // option restricts the pass to one function.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | FileCheck %s --check-prefix=ALL
-// RUN: swage-opt --swage-segmented-reduction-to-scf='function=second' %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential function=second' \
+// RUN:   --swage-plan-to-scf %s \
 // RUN:   | FileCheck %s --check-prefix=ONE
 
 // ALL-NOT: swage.

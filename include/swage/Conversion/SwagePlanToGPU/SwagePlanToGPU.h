@@ -31,6 +31,8 @@ llvm::LogicalResult convertPlanToGPU(ModuleOp module,
 
 /// `--swage-plan-to-gpu`: `convertPlanToGPU` for `nvidiaTarget()`.
 std::unique_ptr<Pass> createSwagePlanToGPUPass();
+/// The same pass for `target`, which must outlive the pass.
+std::unique_ptr<Pass> createSwagePlanToGPUPass(const TargetDescription &target);
 void registerSwagePlanToGPUPass();
 
 } // namespace mlir::swage

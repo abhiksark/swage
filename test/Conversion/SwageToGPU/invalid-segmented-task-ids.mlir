@@ -1,9 +1,11 @@
 // test/Conversion/SwageToGPU/invalid-segmented-task-ids.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=32 use-task-ids=true' \
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=32' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128 use-task-ids=true' \
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128 fused-mixed' \
+// RUN: swage-opt --swage-to-plan='schedule=fused-mixed' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
 
 // A kernel that takes its segments from a task buffer is launched from a

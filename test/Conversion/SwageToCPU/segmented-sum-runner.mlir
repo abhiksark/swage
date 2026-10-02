@@ -1,6 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-sum-runner.mlir
 // REQUIRES: mlir-runner
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | mlir-opt -pass-pipeline='builtin.module(func.func(convert-scf-to-cf,convert-arith-to-llvm),finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner -e main -entry-point-result=void \
 // RUN:       -shared-libs=%llvm_lib_dir/libmlir_runner_utils%shlibext \

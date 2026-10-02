@@ -15,9 +15,20 @@ The dialect holds what a kernel lowering consumes:
   threads;
 - `swage_plan.tasks`, the task operation of a kernel that reduces one
   segment per task, with or without a task buffer;
+- `swage_plan.partial_tasks`, the task operation of the first stage of a
+  split reduction, which reduces one chunk of a long segment per task into
+  a scratch slot;
+- `swage_plan.merge_tasks`, the task operation of the second stage, which
+  reduces the partial results of one split segment per task;
+- `swage_plan.fused_tasks`, the task operation of the fused mixed kernel,
+  with one region for a warp task and one for a block task;
+- `swage_plan.persistent_tasks`, the task operation of the experimental
+  persistent queue kernel, with one region each for a block task, a partial
+  task, a merge, and a warp task;
 - `swage_plan.yield`, the terminator of a task region;
 - `#swage_plan.policy<warp>` and `#swage_plan.policy<cta>`, which say how
-  the threads of a task combine their partial results.
+  the threads of a task combine their partial results, and
+  `#swage_plan.policy<sequential>`, the policy of the CPU oracle.
 
 A plan function has the parameter list of its kernel as its signature and
 one task operation, followed by a return, as its body:
@@ -60,16 +71,30 @@ What is not in the dialect:
   host classification and no kernel reads them, so they are arguments of
   the classifier and not part of plan IR.
 - Runtime offset contents, which no compiler pass inspects.
-- The fused mixed, split, and persistent kernels. Their lowerings emit them
-  without a plan stage today;
-  [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
-  order in which they move.
-- Packed-warp policies, queues, dependency execution, and a general task
-  graph.
+- How the persistent kernel claims its tasks. `persistent_tasks` names
+  the queues, the counters, and what each kind of task computes; the
+  claims, barriers, and fences are written by its conversion pattern.
+- Packed-warp policies, a reusable queue, and a general task graph.
 
-`--swage-to-plan` writes plan functions for the direct and task-id
-schedules, and `--swage-plan-to-gpu` converts every plan function to a
-`gpu.module` that holds its kernel. There is no public
+The CPU oracle is planned too. A task operation of `policy<sequential>`
+visits every segment in order on one thread. Its function has no launch
+width, keeps its signature and its callers, and takes no task buffer, and
+`--swage-plan-to-scf` lowers it to loops over the memrefs. The consumers of
+the region are lowered by the same patterns on both backends.
+
+`--swage-to-plan` writes plan functions for the direct, task-id,
+fused-mixed, split-partial, split-merge, persistent, and sequential
+schedules, one per schedule of its list, and
+`--swage-plan-to-gpu` converts every plan function of a kernel to a
+`gpu.module` that holds it. The plan function of a split stage is named
+after its kernel, `<function>__partial` or `<function>__merge`, and the
+records its task operation loads are laid out as `TaskRecords.h` says,
+which the host classifier fills by the same fields. The region of a merge
+task is an identity reduction over scratch: the merge combines partial
+results and never runs the element program. The persistent schedule admits
+the identity f32 sum only, and its plan function reads the same records and
+a counter buffer whose layout is in `TaskRecords.h` as well. There is no
+public
 `mlir_swage.dialects.swage_plan` Python module contract. The classification
 buckets and task lists that the host produces are drawn in
 [Task Planning](planning.md).

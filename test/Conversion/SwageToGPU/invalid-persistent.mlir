@@ -1,19 +1,20 @@
 // test/Conversion/SwageToGPU/invalid-persistent.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent' \
+// RUN: swage-opt --swage-to-plan='schedule=persistent' --swage-plan-to-gpu \
 // RUN:   --verify-diagnostics --split-input-file %s
-// RUN: not swage-opt --swage-segmented-reduction-to-gpu='block-size=512 persistent use-task-ids' \
-// RUN:   --split-input-file %s 2>&1 | FileCheck %s --check-prefix=TASK-IDS
+// RUN: not swage-opt --swage-to-plan='schedule=persistent,task-ids' \
+// RUN:   --swage-plan-to-gpu --split-input-file %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=TASK-IDS
 
 // The experimental persistent kernel implements only the identity f32 sum.
 // Static schedules admit max, map chains, and reduction regions; none of
-// those may reach the persistent emitter, which would drop them.
+// those may reach the persistent conversion, which lowers no other program.
 
-// The persistent kernel has its own ABI and loads segment IDs from its own
-// task queues, so it cannot honor the task-ID ABI option. The pair is refused
-// by option, once for each of the five modules in this file and before any
-// of them is admitted. The last module is one the persistent lowering accepts
-// on its own, so the refusal is not one of the admission errors below.
-// TASK-IDS-COUNT-5: error: persistent lowering does not accept use-task-ids
+// The persistent kernel and the task-id kernel both take the name of their
+// function, so one schedule list cannot hold both. The list is refused once
+// for each of the five modules in this file and before any of them is
+// admitted. The last module is one the persistent schedule admits on its
+// own, so the refusal is not one of the admission errors below.
+// TASK-IDS-COUNT-5: error: schedules persistent and task-ids both name their kernel @<function>; a schedule list names each kernel once
 // TASK-IDS-NOT: gpu.func
 
 module {

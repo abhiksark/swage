@@ -4,23 +4,29 @@
 // leaves the other functions as they are. The function option restricts a
 // pass to one function.
 //
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=ALL,DIRECT
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 use-task-ids' %s \
+// RUN:   --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=ALL,TASKS
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 fused-mixed' %s \
+// RUN:   --swage-to-plan='schedule=fused-mixed' --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefixes=ALL
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=PARTIAL
-// RUN: swage-opt --swage-split-segmented-reduction-to-gpu='merge' %s \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=MERGE
 // RUN: swage-opt \
-// RUN:   --swage-segmented-reduction-to-gpu='block-size=128 function=second' \
+// RUN:   --swage-to-plan='schedule=direct block-threads=128 function=second' \
+// RUN:   --swage-plan-to-gpu \
 // RUN:   %s | FileCheck %s --check-prefix=ONE
 // RUN: swage-opt \
-// RUN:   --swage-split-segmented-reduction-to-gpu='function=first' %s \
+// RUN:   --swage-to-plan='schedule=split-partial function=first' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=ONE-PARTIAL
 
 // ALL-NOT: swage.

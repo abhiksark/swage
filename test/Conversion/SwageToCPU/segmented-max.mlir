@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-max.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 module {
   func.func @segmented_max(

@@ -19,7 +19,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "swage-c/Target.h"
-#include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
+#include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
+#include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "llvm/Support/MathExtras.h"
 #include "gtest/gtest.h"
@@ -72,8 +73,11 @@ shufflesOf(const TargetDescription &target, int64_t blockThreads) {
       parseSourceString<ModuleOp>(segmentedSum, &context);
   EXPECT_TRUE(static_cast<bool>(module));
   PassManager manager(&context);
-  manager.addPass(createSegmentedReductionToGPUPass(
-      blockThreads, /*useTaskIds=*/true, /*fusedMixed=*/false, target));
+  PlanOptions options;
+  options.schedules = {PlanSchedule::TaskIds};
+  options.blockThreads = blockThreads;
+  manager.addPass(createSwageToPlanPass(options, target));
+  manager.addPass(createSwagePlanToGPUPass(target));
   EXPECT_TRUE(succeeded(manager.run(*module)));
 
   std::vector<std::pair<int64_t, int64_t>> shuffles;
