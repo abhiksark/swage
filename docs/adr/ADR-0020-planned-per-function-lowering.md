@@ -798,11 +798,52 @@ Equivalence:
 
 ## Migration sequence
 
-Every step would be gated by the full set unless noted: lit, C++ unit,
+Every step is gated by the full set unless noted: lit, C++ unit,
 `tests/python`, and `python/tests/mlir` on the qualification GPU, with the
-digest test at 552 of 552. Rollback for every step would be a revert of that
-step's commit. No step would change a launch tuple, and the legacy pass
-names and C API signatures would hold until step 10.
+digest test at 552 of 552. Rollback for every step is a revert of that
+step's commits. No step changes a launch tuple, and the legacy pass names
+and the signatures of the six compile entry points hold until step 10.
+
+What steps 1 to 4 built differently from the first sketch of this record.
+Each point is also stated where its subject is described:
+
+- C API. `swageMaterializeSegmentedPlan` gained `kernelName` in step 2, as
+  question 8 decided, so one C signature changed before step 10. Step 4
+  added one exported function, `swageEstimateElementWork`. The estimate is
+  `swage::estimateElementWork` in the planner library, not a function of
+  the `swage_plan` namespace, and the 32-unit budget it is compared with
+  stays in the private runner.
+- Kernel module selection. The C API finds the `gpu.module` by its symbol,
+  so a module that already holds an unrelated `gpu.module` compiles where
+  it used to be refused by count. `CodegenCAPITest` pins both the selection
+  and the symbol clash.
+- Fixed-block lowering. The symbol checks of step 2 cover the segmented
+  lowerings, the planner, and the conversion. `--swage-fixed-block-to-gpu`
+  does not have them yet.
+- Semantic ABI predicate. `hasCanonicalSemanticABI` accepted the five
+  arguments in any order from step 2, because roles free the order, until
+  step 4 removed it with `swage_plan.classify`.
+- Role tests. The negative cases of `swage.role` are in
+  `test/Dialect/Swage/invalid-roles.mlir`.
+- Fusion driver. The lowerings and the planner apply the fusion rewrite to
+  the admitted consumers directly instead of running the greedy driver,
+  which would also delete a reduction that nothing reads.
+- Planner options. `--swage-to-plan` takes one schedule, not a list, and no
+  planning limit. Without options it plans the direct kernel at 128
+  threads. The limit rule, "planning limits must satisfy", is checked by
+  `swageMaterializeSegmentedPlan` and pinned by `CodegenCAPITest` and
+  `test_segmented_classification.py`.
+- Conversion mechanics. Consumers are legalized one by one and the results
+  moved with `moveOpBefore`, and the function pattern legalizes its body
+  before it moves it. "The conversion" gives the reasons. The fallback was
+  not needed.
+- Classification in the plan call. `swageMaterializeSegmentedPlan` still
+  classifies through `classifyTasks` and regroups the descriptors, and
+  `TaskRecords.h` waits for step 6.
+- Reduction kinds. Three functions in `Emission.h` instead of a table type.
+- Commits. Step 4 is four commits (the shared emission functions, the
+  admission move, the plan stage and conversion, the element-work
+  estimate), each with the digests unchanged.
 
 Step 0. Gates. This step does not depend on the decision.
 
