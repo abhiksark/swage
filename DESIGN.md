@@ -44,7 +44,9 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
+        |     (public segment_softmax runs its softmax module)
         +-- private single-stage sum/max planning and split execution
+        |     (public segment_reduce runs its identity sum and max)
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -60,7 +62,9 @@ construction path.
 
 The current fixed-block frontend and public execution subset are deliberately
 narrow. Native segmented modules exercise a separate private qualification
-surface. The canonical pipeline and links to exact references live in
+surface, and two public calls, `swage.segment_reduce` and
+`swage.segment_softmax`, run three fixed modules of it. The canonical
+pipeline and links to exact references live in
 [`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
 
 ## Semantic invariants
@@ -101,8 +105,10 @@ classification through device claim counters and publishes split completion
 before a unique merge. Its clean A6000 run failed the predeclared performance
 gate, so the path remains experimental.
 General cost inference, schedule selection, packed warps, reusable queues, and
-public segmented execution remain planned. They are not current Swage
-ownership claims.
+public execution of caller-written segment programs remain planned. They are
+not current Swage ownership claims. The public segmented calls expose none
+of the planning controls: they prepare with the default limits and automatic
+selection.
 
 ## Runtime invariants
 
@@ -122,6 +128,9 @@ ownership claims.
   validates caller-supplied task IDs, on host copies made when a call is
   validated or a plan is prepared. For CUDA tensors each copy synchronizes
   with the device.
+- The public segmented calls prepare on every call and keep no plan, so each
+  call makes that host copy. A call is refused while its stream captures a
+  CUDA graph, and it does not synchronize after the enqueue.
 
 Runtime and cache requirements live only in
 [`docs/reference/runtime-environment.md`](docs/reference/runtime-environment.md).
@@ -147,8 +156,9 @@ bindings against an MLIR install without Python bindings is an error.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add plus private
-  segmented runtime qualification on a real NVIDIA device.
+- The trusted GPU workflow covers public fixed vector add, the public
+  segmented calls, and private segmented runtime qualification on a real
+  NVIDIA device.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 

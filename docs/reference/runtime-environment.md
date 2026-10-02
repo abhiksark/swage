@@ -2,10 +2,12 @@
 
 # Runtime and Environment
 
-The public runtime executes only canonical fixed vector add. Private
-qualification reuses the same CUDA Driver wrapper for admitted segmented
-modules. Both paths validate their complete host-visible boundary before
-reading pointers, allocating private storage, compiling, or launching.
+The public runtime executes canonical fixed vector add through `launch()`
+and two fixed segmented programs through `swage.segment_reduce` and
+`swage.segment_softmax`. The segmented calls wrap private qualification,
+which reuses the same CUDA Driver wrapper for admitted segmented modules.
+Every path validates its complete host-visible boundary before reading
+pointers, allocating private storage, compiling, or launching.
 
 ## Launch lifecycle
 
@@ -75,9 +77,9 @@ that from giving a wrong gradient without an error:
   then raises instead of using the overwritten values. The counters of the
   inputs are not advanced.
 
-The private qualification helpers apply both rules to their values and
-output. The advance changes host metadata only: it enqueues nothing and
-does not wait for the device. It has two limits:
+The segmented calls and the private qualification helpers apply both rules
+to their values and output. The advance changes host metadata only: it
+enqueues nothing and does not wait for the device. It has two limits:
 
 - A replayed CUDA graph runs no host code. The launch call that was
   captured advances the counter once, and a replay does not.
@@ -221,8 +223,9 @@ The process keeps compiled artifacts and loaded functions in two in-process
 caches. Each keeps 128 entries. When one more entry is stored, the cache
 forgets the entry it stored first, whether or not that kernel is still in
 use. The next launch of a forgotten kernel reads it from the persistent
-cache or compiles it, and loads it again. The private qualification helpers
-keep caches of their own with the same bound.
+cache or compiles it, and loads it again. The private qualification helpers,
+which the segmented calls run through, keep caches of their own with the
+same bound.
 
 A loaded CUDA module stays loaded for as long as something holds its
 function handle: a cache entry, a prepared private launch, or a launch in
@@ -260,6 +263,86 @@ that capture and fails, the modules stay queued, and the process warns
 that it left `<count>` unused CUDA modules loaded. To avoid it, launch every
 kernel once before any thread starts a capture, so that no kernel is loaded
 while a capture is open.
+
+## Segmented calls
+
+`swage.segment_reduce` and `swage.segment_softmax` prepare and launch in
+one call. [swage](swage.md#swagesegment_reduce) states their arguments, and
+[Ragged Data](../user-guide/ragged-data.md#the-offsets-contract) states the
+offsets contract. This section states what a call does to the device and
+the process.
+
+A call makes its checks in a fixed order, all before the first enqueue:
+
+1. PyTorch: the release floor and the two functions that `launch()`
+   requires.
+2. Arguments that need no native build: `kind`, the tensor type of `values`
+   and `offsets`, the grad state of `values`, and every rule of `out`.
+3. The native bindings. A wheel-only install stops here with a
+   `RuntimeError` that names the installation page.
+4. CUDA graph capture, and for `segment_reduce` the inference state of
+   `offsets`.
+5. The shared validation of dtype, rank, layout, lazy views, the offsets on
+   a host copy, and the device.
+
+A result that the call allocates is allocated before step 5, so a call that
+fails there has allocated and released one tensor.
+
+Preparation and launch follow these rules:
+
+- The host copy of the offsets is made on every call and waits for the
+  work already queued on the current stream. A call asks for no other
+  synchronization, and it does not wait for the kernels it enqueued. A call
+  that loads a kernel can synchronize the context once, as stated under
+  [Module lifetime](#module-lifetime).
+- No plan is kept between calls. A second call with the same offsets tensor
+  copies and classifies it again.
+- `segment_reduce` runs the `mixed` schedule of the private planned path
+  with the default limits and automatic schedule selection.
+  `segment_softmax` runs the one-CTA path with a 128-thread block. Neither
+  call takes a scheduling argument.
+- Kernels are enqueued on the stream that is current at the call, and
+  `values`, `offsets`, and the result are retained through
+  `record_stream()`.
+- After the enqueue, the version counter of the result is advanced. The
+  counters of `values` and `offsets` are not. `segment_reduce` also advances
+  the counter of the result once while it prepares, so a call that is
+  refused after that point, or that has no segment, leaves the result
+  unwritten with its counter moved. `segment_softmax` advances it only when
+  it enqueues.
+- The task records, the split scratch, and the CUDA event of a
+  `segment_reduce` call are released when the call returns. Device memory,
+  the number of loaded modules, and the number of live events stay flat
+  over repeated calls with new offsets.
+- Compiled kernels are kept in the in-process caches of the private
+  helpers, which [Module lifetime](#module-lifetime) describes, and are not
+  written to the persistent cache. The first `segment_reduce` call on a
+  device also uploads the shared segment ids that
+  [Task Execution](../internals/task-execution.md) describes, which hold
+  4 MiB of device memory for the life of the process.
+
+Four conditions are refused with an error instead of being handled:
+
+- A stream that is capturing a CUDA graph. The call raises a `RuntimeError`
+  before the host copy, so the capture stays valid. A prepared private
+  launch can be captured; a public call cannot, because a replay would not
+  repeat its preparation.
+- `values` that require grad, with a `ValueError`. A call records no
+  gradient.
+- For `segment_reduce`, offsets that are an inference tensor, with a
+  `ValueError`. The preparation compares a version counter that an
+  inference tensor does not have. Offsets made outside
+  `torch.inference_mode()`, or cloned outside it, are admitted, also when
+  the call runs inside it. `segment_softmax` accepts inference tensors.
+- `SWAGE_NO_COMPILE=1` with a kernel the process does not hold;
+  [Cache variables](#cache-variables) states the rule.
+
+A call works on a thread that has not used CUDA: its first PyTorch CUDA
+operation makes the context of the current device current there.
+
+Two errors that reach a caller of the public calls use the terms of the
+code that raises them: the PyTorch errors speak of a launch, and the refusal
+under `SWAGE_NO_COMPILE=1` refers to the private segmented path.
 
 ## Specialization and cache
 
@@ -411,14 +494,16 @@ launch each kernel once with the same block size, on the same device target,
 with the same `swage` sources and native libraries, in a process that may
 compile.
 
-`SWAGE_NO_COMPILE=1` also stops the private qualification helpers. They keep
-compiled kernels in the process only and never use the persistent cache, so
-with the switch set they launch a kernel that the process already holds and
-raise the same `RuntimeError` for any other. A process that starts with the
-switch set therefore cannot run them. The host planning pass is not a
-kernel compile and still runs, once per program and pair of planning limits.
-`SWAGE_CACHE_DIR`, `SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY`
-have no effect on the private helpers.
+`SWAGE_NO_COMPILE=1` also stops the public segmented calls and the private
+qualification helpers they wrap. These keep compiled kernels in the process
+only and never use the persistent cache, so with the switch set they launch
+a kernel that the process already holds and raise the same `RuntimeError`
+for any other. A process that starts with the switch set therefore cannot
+run a segmented call, except on a batch without segments, which needs no
+kernel. The host planning pass is not a kernel compile and still runs, once
+per program and pair of planning limits. `SWAGE_CACHE_DIR`,
+`SWAGE_CACHE_MAX_ENTRIES`, and `SWAGE_CACHE_READ_ONLY` have no effect on
+the segmented calls or the private helpers.
 
 A value other than the ones listed is an error, not a default. A mistyped
 variable raises a `ValueError` that names it at the first lookup, before

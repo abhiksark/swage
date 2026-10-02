@@ -18,7 +18,8 @@ python -m pip install swage-compiler
 ```
 
 The base package imports without PyTorch. Install the optional PyTorch
-dependency when using metadata inference or CUDA launch:
+dependency when using metadata inference, CUDA launch, or the segmented
+calls:
 
 ```bash
 python -m pip install "swage-compiler[pytorch]"
@@ -36,7 +37,8 @@ The wheel does not contain compiler libraries, `swage-opt`, generated MLIR
 bindings, or the native `mlir_swage` package. Native wheel packaging is
 deferred. A wheel-only install can import `swage`, report package and
 environment facts, capture kernel source, and check a kernel against the
-kernel language. It cannot emit MLIR or launch a kernel.
+kernel language. It cannot emit MLIR, launch a kernel, or run a segmented
+call.
 
 These pages describe the current source tree. The released `0.5.1` wheel
 predates part of them:
@@ -47,6 +49,7 @@ predates part of them:
 - It rejects a kernel that has a docstring.
 - Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
 - Its environment report has fewer fields.
+- It has no `swage.segment_reduce` and no `swage.segment_softmax`.
 
 The [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
 lists every change since that release under Unreleased. To match these
@@ -156,10 +159,11 @@ PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
 `check-swage-python` supplies the build-tree `PYTHONPATH` itself. Both
 commands need `pytest` and PyTorch, because several binding test modules
 import `torch`. The hosted CI job installs a CPU-only PyTorch build for them,
-and the CUDA tests skip without a GPU. The private segmented qualification
-helpers also import `numpy`, which the binding requirements above already
-install. The public `swage` package does not need it. The second command
-imports `swage`
+and the CUDA tests skip without a GPU. The segmented calls and the private
+qualification helpers behind them also import `numpy`, which the binding
+requirements above already install. Importing `swage`, capturing a kernel,
+emitting MLIR, and launching the fixed vector add do not need it. The
+second command imports `swage`
 from the installed package, so it needs the editable install from the same
 checkout. The released `0.5.1` wheel does not match the tests of the
 current source tree.

@@ -5,7 +5,10 @@
 Internals documents the compiler and runtime machinery behind the public
 surface. None of it is public API. The segmented pages record exact
 internal compiler and runtime contracts that exist to qualify semantics,
-lowering, planning, and execution before any public surface is designed.
+lowering, planning, and execution. The two public segmented calls run fixed
+programs through this machinery with its default limits;
+[swage](../reference/swage.md) states their contract, and nothing on these
+pages widens it.
 
 Readers arriving from an older link to the private qualification page can
 find its content in the topic pages below.

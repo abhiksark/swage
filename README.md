@@ -14,29 +14,47 @@ Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It explores
 whether one segment-local program can support different fixed GPU work shapes
 as runtime segment lengths change.
 
-Segments are not usable from Python yet. The public Python API compiles and
-launches one kernel, a fixed-block vector add. Segmented sum, max, and softmax
-run only through private qualification helpers in this repository. They have
-no public syntax and no public launch call.
+Segments are usable from Python through two calls with fixed programs:
+`swage.segment_reduce` computes a sum or a maximum per segment, and
+`swage.segment_softmax` computes a softmax within each segment, over
+rank-one f32 values and int32 offsets on one CUDA device. Both are newer
+than the released wheel and need a native build. There is no public segment
+syntax: the kernel language compiles and launches one kernel, a fixed-block
+vector add.
 
 ## Current release boundary
 
 The current pre-alpha release is `v0.5.1`. The lists below describe that
-release, except for the one item marked as completed after it.
+release, except for the items marked as completed after it.
 
 ### Public today
 
-- The canonical fixed vector-add kernel is the only public execution subset.
+- The canonical fixed vector-add kernel is the only kernel the Python
+  frontend compiles and launches.
 - The restricted Python frontend can emit verified MLIR through build-tree
   native bindings.
 - The fixed vector add can lower through LLVM NVPTX and launch through the
   CUDA Driver API on the current PyTorch stream.
 - The `swage` dialect, `swage-opt`, and environment diagnostics are available
   to compiler contributors.
+- Not part of `v0.5.1`, completed after that release: two segmented calls.
+  `swage.segment_reduce(values, offsets, kind, *, out=None)` returns the
+  sum or the maximum of every segment, and
+  `swage.segment_softmax(values, offsets, *, out=None)` returns the softmax
+  within every segment. They take rank-one f32 values and int32 offsets on
+  the current CUDA device, and nothing else: no other dtype, kind, or rank,
+  and no gradient. A call validates and classifies its offsets on the host
+  every time, so with offsets that change on every call it is slower than
+  `torch.segment_reduce`; no committed record measures that yet.
+  [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
+  and the cost.
 
 ### Private qualification
 
-Each item names the programs and the paths they run through:
+The two public calls run through these paths with fixed programs and
+default limits. Everything else about the paths is private: other programs,
+the prepared launches, the pure policies, and the planning limits. Each item
+names the programs and the paths they run through:
 
 - Canonical segmented sum, max, and stable ragged softmax run through
   sequential CPU oracles and one-CTA GPU paths.
@@ -62,11 +80,13 @@ Each item of evidence was recorded on one NVIDIA RTX A6000 (`sm_86`):
 
 ### Planned
 
-- Public segment syntax and public segmented launch.
+- Public segment syntax, and public launch of a segment program that the
+  caller writes.
 - Packed warps, split softmax, device queues, persistent
   scheduling, and broader policies.
 
-Private qualification is not a public segmented runtime. Current status is
+Private qualification is not a public segmented runtime: the public calls
+expose two programs of it and none of its controls. Current status is
 backed by the repository's executable tests and committed benchmark record.
 
 ## Package and native build
@@ -97,12 +117,13 @@ ninja -C build check-swage-python
 
 The native package is imported from `build/python_packages`. The published
 wheel remains useful for package import, source capture, and diagnostics, but
-does not independently emit MLIR or execute kernels.
+does not independently emit MLIR, execute kernels, or run a segmented call.
 
-Two committed examples use the native build.
+Three committed examples use the native build.
 `examples/emit_fixed_vector_add.py` emits MLIR with the native build alone and
 needs no GPU and no PyTorch. `examples/fixed_vector_add.py` also launches the
-kernel and needs a CUDA GPU. The
+kernel and needs a CUDA GPU. `examples/segment_reduce.py` runs the two
+segmented calls and needs a CUDA GPU. The
 [support matrix](docs/reference/support-matrix.md) lists which Python,
 PyTorch, driver, and GPU combinations are tested.
 

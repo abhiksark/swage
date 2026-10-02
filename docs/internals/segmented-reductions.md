@@ -4,7 +4,9 @@
 
 Canonical segmented sum and max execute through a sequential CPU
 oracle and a one-CTA GPU path. This page records the exact internal
-contracts; none of them is a public API.
+contracts; none of them is a public API. The public
+`swage.segment_reduce` runs the identity sum and max through the planned
+path, and [Sum rounding](#sum-rounding) says which schedule it gets.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
@@ -96,6 +98,14 @@ schedule with the private helpers today:
 - Pass `select_schedule=False`. `mixed` then chooses the tree from the
   length of each segment and the limits alone.
 - Use `_prepare_planned_sum`, which always disables selection.
+
+The public `swage.segment_reduce` offers none of them. Every call launches
+`mixed` of a preparation with the default limits and `select_schedule=True`,
+so the bits of a public sum can change with the composition of its batch,
+and its bound is the one of the second case under
+[Error bound](#error-bound). A test compares the public sum with that
+private launch bit for bit, and a second one shows the change between a
+batch of one segment fewer than the device has SMs and a batch of as many.
 
 ### Error bound
 

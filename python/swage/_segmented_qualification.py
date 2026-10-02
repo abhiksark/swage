@@ -1579,6 +1579,26 @@ def launch_softmax_gpu(values, offsets, output, block_size=128):
     value_count, segment_count = _validate_softmax_tensors(
         values, offsets, output
     )
+    return _enqueue_softmax(
+        torch, values, offsets, output, value_count, segment_count, block_size
+    )
+
+
+def _enqueue_softmax(
+    torch, values, offsets, output, value_count, segment_count, block_size
+):
+    """Compile, load, and enqueue the ragged softmax on validated tensors.
+
+    Args:
+        torch: The PyTorch module.
+        values: Validated CUDA f32 input tensor.
+        offsets: Validated CUDA i32 segment offsets.
+        output: Validated CUDA f32 output tensor, disjoint from both.
+        value_count: Element bound the kernel receives, as
+            `_validate_softmax_tensors` returns it.
+        segment_count: Number of segments the offsets describe.
+        block_size: Threads per CTA.
+    """
     if type(block_size) is not int or block_size <= 0:
         raise ValueError("block size must be a positive integer")
     _validate_warp_count(block_size)

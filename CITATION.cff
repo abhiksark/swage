@@ -13,6 +13,7 @@ abstract: >-
   explores whether one segment-local program can support different fixed
   GPU work shapes as runtime segment lengths change. In the current
   pre-alpha release, the only public execution subset is a fixed vector-add
-  kernel, lowered through MLIR and LLVM NVPTX for NVIDIA GPUs. Segmented
-  sum, max, and ragged softmax run only as private qualification. Public
-  segment syntax and public segmented launch are planned.
+  kernel, lowered through MLIR and LLVM NVPTX for NVIDIA GPUs, and segmented
+  sum, max, and ragged softmax run only as private qualification. After
+  that release, two calls made a fixed segmented sum, max, and softmax
+  public. Public segment syntax is planned.

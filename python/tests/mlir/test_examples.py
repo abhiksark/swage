@@ -1,5 +1,5 @@
 # python/tests/mlir/test_examples.py
-"""Run the committed emit-only example with the native build alone."""
+"""Run the committed examples that need the native build."""
 
 import os
 import pathlib
@@ -15,11 +15,9 @@ native_ir = pytest.importorskip(
 )
 import swage  # noqa: E402
 
-_EXAMPLE = (
-    pathlib.Path(__file__).resolve().parents[3]
-    / "examples"
-    / "emit_fixed_vector_add.py"
-)
+_EXAMPLES = pathlib.Path(__file__).resolve().parents[3] / "examples"
+_EXAMPLE = _EXAMPLES / "emit_fixed_vector_add.py"
+_SEGMENT_EXAMPLE = _EXAMPLES / "segment_reduce.py"
 # A None entry in sys.modules makes `import torch` raise ImportError, which
 # is what an interpreter without PyTorch does.
 _RUN_WITHOUT_TORCH = (
@@ -59,3 +57,32 @@ def test_emit_only_example_runs_without_a_gpu_or_pytorch():
     assert completed.returncode == 0, completed.stderr
     assert "func.func @add_kernel" in completed.stdout
     assert "swage.program_id" in completed.stdout
+
+
+def test_segment_reduce_example_runs_on_cuda():
+    """Run the public segmented calls of the example and read its results."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    environment = dict(
+        os.environ,
+        PYTHONPATH=os.pathsep.join(
+            [_import_root(swage), _import_root(native_ir)]
+        ),
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(_SEGMENT_EXAMPLE)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "sum: [3.0, 0.0, 12.0, 6.0]",
+        "max: [2.0, -inf, 5.0, 6.0]",
+        "softmax: [0.2689, 0.7311, 0.09, 0.2447, 0.6652, 1.0]",
+        "=== CUDA results match PyTorch ===",
+    ]

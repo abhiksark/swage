@@ -12,9 +12,12 @@ Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
 how one segment-local program can keep its meaning while task derivation
 changes with runtime segment lengths.
 
-Segments are not usable from Python yet. The public execution boundary is
-one canonical fixed vector-add kernel. The wider segment compiler exists as
-private qualification machinery or planned work.
+Segments are usable from Python through two calls with fixed programs:
+`swage.segment_reduce` for a sum or a maximum per segment, and
+`swage.segment_softmax` for a softmax within each segment. There is no
+public segment syntax, and the kernel language compiles one canonical fixed
+vector-add kernel. The wider segment compiler exists as private
+qualification machinery or planned work.
 
 !!! warning "Pre-alpha boundary"
 
@@ -29,6 +32,13 @@ private qualification machinery or planned work.
 - Compile-only `emit_mlir()` for the restricted fixed-block vector-add
   subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
+- `swage.segment_reduce` for `"sum"` and `"max"`, and
+  `swage.segment_softmax`, over rank-one f32 values and int32 offsets on
+  one CUDA device, when build-tree native bindings are present. The calls
+  admit no other dtype, kind, or rank, record no gradient, and prepare
+  their offsets on the host at every call.
+  [Segmented Calls](user-guide/segmented-calls.md) states the contract and
+  the cost.
 - `python -m swage.env` environment diagnostics.
 - Native `swage` MLIR parsing, verification, and registered compiler tools.
 
@@ -36,7 +46,7 @@ The published wheel does not include the native `mlir_swage` package or
 compiler build output. Native wheel packaging remains deferred. These pages
 describe the current source tree, and
 [Installation](getting-started/installation.md) lists what the released
-`0.5.1` wheel lacks.
+`0.5.1` wheel lacks, which includes the two segmented calls.
 
 ## Private qualification
 
@@ -48,12 +58,16 @@ describe the current source tree, and
   split-CTA partial and merge execution for capture-free, single-stage f32
   sum and max programs.
 
-These paths have tests and recorded qualification evidence. They do not
-widen the public Python language or launch contract.
+These paths have tests and recorded qualification evidence. The two
+segmented calls run a fixed sum, max, and softmax through them with default
+limits. Other programs, the prepared launches, the scheduling policies, and
+the planning limits stay private, and none of it widens the public kernel
+language or the `launch()` contract.
 
 ## Planned
 
-- Public segment syntax and public segmented launch.
+- Public segment syntax, and public launch of a segment program that the
+  caller writes.
 - Packing several short segments into one warp allocation.
 - Split softmax.
 - Device queues, persistent scheduling, and broader policy selection. One

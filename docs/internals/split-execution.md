@@ -63,8 +63,10 @@ of random f32 values stay within the bound stated in
 [Sum rounding](segmented-reductions.md#sum-rounding).
 
 Split execution does not implement packed warps, split softmax, captured
-stages, device queues, persistent scheduling, public segment syntax,
-or public segmented launch.
+stages, device queues, persistent scheduling, or public segment syntax. The
+public `swage.segment_reduce` reaches it for segments above the default
+4096-element chunk limit, unless automatic selection replaces it by the CTA
+schedule.
 
 Continue with [Persistent Execution](persistent-execution.md) for the
 experimental kernel that consumes the same partial and merge records in one

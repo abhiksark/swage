@@ -26,12 +26,13 @@ padding or gaps to the values buffer.
 
 ## The offsets contract
 
-Segments are not usable from Python yet, so nothing in this section is a
-public call. It records what the private qualification path validates
-today, on a host copy of the offsets, before it compiles or launches
-anything. An input that breaks a rule is rejected with an error. Nothing is
-cast, moved to another device, or repaired. The private path needs the
-native build, PyTorch, and `numpy`, which the binding requirements in
+The public calls `swage.segment_reduce` and `swage.segment_softmax`, which
+[Segmented Calls](segmented-calls.md) introduces, and the private
+qualification path behind them validate one contract. They check it on a
+host copy of the offsets before they compile or launch anything. An input
+that breaks a rule is rejected with an error. Nothing is cast, moved to
+another device, or repaired. Both surfaces need the native build, PyTorch,
+and `numpy`, which the binding requirements in
 [Installation](../getting-started/installation.md) already include.
 
 For `N` segments over one values buffer:
@@ -42,22 +43,28 @@ For `N` segments over one values buffer:
 - `offsets[0]` is zero.
 - `offsets` never decreases. Two equal neighbors describe an empty segment.
 - `offsets[N]` is at most the number of values. Values past it belong to no
-  segment.
+  segment. `swage.segment_softmax` is stricter: `offsets[N]` must equal the
+  number of values.
 - The number of values and the number of segments are each below `2**31`.
-- `output` is a contiguous rank-one `torch.float32` tensor with at least `N`
-  elements, and it does not overlap `values` or `offsets` in memory.
-- `values` and `output` do not require grad.
-- For a GPU launch, all three tensors are CUDA tensors on the current
-  device.
+- `values` does not require grad.
+- For a GPU launch, both tensors are CUDA tensors on the current device.
 
-Ragged softmax writes one result per value instead of one per segment, so
-its `output` needs at least `offsets[N]` elements.
+The result tensor has the same basic rules on both surfaces: it is a
+contiguous rank-one `torch.float32` tensor on the same device, it does not
+overlap `values` or `offsets` in memory, and it does not require grad. Its
+size differs:
+
+- The public calls take an optional `out` with exactly `N` elements for a
+  reduction and exactly one element per value for a softmax.
+  [Segmented Calls](segmented-calls.md#arguments) states the rules.
+- The private helpers take a required `output` with at least `N` elements
+  for a reduction and at least `offsets[N]` elements for a softmax.
 
 ### Offsets of a prepared launch
 
-The one-shot helpers `launch_gpu` and `launch_softmax_gpu` validate the
-offsets on every call. A prepared launch, which
-`_prepare_planned_reduction`, `_prepare_planned_sum`, and
+The public calls and the private one-shot helpers `launch_gpu` and
+`launch_softmax_gpu` validate the offsets on every call. A prepared launch,
+which the private `_prepare_planned_reduction`, `_prepare_planned_sum`, and
 `_prepare_persistent_sum` return, validates them once at preparation and
 then launches the plan it built from that host copy. Two more rules apply
 to its `offsets`:
@@ -68,12 +75,16 @@ to its `offsets`:
   compare. Create the offsets outside the context, or clone them outside
   it. Offsets created under `torch.no_grad()` are admitted, and a launch
   may be prepared and run inside `torch.inference_mode()` with offsets that
-  were created outside it. The one-shot helpers accept inference tensors.
+  were created outside it. `swage.segment_reduce` prepares a launch on every
+  call, so this rule applies to it. `swage.segment_softmax` and the one-shot
+  helpers accept inference tensors.
 - `offsets` does not change after preparation. Each launch compares the
   version counter, data pointer, element count, and dtype of the tensor
   with the ones recorded at preparation, and raises a `RuntimeError` before
   anything is enqueued when one differs. Prepare again after changing the
-  offsets.
+  offsets. A public call launches what it prepared before it returns and
+  keeps no plan, so this rule and its limits below concern the private
+  prepared launches only.
 
 The second rule is checked on the host through what PyTorch records, so the
 check has these limits:
@@ -145,13 +156,13 @@ values, index = values[order], index[order]
 
 ## Empty segments and NaN
 
-The private qualification path fixes three results:
+The public calls and the private qualification path fix three results:
 
 - The sum of an empty segment is `0.0`.
 - The maximum of an empty segment is negative infinity.
 - The maximum of a segment that contains a NaN is NaN.
 
-The qualification tests pin all three. On PyTorch 2.12,
+The tests pin all three. On PyTorch 2.12,
 `torch.segment_reduce` returns the same values, and
 `torch.nn.functional.embedding_bag` with `mode="max"` differs on the last
 two: it returns `0.0` for an empty bag and skips a NaN member. No option
@@ -197,12 +208,13 @@ were part of semantic IR, changing the schedule would require rewriting the
 kernel's meaning.
 
 Swage instead preserves the segment-local meaning and allows task derivation
-to be qualified separately. Today, that separation is public for canonical
-fixed vector add and privately qualified for selected segmented modules.
-General public segmented execution remains planned.
+to be qualified separately. Today two fixed segment programs, a reduction
+and a softmax, are callable from Python. Other segment programs run only as
+privately qualified native modules, and a public segment syntax remains
+planned.
 
-Continue with [Writing Kernels](writing-kernels.md). That page writes the
-one kernel the public frontend accepts today, a fixed-block vector add. It
-uses no segment, because segment syntax is not public.
+Continue with [Segmented Calls](segmented-calls.md), which runs the two
+public functions on this storage. [Writing Kernels](writing-kernels.md) then
+turns to the kernel language, which has no segment syntax, and
 [Execution Model](execution-model.md) returns to segments, tasks, and tiles
 and gives the invariants behind each level.

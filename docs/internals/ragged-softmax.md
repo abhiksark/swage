@@ -4,7 +4,9 @@
 
 Stable ragged softmax executes all phases in one CTA per segment
 with fused maps. This page records the exact internal contracts;
-none of them is a public API.
+none of them is a public API. The public `swage.segment_softmax` launches
+this path with the default 128-thread block and requires offsets that cover
+every value.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) and

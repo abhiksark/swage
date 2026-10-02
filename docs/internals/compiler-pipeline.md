@@ -16,6 +16,11 @@ direct or split capture-free sum/max lowering. GPU branches rejoin upstream GPU,
 NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the CUDA Driver API.
 No branch introduces a second production IR or a silent backend fallback.
 
+The two public segmented calls run fixed modules through the private
+branches: `swage.segment_softmax` through the one-CTA GPU path, and
+`swage.segment_reduce` through the SwagePlan branch. The modules are native
+text that the runner holds. No public syntax produces a segment module.
+
 <div class="doc-figure" tabindex="0" markdown="1">
 
 ![Verified semantic MLIR entering three admitted compiler branches](../assets/diagrams/compiler-pipeline.svg)
@@ -63,7 +68,8 @@ specialization, cache, module loading, stream, and retention behavior live in
 Canonical segmented sum, max, and stable ragged-softmax modules enter through
 native qualification, not the public Python frontend. One conversion creates
 a sequential CPU correctness oracle. Another creates one CTA per segment and
-continues through upstream GPU, NVVM, LLVM, and NVPTX stages.
+continues through upstream GPU, NVVM, LLVM, and NVPTX stages. The public
+`swage.segment_softmax` launches the softmax module on that GPU path.
 
 Exact admitted module shapes and internal ABIs live in
 [Segmented Reductions](segmented-reductions.md) and
@@ -77,7 +83,8 @@ then classified and materialized into direct IDs or split records. Private
 lowering factories produce the direct, partial, and merge kernels used by the
 qualification runtime. Element programs and single-consumer map chains are
 reused by direct and partial kernels; merge kernels combine only the partial
-results.
+results. The public `swage.segment_reduce` launches the identity sum and
+the identity max through this branch with the default limits.
 
 This branch implements narrow rule-based classification and split task
 decomposition. One private experimental lowering consumes those materialized

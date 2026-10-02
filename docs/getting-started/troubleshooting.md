@@ -54,7 +54,8 @@ cmake -G Ninja -S . -B build \
 
 ## PyTorch or CUDA is unavailable
 
-Metadata inference and launch require the optional PyTorch dependency:
+Metadata inference, launch, and the segmented calls require the optional
+PyTorch dependency:
 
 ```bash
 python -m pip install "swage-compiler[pytorch]"
@@ -67,7 +68,8 @@ A CUDA launch additionally requires Linux, a CUDA-enabled PyTorch build, and
 target-admission and zero-work rules. Swage does not use the CUDA toolkit
 compiler on the production path.
 
-A launch on a PyTorch older than 2.6 fails before any work starts:
+A launch or a segmented call on a PyTorch older than 2.6 fails before any
+work starts:
 
 ```text
 RuntimeError: Swage launch requires PyTorch 2.6 or newer; found PyTorch 2.5.1
@@ -134,6 +136,37 @@ line of the report shows the same reason.
 
 [Runtime and Environment](../reference/runtime-environment.md) owns the rules
 for persistent reuse, cache location, and entry validation.
+
+## A segmented call is refused
+
+`swage.segment_reduce` and `swage.segment_softmax` raise before anything is
+enqueued in these cases:
+
+- The native bindings are missing. The message names the installation page:
+
+    ```text
+    RuntimeError: Swage segment_reduce() requires the build-tree mlir_swage bindings, which the swage-compiler wheel does not include; nothing was launched. See docs/getting-started/installation.md in https://github.com/abhiksark/swage for the native build
+    ```
+
+- `SWAGE_NO_COMPILE=1` is set and the process does not hold the kernel. The
+  segmented kernels are never in the persistent cache, so a process that
+  starts with the variable set cannot run a segmented call. Unset the
+  variable for such a process:
+
+    ```text
+    RuntimeError: SWAGE_NO_COMPILE=1 refuses to compile kernel 'segmented_sum': this process does not hold it for block size 32 and target sm_86, and the private segmented path has no persistent cache
+    ```
+
+- The current stream is capturing a CUDA graph. Make the call outside the
+  capture.
+- The offsets of a `segment_reduce` call were created under
+  `torch.inference_mode()`. Create them before entering the context, or
+  clone them outside it.
+- `values` require grad. Pass `values.detach()`; the calls record no
+  gradient.
+
+[Segmented Calls](../user-guide/segmented-calls.md) lists every refusal and
+the reason for it.
 
 ## The build uses the wrong LLVM/MLIR
 

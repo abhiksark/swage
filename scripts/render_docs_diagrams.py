@@ -218,9 +218,9 @@ def capability_boundary() -> bytes:
     svg = Svg(
         "capability-boundary.svg",
         "Swage capability boundary",
-        "Three separate lanes distinguish the public fixed vector-add "
-        "surface, private segmented qualification, and planned segmented "
-        "APIs.",
+        "Three separate lanes distinguish the public surface, which is one "
+        "fixed vector-add kernel and two segmented calls, private segmented "
+        "qualification, and planned segment syntax.",
         height=650,
     )
     svg.text(48, 54, "Capability boundary", size=32, weight=750)
@@ -237,7 +237,8 @@ def capability_boundary() -> bytes:
             "blue",
             "blue_fill",
             ("Python capture", "emit_mlir()", "launch()"),
-            "canonical fixed vector add only",
+            "one fixed vector-add kernel; segment_reduce and "
+            "segment_softmax calls",
             False,
         ),
         (
@@ -246,7 +247,8 @@ def capability_boundary() -> bytes:
             "purple",
             "purple_fill",
             ("segment semantics", "planning + split", "GPU evidence"),
-            "not a public API",
+            "not a public API; the segmented calls run fixed programs "
+            "through it",
             False,
         ),
         (
@@ -254,7 +256,7 @@ def capability_boundary() -> bytes:
             "PLANNED",
             "line",
             "gray_fill",
-            ("public segmented API", "packed work", "split softmax"),
+            ("segment syntax", "packed work", "split softmax"),
             "persistent scheduling",
             True,
         ),
@@ -554,7 +556,9 @@ def compiler_pipeline() -> bytes:
         "GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. "
         "The direct segmented sequential CPU oracle exits separately through "
         "SCF and "
-        "memref.",
+        "memref. The public segment_softmax call runs through the direct "
+        "segmented GPU path, and the public segment_reduce call runs "
+        "through the SwagePlan branch.",
         height=850,
     )
     svg.text(
@@ -583,7 +587,7 @@ def compiler_pipeline() -> bytes:
             420,
             "PRIVATE QUALIFICATION",
             "segmented direct",
-            ("sum, max, stable softmax", "two qualified paths"),
+            ("sum, max, stable softmax", "runs segment_softmax"),
             "purple",
             "purple_fill",
         ),
@@ -591,7 +595,7 @@ def compiler_pipeline() -> bytes:
             785,
             "PRIVATE QUALIFICATION",
             "SwagePlan direct + split",
-            ("classification companion", "direct or split sum or max"),
+            ("direct or split sum or max", "runs segment_reduce"),
             "green",
             "green_fill",
         ),

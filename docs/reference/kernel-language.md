@@ -149,6 +149,8 @@ plus offset addresses. It emits standard `arith`, `func`, `memref`, and
 
 This language is the public fixed-block subset. The segment
 operations present in native MLIR are not exposed as Python language symbols.
+The two segmented calls on [swage](swage.md) run fixed segment programs and
+take no kernel.
 Continue with [Runtime and Environment](runtime-environment.md) for what a
 launch validates and how a kernel is compiled, cached, and loaded. The call
 contracts are on [swage](swage.md), and the native semantic IR boundary is

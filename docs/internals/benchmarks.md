@@ -63,6 +63,10 @@ The fresh-offsets harness and the comparison harness time these candidates:
   its preparation (`swage_mixed`). The private runner has no mixed-only
   preparation: one call returns the warp, CTA, and mixed policies, and the
   record says so. The comparison times the warp, CTA, and mixed policies.
+  The public `swage.segment_reduce` prepares and launches the mixed policy
+  on every call, with automatic schedule selection, which the fresh-offsets
+  candidate disables. No harness times the public call itself, and no
+  committed record holds a fresh-offsets result.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.
