@@ -23,6 +23,12 @@ These are research measurements, not a performance gate. The machine was not
 idle while they were taken; [Machine and conditions](#machine-and-conditions)
 says what ran.
 
+The records name revision `453c56e`. The branch history was rewritten after
+the runs, to remove a directory that the measurements do not use, so that
+commit is not in the published history. Its counterpart is `4e87184`: the
+two trees differ only in the removed files, and every file the harness
+imports, hashes, or compiles is identical.
+
 ## What the record holds
 
 The directory
@@ -172,7 +178,8 @@ The desktop session of the maintainer ran on the same machine and the same
 GPU throughout. `conditions.txt` holds, for the start and for the end of
 the campaign, the time, the load average, and the GPU utilization,
 temperature, and memory in use. For the start it also lists the five
-processes that used the most CPU:
+processes that used the most CPU. The names of three desktop programs are
+replaced by a description in brackets; the shares are as captured:
 
 ```text
 start 2026-10-02 16:26:55 rev 453c56e04393763dc5839f1da64fb5a0d5244a2b

@@ -52,7 +52,7 @@ conversion" names.
 ## Context
 
 This section describes the tree before the migration started. Line numbers
-refer to revision `d255f0d`. A bare line number refers to
+refer to revision `406b725`. A bare line number refers to
 `lib/Conversion/SegmentedReduction/SegmentedReduction.cpp`; every other file
 is named by its path. Python code is cited by function name.
 
