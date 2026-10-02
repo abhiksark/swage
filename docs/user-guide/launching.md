@@ -11,7 +11,9 @@ is normative when the two disagree.
 ## Fail closed before anything else
 
 The launch first requires PyTorch 2.6 or newer with
-`torch.Tensor.record_stream`, the method that retains submitted tensors.
+`torch.Tensor.record_stream`, the method that retains submitted tensors,
+and `torch.autograd.graph.increment_version`, which marks the output as
+written.
 It then checks each of the following before anything else happens:
 
 - the canonical parameter names and order;

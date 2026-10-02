@@ -1114,6 +1114,115 @@ def test_in_place_writes_to_values_and_output_still_launch(policy):
         )
 
 
+def _one_shot_launch(path, values, offsets, output):
+    """Return a launch of one unprepared private entry point."""
+    if path == "one-cta":
+        return lambda: qualification.launch_gpu(values, offsets, output, "sum")
+    if path == "softmax":
+        return lambda: qualification.launch_softmax_gpu(
+            values, offsets, output
+        )
+    assert path == "tasks"
+    task_ids = torch.arange(
+        offsets.numel() - 1, dtype=torch.int32, device="cuda"
+    )
+    return lambda: qualification._launch_segmented_sum_tasks(
+        values, offsets, output, task_ids, block_size=32
+    )
+
+
+_PREPARED = ["warp", "cta", "mixed", "persistent"]
+_ONE_SHOT = ["one-cta", "softmax", "tasks"]
+
+
+@_requires_cuda
+@pytest.mark.parametrize("path", [*_PREPARED, *_ONE_SHOT])
+def test_every_launch_advances_the_output_version_only(path):
+    """Tell autograd that the output was written, on every private path.
+
+    PyTorch cannot see a kernel store. Without the advance, a backward pass
+    that saved the output would use the overwritten values and return a
+    wrong gradient without an error. The counters of values and offsets
+    must stay put: the offsets counter is what a prepared launch compares.
+    """
+    values, offsets, expected = _case([1, 33, 4097, 2])
+    size = values.numel() if path == "softmax" else 4
+    output = torch.zeros(size, device="cuda")
+    if path in _PREPARED:
+        launch = _prepared_launch(path, values, offsets, output)
+    else:
+        launch = _one_shot_launch(path, values, offsets, output)
+    weights = torch.ones(size, device="cuda", requires_grad=True)
+    kept = [values._version, offsets._version]
+
+    for _ in range(3):
+        loss = (weights * output).sum()
+        version = output._version
+        launch()
+        torch.cuda.synchronize()
+        assert output._version > version
+        with pytest.raises(
+            RuntimeError, match="modified by an inplace operation"
+        ):
+            loss.backward()
+
+    assert [values._version, offsets._version] == kept
+    if path != "softmax":
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+
+@_requires_cuda
+@pytest.mark.parametrize("policy", _PREPARED)
+def test_offsets_that_share_the_output_version_counter_still_launch(policy):
+    """Do not read the launch's own output write as changed offsets.
+
+    Views of one tensor share one version counter, also views of another
+    dtype that share no byte. Advancing the output version then advances
+    the offsets version, which must not stop the next launch, while a
+    write to the offsets must still stop it.
+    """
+    values, host_offsets, expected = _case([1, 33, 4097, 2])
+    arena = torch.zeros(9, device="cuda")
+    offsets = arena[:5].view(torch.int32)
+    offsets.copy_(host_offsets)
+    output = arena[5:]
+    launch = _prepared_launch(policy, values, offsets, output)
+
+    for _ in range(3):
+        version = offsets._version
+        launch()
+        torch.cuda.synchronize()
+        assert offsets._version == output._version > version
+        torch.testing.assert_close(
+            output.cpu(), expected["sum"], rtol=0, atol=0
+        )
+
+    offsets[1] += 1
+    with pytest.raises(RuntimeError, match=_STALE):
+        launch()
+
+
+@_requires_cuda
+@pytest.mark.parametrize("path", _ONE_SHOT)
+def test_one_shot_launch_accepts_inference_tensors(path):
+    """Launch on tensors that have no version counter to advance."""
+    with torch.inference_mode():
+        values, offsets, expected = _case([1, 33, 4097, 2])
+        size = values.numel() if path == "softmax" else 4
+        output = torch.zeros(size, device="cuda")
+        assert output.is_inference()
+
+        _one_shot_launch(path, values, offsets, output)()
+
+        torch.cuda.synchronize()
+        if path != "softmax":
+            torch.testing.assert_close(
+                output.cpu(), expected["sum"], rtol=0, atol=0
+            )
+
+
 @_requires_cuda
 def test_rebound_tensor_stops_an_empty_prepared_launch():
     """Apply the same contract when the prepared batch has no segments."""

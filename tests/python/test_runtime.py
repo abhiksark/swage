@@ -294,6 +294,16 @@ def _fake_torch(
     )
     torch.version = types.SimpleNamespace(cuda="13.0")
     torch.Tensor = _Tensor
+    # Each entry is a tensor whose version a launch advanced, with the
+    # streams that had retained it by then.
+    torch.advanced = []
+    torch.autograd = types.SimpleNamespace(
+        graph=types.SimpleNamespace(
+            increment_version=lambda tensor: torch.advanced.append(
+                (tensor, list(tensor.recorded_streams))
+            )
+        )
+    )
     return torch, stream
 
 
@@ -343,6 +353,38 @@ def test_launch_uses_current_stream_and_raw_abi(monkeypatch):
     ]
     for tensor in tuple(arguments.values())[:3]:
         assert tensor.recorded_streams == [stream]
+
+
+def test_launch_advances_the_version_of_the_output_only(monkeypatch):
+    """Tell autograd the output was written, after it is retained."""
+    torch, stream = _fake_torch()
+    arguments = _arguments(torch)
+    _install_launch_fakes(monkeypatch, torch)
+
+    for _ in range(2):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    output = arguments["output_ptr"]
+    assert torch.advanced == [(output, [stream]), (output, [stream] * 2)]
+
+
+def test_launch_without_work_advances_no_version(monkeypatch):
+    """Leave the counter alone when nothing is enqueued or written."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+
+    add_kernel.launch(
+        arguments=_arguments(torch, n=0), constexprs={"BLOCK": 128}, grid=(0,)
+    )
+    with pytest.raises(ValueError, match="grid must equal"):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(3,)
+        )
+
+    assert driver.launches == []
+    assert torch.advanced == []
 
 
 def test_repeated_launch_reuses_loaded_function_without_retaining_tensors(
@@ -596,6 +638,34 @@ def test_launch_rejects_a_pytorch_without_record_stream(monkeypatch):
     ):
         add_kernel.launch(
             arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+@pytest.mark.parametrize("missing", ["autograd", "graph", "function"])
+def test_launch_rejects_a_pytorch_without_increment_version(
+    monkeypatch, missing
+):
+    """Fail before the enqueue when the output cannot be marked written."""
+    torch, _ = _fake_torch(version="2.6.0")
+    driver = _install_launch_fakes(monkeypatch, torch)
+    if missing == "autograd":
+        del torch.autograd
+    elif missing == "graph":
+        torch.autograd = types.SimpleNamespace()
+    else:
+        torch.autograd.graph = types.SimpleNamespace()
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "requires torch.autograd.graph.increment_version.*found "
+            "PyTorch 2.6.0"
+        ),
+    ):
+        add_kernel.launch(
+            arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
         )
 
     assert driver.loads == driver.launches == []

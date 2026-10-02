@@ -176,6 +176,66 @@ def test_launch_rejects_tensors_that_require_grad():
     assert torch.all(output == 2.0)
 
 
+def test_launch_advances_the_output_version_for_autograd():
+    """Make autograd refuse a value that a launch overwrote.
+
+    The product saves the output for its backward pass. PyTorch cannot see
+    the kernel store, so without the advance the backward pass would use
+    the overwritten output and return a wrong gradient without an error.
+    """
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones(129, device="cuda")
+    output = torch.zeros(129, device="cuda")
+    weights = torch.ones(129, device="cuda", requires_grad=True)
+    loss = (weights * output).sum()
+    versions = [tensor._version for tensor in (x, y, output)]
+
+    _launch(x, y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+    assert [x._version, y._version] == versions[:2]
+    assert output._version == versions[2] + 1
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+
+
+def test_captured_launch_advances_the_output_version_at_capture_only():
+    """Advance the counter in the launch call, which a replay does not run."""
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones(129, device="cuda")
+    output = torch.zeros(129, device="cuda")
+    _launch(x, y, output, 129)
+    torch.cuda.synchronize()
+    version = output._version
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _launch(x, y, output, 129)
+    assert output._version == version + 1
+
+    output.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert output._version == version + 2
+    assert torch.equal(output, x + y)
+
+
+def test_launch_accepts_inference_tensors():
+    """Launch on tensors that have no version counter to advance."""
+    with torch.inference_mode():
+        x = torch.arange(129, dtype=torch.float32, device="cuda")
+        y = torch.ones(129, device="cuda")
+        output = torch.zeros(129, device="cuda")
+        assert output.is_inference()
+
+        _launch(x, y, output, 129)
+
+        torch.cuda.synchronize()
+        assert torch.equal(output, x + y)
+
+
 @pytest.mark.parametrize("shift", [0, 1, 128, -1, -128])
 @pytest.mark.parametrize("overlapped", ["x_ptr", "y_ptr"])
 def test_launch_rejects_an_output_that_overlaps_an_input(overlapped, shift):

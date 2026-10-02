@@ -33,10 +33,11 @@ more checks apply to the tensors:
   an error. Pass `tensor.detach()` to launch without gradients.
 
 A launch requires PyTorch 2.6 or newer, the floor that the `pytorch` extra
-declares, and a `torch.Tensor.record_stream` method. Both are checked before
-validation, so an older PyTorch fails with a `RuntimeError` that names the
-version found, and no kernel is compiled or enqueued. No newer release is
-refused. Compile-only emission does not run this check.
+declares, a `torch.Tensor.record_stream` method, and the
+`torch.autograd.graph.increment_version` function. All three are checked
+before validation, so an older PyTorch fails with a `RuntimeError` that
+names the version found, and no kernel is compiled or enqueued. No newer
+release is refused. Compile-only emission does not run this check.
 
 For `n == 0`, the required grid is `(0,)`, and the validated launch returns
 without compilation, cache access, module loading, or enqueue. Other launches
@@ -63,6 +64,25 @@ A launch that loads a kernel can synchronize the context once;
 [Module lifetime](#module-lifetime) states when. Loaded functions are reused
 per specialization and CUDA context. Tensor storage remains owned by
 PyTorch, and submitted tensors are retained through `record_stream()`.
+
+Autograd sees neither what a kernel reads nor what it stores. Two rules keep
+that from giving a wrong gradient without an error:
+
+- A tensor that requires grad is rejected, as stated above.
+- After the enqueue, a launch advances the version counter of its output
+  through `torch.autograd.graph.increment_version`, as an in-place PyTorch
+  operation does. A backward pass that saved the output before the launch
+  then raises instead of using the overwritten values. The counters of the
+  inputs are not advanced.
+
+The private qualification helpers apply both rules to their values and
+output. The advance changes host metadata only: it enqueues nothing and
+does not wait for the device. It has two limits:
+
+- A replayed CUDA graph runs no host code. The launch call that was
+  captured advances the counter once, and a replay does not.
+- An inference tensor has no version counter, so nothing is advanced for an
+  output created under `torch.inference_mode()`.
 
 Emitted kernels also pin their own launch width: the PTX carries a
 `.reqntid` directive matching the specialized block size, so a launch

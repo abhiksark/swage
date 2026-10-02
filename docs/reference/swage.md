@@ -151,7 +151,8 @@ Parameters
 
 Returns
 :   `None`. The launch enqueues asynchronously on the current PyTorch
-    stream; submitted tensors are retained through `record_stream()`.
+    stream; submitted tensors are retained through `record_stream()`, and
+    the version counter of the output is advanced.
 
 Raises
 :   `TypeError`: wrong container, tensor, dtype, rank, or ABI category.
@@ -161,9 +162,10 @@ Raises
     admission such as an unsupported `sm_*` target; or a cache variable
     with a value other than the documented ones.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6 or without
-    `torch.Tensor.record_stream`, unavailable CUDA, missing native
-    bindings, a kernel that is not cached while `SWAGE_NO_COMPILE=1` is
-    set, or runtime driver and cache failures.
+    `torch.Tensor.record_stream` or
+    `torch.autograd.graph.increment_version`, unavailable CUDA, missing
+    native bindings, a kernel that is not cached while `SWAGE_NO_COMPILE=1`
+    is set, or runtime driver and cache failures.
 :   `CompilationError`: a parameter list outside the kernel language, on
     every call, or a body outside it, when the call compiles the kernel.
 

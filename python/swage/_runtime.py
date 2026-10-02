@@ -262,6 +262,7 @@ def launch(kernel, *, arguments, constexprs, grid):
         )
         for tensor in spec.tensors:
             tensor.record_stream(spec.stream)
+        _advance_version(torch, spec.tensors[-1])
         return None
     except (TypeError, ValueError) as error:
         # A subclass may take more than a message, so it is left as it is.
@@ -270,6 +271,22 @@ def launch(kernel, *, arguments, constexprs, grid):
         raise type(error)(
             f"{error}{_launch_location(kernel)}"
         ).with_traceback(error.__traceback__) from None
+
+
+def _advance_version(torch, tensor):
+    """Tell PyTorch that a launch wrote `tensor` through its raw pointer.
+
+    Autograd saves tensors for a backward pass together with their version
+    counters and raises when a counter moved in between. PyTorch advances
+    the counter for its own in-place operations and cannot see a kernel
+    store, so a launch advances the counter of its output.
+
+    This changes host metadata only: it enqueues nothing, never waits for
+    the device, and is safe while a stream captures a CUDA graph. A
+    replayed graph runs no host code, so a replay does not advance the
+    counter. An inference tensor has no counter and is skipped by PyTorch.
+    """
+    torch.autograd.graph.increment_version(tensor)
 
 
 def _launch_location(kernel):
@@ -311,7 +328,9 @@ def _require_supported_torch(torch):
     A launch enqueues the kernel and then retains each tensor on the stream
     through `Tensor.record_stream`. Finding that method missing after the
     enqueue would leave a kernel running on storage PyTorch may reuse, so
-    the release and the method are both checked here.
+    the release and the method are both checked here. So is
+    `torch.autograd.graph.increment_version`, which marks the output as
+    written after the enqueue.
     """
     found = getattr(torch, "__version__", None)
     release = re.match(r"(\d+)\.(\d+)", str(found))
@@ -325,6 +344,13 @@ def _require_supported_torch(torch):
         raise RuntimeError(
             "Swage launch requires torch.Tensor.record_stream to retain "
             f"submitted tensors; found PyTorch {found} without it"
+        )
+    graph = getattr(getattr(torch, "autograd", None), "graph", None)
+    if not callable(getattr(graph, "increment_version", None)):
+        raise RuntimeError(
+            "Swage launch requires torch.autograd.graph.increment_version "
+            "to mark the output as written; found PyTorch "
+            f"{found} without it"
         )
 
 
