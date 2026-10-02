@@ -305,7 +305,11 @@ Preparation and launch follow these rules:
   `values`, `offsets`, and the result are retained through
   `record_stream()`.
 - After the enqueue, the version counter of the result is advanced. The
-  counters of `values` and `offsets` are not.
+  counters of `values` and `offsets` are not. `segment_reduce` also advances
+  the counter of the result once while it prepares, so a call that is
+  refused after that point, or that has no segment, leaves the result
+  unwritten with its counter moved. `segment_softmax` advances it only when
+  it enqueues.
 - The task records, the split scratch, and the CUDA event of a
   `segment_reduce` call are released when the call returns. Device memory,
   the number of loaded modules, and the number of live events stay flat

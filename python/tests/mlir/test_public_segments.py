@@ -1101,6 +1101,43 @@ def test_no_compile_mode_serves_an_empty_batch(empty_kernel_memo, monkeypatch):
     assert swage.segment_softmax(values, offsets).shape == (0,)
 
 
+@_needs_cuda
+def test_a_reduction_can_advance_the_out_version_without_writing(
+    empty_kernel_memo, monkeypatch
+):
+    """Advance the counter of `out` while preparing, before any kernel.
+
+    `segment_reduce` advances the counter once during preparation, to learn
+    whether the offsets share it. A call that is refused after that point,
+    or that has no segment, leaves `out` unwritten with its counter moved.
+    That errs toward a backward pass that raises. `segment_softmax`
+    advances the counter only when it enqueues.
+    """
+    host_values, host_offsets = _host_segments([3, 40, 0, 4100])
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    no_segments = torch.zeros(1, dtype=torch.int32, device="cuda")
+    no_values = torch.empty(0, device="cuda")
+    reduced = torch.full((4,), _SENTINEL, device="cuda")
+    weights = torch.full((values.numel(),), _SENTINEL, device="cuda")
+    empty = torch.empty(0, device="cuda")
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+
+    with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
+        swage.segment_reduce(values, offsets, "sum", out=reduced)
+    with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
+        swage.segment_softmax(values, offsets, out=weights)
+    torch.cuda.synchronize()
+
+    assert (reduced._version, weights._version) == (1, 0)
+    assert torch.all(reduced == _SENTINEL)
+    assert torch.all(weights == _SENTINEL)
+
+    swage.segment_softmax(no_values, no_segments, out=empty)
+    assert empty._version == 0
+    swage.segment_reduce(no_values, no_segments, "sum", out=empty)
+    assert empty._version == 1
+
+
 @pytest.fixture
 def driver_calls(monkeypatch):
     """Count the loads, unloads, and waits the real driver performs."""
