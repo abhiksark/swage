@@ -79,6 +79,17 @@ workflow or an equivalent recorded qualification. Recorded evidence is a
 citation status, not a boundary status: the snapshot row upgrades nothing,
 and its numbers are presented on [Benchmarks](benchmarks.md).
 
+One check is opt-in and no workflow runs it.
+`python/tests/mlir/test_racecheck.py` runs the direct, task-ID, fused mixed,
+split partial and merge, persistent, and softmax kernels under the
+racecheck tool of NVIDIA Compute Sanitizer, beside a deliberately racy
+kernel that the tool must report. It runs only when `SWAGE_RACECHECK=1` is
+set, CUDA is available, and `compute-sanitizer` is found on `PATH` or in the
+`compute-sanitizer` directory under `CUDA_HOME`, `CUDA_PATH`, or
+`/usr/local/cuda`, where the development machine has version 2023.3 of it;
+otherwise it is skipped. No row above relies on it, and this page claims no
+result for it.
+
 The hosted `ci-cpp` workflow also defines two jobs that no row above relies
 on: a `clang-format` check of the C and C++ sources, and a job that runs the
 lit suite and the C++ unit tests under AddressSanitizer and
