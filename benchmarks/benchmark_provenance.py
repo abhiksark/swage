@@ -34,6 +34,7 @@ _GPU_FIELDS = (
     "utilization.gpu",
 )
 _PROCESS_FIELDS = ("gpu_uuid", "pid", "process_name", "used_memory")
+_CPU_ROOT = pathlib.Path("/sys/devices/system/cpu")
 _SAME_READING = 1e-6
 # A reading is on a grid when it is within this fraction of the finest step
 # of a grid point.
@@ -55,6 +56,61 @@ def cpu_model(cpuinfo=pathlib.Path("/proc/cpuinfo")):
         if name.strip() == "model name":
             return value.strip()
     return None
+
+
+def _sysfs_value(path):
+    """Return the stripped text of one sysfs file, or None without it."""
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def cpu_frequency_policy(root=_CPU_ROOT):
+    """Return the frequency governor of every CPU and its driver.
+
+    The host side of a launch runs at whatever frequency the governor
+    grants, so a record states it.
+
+    Args:
+        root: The CPU directory of sysfs.
+
+    Returns:
+        ``governors`` with the number of CPUs under each governor, where a
+        CPU whose ``cpufreq/scaling_governor`` cannot be read counts under
+        ``unknown`` and a machine without CPU directories gives an empty
+        mapping; and the ``scaling_driver`` and
+        ``energy_performance_preference`` of the first CPU, each None when
+        it cannot be read.
+    """
+    governors = {}
+    for cpu in root.glob("cpu[0-9]*"):
+        governor = _sysfs_value(cpu / "cpufreq" / "scaling_governor")
+        governors[governor or "unknown"] = (
+            governors.get(governor or "unknown", 0) + 1
+        )
+    policy = root / "cpu0" / "cpufreq"
+    return {
+        "governors": dict(sorted(governors.items())),
+        "scaling_driver": _sysfs_value(policy / "scaling_driver"),
+        "energy_performance_preference": _sysfs_value(
+            policy / "energy_performance_preference"
+        ),
+    }
+
+
+def cpu_governor_unchanged(before, after):
+    """Return whether two governor samples agree.
+
+    Returns:
+        True when both samples read every CPU and are equal, False when
+        both read every CPU and differ, and None when either sample has an
+        unreadable CPU or no CPU at all.
+    """
+    samples = [before["governors"], after["governors"]]
+    if any(not sample or "unknown" in sample for sample in samples):
+        return None
+    return samples[0] == samples[1]
 
 
 def package_version(name):
@@ -239,17 +295,18 @@ def swage_build():
     }
 
 
-def start(torch, build, *, run=subprocess.run):
+def start(torch, build, *, run=subprocess.run, cpu_root=_CPU_ROOT):
     """Start the provenance block of one benchmark process.
 
     Args:
         torch: The PyTorch module, with CUDA initialized.
         build: ``swage_build()``.
         run: ``subprocess.run`` or a stand-in.
+        cpu_root: The CPU directory of sysfs.
 
     Returns:
-        The block, with the GPU state sampled before the measurement. Pass
-        it to ``finish`` after the measurement.
+        The block, with the GPU state and the CPU frequency policy sampled
+        before the measurement. Pass it to ``finish`` after the measurement.
     """
     device = torch.cuda.current_device()
     uuid = device_uuid(torch, device)
@@ -261,17 +318,21 @@ def start(torch, build, *, run=subprocess.run):
         "triton": package_version("triton"),
         **build,
         "gpu_state_before": gpu_state(uuid, pid=os.getpid(), run=run),
+        "cpu_frequency_before": cpu_frequency_policy(cpu_root),
     }
 
 
-def finish(block, *, run=subprocess.run):
+def finish(block, *, run=subprocess.run, cpu_root=_CPU_ROOT):
     """Complete a block after the measurement and return it.
 
-    The GPU state is sampled again, the loaded PTX entries are put in a
-    stable order without repeats, and ``other_compute_process_seen``
-    summarizes the samples. A harness that rewrites its record as it goes
-    may call this after every row: the PTX list keeps recording, and a
-    process seen at an earlier call stays seen.
+    The GPU state and the CPU frequency policy are sampled again, the
+    loaded PTX entries are put in a stable order without repeats,
+    ``other_compute_process_seen`` summarizes the GPU samples, and
+    ``cpu_governor_unchanged`` compares the governor samples. The governor
+    is read at the two ends of the run, not watched in between. A harness
+    that rewrites its record as it goes may call this after every row: the
+    PTX list keeps recording, and a process or a governor change seen at an
+    earlier call stays seen.
     """
     block["gpu_state_after"] = gpu_state(
         block["gpu_uuid"], pid=os.getpid(), run=run
@@ -287,6 +348,11 @@ def finish(block, *, run=subprocess.run):
     ) or other_compute_process_seen(
         block["gpu_state_before"], block["gpu_state_after"]
     )
+    block["cpu_frequency_after"] = cpu_frequency_policy(cpu_root)
+    if block.get("cpu_governor_unchanged") is not False:
+        block["cpu_governor_unchanged"] = cpu_governor_unchanged(
+            block["cpu_frequency_before"], block["cpu_frequency_after"]
+        )
     return block
 
 
