@@ -8,6 +8,21 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- `swage.segment_reduce(values, offsets, kind, *, out=None)` for `"sum"` and
+  `"max"`, and `swage.segment_softmax(values, offsets, *, out=None)`: the
+  first public segmented calls, over rank-one f32 values and int32 offsets on
+  the current CUDA device. They record no gradient, prepare their offsets on
+  the host at every call, and are refused under CUDA graph capture. A
+  Segmented Calls user-guide page, API reference entries, and
+  `examples/segment_reduce.py` document them.
+- `scripts/build_native_wheel.sh` builds a `swage-compiler-native` wheel of
+  `mlir_swage` from a checkout; no native wheel is published. The bindings
+  record the `swage` version and source revision they were built from,
+  `swage` refuses bindings built for another version, and
+  `python -m swage.env` prints both.
+- A compile-only test compares the SHA-256 of the lowered MLIR and of the
+  PTX of 552 kernels with a committed record. ADR-0020 proposes a planned
+  per-function segmented lowering; it is not implemented.
 - Generated TikZ figure atlas covering the GPU execution approaches, and a
   benchmarks page backed by a committed RTX 5090 snapshot.
 - Private persistent task queue for the canonical identity segmented sum
@@ -64,6 +79,24 @@ semantic versioning (`0.x`; anything may change).
 
 ### Changed
 
+- Kernels pass through a curated LLVM pass pipeline (early-cse, instcombine,
+  simplifycfg, loop-rotate, licm) before PTX emission. Results are
+  bit-identical and each kernel's barrier, shuffle, fence, and atomic counts
+  are unchanged; segment loops now close with one conditional branch.
+  Committed benchmark records made before this change describe PTX generated
+  without these passes.
+- The persistent cache key identifies native libraries by ELF build id or
+  content digest instead of name, size, and modification time, and no longer
+  includes the checkout's LLVM pin. Existing cache entries are not reused.
+- `swage-opt` registers upstream dialect extensions, so the lowering
+  pipeline of the code generation C API runs from text through the NVVM
+  conversion.
+- Benchmarks: candidate filters on both harnesses; fresh offsets warms each
+  sample with calls of the same candidate and times planned Triton with its
+  partition and a single-policy Swage call; a looping matched Triton
+  comparator; process ratios against any named candidates and
+  re-summarizing of existing records; the CPU frequency governor in every
+  record.
 - The documentation site is restructured into getting started, user guide,
   API reference, internals, and decisions sections; milestone codenames
   moved out of user-facing prose, and every previously published URL
