@@ -171,6 +171,10 @@ class _Kernel:
         )
         _Checker(self, runtime_types, static_values).check()
         try:
+            from . import _runtime
+
+            # Checks the bindings against this swage before any is used.
+            _runtime._native_bindings()
             from mlir_swage import ir
             from mlir_swage.dialects import arith, func, swage, vector
         except ImportError as error:

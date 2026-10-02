@@ -4,6 +4,13 @@ include(AddMLIRPython)
 # (the API is embedded in a relocatable way).
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=${MLIR_PYTHON_PACKAGE_PREFIX}.")
 
+# The disk cache of `swage` identifies each native library by its ELF build
+# id, which the linker derives from the linked contents. Some toolchains
+# emit none unless asked.
+if(UNIX AND NOT APPLE)
+  add_link_options("LINKER:--build-id=sha1")
+endif()
+
 declare_mlir_python_sources(SwagePythonSources)
 
 declare_mlir_dialect_python_bindings(
@@ -62,6 +69,23 @@ add_mlir_python_modules(SwagePythonModules
   COMMON_CAPI_LINK_LIBS
     SwagePythonCAPI
 )
+
+# The extension records the swage version and the source revision it was
+# built from. The header is regenerated on every build, and rewritten only
+# when one of the two changed, so a new commit recompiles one file.
+set(SWAGE_IDENTITY_HEADER
+  "${SWAGE_BINARY_DIR}/include/swage/Python/BuildIdentity.h")
+add_custom_target(SwageBuildIdentity
+  COMMAND ${CMAKE_COMMAND}
+    "-DSWAGE_SOURCE_DIR=${SWAGE_SOURCE_DIR}"
+    "-DSWAGE_IDENTITY_HEADER=${SWAGE_IDENTITY_HEADER}"
+    -P "${SWAGE_SOURCE_DIR}/cmake/SwageBuildIdentity.cmake"
+  BYPRODUCTS "${SWAGE_IDENTITY_HEADER}"
+  COMMENT "Recording the Swage build identity"
+  VERBATIM
+)
+add_dependencies(SwagePythonModules.extension._swageDialectsNanobind.dso
+  SwageBuildIdentity)
 
 add_custom_target(check-swage-python
   COMMAND ${CMAKE_COMMAND} -E env

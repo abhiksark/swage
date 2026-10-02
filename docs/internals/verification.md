@@ -20,6 +20,8 @@ the paths the calls run through.
 |---|---|---|---|
 | Pure `swage` wheel contents and native-package exclusion | Public today | `tests/python/test_packaging.py` | `python -m pytest tests/python/test_packaging.py -q` |
 | Environment report | Public today | `tests/python/test_env.py` | `python -m pytest tests/python/test_env.py -q` |
+| Build identity of the bindings, the check that pairs `swage` with them, and the content identity of the native libraries in the cache key | Public today | `tests/python/test_native_identity.py`, `python/tests/mlir/test_native_identity.py` | `python -m pytest tests/python/test_native_identity.py -q`; `ninja -C build check-swage-python` |
+| Native wheel assembly: contents, metadata, record, and refusal of a package that would not relocate | Local build only; no native wheel is published | `tests/python/test_assemble_native_wheel.py` | `python -m pytest tests/python/test_assemble_native_wheel.py -q`. An install of a built wheel is checked by hand and by the `native-wheel` job of `ci-cpp`, which has never run |
 | Restricted AST to verified native module, and the kernel-language check without the native package | Public today, compile-only | `tests/python/test_frontend.py`, `python/tests/mlir/test_frontend.py` | `python -m pytest tests/python -q`; `ninja -C build check-swage-python` |
 | Emit-only example without a GPU or PyTorch | Public today, compile-only | `python/tests/mlir/test_examples.py` | `ninja -C build check-swage-python` |
 | Native `swage` dialect parsing, verification, and declared segment-read effects | Public today, compile-only | `test/Dialect/Swage`, including `effects.mlir` | `ninja -C build check-swage` |

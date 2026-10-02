@@ -7,6 +7,7 @@
 
 #include "swage-c/Codegen.h"
 #include "swage-c/Dialects.h"
+#include "swage/Python/BuildIdentity.h"
 
 #include "mlir-c/Dialect/Arith.h"
 #include "mlir-c/Dialect/Func.h"
@@ -347,14 +348,50 @@ classifySegments(PlanOffsets offsets, int64_t valueCount, int64_t segmentCount,
           classification.partialCount, classification.mergeCount};
 }
 
+/// Lets a `swage` frontend that is already imported check these bindings
+/// against itself. It reads only the build identity, which is all the module
+/// holds when this runs. The frontend owns the rule and raises on a mismatch,
+/// which fails the import. A frontend from before the check existed cannot
+/// refuse anything, so its use is reported with one warning. Nothing is checked
+/// when `swage` is not imported: the bindings are usable on their own, and
+/// `swage` checks bindings that were loaded first when it reaches for them.
+void verifyLoadedFrontend(nb::handle bindings) {
+  nb::object modules = nb::module_::import_("sys").attr("modules");
+  nb::object frontend = modules.attr("get")("swage");
+  if (frontend.is_none())
+    return;
+  nb::object runtime = nb::getattr(frontend, "_runtime", nb::none());
+  if (nb::hasattr(runtime, "_verify_bindings")) {
+    runtime.attr("_verify_bindings")(bindings);
+    return;
+  }
+  nb::object file = nb::getattr(frontend, "__file__", nb::none());
+  std::string message =
+      "the swage package at " + nb::cast<std::string>(nb::str(file)) +
+      " predates the check that pairs a frontend with its bindings; the "
+      "mlir_swage bindings were built for swage " SWAGE_BUILD_VERSION
+      " at revision " SWAGE_BUILD_REVISION
+      ", and nothing verified that this frontend matches them";
+  if (PyErr_WarnEx(PyExc_RuntimeWarning, message.c_str(), 1) < 0)
+    throw nb::python_error();
+}
+
 } // namespace
 
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
 
-  // The LLVM release this extension was compiled and linked against, so the
-  // Python side reports the real toolchain instead of the repository pin.
+  // What this extension was built from: the `swage` version and the source
+  // revision of its checkout, and the LLVM release it was compiled and
+  // linked against. `swage` refuses bindings built for another version, and
+  // its environment report prints all three.
+  swageM.attr("__version__") = SWAGE_BUILD_VERSION;
+  swageM.attr("__source_revision__") = SWAGE_BUILD_REVISION;
   swageM.attr("__llvm_version__") = LLVM_VERSION_STRING;
+
+  // Before anything is registered, so a refused import leaves nothing
+  // behind and the next attempt is refused for the same reason.
+  verifyLoadedFrontend(swageM);
 
   // The GIL is deliberately held across cuLaunchKernel: the enqueue is
   // microseconds, the driver never re-enters Python, and releasing it per

@@ -17,6 +17,9 @@ a redistributed build.
   components below. Ship this file with any copy of them that leaves the
   machine that built it, for example in a container image or an internal
   package index.
+- The `swage-compiler-native` wheel that `scripts/build_native_wheel.sh`
+  builds holds the `mlir_swage` package and carries this file and `LICENSE`
+  among its license files.
 
 ## Components in a native build
 

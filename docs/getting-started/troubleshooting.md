@@ -10,8 +10,9 @@ python -m swage.env
 ```
 
 Include that output and the failing command in bug reports. The `revision`,
-`swage_file`, `llvm_linked`, `mlir_swage_file`, and `backends` lines identify
-the checkout and the native build that the command saw.
+`swage_file`, `llvm_linked`, `native_version`, `native_revision`,
+`mlir_swage_file`, and `backends` lines identify the checkout and the native
+build that the command saw.
 
 ## `mlir_swage` cannot be imported
 
@@ -20,11 +21,13 @@ The environment report shows this state as:
 ```text
 llvm_linked: None
 mlir_swage_file: None
-backends: {'mlir': 'unavailable (build-tree mlir_swage bindings not importable)'}
+backends: {'mlir': 'unavailable (mlir_swage bindings not importable)'}
 ```
 
-`mlir_swage` is not included in the `swage-compiler` wheel. Build Swage
-against the pinned LLVM/MLIR install, then use the build-tree package:
+`mlir_swage` is not included in the `swage-compiler` wheel, and no native
+wheel is published. Build Swage against the pinned LLVM/MLIR install, then
+use the build-tree package, or build and install a native wheel as
+[Installation](installation.md#build-a-native-wheel) describes:
 
 ```bash
 ninja -C build check-swage-python
@@ -51,6 +54,23 @@ cmake -G Ninja -S . -B build \
     -DLLVM_DIR=/path/to/lib/cmake/llvm \
     -DSWAGE_PYTHON_BINDINGS=ON
 ```
+
+## `mlir_swage` is rejected
+
+Bindings that load but were not built for the `swage` that is loaded are
+reported as:
+
+```text
+native_version: None
+backends: {'mlir': 'rejected (the mlir_swage bindings in <directory> were built for swage <version> ...)'}
+```
+
+Emission and launch raise a `RuntimeError` with the same text. Rebuild the
+bindings from the sources of that `swage`, or install the `swage-compiler`
+and `swage-compiler-native` wheels that were built together.
+[Runtime and Environment](../reference/runtime-environment.md#frontend-and-bindings)
+states the rule, and also explains the warning that a checkout prints when
+its native sources differ from the revision the bindings were built from.
 
 ## PyTorch or CUDA is unavailable
 

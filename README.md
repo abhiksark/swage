@@ -96,9 +96,11 @@ backed by the repository's executable tests and committed benchmark record.
 
 The `swage-compiler` wheel contains only the pure Python `swage` package. It
 does not contain compiler libraries, build output, or the native
-`mlir_swage` package. Native wheel packaging is deferred. A native build
-contains third-party code, which
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists.
+`mlir_swage` package. No native wheel is published. A native wheel,
+`swage-compiler-native`, can be built from a checkout with
+`scripts/build_native_wheel.sh`. A native build contains third-party code,
+which [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists; the native
+wheel carries that file.
 
 ```bash
 python -m pip install swage-compiler
@@ -118,9 +120,26 @@ command.
 ninja -C build check-swage-python
 ```
 
-The native package is imported from `build/python_packages`. The published
-wheel remains useful for package import, source capture, and diagnostics, but
-does not independently emit MLIR, execute kernels, or run a segmented call.
+The native package is imported from `build/python_packages`, or installed
+into a fresh virtual environment from a native wheel built on the same
+machine:
+
+```bash
+python -m build --wheel
+./scripts/build_native_wheel.sh
+python -m pip install --no-index --find-links dist swage-compiler-native
+```
+
+The native wheel records the `swage` version, the source revision, and the
+LLVM version it was built from. `swage` refuses bindings built for another
+version, and `python -m swage.env` prints all three. The wheel is built for
+one Python version and carries the plain `linux_x86_64` tag; only a CPython
+3.13 build has been tried, on the machine that built it.
+[Installation](docs/getting-started/installation.md) states the limits.
+
+The published wheel remains useful for package import, source capture, and
+diagnostics, but does not independently emit MLIR, execute kernels, or run a
+segmented call.
 
 Three committed examples use the native build.
 `examples/emit_fixed_vector_add.py` emits MLIR with the native build alone and

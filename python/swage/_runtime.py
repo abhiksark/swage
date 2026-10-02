@@ -14,6 +14,7 @@ import pathlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -596,9 +597,12 @@ def _specialization_data(kernel, *, descriptors, constexprs, target):
         "compute_capability": target,
         "codegen": {"block_size": block, "index_bits": 64},
         "frontend": identity["frontend"],
+        # The native identity is derived from the contents of the compiler
+        # libraries, so it also covers the LLVM they link. The LLVM pin is
+        # not a field: it is read from a checkout, so the same libraries
+        # installed from a wheel would have another key.
         "native": identity["native"],
         "dialect_version": _DIALECT_VERSION,
-        "llvm_version": identity["llvm"],
     }
 
 
@@ -709,22 +713,160 @@ def _native_libraries():
     ]
 
 
-def _native_identity():
-    """Describe the native compiler libraries by their file metadata.
+_ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
+_ELF_PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
+_ELF_NOTE_HEADER = struct.Struct("<III")
+_ELF_NOTE_SEGMENT = 4
+_ELF_BUILD_ID_NOTE = 3
+# No note segment of a real library comes near this size, so a larger one
+# is a damaged file and is not read.
+_ELF_NOTES_LIMIT = 1 << 20
+
+
+def _elf_build_id(path):
+    """Return the GNU build id of an ELF file in hex, or None without one.
+
+    The linker derives the id from the linked contents and records it in a
+    note. No later tool changes it, so a library that was stripped, copied,
+    or given another modification time keeps its id. Only 64-bit
+    little-endian files are read, which covers every platform the bindings
+    are built for. A file of any other kind, a file without the note, and a
+    damaged file have no id.
+
+    Raises:
+        OSError: The file cannot be read.
+    """
+    with open(path, "rb") as library:
+        header = library.read(_ELF_HEADER.size)
+        if len(header) < _ELF_HEADER.size:
+            return None
+        fields = _ELF_HEADER.unpack(header)
+        magic, table, entry_size, entries = (
+            fields[0],
+            fields[5],
+            fields[9],
+            fields[10],
+        )
+        if magic[:6] != b"\x7fELF\x02\x01":
+            return None
+        if entry_size < _ELF_PROGRAM_HEADER.size:
+            return None
+        for index in range(entries):
+            library.seek(table + index * entry_size)
+            entry = library.read(_ELF_PROGRAM_HEADER.size)
+            if len(entry) < _ELF_PROGRAM_HEADER.size:
+                return None
+            kind, _, offset, _, _, size, _, alignment = (
+                _ELF_PROGRAM_HEADER.unpack(entry)
+            )
+            if kind != _ELF_NOTE_SEGMENT or size > _ELF_NOTES_LIMIT:
+                continue
+            library.seek(offset)
+            build_id = _build_id_note(library.read(size), alignment)
+            if build_id:
+                return build_id.hex()
+    return None
+
+
+def _build_id_note(notes, alignment):
+    """Return the descriptor of the GNU build id note in a note segment."""
+    padding = 8 if alignment == 8 else 4
+    position = 0
+    while position + _ELF_NOTE_HEADER.size <= len(notes):
+        name_size, descriptor_size, kind = _ELF_NOTE_HEADER.unpack_from(
+            notes, position
+        )
+        name_start = position + _ELF_NOTE_HEADER.size
+        descriptor_start = name_start + -(-name_size // padding) * padding
+        descriptor_end = descriptor_start + descriptor_size
+        if descriptor_end > len(notes):
+            return None
+        name = notes[name_start : name_start + name_size]
+        if name == b"GNU\0" and kind == _ELF_BUILD_ID_NOTE:
+            return notes[descriptor_start:descriptor_end]
+        position = descriptor_start + -(-descriptor_size // padding) * padding
+    return None
+
+
+def _file_digest(path):
+    """Return the SHA-256 hex digest of the contents of `path`."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as library:
+        for block in iter(lambda: library.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+# The content identity of each native library this process has read, keyed
+# by the path and the file facts that change when the file does. A library
+# without a build id is hashed in full, tens of megabytes, so it is hashed
+# once per process and again only after the file changes.
+#
+# Only a file that has not changed since the process started is remembered.
+# A file that changed later can change again within one tick of the file
+# system clock and keep every recorded fact, so it is read on each call.
+_content_identities = {}
+
+
+def _content_identity(path):
+    """Identify a native library by its contents.
 
     Returns:
-        A sorted list of `[file name, size, st_mtime_ns]`, one per file of
-        the nanobind extension and the C API library, or None when the
-        bindings are not importable.
+        `build-id:<hex>` for an ELF file that carries a GNU build id,
+        otherwise `sha256:<hex>` over the whole file.
+
+    Raises:
+        OSError: The file cannot be read.
     """
-    libraries = []
+    details = path.stat()
+    signature = (
+        str(path),
+        details.st_ino,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
+    identity = _content_identities.get(signature)
+    if identity is not None:
+        return identity
+    build_id = _elf_build_id(path)
+    if build_id is not None:
+        identity = f"build-id:{build_id}"
+    else:
+        identity = f"sha256:{_file_digest(path)}"
+    started = _PROCESS_START_NS
+    if started is not None and _changed_ns(path) < started:
+        _content_identities[signature] = identity
+    return identity
+
+
+def _native_identity():
+    """Describe the native compiler libraries by their contents.
+
+    Neither the modification time nor the size is part of the identity, so
+    the same bytes give the same identity after a copy, an archive round
+    trip, or an install that normalizes file times, and other bytes give
+    another identity whatever their size and times are.
+
+    Returns:
+        A sorted list of `[file name, content identity]`, one per file of
+        the nanobind extension and the C API library, or None when the
+        bindings are not importable. A symlink counts as the file it leads
+        to, under that file's name.
+    """
+    targets = set()
     for path in _native_libraries():
         try:
-            details = path.stat()
+            targets.add(path.resolve(strict=True))
         except OSError:
             continue
-        libraries.append([path.name, details.st_size, details.st_mtime_ns])
-    if not any(name.startswith(_NATIVE_EXTENSION) for name, *_ in libraries):
+    libraries = []
+    for target in targets:
+        try:
+            libraries.append([target.name, _content_identity(target)])
+        except OSError:
+            continue
+    if not any(name.startswith(_NATIVE_EXTENSION) for name, _ in libraries):
         return None
     return sorted(libraries)
 
@@ -882,6 +1024,151 @@ def _cached_identity():
     if _identity_cache is None or _identity_cache[0] is not _compiler_identity:
         _identity_cache = (_compiler_identity, _compiler_identity())
     return _identity_cache[1]
+
+
+class _BindingsMismatch(RuntimeError):
+    """The `mlir_swage` bindings were not built for the loaded `swage`."""
+
+
+# The paths of a checkout that the native bindings are built from.
+_NATIVE_SOURCES = (
+    "CMakeLists.txt",
+    "cmake",
+    "include",
+    "lib",
+    "python/CMakeLists.txt",
+    "python/SwageExtensionNanobind.cpp",
+    "python/mlir_swage",
+)
+# The bindings module that passed `_verify_bindings`, so the check and its
+# warning run once per process.
+_verified_bindings = None
+
+
+def _stale_native_sources(built_from):
+    """Return why bindings built from `built_from` may not fit a checkout.
+
+    Only a Swage git checkout has native sources to compare with. Its
+    frontend is edited and committed without a native rebuild, and several
+    working trees may share one build, so another revision alone is not a
+    problem there: the native sources decide.
+
+    Args:
+        built_from: The source revision the bindings recorded.
+
+    Returns:
+        A description when the native sources of the checkout differ from
+        that revision or cannot be compared with it. None when they are the
+        same, when the bindings recorded no clean revision to compare with,
+        and when `swage` does not run from a checkout.
+    """
+    identity = _cached_identity()
+    revision = identity["revision"]
+    if (
+        revision is None
+        or built_from == "unknown"
+        or built_from.endswith("-dirty")
+        or (revision == built_from and identity["clean"])
+    ):
+        return None
+    root = _package_dir().parents[1]
+    try:
+        compared = subprocess.run(
+            ["git", "diff", "--quiet", built_from, "--", *_NATIVE_SOURCES],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        ).returncode
+    except OSError:
+        return None
+    if compared == 0:
+        return None
+    built = f"the mlir_swage bindings were built from revision {built_from}"
+    if compared == 1:
+        return (
+            f"{built}, and the native sources of the checkout at {root} "
+            "differ from that revision; rebuild the bindings"
+        )
+    return (
+        f"{built}, which the checkout at {root} does not have, so its "
+        "native sources cannot be compared with the bindings"
+    )
+
+
+def _verify_bindings(native):
+    """Check once that `native` was built for the `swage` that is loaded.
+
+    The extension calls this while it is imported, when `swage` is already
+    loaded. `_native_bindings` calls it for bindings that were imported
+    before `swage` and for bindings from before the extension made the call.
+
+    Bindings built for another `swage` version, and bindings that record no
+    version, are refused. Another source revision is not refused: a wheel
+    of the pure Python package records no revision to compare, and a
+    checkout moves to a new revision with every commit. In a checkout the
+    native sources are compared instead, and a difference warns once.
+
+    Args:
+        native: The `swage` submodule of the nanobind extension.
+
+    Raises:
+        _BindingsMismatch: The bindings were built for another version of
+            `swage`, or carry no build identity.
+    """
+    global _verified_bindings
+    if native is _verified_bindings:
+        return
+    from . import __version__
+
+    libraries = _native_libraries()
+    location = libraries[0].parent if libraries else "that are loaded"
+    built_for = getattr(native, "__version__", None)
+    if built_for is None:
+        raise _BindingsMismatch(
+            f"the mlir_swage bindings in {location} record no swage "
+            f"version, so they cannot be checked against swage "
+            f"{__version__} from {_package_dir()}; they were built before "
+            "the bindings identified themselves. Rebuild them from the "
+            "sources of this swage"
+        )
+    built_from = getattr(native, "__source_revision__", "unknown")
+    if built_for != __version__:
+        raise _BindingsMismatch(
+            f"the mlir_swage bindings in {location} were built for swage "
+            f"{built_for} (source revision {built_from}), but swage "
+            f"{__version__} is loaded from {_package_dir()}. Install the "
+            "bindings built for this version, or rebuild them from the "
+            "sources of this swage"
+        )
+    problem = _stale_native_sources(built_from)
+    if problem is not None:
+        warnings.warn(problem, RuntimeWarning, stacklevel=2)
+    _verified_bindings = native
+
+
+def _native_bindings():
+    """Import the native `swage` bindings and check them against `swage`.
+
+    Returns:
+        The `swage` submodule of the nanobind extension.
+
+    Raises:
+        ImportError: The bindings are not importable.
+        _BindingsMismatch: The bindings were built for another version of
+            `swage`, or carry no build identity.
+    """
+    try:
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native,
+        )
+    except ImportError as error:
+        # The extension reports a failed check as an import error whose
+        # cause is the error `_verify_bindings` raised.
+        if isinstance(error.__cause__, _BindingsMismatch):
+            raise error.__cause__ from None
+        raise
+    _verify_bindings(native)
+    return native
 
 
 def _cache_key(specialization):
@@ -1157,9 +1444,9 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
 
 def _compile_native(module, kernel_name, block_size, target):
     try:
-        from mlir_swage._mlir_libs._swageDialectsNanobind import (
-            swage as native_swage,
-        )
+        native_swage = _native_bindings()
+    except _BindingsMismatch:
+        raise
     except Exception as error:
         from ._frontend import _INSTALLATION
 
@@ -1594,12 +1881,10 @@ class _CudaDriver:
         # cannot be imported. A wheel-only install cannot launch from a
         # warm cache: with no native libraries to identify, it never reads
         # the persistent cache.
+        # Bindings built for another swage version are refused here, not
+        # replaced by the fallback.
         try:
-            from mlir_swage._mlir_libs._swageDialectsNanobind import (
-                swage as native_swage,
-            )
-
-            self._native_launch = native_swage._launch_kernel
+            self._native_launch = _native_bindings()._launch_kernel
         except ImportError:
             self._native_launch = None
 
