@@ -299,11 +299,11 @@ File sizes and file times are not part of the key:
   `cmake/llvm-version.txt` exists only in a checkout, so a field read from
   it would give an installed package another key than a checkout.
 
-Reading a build id takes tens of microseconds per library. The digest of a
+Reading a build id takes about 10 microseconds per library. The digest of a
 library without one is computed once per process, at the first launch that
 looks up the persistent cache, and again only if the file changes: about
-60 ms for the 114 MB compiler library of a stripped `Release` build, measured
-on the machine that qualifies the GPU tier.
+70 ms for the 114 MB compiler library of a stripped `Release` build. Both
+were measured on the machine that qualifies the GPU tier.
 
 A build id identifies what the linker produced. A library that is modified
 after linking, for example by a binary patch, keeps its build id and is not
