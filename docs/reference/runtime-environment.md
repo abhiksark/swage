@@ -282,7 +282,8 @@ A call makes its checks in a fixed order, all before the first enqueue:
 1. PyTorch: the release floor and the two functions that `launch()`
    requires.
 2. Arguments that need no native build: `kind`, the tensor type of `values`
-   and `offsets`, the grad state of `values`, and every rule of `out`.
+   and `offsets`, the grad state of `values`, the rank of `values` for
+   `segment_reduce`, and every rule of `out`.
 3. The selected artifact, or the native bindings. With
    `SWAGE_ARTIFACT_DIR` set, the directory is read and verified at the
    first call of the process, the bindings are not needed, and a directory
@@ -320,6 +321,14 @@ Preparation and launch follow these rules:
 - `segment_reduce` runs the program of the dtype of `values`: float64
   values have kernels of their own, compiled and loaded like the float32
   ones, and nothing is cast. The schedule does not depend on the dtype.
+- `segment_reduce` on `[N, D]` values with more than one column takes
+  another path. It validates the offsets and enqueues one kernel, the
+  column kernel of the kind and dtype, with one 128-thread block per
+  segment. It admits no program for planning, classifies no segment,
+  uploads no task record, and allocates no scratch. With int64 offsets it
+  uploads the narrowed copy, as `segment_softmax` does. `[N, 1]` values
+  take the rank-one path through a view, and `[N, 0]` values enqueue
+  nothing.
 - `segment_reduce` prepares nothing it does not launch. A batch compiles
   and loads the fused kernel when it has segments of up to 4096 elements
   and the partial and merge kernels when it has longer ones. A batch that

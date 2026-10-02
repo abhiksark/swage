@@ -172,6 +172,23 @@ def _programs():
             variants,
             processors,
         )
+    # The reductions over rank-two values. Each has one kernel, the direct
+    # schedule, which the runtime compiles at the CTA block width.
+    for element in ("f32", "f64"):
+        for kind in ("sum", "max", "min", "mean"):
+            suffix = "" if element == "f32" else f"-{element}"
+            programs[f"{kind}-columns{suffix}"] = (
+                qualification._semantic_module(kind, element, 2),
+                qualification._reduction_kernel(kind, element, 2),
+                (
+                    (
+                        "direct-128",
+                        "_compile_segmented_reduction_ptx",
+                        {"block_size": 128},
+                    ),
+                ),
+                _NEWER_PROCESSORS,
+            )
     # The one program with a `map_store` terminal, as the runtime compiles
     # it: one block per segment, at its default width and at one warp.
     programs["ragged-softmax"] = (

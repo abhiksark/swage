@@ -27,7 +27,9 @@ Three levels remain distinct:
 
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
 tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
-steps, and 512-thread split partial and merge steps.
+steps, and 512-thread split partial and merge steps. Rank-two values use a
+128-thread column step, in which a thread reduces one column of one
+segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -73,6 +75,10 @@ pipeline and links to exact references live in
   runtime-sized register array.
 - A segment type carries element type only. Values, offsets, and runtime
   identity remain SSA operands.
+- A trailing feature dimension is a second logical axis. A program instance
+  is one segment and one column, its segment is that column as a run of
+  scalars, and it yields a scalar: neither the number of columns nor the
+  column enters a type, and no lowering holds one accumulator per column.
 - GPU thread and block IDs do not appear in semantic Swage IR.
 - Ordinary scalar arithmetic uses upstream `arith` and `math` operations.
 - Region captures are explicit and ordered.
@@ -103,7 +109,9 @@ scalar partials without reapplying element expressions.
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
-policy.
+policy. A function over rank-two values has one kernel schedule, the column
+policy: it has no task buffer, nothing classifies its segments, and no
+segment is split.
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion

@@ -51,6 +51,14 @@ struct BoundSegment {
   Value start;
 };
 
+/// The range of one segment in its buffer, after its clamp, as index
+/// values, and the index of its output slot.
+struct SegmentRange {
+  Value start;       ///< Index of the first element of the segment.
+  Value end;         ///< Index one past its last element.
+  Value segmentId64; ///< The segment ID as i64, for the scalar store.
+};
+
 /// How the threads that ran one reduction loop combine their accumulators.
 enum class ThreadCombination {
   /// One thread ran the whole loop; there is nothing to combine.
@@ -128,6 +136,13 @@ Value loadRecordField(OpBuilder &builder, Location loc, Value records,
 void emitLeaderStore(OpBuilder &builder, Location loc, Value total, Value sink,
                      Value slot, Value threadId, Value zero, Value slotInRange);
 
+/// Load the range of segment `segmentId` from `offsets` and clamp it to
+/// `valueCount`. `segmentInRange`, `zero`, and `one` are those of
+/// `emitSegmentBinding`, which adds the first element of one thread.
+SegmentRange emitSegmentRange(OpBuilder &builder, Location loc, Value offsets,
+                              Value valueCount, Value segmentId,
+                              Value segmentInRange, Value zero, Value one);
+
 /// Bind segment `segmentId` for the thread `logicalThreadId`: load its range
 /// from `offsets`, clamp it to `valueCount`, and give the thread its first
 /// element.
@@ -165,8 +180,15 @@ void emitScalarStore(OpBuilder &builder, Location loc, Value total,
                      Value output, Value segmentId64, Value logicalThreadId,
                      Value zero, Value segmentInRange);
 
+/// View a rank-two memref of rows as the rank-one memref of its elements in
+/// row order, so that element `[row, column]` is at `row * columns + column`.
+/// A rank-one memref and a pointer are returned as they are.
+Value flattenRows(OpBuilder &builder, Location loc, Value buffer);
+
 /// Write the element program of every element of the bound segment to the
-/// same index of `output`, which is a pointer or a memref.
+/// same index of `output`, which is a pointer or a memref. A rank-two memref
+/// is written through its row-order view, where the binding of a column
+/// segment indexes it.
 void emitMapStore(OpBuilder &builder, Location loc, Type elementType,
                   const SegmentBinding &segment, Value output,
                   ElementProgramFn element);

@@ -160,6 +160,39 @@ _REDUCTION_KERNELS = _reduction_kernels("float")
 _REDUCTION_KERNELS_F64 = _reduction_kernels("double")
 _MEAN_KERNELS = _reduction_kernels("float", reads_extent=True)
 _MEAN_KERNELS_F64 = _reduction_kernels("double", reads_extent=True)
+
+
+def _column_kernels(scalar):
+    """Return the one kernel of a reduction over rank-two values.
+
+    The kernel is the direct schedule of the program: one block per
+    segment, in which a thread reduces a column. It takes the number of
+    columns after the counts of the direct kernel.
+
+    Args:
+        scalar: The C type of one element of the values and the output.
+    """
+    return (
+        _Kernel(
+            "column",
+            _SEGMENTED,
+            (("block_size", _CTA_BLOCK),),
+            _CTA_BLOCK,
+            "",
+            (
+                ("values", f"const {scalar}*"),
+                _OFFSETS,
+                ("output", f"{scalar}*"),
+                _VALUE_COUNT,
+                _SEGMENT_COUNT,
+                ("feature_count", "int32_t"),
+            ),
+        ),
+    )
+
+
+_COLUMN_KERNELS = _column_kernels("float")
+_COLUMN_KERNELS_F64 = _column_kernels("double")
 # The one kernel `segment_softmax` launches. Its value count is the length
 # of the shorter of the values and output buffers.
 _SOFTMAX_KERNELS = (
@@ -184,6 +217,14 @@ _PROGRAMS = {
     "segmented_max_f64": _REDUCTION_KERNELS_F64,
     "segmented_min_f64": _REDUCTION_KERNELS_F64,
     "segmented_mean_f64": _MEAN_KERNELS_F64,
+    **{
+        f"segmented_{kind}{element}_r2": kernels
+        for element, kernels in (
+            ("", _COLUMN_KERNELS),
+            ("_f64", _COLUMN_KERNELS_F64),
+        )
+        for kind in ("sum", "max", "min", "mean")
+    },
     "ragged_softmax": _SOFTMAX_KERNELS,
 }
 

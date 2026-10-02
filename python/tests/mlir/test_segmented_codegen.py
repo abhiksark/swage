@@ -12,6 +12,7 @@ from reduction_programs import reduction_module
 from swage._segmented_qualification import (
     _has_small_element_program,
     _reduction_kernel,
+    _semantic_module,
 )
 
 
@@ -196,6 +197,77 @@ def test_static_schedules_share_reduction_program(kind, transform, element):
             other = "f32" if element == "f64" else "f64"
             assert not re.search(rf"\b{other}\b", lowered)
             assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+_RANK_ONE_SCHEDULES = [
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+    ),
+    ("_compile_fused_segmented_reduction_ptx", {}),
+    ("_compile_split_partial_reduction_ptx", {}),
+    ("_compile_split_merge_reduction_ptx", {}),
+    ("_compile_persistent_segmented_reduction_ptx", {}),
+]
+
+
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
+def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
+    """A program over rank-two values compiles on the direct schedule only.
+
+    Its kernel takes the three buffers and three counts, the last of which
+    is the feature count, holds nothing that synchronizes threads, and has
+    one loop accumulator per reduction: a thread never holds one value per
+    column. Every schedule that reads a task buffer refuses the program
+    with a diagnostic, and so does host classification.
+    """
+    kernel_name = _reduction_kernel(kind, element, 2)
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_semantic_module(kind, element, 2))
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+            module, kernel_name=kernel_name, block_size=128, target="sm_86"
+        )
+
+        assert f".entry {kernel_name}(" in ptx
+        declaration = re.search(
+            rf"\.entry {kernel_name}\((.*?)\)", ptx, re.DOTALL
+        )
+        parameters = [
+            "pointer" if ".ptr" in parameter else parameter.split()[1]
+            for parameter in declaration[1].split(",")
+        ]
+        assert parameters == ["pointer"] * 3 + [".u32"] * 3
+        assert "shfl.sync" not in ptx and "bar.sync" not in ptx
+        assert ".shared" not in ptx
+        # One accumulator: of the blocks that take arguments, the header of
+        # the row loop takes one element and no other block takes any.
+        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
+        assert sorted(header.count(f": {element}") for header in headers) == [
+            0,
+            1,
+        ]
+        for name, arguments in _RANK_ONE_SCHEDULES:
+            with pytest.raises(
+                ValueError, match="planning requires rank-one values"
+            ):
+                getattr(native_swage, name)(
+                    module, kernel_name=kernel_name, target="sm_86", **arguments
+                )
+        with pytest.raises(
+            ValueError, match="planning requires rank-one values"
+        ):
+            _plan(
+                module, kernel_name, [0, 1, 34], value_count=34, segment_count=2
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
 
 
 def test_persistent_execution_refuses_f64_values():

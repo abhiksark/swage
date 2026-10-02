@@ -89,7 +89,7 @@ module {
 // A kernel takes a buffer as a pointer, so the conversion needs a buffer it
 // can address that way.
 module {
-  // expected-error@+1 {{plan function argument #2 must be a signless integer or a rank-one memref of signless integers or floats with a dynamic size, the identity layout, and the default memory space, got 'memref<8xf32>'}}
+  // expected-error@+1 {{plan function argument #2 must be a signless integer or a memref of rank one or two of signless integers or floats with dynamic sizes, the identity layout, and the default memory space, got 'memref<8xf32>'}}
   func.func @fixed_size_output(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
       %output: memref<8xf32>, %value_count: i32, %segment_count: i32)

@@ -54,9 +54,9 @@ _Bind one logical segment of a values buffer_
 Syntax:
 
 ```
-operation ::= `swage.make_segment` $values `,` $offsets `,` $segment_id attr-dict
+operation ::= `swage.make_segment` $values `,` $offsets `,` $segment_id (`column` `(` $column^ `)`)? attr-dict
               `:` type($values) `,` type($offsets) `,` type($segment_id)
-              `->` qualified(type($result))
+              (`,` type($column)^)? `->` qualified(type($result))
 ```
 
 Binds segment `segment_id` of the dense `values` buffer, as delimited by
@@ -67,11 +67,22 @@ the `offsets` array, into a `!swage.segment` value:
 The result is a symbolic handle. No data is materialized; consumers of
 the segment are tiled during lowering.
 
+With `column`, `values` is a rank-two buffer of rows and the segment is
+one column of the rows the offsets delimit:
+
+    segment = values[offsets[segment_id] : offsets[segment_id + 1], column]
+
+The segment is still a run of scalars, so its type carries the element
+type alone: neither the number of columns nor the column enters a type.
+A rank-two buffer needs a column, and a rank-one buffer takes none.
+
 Example:
 
 ```mlir
 %seg = swage.make_segment %values, %offsets, %sid
     : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+%column = swage.make_segment %rows, %offsets, %sid column(%col)
+    : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
 ```
 
 Traits: `AlwaysSpeculatableImplTrait`
@@ -84,9 +95,10 @@ Effects: `MemoryEffects::Effect{}`
 
 | Operand | Description |
 | :-----: | ----------- |
-| `values` | 1D memref of any type values |
+| `values` | 1D/2D memref of any type values |
 | `offsets` | 1D memref of signless integer values |
 | `segment_id` | index |
+| `column` | index |
 
 ##### Results:
 
@@ -165,7 +177,8 @@ operation ::= `swage.map_store` $segment `,` $output
 For every element of the segment, applies the region (captures appended
 to the block arguments, ADR-0008) and writes the yielded value to the
 segment's own index range in `output`; writing outside that range is
-inexpressible. The declared write effect on `output` keeps the
+inexpressible. For a column segment of rank-two values, `output` is a
+rank-two buffer and the range is the rows of the segment in its column. The declared write effect on `output` keeps the
 operation alive under dead-code elimination. The output buffer must not
 alias the segment's values buffer (a runtime obligation). Over an empty
 segment nothing is written.
@@ -191,7 +204,7 @@ Traits: `IsolatedFromAbove`, `RecursiveMemoryEffects`
 | Operand | Description |
 | :-----: | ----------- |
 | `segment` | A runtime-sized, internally dense segment of values |
-| `output` | 1D memref of integer or floating-point values |
+| `output` | 1D/2D memref of integer or floating-point values |
 | `captures` | variadic of integer or floating-point |
 
 
@@ -326,10 +339,15 @@ Returns the index of the logical segment the surrounding program instance
 operates on, along the given logical grid axis. This is a semantic
 coordinate in the logical grid, not a GPU thread or block id.
 
+Axis 0 runs over the segments of the offsets array. Axis 1 runs over the
+trailing dimension of rank-two values: a program instance is then one
+segment and one column, and `swage.segment_id 1` is the column.
+
 Example:
 
 ```mlir
 %sid = swage.segment_id 0
+%col = swage.segment_id 1
 ```
 
 Traits: `AlwaysSpeculatableImplTrait`

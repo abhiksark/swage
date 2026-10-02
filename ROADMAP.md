@@ -38,7 +38,9 @@ The phrase "no public segmented launch" in the M7 and M8 rows records the
 boundary at those gates. Since then two public calls, `swage.segment_reduce`
 for sum, max, min, and mean and `swage.segment_softmax`, run fixed programs
 through the M4 to M8 paths with default limits: the reductions over f32 or
-f64 values, and the softmax over f32 values. They belong to no phase gate above
+f64 values, and the softmax over f32 values. A reduction over `[N, D]` rows
+of features runs one more kernel, a column step with one block per segment
+and no split (ADR-0022). They belong to no phase gate above
 and are not part of a release yet. The same holds for the ahead-of-time
 artifacts of those two calls, which let a process run them without the
 native package. Captured stages, split softmax, general

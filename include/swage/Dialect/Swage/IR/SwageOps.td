@@ -22,13 +22,16 @@ def Swage_ArgumentRoleValueCount
     : I32EnumAttrCase<"ValueCount", 3, "value_count">;
 def Swage_ArgumentRoleSegmentCount
     : I32EnumAttrCase<"SegmentCount", 4, "segment_count">;
+def Swage_ArgumentRoleFeatureCount
+    : I32EnumAttrCase<"FeatureCount", 5, "feature_count">;
 
 def Swage_ArgumentRole
     : I32EnumAttr<"ArgumentRole",
                   "what one argument of a segment function is",
                   [Swage_ArgumentRoleValues, Swage_ArgumentRoleOffsets,
                    Swage_ArgumentRoleOutput, Swage_ArgumentRoleValueCount,
-                   Swage_ArgumentRoleSegmentCount]> {
+                   Swage_ArgumentRoleSegmentCount,
+                   Swage_ArgumentRoleFeatureCount]> {
   let cppNamespace = "::mlir::swage";
   let genSpecializedAttr = 0;
 }
@@ -65,10 +68,15 @@ def Swage_SegmentIdOp : Swage_Op<"segment_id", [Pure]> {
     operates on, along the given logical grid axis. This is a semantic
     coordinate in the logical grid, not a GPU thread or block id.
 
+    Axis 0 runs over the segments of the offsets array. Axis 1 runs over the
+    trailing dimension of rank-two values: a program instance is then one
+    segment and one column, and `swage.segment_id 1` is the column.
+
     Example:
 
     ```mlir
     %sid = swage.segment_id 0
+    %col = swage.segment_id 1
     ```
   }];
   let arguments = (ins ConfinedAttr<I32Attr, [IntNonNegative]>:$axis);
@@ -87,22 +95,34 @@ def Swage_MakeSegmentOp : Swage_Op<"make_segment", [Pure]> {
     The result is a symbolic handle. No data is materialized; consumers of
     the segment are tiled during lowering.
 
+    With `column`, `values` is a rank-two buffer of rows and the segment is
+    one column of the rows the offsets delimit:
+
+        segment = values[offsets[segment_id] : offsets[segment_id + 1], column]
+
+    The segment is still a run of scalars, so its type carries the element
+    type alone: neither the number of columns nor the column enters a type.
+    A rank-two buffer needs a column, and a rank-one buffer takes none.
+
     Example:
 
     ```mlir
     %seg = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %column = swage.make_segment %rows, %offsets, %sid column(%col)
+        : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
     ```
   }];
   let arguments = (ins
-    MemRefRankOf<[AnyType], [1]>:$values,
+    MemRefRankOf<[AnyType], [1, 2]>:$values,
     MemRefRankOf<[AnySignlessInteger], [1]>:$offsets,
-    Index:$segment_id);
+    Index:$segment_id,
+    Optional<Index>:$column);
   let results = (outs Swage_SegmentType:$result);
   let assemblyFormat = [{
-    $values `,` $offsets `,` $segment_id attr-dict
+    $values `,` $offsets `,` $segment_id (`column` `(` $column^ `)`)? attr-dict
     `:` type($values) `,` type($offsets) `,` type($segment_id)
-    `->` qualified(type($result))
+    (`,` type($column)^)? `->` qualified(type($result))
   }];
   let hasVerifier = 1;
 }
@@ -272,7 +292,8 @@ def Swage_MapStoreOp : Swage_Op<"map_store", [IsolatedFromAbove,
     For every element of the segment, applies the region (captures appended
     to the block arguments, ADR-0008) and writes the yielded value to the
     segment's own index range in `output`; writing outside that range is
-    inexpressible. The declared write effect on `output` keeps the
+    inexpressible. For a column segment of rank-two values, `output` is a
+    rank-two buffer and the range is the rows of the segment in its column. The declared write effect on `output` keeps the
     operation alive under dead-code elimination. The output buffer must not
     alias the segment's values buffer (a runtime obligation). Over an empty
     segment nothing is written.
@@ -293,7 +314,7 @@ def Swage_MapStoreOp : Swage_Op<"map_store", [IsolatedFromAbove,
   }];
   let arguments = (ins Arg<Swage_SegmentType, "segment handle",
                            [MemRead]>:$segment,
-                       Arg<MemRefRankOf<[AnyInteger, AnyFloat], [1]>,
+                       Arg<MemRefRankOf<[AnyInteger, AnyFloat], [1, 2]>,
                            "output buffer", [MemWrite]>:$output,
                        Variadic<Swage_ScalarType>:$captures);
   let regions = (region SizedRegion<1>:$body);

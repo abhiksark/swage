@@ -86,11 +86,24 @@ What is not in the dialect:
   claims, barriers, and fences are written by its conversion pattern.
 - Packed-warp policies, a reusable queue, and a general task graph.
 
+A function over rank-two values plans to the same task operation with two
+additions. The operation takes the number of columns as `feature_count`,
+and its policy is `column`: a block is one segment, and each thread of the
+block runs the region for the columns it owns, one after the other, and
+stores its own results. The region binds one column of the rows of a
+segment, a segment of scalars like any other, so the consumers of the
+region are the ones of a rank-one program. Nothing is combined across
+threads, and no task buffer is read. The planner absorbs
+`swage.segment_id 1` and the `column` of `swage.make_segment` as it absorbs
+the segment id of axis 0.
+
 The CPU oracle is planned too. A task operation of `policy<sequential>`
 visits every segment in order on one thread. Its function has no launch
 width, keeps its signature and its callers, and takes no task buffer, and
 `--swage-plan-to-scf` lowers it to loops over the memrefs. The consumers of
-the region are lowered by the same patterns on both backends.
+the region are lowered by the same patterns on both backends. With a
+`feature_count` the oracle visits the columns of each segment in order, and
+a column is a strided run of the row-order view of the values.
 
 `--swage-to-plan` writes plan functions for the direct, task-id,
 fused-mixed, split-partial, split-merge, persistent, and sequential

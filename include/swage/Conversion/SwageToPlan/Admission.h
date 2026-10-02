@@ -36,11 +36,16 @@ struct SegmentABI {
   unsigned output = 0;
   unsigned valueCount = 0;
   unsigned segmentCount = 0;
+  /// The number of columns, which a function over rank-two values declares
+  /// and a function over rank-one values does not.
+  std::optional<unsigned> featureCount;
 };
 
 /// Read-only admission result shared by every segmented-program consumer.
 struct SegmentProgramAnalysis {
   SegmentABI abi;
+  /// The segment id of axis 0 and, for rank-two values, the one of axis
+  /// 1, the column, in the order of their axes.
   SmallVector<SegmentIdOp> segmentIds;
   SmallVector<MakeSegmentOp> segments;
   SmallVector<MapOp> maps;
@@ -95,7 +100,9 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 /// type only. `math.exp2` is admitted for f32 alone.
 LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis);
 
-/// Admit a single reduction whose element program needs no other stage.
+/// Admit a single reduction whose element program needs no other stage,
+/// over rank-one values: host classification turns segments of scalars into
+/// tasks, and a rank-two function has one kernel and no task buffer.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis);
 
 /// The relative work of the element programs under `root`: one unit per

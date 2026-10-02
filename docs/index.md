@@ -34,11 +34,12 @@ qualification machinery or planned work.
   subset, when build-tree native bindings are present.
 - Keyword-only CUDA launch for the canonical fixed vector add.
 - `swage.segment_reduce` for `"sum"`, `"max"`, `"min"`, and `"mean"`, and
-  `swage.segment_softmax`, over rank-one values and int32 or int64 offsets
-  on one CUDA device, when build-tree native bindings are present. A
-  reduction takes f32 or f64 values, and the softmax takes f32 values. The
-  calls admit no other dtype, kind, or rank, record no gradient, and
-  prepare their offsets on the host at every call.
+  `swage.segment_softmax`, over int32 or int64 offsets on one CUDA device,
+  when build-tree native bindings are present. A reduction takes f32 or
+  f64 values of rank one or of rank two, `[N, D]` rows that are reduced
+  per column, and the softmax takes rank-one f32 values. The calls admit
+  no other dtype, kind, or rank, record no gradient, and prepare their
+  offsets on the host at every call.
   [Segmented Calls](user-guide/segmented-calls.md) states the contract and
   the cost.
 - `python -m swage.compile`, which writes the kernels of those two calls

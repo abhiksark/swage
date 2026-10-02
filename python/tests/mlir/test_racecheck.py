@@ -202,6 +202,42 @@ def _run_static_kernels(results, element, values, offsets, expected):
             )
 
 
+def _run_column_kernels(results, element, dtype, offsets):
+    """Launch the column kernel of each kind over rank-two values.
+
+    The kernel holds no shared memory, no barrier, and no shuffle, so the
+    tool has nothing to report on it. It runs here all the same: a hazard
+    check that skipped a kernel family could not say so. The rows hold
+    three and 130 columns, fewer than a block has threads and more.
+
+    Args:
+        results: Receives whether each launch was exact, by name.
+        element: The element type, `"f32"` or `"f64"`.
+        dtype: Its tensor dtype.
+        offsets: The int32 row offsets, on the device.
+    """
+    lengths = torch.tensor(_LENGTHS)
+    row = torch.arange(int(lengths.sum()))[:, None]
+    for columns in (3, 130):
+        # Small integers that depend on the row and on the column, so that
+        # every column sum is exact in both element types.
+        column = torch.arange(columns)[None, :]
+        host = ((row * 31 + column * 17) % 127 - 63).to(dtype)
+        values = host.cuda()
+        output = torch.empty(len(_LENGTHS), columns, dtype=dtype, device="cuda")
+        for kind in ("sum", "max", "min", "mean"):
+            expected = torch.segment_reduce(host, kind, lengths=lengths, axis=0)
+            for block_size in (32, 128):
+                name = f"columns {kind} {element} {columns} block {block_size}"
+                results[name] = _exact(
+                    lambda: launch_gpu(
+                        values, offsets, output, kind, block_size
+                    ),
+                    output,
+                    expected,
+                )
+
+
 def _run_kernels():
     """Launch every segmented kernel family and report exactness by name.
 
@@ -214,6 +250,8 @@ def _run_kernels():
     - persistent: the resident queue kernel at several residencies, with
       the default limits and with the splitting ones.
     - softmax: the multi-phase map-store kernel.
+    - columns: the kernel of rank-two values, in which a thread reduces a
+      column on its own.
 
     The direct, task-id, fused, and split families run once per element
     type. The f64 kernels reduce through shared slots of eight bytes, so
@@ -230,6 +268,7 @@ def _run_kernels():
             offsets,
             {kind: result.to(dtype) for kind, result in expected.items()},
         )
+        _run_column_kernels(results, element, dtype, offsets)
     for name, limits in (("default", {}), ("split", _SPLIT_LIMITS)):
         for resident_blocks in (1, 2, 5):
             persistent = _prepare_persistent_sum(
@@ -338,10 +377,12 @@ def test_segmented_kernels_have_no_shared_memory_hazard(tmp_path):
     assert completed.returncode == 0, f"{report}\n{completed.stderr}"
     assert counts == (0, 0, 0), report
     results = json.loads(completed.stdout.splitlines()[-1])
-    assert len(results) > 90
-    # Ten static launches of each of four kinds over f64 values.
-    assert sum(" f64" in name for name in results) == 40
+    assert len(results) > 120
+    # Ten static launches of each of four kinds over f64 values, and four
+    # launches of the column kernel of each kind.
+    assert sum(" f64" in name for name in results) == 40 + 16
     assert any(" mean " in name for name in results)
+    assert sum(name.startswith("columns ") for name in results) == 32
     assert all(results.values()), results
 
 

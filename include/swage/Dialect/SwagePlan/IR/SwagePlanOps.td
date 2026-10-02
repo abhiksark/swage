@@ -21,11 +21,15 @@ def SwagePlan_TaskPolicyCTA : I32EnumAttrCase<"CTA", 1, "cta">;
 // The policy of the CPU oracle. Host classification never produces it.
 def SwagePlan_TaskPolicySequential
     : I32EnumAttrCase<"Sequential", 2, "sequential">;
+// The policy of rank-two values: one thread reduces one column of the
+// segment of its block, and no thread combines with another.
+def SwagePlan_TaskPolicyColumn : I32EnumAttrCase<"Column", 3, "column">;
 
 def SwagePlan_TaskPolicy
     : I32EnumAttr<"TaskPolicy", "task execution policy",
                   [SwagePlan_TaskPolicyWarp, SwagePlan_TaskPolicyCTA,
-                   SwagePlan_TaskPolicySequential]> {
+                   SwagePlan_TaskPolicySequential,
+                   SwagePlan_TaskPolicyColumn]> {
   let cppNamespace = "::mlir::swage_plan";
   let genSpecializedAttr = 0;
 }
@@ -36,6 +40,10 @@ def SwagePlan_TaskPolicyAttr
 }
 
 def SwagePlan_Buffer : MemRefRankOf<[AnySignlessInteger, AnyFloat], [1]>;
+// The values and the output of `swage_plan.tasks`, which are rows of
+// `feature_count` columns for rank-two values.
+def SwagePlan_RowBuffer
+    : MemRefRankOf<[AnySignlessInteger, AnyFloat], [1, 2]>;
 def SwagePlan_WordBuffer : MemRefRankOf<[AnySignlessInteger], [1]>;
 
 def SwagePlan_TasksOp
@@ -78,6 +86,19 @@ def SwagePlan_TasksOp
     function has no launch width and keeps its callers, and it lowers to
     loops over the memrefs instead of to a kernel.
 
+    With `feature_count`, the values are rank-two: `value_count` rows of
+    `feature_count` columns. The region then runs once per segment and
+    column, and its argument is one column of the rows of the segment,
+    `values[offsets[s] : offsets[s + 1], c]`. With `into`, the yielded
+    scalar is stored at `output[s, c]`, and `output` is rank-two as well.
+    `policy<column>` is the kernel of such a program: task `t` is segment
+    `t`, and thread `i` of a block runs the region for the columns `i`,
+    `i + block_threads`, and so on, one after the other. Each thread reduces
+    its columns alone and stores its own results, so no thread combines
+    with another and a thread holds one scalar per reduction, whatever the
+    number of columns. The policy takes no `ids`. `policy<sequential>`
+    visits the columns of each segment in order.
+
     Example:
 
     ```mlir
@@ -95,15 +116,16 @@ def SwagePlan_TasksOp
     ```
   }];
   let arguments = (ins
-    Arg<SwagePlan_Buffer, "segment values", [MemRead]>:$values,
+    Arg<SwagePlan_RowBuffer, "segment values", [MemRead]>:$values,
     Arg<SwagePlan_WordBuffer, "segment offsets", [MemRead]>:$offsets,
     AnySignlessInteger:$value_count,
     AnySignlessInteger:$segment_count,
     Arg<Optional<SwagePlan_WordBuffer>, "segment id of each task",
         [MemRead]>:$ids,
     Optional<AnySignlessInteger>:$task_count,
-    Arg<Optional<SwagePlan_Buffer>, "one scalar per segment",
+    Arg<Optional<SwagePlan_RowBuffer>, "one scalar per segment",
         [MemWrite]>:$output,
+    Optional<AnySignlessInteger>:$feature_count,
     SwagePlan_TaskPolicyAttr:$policy);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
@@ -111,6 +133,7 @@ def SwagePlan_TasksOp
     `segments` `(` $values `,` $offsets `:` type($values) `,` type($offsets) `)`
     `value_count` `(` $value_count `:` type($value_count) `)`
     `segment_count` `(` $segment_count `:` type($segment_count) `)`
+    (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
     (`ids` `(` $ids^ `:` type($ids) `)`)?
     (`task_count` `(` $task_count^ `:` type($task_count) `)`)?
     (`into` `(` $output^ `:` type($output) `)`)?

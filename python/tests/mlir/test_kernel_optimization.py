@@ -151,6 +151,19 @@ def _segmented_kernels():
         _semantic_module("sum"), _PERSISTENT_COMPILER, "segmented_sum", {},
         _PERSISTENT, id="persistent",
     )
+    # The column kernel of rank-two values combines nothing across threads:
+    # no barrier and no shuffle, at any block width and for any kind.
+    for kind, element in (
+        ("sum", "f32"), ("max", "f32"), ("mean", "f32"), ("min", "f64"),
+        ("mean", "f64"),
+    ):
+        for block_size in (32, 128, 1024):
+            yield pytest.param(
+                _semantic_module(kind, element, 2), _DIRECT,
+                _reduction_kernel(kind, element, 2),
+                {"block_size": block_size}, _NONE,
+                id=f"columns-{kind}-{element}-{block_size}",
+            )
     for block_size in (32, 128, 512):
         yield pytest.param(
             _SOFTMAX_MODULE, _DIRECT, "ragged_softmax",
@@ -161,11 +174,13 @@ def _segmented_kernels():
 
 # The kernels whose only loops are reduction or store loops over a segment.
 # The persistent kernel is left out: its queue loops hold barriers and
-# shuffles, and those keep the shape the lowering gave them.
+# shuffles, and those keep the shape the lowering gave them. The column
+# kernels are left out too: their row loop is nested in a column loop, and
+# test_the_row_loop_of_a_column_kernel_is_rotated covers its shape.
 _REDUCTION_LOOP_KERNELS = [
     parameter
     for parameter in _segmented_kernels()
-    if parameter.id != "persistent"
+    if parameter.id != "persistent" and not parameter.id.startswith("columns")
 ]
 
 
@@ -283,6 +298,39 @@ def test_segmented_kernels_keep_their_synchronization(
     ptx = _compile(text, compiler, kernel_name, options, target)
 
     assert _synchronization(ptx) == expected
+
+
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "mean"])
+def test_the_row_loop_of_a_column_kernel_is_rotated(kind, element):
+    """Close the row loop of a column with one conditional branch.
+
+    The column kernel nests the loop over the rows of a segment in the loop
+    over the columns of a thread. The row loop is the one that runs once
+    per element: its block combines one element into the accumulator and
+    ends in the conditional branch back to itself, with no jump to a test
+    at the top. The column loop is rotated as well, and the one
+    unconditional backward branch of the kernel leaves the row loop for
+    the end of the column loop, once per column.
+    """
+    ptx = _compile(
+        _semantic_module(kind, element, 2), _DIRECT,
+        _reduction_kernel(kind, element, 2), {"block_size": 128}, "sm_86",
+    )
+    combine = {"sum": "add.rn", "mean": "add.rn", "max": "max"}[kind]
+    blocks = re.split(r"^(\$L__\w+):\n", ptx, flags=re.MULTILINE)
+    rows = [
+        (label, body)
+        for label, body in zip(blocks[1::2], blocks[2::2])
+        if re.search(rf"^\s*{re.escape(combine)}\S*\.{element}\s", body, re.M)
+    ]
+
+    assert len(rows) == 1
+    label, body = rows[0]
+    branches = re.findall(r"^\s*(@!?%p\d+\s+bra|bra\.uni)\s+(\S+);", body, re.M)
+    assert branches[0][0].endswith("bra") and branches[0][1] == label
+    assert branches[0][0] != "bra.uni"
+    assert _backward_branches(ptx)[0] == 1
 
 
 @pytest.mark.parametrize("target", _TARGETS)

@@ -23,6 +23,15 @@ def segment_reduce(values, offsets, kind, *, out=None):
     them, and enqueues the kernels on the current PyTorch CUDA stream. It
     returns without waiting for the result.
 
+    Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
+    delimit rows, and every column of a segment is reduced on its own, as
+    `torch.segment_reduce` does along axis 0. Such a call runs one kernel
+    with one block per segment, in which a thread reduces a column in row
+    order. It classifies nothing and splits no segment, so a long segment
+    occupies one block for its whole length, and with few columns few
+    threads reduce it. `[N, 1]` values are reduced by the schedules of
+    rank-one values.
+
     Every call repeats the host work, also when the offsets are the ones of
     the call before, so a call costs more than its kernels. A call keeps no
     plan and compares no version counter, so the tensors may be inference
@@ -32,17 +41,17 @@ def segment_reduce(values, offsets, kind, *, out=None):
     wrote, the kernels come from it and nothing is compiled.
 
     Args:
-        values: Contiguous rank-one `torch.float32` or `torch.float64`
-            CUDA tensor on the current device. It must not require grad:
-            the call records no gradient. Nothing is cast: float64 values
-            are reduced in float64.
+        values: Contiguous `torch.float32` or `torch.float64` CUDA tensor
+            on the current device, of rank one or of rank two, `[N, D]`.
+            It must not require grad: the call records no gradient.
+            Nothing is cast: float64 values are reduced in float64.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at or
-            below the number of values. Two equal neighbors describe an
-            empty segment. int64 offsets are checked and narrowed on the
-            host, and the kernels read a private int32 copy that the call
-            uploads.
+            below the number of values, or of rows for rank-two values. Two
+            equal neighbors describe an empty segment. int64 offsets are
+            checked and narrowed on the host, and the kernels read a
+            private int32 copy that the call uploads.
         kind: `"sum"`, `"max"`, `"min"`, or `"mean"`. The sum of an empty
             segment is `0.0`, its maximum is negative infinity, its minimum
             is positive infinity, and its mean is NaN. A maximum or a
@@ -51,14 +60,16 @@ def segment_reduce(values, offsets, kind, *, out=None):
             depends on the schedule the call selects from the segment
             lengths, the batch, and the device, and no argument pins it. A
             mean is that sum divided once by the length of the segment.
-        out: Optional result tensor: contiguous, rank one, of the dtype of
-            `values`, on the device of `values`, with exactly one element
-            per segment, sharing no memory with `values` or `offsets`, and
-            not requiring grad. It is never resized.
+        out: Optional result tensor: contiguous, of the dtype of `values`,
+            on the device of `values`, with exactly one element per
+            segment, or of shape `[S, D]` for `S` segments of `[N, D]`
+            values, sharing no memory with `values` or `offsets`, and not
+            requiring grad. It is never resized.
 
     Returns:
         `out`, or a new tensor of the dtype and on the device of `values`
-        when `out` is None, with one element per segment. The kernels that
+        when `out` is None, with one element per segment, or one row of
+        `D` elements per segment for `[N, D]` values. The kernels that
         write it are
         enqueued and may not have finished. The version counter of the
         tensor is advanced when a kernel is enqueued.
@@ -84,12 +95,15 @@ def segment_reduce(values, offsets, kind, *, out=None):
             f"kind must be 'sum', 'max', 'min', or 'mean', got {kind!r}"
         )
     _require_inputs(torch, values, offsets)
+    rank = values.dim()
+    if rank not in (1, 2):
+        raise TypeError("values must have rank one or two")
     segment_count = max(offsets.numel() - 1, 0)
+    # One result per segment, and per column for `[N, D]` values.
+    shape = (segment_count, *values.shape[1:])
     # The element type of the program, or None for values no program takes.
     element = _qualification._element_of(torch, values)
-    _require_out(
-        torch, out, segment_count, "segment", values, offsets, element
-    )
+    _require_out(torch, out, shape, "segment", values, offsets, element)
     _require_bindings("segment_reduce")
     _require_numpy("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
@@ -97,11 +111,31 @@ def segment_reduce(values, offsets, kind, *, out=None):
         raise TypeError(
             "values must have dtype torch.float32 or torch.float64"
         )
-    output = _result(torch, out, segment_count, values, values.dtype)
+    output = _result(torch, out, shape, values, values.dtype)
+    if rank == 2 and values.shape[1] != 1:
+        _qualification._launch_columns(
+            values,
+            offsets,
+            output,
+            module_text=_qualification._semantic_module(kind, element, 2),
+            kernel_name=_qualification._reduction_kernel(kind, element, 2),
+            validate_offsets=_qualification._validate_offsets,
+            int64_offsets=True,
+        )
+        return output
+    kernel_values, kernel_output = values, output
+    if rank == 2:
+        # `[N, 1]` values are one column. Their elements are the values of
+        # a rank-one batch, which the schedules of rank one reduce. A view
+        # needs contiguous storage, which the kernels need as well.
+        for name, tensor in (("values", values), ("out", output)):
+            if not tensor.is_contiguous():
+                raise ValueError(f"{name} must be contiguous")
+        kernel_values, kernel_output = values.view(-1), output.view(-1)
     _qualification._launch_planned_reduction(
-        values,
+        kernel_values,
         offsets,
-        output,
+        kernel_output,
         module_text=_qualification._semantic_module(kind, element),
         kernel_name=_qualification._reduction_kernel(kind, element),
     )
@@ -159,7 +193,9 @@ def segment_softmax(values, offsets, *, out=None):
     _require_inputs(torch, values, offsets)
     value_count = values.numel()
     element = "f32" if values.dtype == torch.float32 else None
-    _require_out(torch, out, value_count, "value", values, offsets, element)
+    _require_out(
+        torch, out, (value_count,), "value", values, offsets, element
+    )
     _require_bindings("segment_softmax")
     _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
@@ -168,7 +204,7 @@ def segment_softmax(values, offsets, *, out=None):
             "values must have dtype torch.float32; segment_softmax has no "
             "float64 kernel because the device has no 64-bit exp2"
         )
-    output = _result(torch, out, value_count, values, torch.float32)
+    output = _result(torch, out, (value_count,), values, torch.float32)
     value_count, segment_count, host_offsets = (
         _qualification._validate_shapes(
             values,
@@ -214,13 +250,15 @@ def _require_inputs(torch, values, offsets):
         )
 
 
-def _require_out(torch, out, count, unit, values, offsets, element):
+def _require_out(torch, out, shape, unit, values, offsets, element):
     """Validate a caller-supplied result tensor under its public name.
 
     Args:
         torch: The PyTorch module.
         out: The `out` argument, or None when the call allocates the result.
-        count: Number of elements the result has.
+        shape: The shape of the result: one element per segment or value,
+            or one row per segment and one column per feature for rank-two
+            values.
         unit: What one element belongs to, `"segment"` or `"value"`.
         values: The values tensor, already known to be a tensor.
         offsets: The offsets tensor, already known to be a tensor.
@@ -235,13 +273,21 @@ def _require_out(torch, out, count, unit, values, offsets, element):
         raise TypeError("out must be a torch.Tensor or None")
     if element is not None and out.dtype != values.dtype:
         raise TypeError(f"out must have the dtype of values, {values.dtype}")
-    if out.dim() != 1:
-        raise TypeError("out must have rank one")
-    if out.numel() != count:
-        raise ValueError(
-            f"out must have exactly {count} elements, one per {unit}; "
-            f"found {out.numel()}"
-        )
+    if len(shape) == 2:
+        if tuple(out.shape) != tuple(shape):
+            raise ValueError(
+                f"out must have shape {tuple(shape)}, one row per {unit} and "
+                f"one column per feature; found {tuple(out.shape)}"
+            )
+    else:
+        (count,) = shape
+        if out.dim() != 1:
+            raise TypeError("out must have rank one")
+        if out.numel() != count:
+            raise ValueError(
+                f"out must have exactly {count} elements, one per {unit}; "
+                f"found {out.numel()}"
+            )
     if not out.is_contiguous():
         raise ValueError("out must be contiguous")
     _qualification._validate_storage("out", out)
@@ -333,11 +379,11 @@ def _refuse_capture(torch, call, values, offsets):
         )
 
 
-def _result(torch, out, count, values, dtype):
-    """Return the tensor a call writes: `out`, or a new one of `count`."""
+def _result(torch, out, shape, values, dtype):
+    """Return the tensor a call writes: `out`, or a new one of `shape`."""
     if out is not None:
         return out
-    return torch.empty(count, dtype=dtype, device=values.device)
+    return torch.empty(shape, dtype=dtype, device=values.device)
 
 
 def _validate_covering_offsets(offsets, value_count, output_count):

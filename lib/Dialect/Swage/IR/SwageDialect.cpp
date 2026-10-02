@@ -30,7 +30,9 @@ static const char *requirementOf(ArgumentRole role, Type type) {
   switch (role) {
   case ArgumentRole::Values:
   case ArgumentRole::Output:
-    return memref && memref.getRank() == 1 ? nullptr : "a rank-one memref";
+    return memref && (memref.getRank() == 1 || memref.getRank() == 2)
+               ? nullptr
+               : "a memref of rank one or two";
   case ArgumentRole::Offsets:
     return memref && memref.getRank() == 1 &&
                    memref.getElementType().isSignlessInteger()
@@ -38,6 +40,7 @@ static const char *requirementOf(ArgumentRole role, Type type) {
                : "a rank-one memref of signless integers";
   case ArgumentRole::ValueCount:
   case ArgumentRole::SegmentCount:
+  case ArgumentRole::FeatureCount:
     return type.isSignlessInteger() ? nullptr : "a signless integer";
   }
   llvm_unreachable("unknown argument role");

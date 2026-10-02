@@ -84,7 +84,7 @@ int64_t blockThreadsOf(PlanSchedule schedule, const PlanOptions &options,
   return options.blockThreads;
 }
 
-/// The role a kernel argument has in the segment function, for the five
+/// The role a kernel argument has in the segment function, for the
 /// arguments the function declares. The arguments a schedule adds have none.
 std::optional<ArgumentRole> roleOf(KernelArgument argument) {
   switch (argument) {
@@ -98,6 +98,8 @@ std::optional<ArgumentRole> roleOf(KernelArgument argument) {
     return ArgumentRole::ValueCount;
   case KernelArgument::SegmentCount:
     return ArgumentRole::SegmentCount;
+  case KernelArgument::FeatureCount:
+    return ArgumentRole::FeatureCount;
   default:
     return std::nullopt;
   }
@@ -116,6 +118,8 @@ unsigned sourceIndexOf(const SegmentABI &abi, ArgumentRole role) {
     return abi.valueCount;
   case ArgumentRole::SegmentCount:
     return abi.segmentCount;
+  case ArgumentRole::FeatureCount:
+    return *abi.featureCount;
   }
   llvm_unreachable("unknown argument role");
 }
@@ -226,12 +230,15 @@ void buildSequentialPlan(func::FuncOp function,
       builder, function.getLoc(), function.getArgument(abi.values),
       function.getArgument(abi.offsets), function.getArgument(abi.valueCount),
       function.getArgument(abi.segmentCount), Value(), Value(),
-      analysis.mapStores.empty() ? output : Value(), TaskPolicy::Sequential);
+      analysis.mapStores.empty() ? output : Value(),
+      abi.featureCount ? function.getArgument(*abi.featureCount) : Value(),
+      TaskPolicy::Sequential);
   fillTaskRegion(tasks, analysis, output);
   for (memref::StoreOp store : analysis.stores)
     store.erase();
   analysis.segments.front().erase();
-  analysis.segmentIds.front().erase();
+  for (SegmentIdOp segmentId : analysis.segmentIds)
+    segmentId.erase();
 }
 
 /// Replace an admitted segment function by the plan function of one kernel.
@@ -252,8 +259,13 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   // segment, which it reads from the range records of the partial tasks.
   bool mergeExtent =
       schedule == PlanSchedule::SplitMerge && !analysis.epilogue.empty();
-  const KernelLayout layout = swage_plan::kernelLayout(
-      mergeExtent ? KernelKind::SplitMergeExtent : kernel.kind);
+  // The direct kernel of rank-two values reduces one column per thread and
+  // takes the number of columns.
+  bool columns = static_cast<bool>(analysis.abi.featureCount);
+  const KernelLayout layout =
+      swage_plan::kernelLayout(mergeExtent ? KernelKind::SplitMergeExtent
+                               : columns   ? KernelKind::DirectColumns
+                                           : kernel.kind);
   SmallVector<Type> inputs;
   for (KernelArgument argument : layout.arguments())
     inputs.push_back(
@@ -330,6 +342,8 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
     TaskPolicy policy = useTaskIds && blockThreads == target.subgroupWidth
                             ? TaskPolicy::Warp
                             : TaskPolicy::CTA;
+    if (columns)
+      policy = TaskPolicy::Column;
     output = argument(KernelArgument::Output);
     task = swage_plan::TasksOp::create(
         builder, loc, argument(KernelArgument::Values),
@@ -337,7 +351,8 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::SegmentCount),
         useTaskIds ? argument(KernelArgument::TaskIds) : Value(),
         useTaskIds ? argument(KernelArgument::TaskCount) : Value(),
-        analysis.mapStores.empty() ? output : Value(), policy);
+        analysis.mapStores.empty() ? output : Value(),
+        columns ? argument(KernelArgument::FeatureCount) : Value(), policy);
   }
   func::ReturnOp::create(builder, loc);
   if (schedule == PlanSchedule::SplitMerge) {

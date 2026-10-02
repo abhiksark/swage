@@ -31,6 +31,11 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
   EXPECT_EQ(
       namesOf(KernelKind::Direct),
       (Names{"values", "offsets", "output", "value_count", "segment_count"}));
+  // The column kernel of rank-two values takes the number of columns after
+  // the counts of the direct kernel.
+  EXPECT_EQ(namesOf(KernelKind::DirectColumns),
+            (Names{"values", "offsets", "output", "value_count",
+                   "segment_count", "feature_count"}));
   EXPECT_EQ(namesOf(KernelKind::TaskIds),
             (Names{"values", "offsets", "output", "task_ids", "value_count",
                    "task_count", "segment_count"}));
@@ -58,9 +63,10 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
 
 TEST(KernelLayoutTest, EveryKernelTakesItsBuffersBeforeItsCounts) {
   for (KernelKind kind :
-       {KernelKind::Direct, KernelKind::TaskIds, KernelKind::FusedMixed,
-        KernelKind::SplitPartial, KernelKind::SplitMerge,
-        KernelKind::SplitMergeExtent, KernelKind::Persistent}) {
+       {KernelKind::Direct, KernelKind::DirectColumns, KernelKind::TaskIds,
+        KernelKind::FusedMixed, KernelKind::SplitPartial,
+        KernelKind::SplitMerge, KernelKind::SplitMergeExtent,
+        KernelKind::Persistent}) {
     SCOPED_TRACE(static_cast<int>(kind));
     bool sawCount = false;
     for (KernelArgument argument : kernelLayout(kind).arguments()) {

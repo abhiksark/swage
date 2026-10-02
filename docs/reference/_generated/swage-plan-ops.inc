@@ -356,6 +356,7 @@ operation ::= `swage_plan.tasks` `policy` `` $policy
               `segments` `(` $values `,` $offsets `:` type($values) `,` type($offsets) `)`
               `value_count` `(` $value_count `:` type($value_count) `)`
               `segment_count` `(` $segment_count `:` type($segment_count) `)`
+              (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
               (`ids` `(` $ids^ `:` type($ids) `)`)?
               (`task_count` `(` $task_count^ `:` type($task_count) `)`)?
               (`into` `(` $output^ `:` type($output) `)`)?
@@ -397,6 +398,19 @@ in order and runs the region on each. It takes no task buffer, its
 function has no launch width and keeps its callers, and it lowers to
 loops over the memrefs instead of to a kernel.
 
+With `feature_count`, the values are rank-two: `value_count` rows of
+`feature_count` columns. The region then runs once per segment and
+column, and its argument is one column of the rows of the segment,
+`values[offsets[s] : offsets[s + 1], c]`. With `into`, the yielded
+scalar is stored at `output[s, c]`, and `output` is rank-two as well.
+`policy<column>` is the kernel of such a program: task `t` is segment
+`t`, and thread `i` of a block runs the region for the columns `i`,
+`i + block_threads`, and so on, one after the other. Each thread reduces
+its columns alone and stores its own results, so no thread combines
+with another and a thread holds one scalar per reduction, whatever the
+number of columns. The policy takes no `ids`. `policy<sequential>`
+visits the columns of each segment in order.
+
 Example:
 
 ```mlir
@@ -426,13 +440,14 @@ Traits: `AttrSizedOperandSegments`, `RecursiveMemoryEffects`, `SingleBlock`
 
 | Operand | Description |
 | :-----: | ----------- |
-| `values` | 1D memref of signless integer or floating-point values |
+| `values` | 1D/2D memref of signless integer or floating-point values |
 | `offsets` | 1D memref of signless integer values |
 | `value_count` | signless integer |
 | `segment_count` | signless integer |
 | `ids` | 1D memref of signless integer values |
 | `task_count` | signless integer |
-| `output` | 1D memref of signless integer or floating-point values |
+| `output` | 1D/2D memref of signless integer or floating-point values |
+| `feature_count` | signless integer |
 
 
 #### `swage_plan.yield` (swage_plan::YieldOp)

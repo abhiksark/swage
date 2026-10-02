@@ -27,6 +27,8 @@ namespace mlir::swage_plan {
 enum class KernelKind {
   /// One block per segment; the block index is the segment index.
   Direct,
+  /// One block per segment of rank-two values; each thread reduces columns.
+  DirectColumns,
   /// One block per task; the task buffer names the segment.
   TaskIds,
   /// Warp tasks and block tasks in one launch.
@@ -73,6 +75,8 @@ enum class KernelArgument {
   PartialCount,
   MergeCount,
   SegmentCount,
+  /// The number of columns of rank-two values.
+  FeatureCount,
 };
 
 /// Whether the argument is a buffer, passed as a pointer. Every other
@@ -120,6 +124,8 @@ constexpr llvm::StringLiteral kernelArgumentName(KernelArgument argument) {
     return "merge_count";
   case KernelArgument::SegmentCount:
     return "segment_count";
+  case KernelArgument::FeatureCount:
+    return "feature_count";
   }
   llvm_unreachable("unknown kernel argument");
 }
@@ -158,6 +164,10 @@ namespace detail {
 inline constexpr KernelArgument directArguments[] = {
     KernelArgument::Values, KernelArgument::Offsets, KernelArgument::Output,
     KernelArgument::ValueCount, KernelArgument::SegmentCount};
+inline constexpr KernelArgument directColumnsArguments[] = {
+    KernelArgument::Values,       KernelArgument::Offsets,
+    KernelArgument::Output,       KernelArgument::ValueCount,
+    KernelArgument::SegmentCount, KernelArgument::FeatureCount};
 inline constexpr KernelArgument taskIdArguments[] = {
     KernelArgument::Values,      KernelArgument::Offsets,
     KernelArgument::Output,      KernelArgument::TaskIds,
@@ -197,6 +207,8 @@ constexpr KernelLayout kernelLayout(KernelKind kind) {
   switch (kind) {
   case KernelKind::Direct:
     return KernelLayout(detail::directArguments);
+  case KernelKind::DirectColumns:
+    return KernelLayout(detail::directColumnsArguments);
   case KernelKind::TaskIds:
     return KernelLayout(detail::taskIdArguments);
   case KernelKind::FusedMixed:

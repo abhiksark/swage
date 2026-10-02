@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; steps 1 to 4 of the migration sequence are implemented
+- Status: accepted; steps 1 to 5 of the migration sequence are implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end
@@ -153,7 +153,7 @@ memref.store %sum, %output[%sid, %col] : memref<?x?xf32>
   scalar. The segment type stays `!swage.segment<f32>`, so no runtime
   identity enters a type and no thread or block index enters the IR.
 - A sixth role, `feature_count`, gives the extent of the second axis.
-- The plan gains a `column` policy with one kernel per program and no
+- The plan has a `column` policy with one kernel per program and no
   split: thread `t` of a block runs the region for the columns `t`,
   `t + block_threads`, and so on, each alone. Nothing is combined across
   threads, so the kernel holds no shuffle, barrier, or shared memory.
@@ -396,7 +396,65 @@ What was built against what was proposed for step 4:
   both element types. The PTX holds one `cvt.rn` from i32 and one `div.rn`
   per task region, in the element type, and none in the partial kernel.
 
-Step 5. Rank-two reductions. Not implemented.
+Step 5. Rank-two reductions. Implemented.
+
+- The dialect has the role `feature_count`, the optional operand `column`
+  of `swage.make_segment`, tied by its verifier to rank-two values, and a
+  rank-two output of `swage.map_store`. `swage.segment_id 1` is the column.
+- Admission reads the sixth role, requires rows of an admitted element
+  type with a rank-two output and three counts, the two segment ids of the
+  two axes, and a store at `output[segment, column]`. Planning admission
+  refuses a rank-two function, so every schedule that reads a task buffer
+  refuses it with that diagnostic.
+- `swage_plan.tasks` takes `feature_count` and has `policy<column>`. Its
+  verifier ties the two to rank-two values and a rank-two `into`, and
+  refuses `ids`. The plan function keeps the rank-two buffer types, and the
+  kernel layout `DirectColumns` adds the feature count to the counts of
+  the direct kernel.
+- The kernel conversion emits the column tile: the rows of the segment
+  clamped to the row count, a loop over the columns of a thread bounded by
+  the feature count, the region on the strided run of one column with no
+  combination across threads, and a store by every thread at
+  `output[segment * columns + column]`.
+- The sequential conversion loops over the columns of each segment and
+  reads the values through a `memref.reinterpret_cast` to their row-order
+  view.
+- `swage.segment_reduce` takes `[N, D]` values and returns `[S, D]`. It
+  runs the column kernel, validates the offsets, and classifies nothing.
+  `[N, 1]` values take the rank-one schedules through a view, and `[N, 0]`
+  values launch nothing. The artifact holds eight more programs,
+  `segmented_<kind>[_f64]_r2`, each with the one role `column`.
+- `test/Conversion/SwageToPlan/segmented-columns.mlir` and the files of the
+  same name under `SwageToCPU`, with a runner file, and `SwageToGPU` pin
+  the plan, the oracle, and the kernel, which may hold no shuffle, block
+  reduction, or barrier. `python/tests/mlir/test_segment_columns.py` holds
+  the public contract, and `python/tests/mlir/test_segmented_bounds.py`
+  the device bounds.
+- The digest matrix gains 16 pairs, the eight programs at the launch width
+  on `sm_80` and `sm_86`. The 818 pairs before it did not move.
+
+What was built against what was proposed for step 5:
+
+- The proposal bound a column as the run from `start * D + column` to
+  `end * D + column`. The kernel and the oracle use `end * D` as the end,
+  which the columns of a thread share. Both name the same elements,
+  because a column index is below `D`.
+- The proposal did not name the role of the kernel in an artifact. It is
+  `column`.
+- The proposal listed a tail candidate for the fresh-offsets harness. None
+  was added: no record would hold it, and the user guide states the cost
+  of a long segment with few columns from the tile itself.
+- An offsets refusal of a rank-two call names the number of rows as the
+  value count, in the words of the rank-one refusal.
+- On the device every kind and both element types agree with
+  `torch.segment_reduce` along axis 0 at 1, 3, 64, 129, 200, and 1024
+  columns, and equal the CPU oracle bit for bit on values that are not
+  exactly summable, as the row order predicts. A column sum stays within
+  `(n - 1) * eps * sum(|x|)` of the exactly rounded sum. The bits of a
+  column do not change with the block width or with the other segments of
+  the batch.
+- NVIDIA Compute Sanitizer runs the column kernels with the other kernel
+  families and reports nothing, as a kernel without shared memory must.
 
 Step 6. Rank-two softmax, f32. Not implemented.
 
@@ -412,7 +470,8 @@ Step 6. Rank-two softmax, f32. Not implemented.
 | The merge reads a range record out of bounds | The stray-record case of `python/tests/mlir/test_segmented_bounds.py`, with range records between guards |
 | int64 wraps on narrowing | The refusal of `[0, 2**32 + 3, 5]` |
 | The private offsets copy is freed early | A lifetime test |
-| A column reads a neighbor or writes past `[S, D]` | Position-dependent values; canaries; bounds lit |
+| A column reads a neighbor or writes past `[S, D]` | Values that depend on the row and on the column in `python/tests/mlir/test_segment_columns.py`; the driver-level launches of `python/tests/mlir/test_segmented_bounds.py` with guards around the values and canaries around the output; `test/Conversion/SwageToGPU/segmented-columns.mlir` |
+| A thread holds one accumulator per column | The same lit file, which pins one iteration argument of the row loop; `python/tests/mlir/test_segmented_codegen.py` |
 | The PTX scan passes arithmetic of the wrong type | The typed arithmetic scan |
 | An existing kernel's text moves | The 552 digest pairs |
 | f64 behaves differently on the device | The GPU tier, from step 3: the `eps64` bound against exactly rounded sums, the exact extremes, and the special values on every schedule |

@@ -51,6 +51,11 @@ defaults, derive:
 - one direct CTA task for a segment from 33 through 4096 elements;
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
+These three tasks derive from segments of scalars. Rows of features have
+one more shape and no derivation: one block per segment, in which each
+thread reduces one column in row order, whatever the length of the segment.
+[Segmented Calls](segmented-calls.md#rows-of-features) states its costs.
+
 The thresholds are planning limits that the private helpers can change
 and the public call cannot. Static work supports capture-free sum, max,
 and min programs over f32 or f64 values and their fused element

@@ -6,16 +6,18 @@ Two functions run a fixed program over every segment of a ragged batch:
 
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` returns one
   result per segment, in the dtype of `values`: a sum, a maximum, a
-  minimum, or a mean of float32 or float64 values.
+  minimum, or a mean of float32 or float64 values. The values are a run of
+  scalars or `[N, D]` rows of `D` features, which are reduced per column.
 - `swage.segment_softmax(values, offsets, *, out=None)` returns one float32
   result per value, the softmax within its segment.
 
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
-reduction kind, a dtype outside the admitted ones, and a trailing feature
-dimension cannot be written. The calls record no gradient. [Ragged Data](ragged-data.md) defines
-the storage they read. This page shows a call, states what it returns and
-what it costs, and lists where it is refused.
+reduction kind, a dtype outside the admitted ones, and values of rank three
+or above cannot be written. The calls record no gradient.
+[Ragged Data](ragged-data.md) defines the storage they read. This page
+shows a call, states what it returns and what it costs, and lists where it
+is refused.
 
 Both calls need the CUDA GPU tier: the native build, PyTorch 2.6 or newer,
 `numpy`, which the `pytorch` extra of the package and the binding
@@ -57,8 +59,8 @@ stream. It does not wait for them. Reading a result, as `tolist()` or
 ## Arguments
 
 `values` and `offsets` follow
-[the offsets contract](ragged-data.md#the-offsets-contract): rank-one,
-contiguous values and `torch.int32` or `torch.int64` offsets on the current
+[the offsets contract](ragged-data.md#the-offsets-contract): contiguous
+values and rank-one `torch.int32` or `torch.int64` offsets on the current
 CUDA device. No values are cast, and nothing is moved to another device or
 repaired. int64 offsets are checked and then narrowed on the host, as
 [int64 offsets](ragged-data.md#int64-offsets) describes, so offsets that
@@ -71,7 +73,10 @@ The two calls differ in the values they take:
   float64 batch runs a float64 program: every value is loaded, combined,
   and stored as float64, and the result is float64. Any other dtype raises
   a `TypeError` that names the two.
-- `segment_softmax` takes `torch.float32` values only. float64 values raise
+- `segment_reduce` takes values of rank one or of rank two.
+  [Rows of features](#rows-of-features) describes rank two. Any other rank
+  raises a `TypeError` that names the two.
+- `segment_softmax` takes rank-one `torch.float32` values only. float64 values raise
   a `TypeError` that states the reason: the softmax kernel computes its
   exponential with the `exp2` instruction of the device, which exists for
   32-bit values and not for 64-bit ones.
@@ -88,10 +93,12 @@ They also differ in one offsets rule:
 `out` is optional and keyword-only. When it is given, the call writes it and
 returns the same tensor. It must meet all of these rules:
 
-- It is a contiguous rank-one tensor of the dtype of `values`, on the
-  device of `values`. A contiguous slice of a larger tensor is admitted.
-- It has exactly one element per segment for `segment_reduce`, and exactly
-  one element per value for `segment_softmax`. It is never resized.
+- It is a contiguous tensor of the dtype of `values`, on the device of
+  `values`. A contiguous slice of a larger tensor is admitted.
+- It has rank one and exactly one element per segment for `segment_reduce`
+  of rank-one values, and exactly one element per value for
+  `segment_softmax`. For `[N, D]` values it has the shape `[S, D]`, one row
+  per segment and one column per feature. It is never resized.
 - It shares no memory with `values` or `offsets`.
 - It does not require grad, and it is not a lazy negation or conjugate view.
 
@@ -211,6 +218,70 @@ trees, the bound, and its evidence.
 A softmax uses one 128-thread CTA per segment at every length. It has no
 warp, split, or selected schedule.
 
+## Rows of features
+
+`segment_reduce` takes `[N, D]` values: `N` rows of `D` features. The
+offsets delimit rows, so they start at zero and end at or below `N`, and
+every column of a segment is reduced on its own, as
+`torch.segment_reduce(values, kind, axis=0, ...)` does. The result is
+`[S, D]` for `S` segments.
+
+```python
+# Four rows of two features in three segments: rows 0 and 1, none, 2 and 3.
+rows = torch.tensor(
+    [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]], device="cuda"
+)
+offsets = torch.tensor([0, 2, 2, 4], dtype=torch.int32, device="cuda")
+
+totals = swage.segment_reduce(rows, offsets, "sum")
+# [[3, 30], [0, 0], [7, 70]]
+```
+
+Everything under [Arguments](#arguments) and [Results](#results) holds per
+column. Every column of an empty segment receives the value of the kind:
+`0.0`, an infinity, or NaN for a mean. The values must be contiguous in row
+order: a transposed tensor and a slice of columns are refused, and nothing
+is copied. Values of rank three or above are refused.
+
+A call on rows runs another kernel than a call on scalars, with one
+schedule:
+
+- One block of 128 threads per segment. Thread `t` reduces the columns `t`,
+  `t + 128`, and so on, one after the other, each in row order.
+- No split. A segment occupies one block for its whole length, whatever
+  that length is.
+- No thread combines with another, so a column is reduced by one thread.
+
+That schedule has these consequences, which are limits of this call and not
+of the data:
+
+| | Few columns (1 to 8) | Many columns (64 to 1024) |
+|---|---|---|
+| Threads of a block that work | `D` of 128 | 64 to 128 |
+| Additions of one thread per segment | `n` rows | `n * ceil(D / 128)` |
+| Weakness | A long segment is reduced by `D` threads: 10,000 rows of three columns are 10,000 additions, one after the other, in each of three threads | A long segment occupies one block for its whole length |
+
+- **Rounding.** A column sum is added in row order, one addition per row.
+  It lies within `(n - 1) * eps * sum(|x|)` of the exact sum of its `n`
+  rows, with the `eps` of the dtype. For a long segment that bound is
+  weaker than the bound of rank-one values, whose trees add in parallel. A
+  column mean divides that sum once and lies within `eps * sum(|x|)` of the
+  exact mean, under the conditions of the rank-one mean. A maximum and a
+  minimum are exact.
+- **Bits.** The bits of a column do not depend on the other segments of the
+  batch, on the block width, or on the GPU model: a rank-two call has no
+  schedule selection.
+- **Host work.** A call on rows validates its offsets on the host and
+  classifies nothing. It uploads no task record and allocates no scratch.
+- **One column and no column.** `[N, 1]` values are a run of scalars. They
+  are reduced by the schedules of rank-one values, with their rounding and
+  their selection, and the result is `[S, 1]`. `[N, 0]` values return an
+  `[S, 0]` result and launch nothing.
+
+The schedules of rank-one values reduce a long run of scalars in parallel
+and split it. A caller reaches them for rows by passing each column as a
+contiguous `[N]` or `[N, 1]` tensor, at the price of one call per column.
+
 ## What a call costs
 
 Each call prepares before it launches, and it keeps nothing of that
@@ -218,10 +289,11 @@ preparation for the next call:
 
 1. It copies the offsets to the host. The copy waits for the work already
    queued on the current stream.
-2. It validates the offsets on the host and, for `segment_reduce`,
-   classifies every segment into warp, CTA, and split tasks.
-3. For `segment_reduce`, it uploads the task records and allocates scratch
-   for split segments. With int64 offsets it also uploads the narrowed
+2. It validates the offsets on the host and, for `segment_reduce` of
+   rank-one values, classifies every segment into warp, CTA, and split
+   tasks.
+3. For `segment_reduce` of rank-one values, it uploads the task records and
+   allocates scratch for split segments. With int64 offsets it also uploads the narrowed
    int32 copy the kernels read.
 4. It enqueues the kernels.
 
@@ -255,10 +327,11 @@ The first calls of a process cost more:
 
 - A call compiles each kernel its batch needs that the process does not
   hold yet, and loads it into the CUDA context. A reduction kind has four
-  kernels per dtype that a batch can need: one for segments of up to 4096
-  elements, two for longer segments, and one for a batch that the selection
-  rule of [Sum rounding](#sum-rounding) sends to the 128-lane tree. The
-  softmax has one. Kernels stay in the process for later calls and are
+  kernels per dtype that a batch of rank-one values can need: one for
+  segments of up to 4096 elements, two for longer segments, and one for a
+  batch that the selection rule of [Sum rounding](#sum-rounding) sends to
+  the 128-lane tree. A reduction kind has one more kernel per dtype for
+  rows of features. The softmax has one. Kernels stay in the process for later calls and are
   never written to the persistent cache. With an artifact selected, a call
   compiles nothing: the first call reads and verifies the directory, and
   each kernel is loaded from it when a call first needs it.

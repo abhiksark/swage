@@ -236,6 +236,7 @@ def _validate_shapes(
     require_cuda=True,
     int64_offsets=False,
     element="f32",
+    rank=1,
 ):
     """Validate tensor shapes against one of the two output ABIs.
 
@@ -254,9 +255,14 @@ def _validate_shapes(
         element: The element type of the program the caller runs, `"f32"`
             or `"f64"`. The values and the output must have its dtype: a
             kernel reads and writes elements of one width.
+        rank: The rank of the values and of the output of the program, one
+            or two. Rank-two values are `[rows, columns]`, the offsets
+            delimit rows, and the output has the columns of the values.
+            The validator then receives the row counts.
 
     Returns:
-        The value count, the segment count, and the offsets on the host as
+        The value count, which is the number of rows for rank two, the
+        segment count, and the offsets on the host as
         one int32 array. Copying a CUDA tensor to the host waits for the
         work queued on it; that copy is the only device synchronization
         here, and no Python integer is created per offset. int64 offsets
@@ -282,13 +288,15 @@ def _validate_shapes(
             "offsets must have dtype torch.int32"
             + (" or torch.int64" if int64_offsets else "")
         )
-    for name, tensor in (
-        ("values", values),
-        ("offsets", offsets),
-        ("output", output),
+    for name, tensor, required in (
+        ("values", values, rank),
+        ("offsets", offsets, 1),
+        ("output", output, rank),
     ):
-        if tensor.dim() != 1:
-            raise TypeError(f"{name} must have rank one")
+        if tensor.dim() != required:
+            raise TypeError(
+                f"{name} must have rank {'one' if required == 1 else 'two'}"
+            )
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous")
         _validate_storage(name, tensor)
@@ -298,8 +306,18 @@ def _validate_shapes(
                 f"{name} must not require grad; segmented kernels write "
                 "through raw pointers"
             )
+    if rank == 2:
+        if output.shape[1] != values.shape[1]:
+            raise ValueError(
+                f"output has {output.shape[1]} columns for "
+                f"{values.shape[1]} columns of values"
+            )
+        if values.shape[1] >= _I32_LIMIT:
+            raise ValueError("feature count must be a nonnegative i32")
 
-    value_count = values.numel()
+    # The offsets delimit the first axis: elements of rank-one values and
+    # rows of rank-two values.
+    value_count = values.shape[0]
     host_offsets = offsets.detach().cpu().numpy()
     if offsets.dtype == torch.int64:
         import numpy
@@ -308,7 +326,9 @@ def _validate_shapes(
         # below 2**31, so the narrowing below is exact.
         _validate_offset_sequence(host_offsets, value_count)
         host_offsets = host_offsets.astype(numpy.int32)
-    segment_count = validate_offsets(host_offsets, value_count, output.numel())
+    segment_count = validate_offsets(
+        host_offsets, value_count, output.shape[0]
+    )
     _validate_disjoint("values", values, output)
     _validate_disjoint("offsets", offsets, output)
     if not require_cuda:
@@ -691,13 +711,18 @@ def _element_of(torch, values):
     return {torch.float32: "f32", torch.float64: "f64"}.get(dtype)
 
 
-def _reduction_kernel(kind, element="f32"):
+def _reduction_kernel(kind, element="f32", rank=1):
     """Return the name of the kernel function of one reduction program.
 
-    The f32 programs are unsuffixed, which keeps the names and the program
-    texts they had before f64 was admitted.
+    The name is `segmented_<kind>[_f64][_r2]`. The f32 programs over
+    rank-one values are unsuffixed, which keeps the names and the program
+    texts they had before f64 and rank two were admitted.
     """
-    return f"segmented_{kind}" + ("" if element == "f32" else f"_{element}")
+    return (
+        f"segmented_{kind}"
+        + ("" if element == "f32" else f"_{element}")
+        + ("" if rank == 1 else "_r2")
+    )
 
 
 def _program_element(module_text):
@@ -712,7 +737,7 @@ def _program_element(module_text):
             in `_ELEMENTS`.
     """
     match = re.search(
-        r"memref<\?x(\w+)> \{swage\.role = #swage\.role<values>\}",
+        r"memref<(?:\?x)+(\w+)> \{swage\.role = #swage\.role<values>\}",
         module_text,
     )
     if match is None or match[1] not in _ELEMENTS:
@@ -733,17 +758,22 @@ def _reads_extent(module_text):
     return "swage.extent" in module_text
 
 
-def _semantic_module(kind, element="f32"):
+def _semantic_module(kind, element="f32", rank=1):
     """Return the canonical private qualification module.
 
     A mean is a sum, the extent of the segment, and one division: the
     reduction kind of its program is `sum`, and the division runs once per
     segment, after the reduction.
 
+    A program over rank-two values reduces one column of one segment per
+    instance: `swage.segment_id 1` is the column, `make_segment` binds it,
+    and the function declares the number of columns as `feature_count`.
+
     Args:
         kind: `"sum"`, `"max"`, `"min"`, or `"mean"`.
         element: The element type of the values and the result, `"f32"` or
             `"f64"`.
+        rank: The rank of the values and of the output, one or two.
     """
     if kind not in {"sum", "max", "min", "mean"}:
         raise ValueError(
@@ -751,6 +781,8 @@ def _semantic_module(kind, element="f32"):
         )
     if element not in _ELEMENTS:
         raise ValueError("reduction element type must be 'f32' or 'f64'")
+    if rank not in (1, 2):
+        raise ValueError("reduction rank must be one or two")
     reduced, epilogue, stored = kind, "", "%result"
     if kind == "mean":
         reduced, stored = "sum", "%mean"
@@ -759,6 +791,31 @@ def _semantic_module(kind, element="f32"):
     %count = arith.index_cast %extent : index to i32
     %divisor = arith.sitofp %count : i32 to {element}
     %mean = arith.divf %result, %divisor : {element}"""
+    if rank == 2:
+        return f"""
+module {{
+  func.func @{_reduction_kernel(kind, element, rank)}(
+      %values: memref<?x?x{element}> {{swage.role = #swage.role<values>}},
+      %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
+      %output: memref<?x?x{element}> {{swage.role = #swage.role<output>}},
+      %value_count: i32 {{swage.role = #swage.role<value_count>}},
+      %segment_count: i32 {{swage.role = #swage.role<segment_count>}},
+      %feature_count: i32 {{swage.role = #swage.role<feature_count>}}) {{
+    %sid = swage.segment_id 0
+    %column = swage.segment_id 1
+    %segment = swage.make_segment %values, %offsets, %sid column(%column)
+        : memref<?x?x{element}>, memref<?xi32>, index, index
+          -> !swage.segment<{element}>
+    %result = swage.reduce %segment kind<{reduced}>
+        : !swage.segment<{element}> -> {element} {{
+    ^bb0(%value: {element}):
+      swage.yield %value : {element}
+    }}{epilogue}
+    memref.store {stored}, %output[%sid, %column] : memref<?x?x{element}>
+    return
+  }}
+}}
+"""
     return f"""
 module {{
   func.func @{_reduction_kernel(kind, element)}(
@@ -920,16 +977,120 @@ class _PreparedPersistentSum(NamedTuple):
     merge_tasks: int
 
 
+def _launch_columns(
+    values,
+    offsets,
+    output,
+    *,
+    module_text,
+    kernel_name,
+    validate_offsets,
+    int64_offsets=False,
+    block_size=None,
+):
+    """Validate and enqueue the column kernel of one rank-two program.
+
+    The kernel is the direct schedule of a program over `[rows, columns]`
+    values: one block per segment, in which thread `t` runs the program
+    for the columns `t`, `t + block_size`, and so on, each alone. A launch
+    classifies nothing and uploads no task record. Its host work is the
+    validation of the offsets.
+
+    Args:
+        values: Contiguous `[rows, columns]` CUDA tensor of the element
+            type the program declares.
+        offsets: Contiguous CUDA segment offsets, which delimit rows.
+        output: Disjoint contiguous CUDA output with the columns of the
+            values and the rows the validator requires.
+        module_text: MLIR text of the program.
+        kernel_name: Name of its segment function.
+        validate_offsets: The validator of the output ABI, as for
+            `_validate_shapes`.
+        int64_offsets: Whether `torch.int64` offsets are admitted. The
+            kernel then reads a private int32 copy.
+        block_size: Threads per block, or None for the CTA block of the
+            target description.
+    """
+    torch = _runtime._import_torch()
+    value_count, segment_count, host_offsets = _validate_shapes(
+        values,
+        offsets,
+        output,
+        validate_offsets,
+        int64_offsets=int64_offsets,
+        element=_program_element(module_text),
+        rank=2,
+    )
+    feature_count = values.shape[1]
+    if block_size is None:
+        block_size = _target_description().cta_block_threads
+    if type(block_size) is not int or block_size <= 0:
+        raise ValueError("block size must be a positive integer")
+    _validate_warp_count(block_size)
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if block_size > properties.max_threads_per_block:
+        raise ValueError(
+            f"block size {block_size} exceeds device limit "
+            f"{properties.max_threads_per_block}"
+        )
+    # Without a segment or without a column there is nothing to write.
+    if segment_count == 0 or feature_count == 0:
+        return None
+
+    native_swage = _native_swage()
+    target = _target(torch, torch.cuda.current_device())
+    ptx = _compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name=kernel_name,
+        block_size=block_size,
+        target=target,
+    )
+    driver = _runtime._get_driver()
+    _, function = _load_once(driver, ptx, kernel_name)
+    kernel_offsets = _kernel_offsets(torch, offsets, host_offsets)
+    stream = torch.cuda.current_stream()
+    driver.launch_segmented(
+        function,
+        (segment_count,),
+        block_size,
+        stream.cuda_stream,
+        (
+            values.data_ptr(),
+            kernel_offsets.data_ptr(),
+            output.data_ptr(),
+            value_count,
+            segment_count,
+            feature_count,
+        ),
+    )
+    for tensor in (values, kernel_offsets, output):
+        tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
+    return None
+
+
 def launch_gpu(values, offsets, output, kind, block_size=None):
     """Launch one internally qualified segmented reduction.
 
-    The kernel is compiled once per kind, element type, block size, and
-    target, and loaded once per CUDA context. An omitted block size is the
-    CTA block of the target description. float64 values run the f64 program
-    of the kind, and the output then is float64 as well.
+    The kernel is compiled once per kind, element type, rank, block size,
+    and target, and loaded once per CUDA context. An omitted block size is
+    the CTA block of the target description. float64 values run the f64
+    program of the kind, and the output then is float64 as well. Rank-two
+    values run the column kernel of the kind, one block per segment.
     """
     torch = _runtime._import_torch()
     element = _element_of(torch, values) or "f32"
+    if getattr(values, "ndim", 1) == 2:
+        return _launch_columns(
+            values,
+            offsets,
+            output,
+            module_text=_semantic_module(kind, element, 2),
+            kernel_name=_reduction_kernel(kind, element, 2),
+            validate_offsets=_validate_offsets,
+            block_size=block_size,
+        )
     value_count, segment_count, _ = _validate_shapes(
         values, offsets, output, _validate_offsets, element=element
     )
@@ -2266,6 +2427,10 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
     printer keeps only six significant digits. The element type is the one
     the program declares for its values.
     """
+    if values.dim() == 2:
+        return _column_runner_module(
+            values, offsets, semantic, kernel_name, output_length
+        )
     element = _program_element(semantic)
     code, _, word, printer = _TRANSPORT[element]
     value_count = values.numel()
@@ -2352,6 +2517,119 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
         ]
     )
     if not value_count:
+        lines.append(f"    memref.dealloc %values_storage : {values_type}")
+    lines.extend(
+        [
+            f"    memref.dealloc %output_storage : {output_type}",
+            f"    memref.dealloc %bits : {bits_type}",
+            "    return",
+            "  }",
+            "",
+            (
+                f"  func.func private @{printer}(memref<*x{word}>) "
+                "attributes {llvm.emit_c_interface}"
+            ),
+            "}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _column_runner_module(values, offsets, semantic, kernel_name, output_rows):
+    """Add an executable wrapper around a kernel over rank-two values.
+
+    The module is the one of `_runner_module` with rows in place of
+    elements: the values are a constant `[rows, columns]` global, the output
+    has `output_rows` rows of the same columns, and its bit patterns are
+    printed in row order.
+    """
+    element = _program_element(semantic)
+    code, _, word, printer = _TRANSPORT[element]
+    row_count, columns = values.shape
+    segment_count = offsets.numel() - 1
+    values_type = f"memref<{row_count}x{columns}x{element}>"
+    offsets_type = f"memref<{segment_count + 1}xi32>"
+    output_type = f"memref<{output_rows}x{columns}x{element}>"
+    rows_type = f"memref<?x?x{element}>"
+    bits_type = f"memref<{output_rows * columns}x{word}>"
+    lines = [
+        semantic.rstrip()[:-1],
+        "",
+        (
+            f'  memref.global "private" constant @runner_offsets : '
+            f"{offsets_type} = {_dense_literal('i', offsets.tolist())}"
+        ),
+    ]
+    values_storage = f"memref.alloc() : {values_type}"
+    if values.numel():
+        lines.append(
+            f'  memref.global "private" constant @runner_values : '
+            f"{values_type} = "
+            f"{_dense_literal(code, values.reshape(-1).tolist())}"
+        )
+        values_storage = f"memref.get_global @runner_values : {values_type}"
+    lines.extend(
+        [
+            "",
+            "  func.func @main() {",
+            f"    %values_storage = {values_storage}",
+            (
+                f"    %offsets_storage = memref.get_global @runner_offsets : "
+                f"{offsets_type}"
+            ),
+            f"    %output_storage = memref.alloc() : {output_type}",
+            f"    %bits = memref.alloc() : {bits_type}",
+            (
+                f"    %values = memref.cast %values_storage : {values_type} "
+                f"to {rows_type}"
+            ),
+            (
+                f"    %offsets = memref.cast %offsets_storage : "
+                f"{offsets_type} to memref<?xi32>"
+            ),
+            (
+                f"    %output = memref.cast %output_storage : {output_type} "
+                f"to {rows_type}"
+            ),
+            (
+                f"    %sentinel = arith.constant "
+                f"{_float_literal(_SENTINEL, element)} : {element}"
+            ),
+            "    %from = arith.constant 0 : index",
+            "    %step = arith.constant 1 : index",
+            f"    %rows = arith.constant {output_rows} : index",
+            f"    %columns = arith.constant {columns} : index",
+            "    scf.for %pr = %from to %rows step %step {",
+            "      scf.for %pc = %from to %columns step %step {",
+            f"        memref.store %sentinel, %output[%pr, %pc] : {rows_type}",
+            "      }",
+            "    }",
+            f"    %value_count = arith.constant {row_count} : i32",
+            f"    %segment_count = arith.constant {segment_count} : i32",
+            f"    %feature_count = arith.constant {columns} : i32",
+            (
+                f"    call @{kernel_name}(%values, %offsets, %output, "
+                f"%value_count, %segment_count, %feature_count) : "
+                f"({rows_type}, memref<?xi32>, {rows_type}, i32, i32, i32) "
+                "-> ()"
+            ),
+            "    scf.for %br = %from to %rows step %step {",
+            "      %row = arith.muli %br, %columns : index",
+            "      scf.for %bc = %from to %columns step %step {",
+            f"        %result = memref.load %output[%br, %bc] : {rows_type}",
+            f"        %pattern = arith.bitcast %result : {element} to {word}",
+            "        %slot = arith.addi %row, %bc : index",
+            f"        memref.store %pattern, %bits[%slot] : {bits_type}",
+            "      }",
+            "    }",
+            (
+                f"    %unranked = memref.cast %bits : {bits_type} "
+                f"to memref<*x{word}>"
+            ),
+            f"    call @{printer}(%unranked) : (memref<*x{word}>) -> ()",
+        ]
+    )
+    if not values.numel():
         lines.append(f"    memref.dealloc %values_storage : {values_type}")
     lines.extend(
         [
@@ -2513,28 +2791,35 @@ def _execute_guarded(values, offsets, semantic, kernel_name, live):
         _runner_module(values, offsets, semantic, kernel_name, live + 1),
         _program_element(semantic),
     )
-    if len(results) != live + 1:
+    # For rank-two values a slot is a row, and the guard is a whole row.
+    width = values.shape[1] if values.dim() == 2 else 1
+    if len(results) != (live + 1) * width:
         raise RuntimeError(
-            f"oracle printed {len(results)} values for {live + 1} slots"
+            f"oracle printed {len(results)} values for "
+            f"{(live + 1) * width} slots"
         )
-    if results[-1] != _SENTINEL:
+    guard = results[live * width :]
+    if any(value != _SENTINEL for value in guard):
         raise RuntimeError(
-            f"{kernel_name} wrote past its live output range: {results[-1]}"
+            f"{kernel_name} wrote past its live output range: {guard}"
         )
-    return results[:-1]
+    return results[: live * width]
 
 
 def cpu_oracle(values, offsets, kind):
     """Execute the sequential reduction lowering with the MLIR runner.
 
     Returns the exact result of each segment, accumulated left to right, in
-    the dtype of `values`: float32 or float64.
+    the dtype of `values`: float32 or float64. Rank-two values give one row
+    of results per segment, each column accumulated in row order.
     """
     torch = _runtime._import_torch()
     element = _element_of(torch, values) or "f32"
     dtype = _element_dtype(torch, element)
+    rank = 2 if getattr(values, "ndim", 1) == 2 else 1
     segment_count = max(offsets.numel() - 1, 0)
-    output = torch.empty(segment_count, dtype=dtype)
+    shape = (segment_count,) + tuple(values.shape[1:rank])
+    output = torch.empty(shape, dtype=dtype)
     _validate_shapes(
         values,
         offsets,
@@ -2542,15 +2827,19 @@ def cpu_oracle(values, offsets, kind):
         _validate_offsets,
         require_cuda=False,
         element=element,
+        rank=rank,
     )
+    # A result without a column holds nothing the runner could print.
+    if output.numel() == 0 and rank == 2:
+        return output
     results = _execute_guarded(
         values,
         offsets,
-        _semantic_module(kind, element),
-        _reduction_kernel(kind, element),
+        _semantic_module(kind, element, rank),
+        _reduction_kernel(kind, element, rank),
         segment_count,
     )
-    return torch.tensor(results, dtype=dtype)
+    return torch.tensor(results, dtype=dtype).reshape(shape)
 
 
 def cpu_softmax_oracle(values, offsets):

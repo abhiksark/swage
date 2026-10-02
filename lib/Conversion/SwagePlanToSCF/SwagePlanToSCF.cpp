@@ -23,6 +23,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "swage/Conversion/SwagePlanToGPU/ConsumerPatterns.h"
+#include "swage/Conversion/SwagePlanToGPU/Emission.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
@@ -45,6 +46,12 @@ bool isSequentialTasks(Operation *op) {
 ///
 /// The oracle trusts its offsets: it applies no clamp, because it runs on
 /// host memory that the caller validated and nothing reloads it.
+///
+/// For rank-two values each iteration holds a second loop, over the
+/// columns. A column is a strided run of the row-order view of the values:
+/// it starts at `start * columns + column` and takes every `columns`-th
+/// element below `end * columns`. The rows of a column are visited in
+/// order, which is the order the column kernel adds them in.
 class SequentialTasksPattern : public OpConversionPattern<TasksOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -63,6 +70,39 @@ public:
     Block &region = tasks.getBody().front();
     auto yield = cast<swage_plan::YieldOp>(region.getTerminator());
     bool converted = true;
+    // Run the consumers of the region on `segment` at the insertion point
+    // of `body` and store the yielded scalar at `output[slot]`.
+    auto runRegion = [&](OpBuilder &body, Location bodyLoc, Value base,
+                         Value first, Value end, Value stride, Value extent,
+                         ValueRange slot) {
+      rewriter.replaceAllUsesWith(region.getArgument(0),
+                                  ValueRange{base, first, end, stride});
+      // A region that takes the extent of its segment runs its scalar
+      // epilogue after the reductions, once per segment.
+      if (region.getNumArguments() == 2)
+        rewriter.replaceAllUsesWith(region.getArgument(1), extent);
+      SmallVector<Operation *> consumers = operationsOf(region);
+      consumers.pop_back();
+      converted = succeeded(legalizeInPlace(rewriter, consumers));
+      if (!converted)
+        return;
+      moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
+          rewriter, region, body.getInsertionBlock());
+      if (Value scalar = yield.getValue())
+        memref::StoreOp::create(body, bodyLoc,
+                                rewriter.getRemappedValue(scalar),
+                                adaptor.getOutput(), slot);
+    };
+
+    // The row-order view of rank-two values, and their number of columns.
+    Value featureCount = adaptor.getFeatureCount();
+    Value values = adaptor.getValues();
+    Value columns;
+    if (featureCount) {
+      values = flattenRows(rewriter, loc, values);
+      columns = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), featureCount);
+    }
     scf::ForOp::create(
         rewriter, loc, zero, segmentCount, one, ValueRange(),
         [&](OpBuilder &body, Location bodyLoc, Value segmentId, ValueRange) {
@@ -75,27 +115,26 @@ public:
               body, bodyLoc, body.getIndexType(), startWord);
           Value end = arith::IndexCastOp::create(body, bodyLoc,
                                                  body.getIndexType(), endWord);
-          rewriter.replaceAllUsesWith(
-              region.getArgument(0),
-              ValueRange{adaptor.getValues(), start, end, one});
-          // A region that takes the extent of its segment runs its scalar
-          // epilogue after the reductions, once per segment.
+          Value extent;
           if (region.getNumArguments() == 2)
-            rewriter.replaceAllUsesWith(
-                region.getArgument(1),
-                arith::SubIOp::create(body, bodyLoc, end, start).getResult());
-
-          SmallVector<Operation *> consumers = operationsOf(region);
-          consumers.pop_back();
-          converted = succeeded(legalizeInPlace(rewriter, consumers));
-          if (converted) {
-            moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
-                rewriter, region, body.getInsertionBlock());
-            if (Value scalar = yield.getValue())
-              memref::StoreOp::create(body, bodyLoc,
-                                      rewriter.getRemappedValue(scalar),
-                                      adaptor.getOutput(), segmentId);
+            extent = arith::SubIOp::create(body, bodyLoc, end, start);
+          if (!featureCount) {
+            runRegion(body, bodyLoc, values, start, end, one, extent,
+                      segmentId);
+            scf::YieldOp::create(body, bodyLoc);
+            return;
           }
+          Value firstRow = arith::MulIOp::create(body, bodyLoc, start, columns);
+          Value endRow = arith::MulIOp::create(body, bodyLoc, end, columns);
+          scf::ForOp::create(
+              body, bodyLoc, zero, columns, one, ValueRange(),
+              [&](OpBuilder &loop, Location loopLoc, Value column, ValueRange) {
+                Value first =
+                    arith::AddIOp::create(loop, loopLoc, firstRow, column);
+                runRegion(loop, loopLoc, values, first, endRow, columns, extent,
+                          {segmentId, column});
+                scf::YieldOp::create(loop, loopLoc);
+              });
           scf::YieldOp::create(body, bodyLoc);
         });
     if (!converted)

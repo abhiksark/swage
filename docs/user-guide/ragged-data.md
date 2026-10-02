@@ -39,7 +39,9 @@ For `N` segments over one values buffer:
 
 - `values` is a contiguous rank-one `torch.float32` or `torch.float64`
   tensor. A reduction takes both dtypes. A softmax takes `torch.float32`
-  only, and so does the private persistent sum.
+  only, and so does the private persistent sum. A reduction also takes
+  `[rows, columns]` values, which [Rows of features](#rows-of-features)
+  describes.
 - `offsets` is a contiguous rank-one `torch.int32` tensor with `N + 1`
   entries. The two public calls also take `torch.int64` offsets, the
   default integer width of PyTorch.
@@ -54,9 +56,9 @@ For `N` segments over one values buffer:
 - For a GPU launch, both tensors are CUDA tensors on the current device.
 
 The result tensor has the same basic rules on both surfaces: it is a
-contiguous rank-one tensor of the dtype of `values` on the same device, it
-does not overlap `values` or `offsets` in memory, and it does not require
-grad. A kernel reads and writes elements of one width, so a float64 batch
+contiguous tensor of the dtype of `values` and of their rank on the same
+device, it does not overlap `values` or `offsets` in memory, and it does not
+require grad. A kernel reads and writes elements of one width, so a float64 batch
 with a float32 result is refused, and so is the reverse. Its size differs:
 
 - The public calls take an optional `out` with exactly `N` elements for a
@@ -64,6 +66,26 @@ with a float32 result is refused, and so is the reverse. Its size differs:
   [Segmented Calls](segmented-calls.md#arguments) states the rules.
 - The private helpers take a required `output` with at least `N` elements
   for a reduction and at least `offsets[N]` elements for a softmax.
+
+### Rows of features
+
+A reduction takes values of rank two: rows of `D` features, contiguous in
+row order. The contract above then reads with rows in place of values:
+
+- The offsets delimit rows. The final offset is at most the number of rows,
+  and segment `i` is the rows from `offsets[i]` up to `offsets[i + 1]`.
+- The number of rows, the number of segments, and the number of columns are
+  each below `2**31`. The number of elements, rows times columns, may
+  exceed that.
+- The result has one row of `D` elements per segment: every column of a
+  segment is reduced on its own.
+- A transposed tensor and a slice of columns are not contiguous in row
+  order and are refused. Nothing is copied.
+
+Rows of one feature are a run of scalars and are reduced as one. Values of
+rank three or above are refused.
+[Segmented Calls](segmented-calls.md#rows-of-features) states what a call on
+rows costs and how it is rounded.
 
 ### int64 offsets
 

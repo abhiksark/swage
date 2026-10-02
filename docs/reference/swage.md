@@ -188,7 +188,9 @@ swage.segment_reduce(values, offsets, kind, *, out=None)
 ```
 
 Reduce every segment of `values` to one result on the GPU, in the dtype of
-`values`. Segment `i` is `values[offsets[i]:offsets[i + 1]]`. The call validates its tensors,
+`values`. Segment `i` is `values[offsets[i]:offsets[i + 1]]`. For `[N, D]`
+values a segment is a run of rows, and each of its `D` columns is reduced
+to one result, as `torch.segment_reduce` does along axis 0. The call validates its tensors,
 copies the offsets to the host to validate and classify them, enqueues its
 kernels on the current PyTorch CUDA stream, and returns without waiting for
 them. Every call repeats the host work, so with offsets that change on every
@@ -198,14 +200,18 @@ the committed record of the private preparation that the call repeats; no
 record times the call itself.
 
 Parameters
-:   `values`: a contiguous rank-one `torch.float32` or `torch.float64` CUDA
-    tensor on the current device. It must not require grad and must not be
-    a lazy negation or conjugate view. float64 values run a float64
-    program; nothing is cast.
+:   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on
+    the current device, of rank one or of rank two, `[N, D]`. It must not
+    require grad and must not be a lazy negation or conjugate view. float64
+    values run a float64 program; nothing is cast. `[N, D]` values run one
+    kernel with one block per segment, in which a thread reduces a column
+    in row order: no segment is split, and nothing is classified. `[N, 1]`
+    values are reduced by the schedules of rank-one values.
 :   `offsets`: a contiguous rank-one `torch.int32` or `torch.int64` tensor
     on the same device with one entry more than there are segments. It
     starts at zero, never decreases, and ends at or below the number of
-    values. Values past the final offset belong to no segment. int64
+    values, or of rows for `[N, D]` values. Values past the final offset
+    belong to no segment. int64
     offsets are checked as 64-bit values and then narrowed on the host; the
     kernels read a private int32 copy that the call uploads.
 :   `kind`: `"sum"`, `"max"`, `"min"`, or `"mean"`. The sum of an empty
@@ -215,15 +221,16 @@ Parameters
     dtype of `values`, and its rounding depends on the schedule the call
     selects. A mean is that sum divided once by the length of the segment,
     converted to the dtype of `values`. No argument pins the schedule.
-:   `out`: an optional result tensor, keyword-only. A contiguous rank-one
-    tensor of the dtype of `values`, on the device of `values`, with
-    exactly one element per segment, which shares no memory with `values`
-    or `offsets`, does not require grad, and is not a lazy view. It is
-    never resized.
+:   `out`: an optional result tensor, keyword-only. A contiguous tensor of
+    the dtype of `values`, on the device of `values`, with exactly one
+    element per segment, or of shape `[S, D]` for `S` segments of `[N, D]`
+    values, which shares no memory with `values` or `offsets`, does not
+    require grad, and is not a lazy view. It is never resized.
 
 Returns
 :   `out`, or a new tensor of the dtype of `values` on the device of
-    `values` when `out` is `None`, with one element per segment. The kernels that write
+    `values` when `out` is `None`, with one element per segment, or one
+    row of `D` elements per segment for `[N, D]` values. The kernels that write
     it are enqueued and may not have finished. Submitted tensors are
     retained through `record_stream()`, and the version counter of the
     result is advanced when a kernel is enqueued. `values`, `offsets`, and
@@ -235,11 +242,14 @@ Raises
     `values must have dtype torch.float32 or torch.float64`,
     `offsets must have dtype torch.int32 or torch.int64`, and
     `out must have the dtype of values, torch.float64` with the dtype of
-    the call.
+    the call. Values of another rank raise
+    `values must have rank one or two`.
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
     is a lazy view, requires grad, or is on another device; offsets that
     break the offsets contract; an `out` of the wrong size or one that
-    overlaps an input.
+    overlaps an input. For `[N, D]` values a wrong `out` raises
+    `out must have shape (S, D), one row per segment and one column per
+    feature; found (...)`, with the numbers of the call.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
     native bindings while no artifact is selected, an artifact selected by
     `SWAGE_ARTIFACT_DIR` that cannot be used or does not hold the kernels of
@@ -285,8 +295,8 @@ enqueues one kernel on the current PyTorch CUDA stream, and returns without
 waiting for it.
 
 Parameters
-:   `values`: as for `segment_reduce`, with one difference. The values are
-    `torch.float32`. float64 values raise a `TypeError`, because the device
+:   `values`: as for `segment_reduce`, with two differences. The values
+    have rank one, and they are `torch.float32`. float64 values raise a `TypeError`, because the device
     has no 64-bit `exp2` instruction for the exponential of the kernel.
 :   `offsets`: as for `segment_reduce`, with one difference. The final
     offset must equal the number of values, so that every value belongs to
@@ -370,10 +380,11 @@ Options
     kernels, such as `sm_86`. Required.
 :   `--output`: the directory to create. It must not exist. Required.
 :   `--program`: a program to include: `sum`, `max`, `min`, `mean`,
-    `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, or `softmax`. A kind alone
-    names the reduction over float32 values, and the kind with `_f64` the
-    one over float64 values. It may be repeated. All nine are included
-    without it.
+    `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with
+    `_r2` appended, or `softmax`. A kind alone names the reduction over
+    rank-one float32 values, `_f64` the one over float64 values, and `_r2`
+    the one over rank-two values. It may be repeated. All seventeen are
+    included without it.
 :   `--runtime-library`: a `libSwageRuntime.so` to ship in place of the one
     of the native build, for a serving host of another machine.
 

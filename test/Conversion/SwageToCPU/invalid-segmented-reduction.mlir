@@ -12,7 +12,7 @@ module {
       %output: memref<?xf32> {swage.role = #swage.role<output>},
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    // expected-error@+1 {{only swage.segment_id axis 0 is supported, got axis 1}}
+    // expected-error@+1 {{a segment function over rank-one values has one logical axis, swage.segment_id 0, got axis 1}}
     %sid = swage.segment_id 1
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -392,7 +392,7 @@ module {
       %output: memref<?xf32> {swage.role = #swage.role<output>},
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    // expected-error@+1 {{only swage.segment_id axis 0 is supported, got axis 1}}
+    // expected-error@+1 {{a segment function over rank-one values has one logical axis, swage.segment_id 0, got axis 1}}
     %sid = swage.segment_id 1
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>

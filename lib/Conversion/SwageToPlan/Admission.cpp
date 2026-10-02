@@ -212,16 +212,70 @@ bool isSegmentBuffer(Type type) {
   return memref && isRankOneMemRef(type, memref.getElementType());
 }
 
+/// Whether `type` is a rank-two buffer of `elementType` rows the lowerings
+/// can address: two dynamic sizes, the identity layout, and the default
+/// memory space.
+bool isRankTwoMemRef(Type type, Type elementType) {
+  auto memref = dyn_cast<MemRefType>(type);
+  return memref && memref.getRank() == 2 && memref.isDynamicDim(0) &&
+         memref.isDynamicDim(1) && memref.getLayout().isIdentity() &&
+         !memref.getMemorySpace() && memref.getElementType() == elementType;
+}
+
+/// Check the types of a segment function over rank-two values, whose
+/// arguments `abi` names: rows of an admitted element type, rank-one i32
+/// offsets, an output of rows of the same element type, and three counts.
+LogicalResult readRankTwoABI(func::FuncOp function, const SegmentABI &abi) {
+  constexpr const char *shape =
+      " with dynamic sizes, the identity layout, and the default memory "
+      "space, got ";
+  FunctionType type = function.getFunctionType();
+  StringRef attribute = SwageDialect::getRoleAttrName();
+  Type element = cast<MemRefType>(type.getInput(abi.values)).getElementType();
+  if (!isRankTwoMemRef(type.getInput(abi.values), element) ||
+      !isAdmittedElementType(element))
+    return function.emitError()
+           << attribute << "<values> requires a rank-two f32 or f64 memref"
+           << shape << type.getInput(abi.values);
+  Type offsetsType = type.getInput(abi.offsets);
+  if (!isSegmentBuffer(offsetsType) ||
+      !isAdmittedIndexType(cast<MemRefType>(offsetsType).getElementType()))
+    return function.emitError()
+           << attribute
+           << "<offsets> requires a rank-one i32 memref with a dynamic size, "
+              "the identity layout, and the default memory space, got "
+           << offsetsType;
+  Type word = cast<MemRefType>(offsetsType).getElementType();
+  if (!isRankTwoMemRef(type.getInput(abi.output), element))
+    return function.emitError()
+           << attribute << "<output> requires a rank-two memref of " << element
+           << ", the element type of the values," << shape
+           << type.getInput(abi.output);
+  for (auto [role, index] : {std::pair("value_count", abi.valueCount),
+                             std::pair("segment_count", abi.segmentCount),
+                             std::pair("feature_count", *abi.featureCount)})
+    if (type.getInput(index) != word)
+      return function.emitError()
+             << attribute << "<" << role << "> requires " << word
+             << ", the element type of the offsets, got "
+             << type.getInput(index);
+  if (type.getNumResults() != 0)
+    return function.emitError()
+           << "segment function must have no result, got " << type;
+  return success();
+}
+
 /// Find the arguments of a segment function through their roles and check
 /// their types. Every argument declares a role, each of the five roles is
-/// declared once, and there is no positional default.
+/// declared once, and there is no positional default. A function over
+/// rank-two values also declares `feature_count`, the number of columns.
 LogicalResult readSegmentABI(func::FuncOp function, SegmentABI &abi) {
   constexpr const char *shape =
       " with a dynamic size, the identity layout, and the default memory "
       "space, got ";
   FunctionType type = function.getFunctionType();
   StringRef attribute = SwageDialect::getRoleAttrName();
-  std::optional<unsigned> declared[5];
+  std::optional<unsigned> declared[6];
   for (unsigned index = 0; index < type.getNumInputs(); ++index) {
     auto role = dyn_cast_or_null<ArgumentRoleAttr>(
         function.getArgAttr(index, attribute));
@@ -257,10 +311,22 @@ LogicalResult readSegmentABI(func::FuncOp function, SegmentABI &abi) {
   abi.valueCount = *declared[static_cast<unsigned>(ArgumentRole::ValueCount)];
   abi.segmentCount =
       *declared[static_cast<unsigned>(ArgumentRole::SegmentCount)];
+  abi.featureCount =
+      declared[static_cast<unsigned>(ArgumentRole::FeatureCount)];
 
   // The element type comes from the values, and the index word type from
   // the offsets. The output and the counts follow them.
   Type valuesType = type.getInput(abi.values);
+  auto valuesMemRef = dyn_cast<MemRefType>(valuesType);
+  bool rankTwo = valuesMemRef && valuesMemRef.getRank() == 2;
+  if (rankTwo != static_cast<bool>(abi.featureCount))
+    return function.emitError()
+           << "a segment function declares " << attribute
+           << "<feature_count> exactly when its values have rank two, got "
+           << valuesType << (abi.featureCount ? " with" : " without")
+           << " a feature_count";
+  if (rankTwo)
+    return readRankTwoABI(function, abi);
   if (!isSegmentBuffer(valuesType) ||
       !isAdmittedElementType(cast<MemRefType>(valuesType).getElementType()))
     return function.emitError()
@@ -332,28 +398,68 @@ LogicalResult collectSegmentOperations(func::FuncOp function,
   return success();
 }
 
+/// Admit the segment ids of a function over rank-two values: one of axis 0,
+/// the segment, and one of axis 1, the column, which `make_segment` binds.
+/// `analysis.segmentIds` is put in the order of the axes.
+LogicalResult verifyColumnSegment(func::FuncOp function,
+                                  SegmentProgramAnalysis &analysis) {
+  SmallVector<SegmentIdOp> &ids = analysis.segmentIds;
+  if (ids.size() == 2 && ids[0].getAxis() == 1 && ids[1].getAxis() == 0)
+    std::swap(ids[0], ids[1]);
+  if (ids.size() != 2 || ids[0].getAxis() != 0 || ids[1].getAxis() != 1) {
+    InFlightDiagnostic diagnostic =
+        function.emitError()
+        << "a segment function over rank-two values requires one "
+           "swage.segment_id 0, the segment, and one swage.segment_id 1, the "
+           "column, found axes";
+    for (SegmentIdOp id : ids)
+      diagnostic << " " << id.getAxis();
+    if (ids.empty())
+      diagnostic << " none";
+    return diagnostic;
+  }
+  MakeSegmentOp segment = analysis.segments.front();
+  if (segment.getValues() != function.getArgument(analysis.abi.values) ||
+      segment.getOffsets() != function.getArgument(analysis.abi.offsets) ||
+      segment.getSegmentId() != ids[0].getResult() ||
+      segment.getColumn() != ids[1].getResult())
+    return segment.emitError(
+        "make_segment must bind the function values and offsets at "
+        "segment_id 0, with segment_id 1 as its column");
+  return success();
+}
+
 LogicalResult verifySegmentRoot(func::FuncOp function,
                                 SegmentProgramAnalysis &analysis) {
-  if (analysis.segmentIds.size() != 1 || analysis.segments.size() != 1 ||
-      analysis.reductions.empty() || analysis.returns.size() != 1)
+  bool rankTwo = static_cast<bool>(analysis.abi.featureCount);
+  if (analysis.segmentIds.size() != (rankTwo ? 2U : 1U) ||
+      analysis.segments.size() != 1 || analysis.reductions.empty() ||
+      analysis.returns.size() != 1)
     return function.emitError()
-           << "segmented reduction requires one segment_id, one make_segment, "
-              "at least one reduce, and one return, found "
+           << "segmented reduction requires "
+           << (rankTwo ? "two segment_id" : "one segment_id")
+           << ", one make_segment, at least one reduce, and one return, found "
            << analysis.segmentIds.size() << " segment_id, "
            << analysis.segments.size() << " make_segment, "
            << analysis.reductions.size() << " reduce, and "
            << analysis.returns.size() << " return";
-  SegmentIdOp segmentId = analysis.segmentIds.front();
-  MakeSegmentOp segment = analysis.segments.front();
-  if (segmentId.getAxis() != 0)
-    return segmentId.emitError()
-           << "only swage.segment_id axis 0 is supported, got axis "
-           << segmentId.getAxis();
-  if (segment.getValues() != function.getArgument(analysis.abi.values) ||
-      segment.getOffsets() != function.getArgument(analysis.abi.offsets) ||
-      segment.getSegmentId() != segmentId.getResult())
-    return segment.emitError(
-        "make_segment must bind the function values and offsets at segment_id");
+  if (rankTwo) {
+    if (failed(verifyColumnSegment(function, analysis)))
+      return failure();
+  } else {
+    SegmentIdOp segmentId = analysis.segmentIds.front();
+    MakeSegmentOp segment = analysis.segments.front();
+    if (segmentId.getAxis() != 0)
+      return segmentId.emitError()
+             << "a segment function over rank-one values has one logical "
+                "axis, swage.segment_id 0, got axis "
+             << segmentId.getAxis();
+    if (segment.getValues() != function.getArgument(analysis.abi.values) ||
+        segment.getOffsets() != function.getArgument(analysis.abi.offsets) ||
+        segment.getSegmentId() != segmentId.getResult())
+      return segment.emitError("make_segment must bind the function values "
+                               "and offsets at segment_id");
+  }
   if (analysis.stores.size() + analysis.mapStores.size() != 1)
     return function.emitError()
            << "segmented reduction requires exactly one output terminal: a "
@@ -484,7 +590,6 @@ indexReductionStages(SegmentProgramAnalysis &analysis) {
 LogicalResult
 verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
                       const DenseMap<Operation *, unsigned> &stageOf) {
-  SegmentIdOp segmentId = analysis.segmentIds.front();
   if (analysis.mapStores.empty()) {
     memref::StoreOp store = analysis.stores.front();
     analysis.storedValue = store.getValue();
@@ -500,13 +605,21 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
       reduced = division.getLhs();
     }
     analysis.storedReduction = reduced.getDefiningOp<ReduceOp>();
+    // The slot of one program instance: the segment, and for rank-two
+    // values its column.
+    SmallVector<Value, 2> slot;
+    for (SegmentIdOp id : analysis.segmentIds)
+      slot.push_back(id.getResult());
     if (!analysis.storedReduction ||
         !stageOf.contains(analysis.storedReduction.getOperation()) ||
         store.getMemRef() != function.getArgument(analysis.abi.output) ||
-        store.getIndices().size() != 1 ||
-        store.getIndices().front() != segmentId.getResult())
+        !llvm::equal(store.getIndices(), slot))
       return store.emitError(
-          "segmented reduction result must be stored at output[segment_id]");
+          slot.size() == 1
+              ? "segmented reduction result must be stored at "
+                "output[segment_id]"
+              : "the result of a reduction over rank-two values must be "
+                "stored at output[segment_id 0, segment_id 1]");
   } else if (analysis.mapStores.front().getOutput() !=
              function.getArgument(analysis.abi.output)) {
     return analysis.mapStores.front().emitError(
@@ -557,6 +670,10 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 
 /// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
+  if (analysis.abi.featureCount)
+    return analysis.segments.front().emitError(
+        "planning requires rank-one values: a function over rank-two values "
+        "has one kernel, the direct schedule, and no task buffer");
   for (MapOp map : analysis.maps)
     if (!map.getCaptures().empty())
       return map.emitError("planning requires capture-free maps");

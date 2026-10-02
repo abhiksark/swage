@@ -120,7 +120,10 @@ programs and single-consumer map chains are reused by direct and partial
 kernels; merge kernels combine only the partial results, and the merge of a
 mean divides the combined sum once. The public `swage.segment_reduce`
 launches the identity sum, maximum, minimum, and mean through this branch
-with the default limits.
+with the default limits. A program over rank-two values takes the direct
+schedule alone: the planner writes a task operation of `policy<column>`,
+and the conversion emits the column kernel, in which a thread reduces a
+column and no thread combines with another.
 
 This branch implements narrow rule-based classification and split task
 decomposition. One private experimental lowering consumes those materialized

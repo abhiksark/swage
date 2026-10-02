@@ -368,6 +368,7 @@ def _wrong_values(case):
         "float16": values.half(),
         "int32": values.int(),
         "rank-two": values.reshape(2, 3),
+        "rank-three": values.reshape(1, 2, 3),
         "strided": torch.arange(12, dtype=torch.float32)[::2],
         "negated": torch._neg_view(values),
     }[case]
@@ -377,7 +378,6 @@ def _wrong_values(case):
 @pytest.mark.parametrize(
     ("case", "error", "message"),
     [
-        ("rank-two", TypeError, "values must have rank one"),
         ("strided", ValueError, "values must be contiguous"),
         ("negated", ValueError, "values must not be a lazy negation view"),
     ],
@@ -385,11 +385,25 @@ def _wrong_values(case):
 def test_segmented_calls_reject_values_outside_the_data_model(
     function, case, error, message
 ):
-    """Reject other ranks and layouts instead of converting."""
+    """Reject other layouts instead of converting."""
     _, offsets = _host_segments()
 
     with pytest.raises(error, match=f"^{message}"):
         _call(function, _wrong_values(case), offsets)
+
+
+def test_each_call_names_the_ranks_of_values_it_takes():
+    """Take rank one and two in the reduction, and rank one in the softmax.
+
+    `test_segment_columns.py` covers the rank-two reduction.
+    """
+    _, offsets = _host_segments()
+
+    with pytest.raises(TypeError, match="^values must have rank one or two$"):
+        swage.segment_reduce(_wrong_values("rank-three"), offsets, "sum")
+    for case in ("rank-two", "rank-three"):
+        with pytest.raises(TypeError, match="^values must have rank one$"):
+            swage.segment_softmax(_wrong_values(case), offsets)
 
 
 @pytest.mark.parametrize("case", ["float16", "int32"])

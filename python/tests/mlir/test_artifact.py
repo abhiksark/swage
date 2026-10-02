@@ -42,6 +42,7 @@ from test_public_segments import (
     _distributions,
     _host_case,
 )
+from test_segment_columns import _assert_columns_match, _rows
 from test_segmented_runtime import _bits, _offsets
 from test_target_compile import _ADMITTED, add_kernel
 
@@ -50,13 +51,15 @@ _needs_cuda = pytest.mark.skipif(
 )
 _SENTINEL = -5.0
 _CHILD = pathlib.Path(__file__).with_name("artifact_child.py")
-# The kinds of the reduction. Each is a program per element type.
+# The kinds of the reduction. Each is a program per element type and per
+# rank of the values.
 _KINDS = ("sum", "max", "min", "mean")
 _PROGRAMS = {
     **{
-        qualification._reduction_kernel(kind, element): (
-            qualification._semantic_module(kind, element)
+        qualification._reduction_kernel(kind, element, rank): (
+            qualification._semantic_module(kind, element, rank)
         )
+        for rank in (1, 2)
         for element in ("f32", "f64")
         for kind in _KINDS
     },
@@ -71,8 +74,18 @@ _PROGRAM_NAMES = (
     "segmented_max_f64",
     "segmented_min_f64",
     "segmented_mean_f64",
+    "segmented_sum_r2",
+    "segmented_max_r2",
+    "segmented_min_r2",
+    "segmented_mean_r2",
+    "segmented_sum_f64_r2",
+    "segmented_max_f64_r2",
+    "segmented_min_f64_r2",
+    "segmented_mean_f64_r2",
     "ragged_softmax",
 )
+# The reductions over rank-one values, which the planned path runs.
+_PLANNED = _PROGRAM_NAMES[:8]
 
 
 def _run(*arguments):
@@ -131,7 +144,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write thirty-three kernels, the library, and what describes them."""
+    """Write forty-one kernels, the library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -141,7 +154,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 33
+    assert len(_kernel_ids()) == 41
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -205,6 +218,7 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
         "mixed": description["cta_block_threads"],
         "partial": description["split_block_threads"],
         "merge": description["split_block_threads"],
+        "column": description["cta_block_threads"],
     }
 
     for kernels in _artifact._PROGRAMS.values():
@@ -215,24 +229,17 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
 def test_the_manifest_identifies_each_program(manifest):
     """Record the text digest and the planning admission of each program."""
     assert tuple(_PROGRAMS) == _PROGRAM_NAMES
-    reductions = _PROGRAM_NAMES[:-1]
+    # A reduction over rank-two values and the softmax have one kernel and
+    # are not planned, so the manifest records no admission for them.
     assert manifest["programs"] == [
-        *[
-            {
-                "name": name,
-                "sha256": hashlib.sha256(_PROGRAMS[name].encode()).hexdigest(),
-                "small_element_program": True,
-            }
-            for name in reductions
-        ],
         {
-            "name": "ragged_softmax",
-            "sha256": hashlib.sha256(
-                _PROGRAMS["ragged_softmax"].encode()
-            ).hexdigest(),
-        },
+            "name": name,
+            "sha256": hashlib.sha256(_PROGRAMS[name].encode()).hexdigest(),
+            **({"small_element_program": True} if name in _PLANNED else {}),
+        }
+        for name in _PROGRAM_NAMES
     ]
-    for name in reductions:
+    for name in _PLANNED:
         assert (
             qualification._admit_program(_PROGRAMS[name], name, 32, 4096)
             is True
@@ -314,7 +321,7 @@ def test_the_manifest_describes_each_kernel_as_its_ptx_declares_it(
     assert parameters == stated
     # The values, the output, and the partial results of an f64 program
     # are doubles, and no kernel takes both widths.
-    scalar = "double" if program.endswith("_f64") else "float"
+    scalar = "double" if "_f64" in program else "float"
     types = {argument["type"] for argument in entry["arguments"]}
     assert types <= {
         f"const {scalar}*",
@@ -361,7 +368,7 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         "format_version: 2",
         "target: sm_86",
         "programs: " + ", ".join(_PROGRAM_NAMES),
-        "kernels: 33",
+        "kernels: 41",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -786,6 +793,14 @@ def _cases():
     for kind in _KINDS:
         cases[f"{kind}/float64"] = (kind, values, offsets)
         cases[f"{kind}/float64-direct-cta"] = (kind, wide, wide_offsets)
+    # Rank-two values, which run the column kernel of each kind: more
+    # columns than a block has threads, and a segment of many rows.
+    lengths = [0, 3, 40, 0, 700, 1]
+    rows, row_offsets = _rows(lengths, 130, 3, torch.float32)
+    wide_rows, _ = _rows(lengths, 5, 4, torch.float64)
+    for kind in _KINDS:
+        cases[f"{kind}/rank-two"] = (kind, rows, row_offsets)
+        cases[f"{kind}/rank-two-float64"] = (kind, wide_rows, row_offsets)
     return cases
 
 
@@ -809,6 +824,8 @@ def _case_names():
     ]
     for kind in _KINDS:
         names += [f"{kind}/float64", f"{kind}/float64-direct-cta"]
+    for kind in _KINDS:
+        names += [f"{kind}/rank-two", f"{kind}/rank-two-float64"]
     return names
 
 
@@ -911,6 +928,7 @@ def child_with_bindings(device_artifact, tmp_path_factory):
         "max/uniform",
         "softmax/many-tiny",
         "sum/float64",
+        "mean/rank-two",
     )
     cases = {
         name: case
@@ -955,8 +973,8 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
     cases, report = child_with_bindings
 
     assert sorted(report["results"]) == sorted(cases)
-    # Four named cases and the direct-CTA batch of every kind.
-    assert len(cases) == 4 + len(_KINDS)
+    # Five named cases and the direct-CTA batch of every kind.
+    assert len(cases) == 5 + len(_KINDS)
     bindings = pathlib.Path(ir.__file__).absolute().parents[1]
     assert str(bindings) in report["path"]
     assert report["modules"] == []
@@ -1023,6 +1041,8 @@ def test_artifact_results_match_pytorch_and_float64(name, child):
         assert actual.dtype == torch.float32
     elif kind == "softmax":
         _assert_softmax_matches(values, offsets, actual)
+    elif values.dim() == 2:
+        _assert_columns_match(kind, values, offsets, actual)
     else:
         _assert_reduction_matches(kind, values, offsets, actual)
 
@@ -1115,6 +1135,9 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     selected = torch.tensor(_offsets(lengths), dtype=torch.int32).cuda()
     swage.segment_reduce(torch.ones(sum(lengths)).cuda(), selected, "max")
     swage.segment_reduce(values, offsets, "mean")
+    rows = torch.ones(6, 5, device="cuda")
+    row_offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    swage.segment_reduce(rows, row_offsets, "min")
     torch.cuda.synchronize()
 
     def stated(program, role):
@@ -1141,7 +1164,10 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
         stated("segmented_mean", "mixed"),
         stated("segmented_mean", "partial"),
         stated("segmented_mean", "merge"),
+        stated("segmented_min_r2", "column"),
     ]
+    # The column kernel takes the feature count as its third count.
+    assert stated("segmented_min_r2", "column") == (128, 3, 3)
     # The merge of a mean takes one pointer more than the merge of a sum.
     assert stated("segmented_mean", "merge")[1:] == (4, 3)
     assert stated("segmented_sum", "merge")[1:] == (3, 3)

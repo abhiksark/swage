@@ -30,6 +30,13 @@ element program, so it adds no element work and the schedule selection
 treats a mean as it treats its sum. The classification of a batch does not
 depend on it either.
 
+A function over rank-two values is not planned in this sense. It has one
+kernel, the direct schedule with the column policy, takes no task buffer,
+and nothing classifies its segments. Planning admission refuses it for every
+schedule that reads a task buffer, and
+[Segmented Reductions](segmented-reductions.md#rank-two-values) describes
+its kernel.
+
 Two callers run the same admission. `--swage-to-plan` with
 `schedule=task-ids` admits a function and then replaces it by the plan
 function of the task-id kernel, described on

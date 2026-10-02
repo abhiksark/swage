@@ -59,13 +59,15 @@ std::optional<TaskPolicy> mlir::swage_plan::policyOfRegion(Region *region) {
   return std::nullopt;
 }
 
-/// Whether a kernel can take `type` as a parameter: a rank-one buffer it can
-/// address through a pointer, or a count.
+/// Whether a kernel can take `type` as a parameter: a buffer it can address
+/// through a pointer, or a count. A buffer has rank one, or rank two for
+/// the rows of a column kernel.
 static bool isKernelParameterType(Type type) {
   if (type.isSignlessInteger())
     return true;
   auto memref = dyn_cast<MemRefType>(type);
-  return memref && memref.getRank() == 1 && memref.isDynamicDim(0) &&
+  return memref && (memref.getRank() == 1 || memref.getRank() == 2) &&
+         memref.getNumDynamicDims() == memref.getRank() &&
          memref.getLayout().isIdentity() && !memref.getMemorySpace() &&
          (memref.getElementType().isSignlessInteger() ||
           isa<FloatType>(memref.getElementType()));
@@ -101,9 +103,9 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
     if (!isKernelParameterType(input))
       return op->emitError()
              << "plan function argument #" << index
-             << " must be a signless integer or a rank-one memref of signless "
-                "integers or floats with a dynamic size, the identity layout, "
-                "and the default memory space, got "
+             << " must be a signless integer or a memref of rank one or two "
+                "of signless integers or floats with dynamic sizes, the "
+                "identity layout, and the default memory space, got "
              << input;
   if (function.isExternal() || !function.getBody().hasOneBlock())
     return op->emitError("a plan function has a body of one block");
@@ -149,6 +151,40 @@ LogicalResult TasksOp::verify() {
            requireWord("an element of ids",
                        cast<MemRefType>(getIds().getType()).getElementType()))))
     return failure();
+
+  // Rank-two values are rows of `feature_count` columns, and a column
+  // kernel is the kernel of such rows.
+  auto values = cast<MemRefType>(getValues().getType());
+  if ((values.getRank() == 2) != static_cast<bool>(getFeatureCount()))
+    return emitOpError()
+           << "feature_count is given exactly when the values have rank two, "
+              "got "
+           << values << (getFeatureCount() ? " with" : " without")
+           << " a feature_count";
+  bool column = getPolicy() == TaskPolicy::Column;
+  if (!getFeatureCount()) {
+    if (column)
+      return emitOpError("policy<column> reduces the columns of rank-two "
+                         "values and takes a feature_count");
+    if (getOutput() && cast<MemRefType>(getOutput().getType()).getRank() != 1)
+      return emitOpError()
+             << "into must have rank one for rank-one values, got "
+             << getOutput().getType();
+    return success();
+  }
+  if (failed(requireWord("feature_count", getFeatureCount().getType())))
+    return failure();
+  if (!column && getPolicy() != TaskPolicy::Sequential)
+    return emitOpError()
+           << "rank-two values take policy<column> or policy<sequential>, "
+              "got policy<"
+           << stringifyTaskPolicy(getPolicy()) << ">";
+  if (getIds())
+    return emitOpError("a task of rank-two values is one segment, in order, "
+                       "and takes no ids");
+  if (getOutput() && cast<MemRefType>(getOutput().getType()).getRank() != 2)
+    return emitOpError() << "into must have rank two for rank-two values, got "
+                         << getOutput().getType();
   return success();
 }
 

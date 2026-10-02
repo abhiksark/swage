@@ -13,7 +13,9 @@ says which schedule it gets. A mean is a sum with a division, as
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) for the executable evidence.*
 
-An admitted segment function has one axis-zero segment ID, one segment over
+A function over rank-two values is described under
+[Rank-two values](#rank-two-values). An admitted segment function over
+rank-one values has one axis-zero segment ID, one segment over
 rank-one values and rank-one i32 offsets, one capture-free reduction of kind
 `sum`, `max`, or `min`, with an optional element expression and
 single-consumer map chains, one rank-one output, and explicit i32 value and
@@ -132,6 +134,89 @@ The results follow from the composition:
   element work, so the selection rule treats both alike.
 
 All of this is measured on the RTX A6000 (`sm_86`).
+
+## Rank-two values
+
+A segment function over rank-two values reduces one column of one segment
+per program instance. It declares a sixth role, `feature_count`, and its
+program is the rank-one program with a second segment id:
+`swage.segment_id 1` is the column, `swage.make_segment` binds it, and the
+result is stored at `output[segment, column]`, as
+[Textual Swage IR](../language/swage-ir.md#swagemake_segment) shows. The
+segment is a column of the rows of a segment, a run of scalars, so every
+reduction kind, both element types, and the mean epilogue apply as they are.
+
+The kernel takes the parameters of the direct kernel and the number of
+columns:
+
+```text
+values*, offsets*, output*, value_count:i32, segment_count:i32,
+feature_count:i32
+```
+
+`value_count` is the number of rows. `values` holds `value_count` rows of
+`feature_count` elements in row order, and `output` holds `segment_count`
+rows of the same width.
+
+The kernel is the column tile:
+
+- **One block per segment.** The block index is the segment, compared with
+  `segment_count`. The rows of the segment are loaded from the offsets and
+  clamped to `value_count`, as every range into values is.
+- **One column per thread at a time.** Thread `t` of a block of 128 runs
+  the region for the columns `t`, `t + 128`, and so on, one after the
+  other. The loop over those columns is bounded by `feature_count`.
+- **A column is a strided run.** For the rows `[start, end)` and the column
+  `c` of `D`, a thread reads the elements `start * D + c`,
+  `(start + 1) * D + c`, and so on below `end * D`. The index is 64 bits
+  wide, so the number of elements may exceed `2**31` while the number of
+  rows stays below it.
+- **One scalar per reduction.** A thread holds one accumulator per
+  reduction stage, never one per column, so no runtime-sized array exists
+  on the device or in the IR.
+- **No combination across threads.** Each thread stores the results of its
+  own columns at `output[segment * D + c]`. The kernel holds no shuffle, no
+  barrier, and no shared memory, so its control flow may depend on the
+  thread index, and the block reduction rules do not apply to it.
+- **Every slot is written.** An empty segment stores the value of the kind
+  in each of its columns.
+
+The CPU oracle lowers the same program to a loop over the segments, a loop
+over the columns, and a loop over the rows of the column. Both add a column
+in row order, so the kernel and the oracle agree bit for bit, also on
+values that are not exactly summable, and the tests compare them that way.
+
+What follows from the tile:
+
+- A column sum lies within `(n - 1) * eps * sum(|x|)` of the exact sum of
+  its `n` rows, the bound of a sequential sum. It is weaker than the bound
+  of the rank-one trees for a long segment. The bits of a column do not
+  depend on the batch, the block width, or the GPU model.
+- There is no split. A segment occupies one block for its whole length, so
+  a batch with a heavy tail of long segments keeps few blocks busy for a
+  long time.
+- With few columns few threads of a block work: a segment of 10,000 rows
+  and three columns is 10,000 additions, one after the other, in each of
+  three threads.
+- A launch classifies nothing, uploads no task record, and allocates no
+  scratch. Its host work is the validation of the offsets.
+
+`swage.segment_reduce` runs this kernel for `[N, D]` values with more than
+one column. `[N, 1]` values take the rank-one schedules through a view, and
+`[N, 0]` values launch nothing. Planning admission refuses a rank-two
+function on every schedule that reads a task buffer.
+
+The alternative, a column loop inside the row tiles of rank one, keeps the
+split and the rank-one bound. It was not built: it doubles four schedules,
+runs one cross-thread combination per column and segment, and loads a row
+apart. [ADR-0022](../adr/ADR-0022-wider-data-model-for-segmented-reductions.md)
+records the choice.
+
+The driver-level tests of `python/tests/mlir/test_segmented_bounds.py`
+launch the kernel below the Python validation: with row ranges that
+validation rejects, with more blocks than segments, and with feature counts
+of zero and below. Values sit between NaN guards and the output between
+canaries. All of this is measured on the RTX A6000 (`sm_86`).
 
 ## Sum rounding
 

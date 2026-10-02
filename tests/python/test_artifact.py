@@ -35,6 +35,13 @@ PROGRAM_TEXTS = {
     "segmented_max_f64": qualification._semantic_module("max", "f64"),
     "segmented_min_f64": qualification._semantic_module("min", "f64"),
     "segmented_mean_f64": qualification._semantic_module("mean", "f64"),
+    **{
+        qualification._reduction_kernel(kind, element, 2): (
+            qualification._semantic_module(kind, element, 2)
+        )
+        for element in ("f32", "f64")
+        for kind in ("sum", "max", "min", "mean")
+    },
     "ragged_softmax": qualification._SOFTMAX_MODULE,
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
@@ -132,10 +139,11 @@ def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
             {
                 "name": program,
                 "sha256": _digest(PROGRAM_TEXTS[program]),
-                # The softmax is not planned, so nothing was admitted.
+                # The softmax and the reductions over rank-two values are
+                # not planned, so nothing was admitted for them.
                 **(
                     {}
-                    if program == "ragged_softmax"
+                    if program == "ragged_softmax" or program.endswith("_r2")
                     else {"small_element_program": program == "segmented_sum"}
                 ),
             }
@@ -327,6 +335,24 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         ),
     ]
 
+    # A reduction over rank-two values has one kernel, the direct schedule
+    # of its program, which takes the number of columns as a third count.
+    column = [
+        (
+            "column",
+            segmented,
+            (("block_size", 128),),
+            128,
+            "",
+            (
+                *task[:3],
+                ("value_count", "int32_t"),
+                ("segment_count", "int32_t"),
+                ("feature_count", "int32_t"),
+            ),
+        )
+    ]
+
     def typed(kernels):
         """Return the same kernels for f64 values, scratch, and output."""
         return [
@@ -352,6 +378,14 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         "segmented_max_f64": typed(reduction),
         "segmented_min_f64": typed(reduction),
         "segmented_mean_f64": typed(mean),
+        **{
+            f"segmented_{kind}_r2": column
+            for kind in ("sum", "max", "min", "mean")
+        },
+        **{
+            f"segmented_{kind}_f64_r2": typed(column)
+            for kind in ("sum", "max", "min", "mean")
+        },
         "ragged_softmax": softmax,
     }
     assert len(mean[3][5]) == len(reduction[3][5]) + 1
@@ -388,6 +422,7 @@ def test_the_kernel_table_uses_the_block_sizes_of_the_runner():
         "mixed": description["ctaBlockThreads"],
         "partial": description["splitBlockThreads"],
         "merge": description["splitBlockThreads"],
+        "column": description["ctaBlockThreads"],
     }
     assert set(widths.values()) == {128, 512}
 
@@ -434,9 +469,13 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
         "mixed": "fusedMixed",
         "partial": "splitPartial",
         "merge": "splitMerge",
+        "column": "directColumns",
     }
-    assert sorted(roles) == sorted(layouts["direct"])
-    assert len(roles) == 5
+    # A function over rank-one values declares five roles, and one over
+    # rank-two values the feature count as well.
+    assert sorted(roles) == sorted(layouts["directColumns"])
+    assert sorted(set(roles) - {"feature_count"}) == sorted(layouts["direct"])
+    assert len(roles) == 6
 
     for program, kernels in _artifact._PROGRAMS.items():
         for kernel in kernels:
@@ -1097,9 +1136,7 @@ def test_a_request_outside_the_table_is_refused(artifact_dir, monkeypatch):
         match=(
             r"holds no kernel 'segmented_sum' \(_compile_segmented_reduction"
             r"_ptx, block_size=64, use_task_ids=True\); it holds the "
-            "programs segmented_sum, segmented_max, segmented_min, "
-            "segmented_mean, segmented_sum_f64, segmented_max_f64, "
-            "segmented_min_f64, segmented_mean_f64, ragged_softmax"
+            "programs " + ", ".join(PROGRAM_TEXTS)
         ),
     ):
         artifact.kernel(compiler, text, {**options, "block_size": 64})
@@ -1216,6 +1253,14 @@ def test_the_manifest_is_kept_for_reports(artifact_dir, monkeypatch):
         "segmented_max_f64",
         "segmented_min_f64",
         "segmented_mean_f64",
+        "segmented_sum_r2",
+        "segmented_max_r2",
+        "segmented_min_r2",
+        "segmented_mean_r2",
+        "segmented_sum_f64_r2",
+        "segmented_max_f64_r2",
+        "segmented_min_f64_r2",
+        "segmented_mean_f64_r2",
         "ragged_softmax",
     )
 
@@ -1360,6 +1405,7 @@ class _Tensor:
 
     def __init__(self, torch, count, *, integer=False, pointer=0x1000):
         self.dtype = torch.int32 if integer else torch.float32
+        self.shape = (count,)
         self._count = count
         self._pointer = pointer
 
@@ -1536,10 +1582,13 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 33 kernels of "
+        f"{artifact_dir} (format 2, target sm_86, 41 kernels of "
         "segmented_sum, segmented_max, segmented_min, segmented_mean, "
         "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
-        "segmented_mean_f64, ragged_softmax, written by "
+        "segmented_mean_f64, segmented_sum_r2, segmented_max_r2, "
+        "segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, "
+        "segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, "
+        "ragged_softmax, written by "
         "swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"

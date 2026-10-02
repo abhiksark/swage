@@ -107,21 +107,25 @@ func.func @segmented_sum(
 | `values` | the buffer that `swage.make_segment` views |
 | `offsets` | the buffer of segment bounds that `swage.make_segment` reads |
 | `output` | the buffer the terminal writes |
-| `value_count` | the element count of `values`, which bounds every range into it |
+| `value_count` | the element count of `values`, which bounds every range into it; the row count for rank-two values |
 | `segment_count` | the extent of `swage.segment_id 0` |
+| `feature_count` | the extent of `swage.segment_id 1`, the number of columns of rank-two `values` and `output` |
 
 The roles name the arguments, so their order carries no meaning. The
-verifier accepts a role on a rank-one memref (`values`, `output`), on a
-rank-one memref of signless integers (`offsets`), or on a signless integer
-(a count), and rejects a role that two arguments of one function declare. It
+verifier accepts a role on a memref of rank one or two (`values`, `output`),
+on a rank-one memref of signless integers (`offsets`), or on a signless
+integer (a count), and rejects a role that two arguments of one function
+declare. It
 does not require a function to declare roles: the walkthrough module above
 declares none and verifies.
 
 The segmented lowerings require more. Every argument of a function they
-lower declares a role, each of the five roles appears once, and the types
-are the admitted ones: `values` and `output` of one element type, f32 or
-f64, i32 `offsets`, and counts of the offsets' element type, in dynamically sized buffers with the
-identity layout in the default memory space. A function that falls short is
+lower declares a role, each of the first five roles appears once, and the
+types are the admitted ones: `values` and `output` of one element type, f32
+or f64, and of one rank, i32 `offsets`, and counts of the offsets' element
+type, in dynamically sized buffers with the identity layout in the default
+memory space. A function declares `feature_count` exactly when its values
+have rank two. A function that falls short is
 rejected with a diagnostic that names the argument or the missing role.
 There is no positional default.
 
@@ -153,6 +157,12 @@ is a nonnegative `i32` attribute and its result is `index`. It identifies
 the logical segment on the given logical grid axis. Dialect acceptance
 does not guarantee a lowering for every axis.
 
+The lowerings admit two axes. Axis 0 runs over the segments of the offsets
+array. Axis 1 runs over the trailing dimension of rank-two values: a
+program instance is then one segment and one column, and
+`swage.segment_id 1` is the column. A function over rank-one values has
+axis 0 alone.
+
 ### `swage.make_segment`
 
 ```mlir
@@ -163,7 +173,8 @@ does not guarantee a lowering for every axis.
 The operands are values, offsets, and segment ID, in that order. Their
 types are explicit, followed by `-> !swage.segment<T>`:
 
-- Both buffers must be rank-one memrefs.
+- The values buffer is a memref of rank one or two, and the offsets buffer
+  a rank-one memref.
 - Offsets must have a signless integer element type.
 - The segment ID must have type `index`.
 - The values buffer's element type must equal the result segment's
@@ -171,6 +182,28 @@ types are explicit, followed by `-> !swage.segment<T>`:
 
 The handle denotes `values[offsets[id] : offsets[id + 1]]`. This operation
 binds those runtime relationships without materializing or copying data.
+
+A rank-two values buffer holds rows, and a segment is a run of scalars, so
+`make_segment` then names the column, and a rank-one buffer takes none:
+
+```mlir
+%sid = swage.segment_id 0
+%col = swage.segment_id 1
+%column = swage.make_segment %rows, %offsets, %sid column(%col)
+    : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
+%sum = swage.reduce %column kind<sum> : !swage.segment<f32> -> f32 {
+^bb0(%element: f32):
+  swage.yield %element : f32
+}
+memref.store %sum, %output[%sid, %col] : memref<?x?xf32>
+```
+
+The handle denotes `rows[offsets[id] : offsets[id + 1], col]`, one column of
+the rows of a segment. Its type is still `!swage.segment<f32>`: neither the
+number of columns nor the column enters a type, and the program yields a
+scalar per segment and column. A reduction over rows is therefore never a
+value of runtime size, and a lowering holds one accumulator per reduction
+whatever the number of columns.
 
 ### `swage.extent`
 
@@ -302,8 +335,8 @@ swage.map_store %segment, %output captures(%total : f32)
 }
 ```
 
-The operands are the segment and a rank-one output memref, followed by
-optional `captures(values : types)`. The single-block region is isolated
+The operands are the segment and an output memref of rank one, or of rank
+two for a column segment, followed by optional `captures(values : types)`. The single-block region is isolated
 and receives the input element followed by captures in operand order,
 with matching types. Captures are integer or floating-point scalars.
 The region must terminate with `swage.yield`, whose type must match the
@@ -311,7 +344,8 @@ output buffer's integer or floating-point element type.
 
 This terminal operation has no SSA result. It writes the per-element
 results only to the segment's corresponding output range,
-`output[offsets[id] : offsets[id + 1]]`. An empty segment writes nothing.
+`output[offsets[id] : offsets[id + 1]]`, in the column of a column segment.
+An empty segment writes nothing.
 The explicit write effect on the output keeps the operation alive under
 dead-code elimination. The effects of the operation include the effects of
 its region, as they do for `map` and `reduce`.

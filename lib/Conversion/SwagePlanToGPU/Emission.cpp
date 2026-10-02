@@ -136,11 +136,9 @@ void emitLeaderStore(OpBuilder &builder, Location loc, Value total, Value sink,
       });
 }
 
-BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
-                                Value offsets, Value valueCount,
-                                Value segmentId, Value segmentInRange,
-                                Value logicalThreadId, Value stride, Value zero,
-                                Value one) {
+SegmentRange emitSegmentRange(OpBuilder &builder, Location loc, Value offsets,
+                              Value valueCount, Value segmentId,
+                              Value segmentInRange, Value zero, Value one) {
   Type pointer = LLVM::LLVMPointerType::get(builder.getContext());
   // The offsets and the counts share one word type.
   Type word = valueCount.getType();
@@ -170,8 +168,32 @@ BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
   Value start;
   Value end;
   std::tie(start, end) = clampRange(builder, loc, startI32, endI32, valueCount);
-  Value first = arith::AddIOp::create(builder, loc, start, logicalThreadId);
-  return {{values, first, end, stride}, segmentId64, start};
+  return {start, end, segmentId64};
+}
+
+BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
+                                Value offsets, Value valueCount,
+                                Value segmentId, Value segmentInRange,
+                                Value logicalThreadId, Value stride, Value zero,
+                                Value one) {
+  SegmentRange range = emitSegmentRange(builder, loc, offsets, valueCount,
+                                        segmentId, segmentInRange, zero, one);
+  Value first =
+      arith::AddIOp::create(builder, loc, range.start, logicalThreadId);
+  return {{values, first, range.end, stride}, range.segmentId64, range.start};
+}
+
+Value flattenRows(OpBuilder &builder, Location loc, Value buffer) {
+  auto rows = dyn_cast<MemRefType>(buffer.getType());
+  if (!rows || rows.getRank() != 2)
+    return buffer;
+  Value rowCount = memref::DimOp::create(builder, loc, buffer, 0);
+  Value columnCount = memref::DimOp::create(builder, loc, buffer, 1);
+  Value elements = arith::MulIOp::create(builder, loc, rowCount, columnCount);
+  auto flat = MemRefType::get({ShapedType::kDynamic}, rows.getElementType());
+  return memref::ReinterpretCastOp::create(
+      builder, loc, flat, buffer, OpFoldResult(builder.getIndexAttr(0)),
+      {OpFoldResult(elements)}, {OpFoldResult(builder.getIndexAttr(1))});
 }
 
 /// Load the element at `index` of the buffer `base`. A pointer is addressed
@@ -252,6 +274,7 @@ void emitMapStore(OpBuilder &builder, Location loc, Type elementType,
   // A thread-dependent guard here would put a predicate around code the
   // barriers of the stages already made CTA-uniform. An out-of-range segment
   // ID needs no guard either, because its range is empty.
+  output = flattenRows(builder, loc, output);
   scf::ForOp::create(
       builder, loc, segment.first, segment.end, segment.stride, ValueRange(),
       [&](OpBuilder &loop, Location loopLoc, Value index, ValueRange) {

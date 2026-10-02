@@ -14,6 +14,11 @@ buffer and the output segment of a merge record against the segment count,
 and the merge ID of a persistent partial against the merge count. An index
 outside its bound is skipped. The tests for them place every buffer such an
 index could reach between guards and require the guards to be unchanged.
+
+The column kernel of rank-two values takes one more count, the feature
+count. Its row ranges are clamped to the row count like any range into
+values, and its column loop is bounded by the feature count, which is what
+keeps a load inside `[N, D]` and a store inside `[S, D]`.
 """
 
 import re
@@ -136,6 +141,17 @@ CLAMPED_KERNELS = [
     ),
     pytest.param(
         "_compile_split_merge_reduction_ptx", {}, {3: 1}, id="split-merge"
+    ),
+    # The column kernel clamps the rows of a segment against the row count.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {3: 1},
+        id="columns",
     ),
 ]
 
@@ -388,6 +404,162 @@ def test_direct_kernel_clamps_offsets_that_validation_rejects(
     )
 
     _assert_clamped(output, host_values, pairwise(offsets))
+
+
+def _column_kernel():
+    """Compile and load the column kernel of the rank-two sum."""
+    return _load(
+        "_compile_segmented_reduction_ptx",
+        entry="segmented_sum_r2",
+        block_size=128,
+        module_text=_semantic_module("sum", "f32", 2),
+        kernel_name="segmented_sum_r2",
+    )
+
+
+def _guarded_rows(row_count, columns):
+    """Build `[row_count, columns]` values between NaN guards.
+
+    Returns:
+        The device view the kernel reads, as its elements in row order, and
+        a host copy of the rows. Every value depends on its row and on its
+        column and is a small integer, so every column sum is exact and a
+        load from another row or column changes it.
+    """
+    row = torch.arange(row_count)[:, None]
+    column = torch.arange(columns)[None, :]
+    host_rows = ((row * 7 + column * 3) % 13 + 1).to(torch.float32)
+    return _guarded(host_rows.reshape(-1)), host_rows
+
+
+def _clamped_column_sums(host_rows, ranges):
+    """Sum each column over each row range after the clamp of the kernel."""
+    count = host_rows.shape[0]
+    sums = []
+    for start, end in ranges:
+        start = min(max(start, 0), count)
+        end = min(max(end, start), count)
+        sums.append(host_rows[start:end].sum(dim=0))
+    return torch.stack(sums)
+
+
+@requires_cuda
+@pytest.mark.parametrize("columns", [3, 129], ids=["few", "second-pass"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_column_kernel_clamps_row_ranges_that_validation_rejects(
+    offsets, columns
+):
+    """Keep every load inside `[N, D]` and every store inside `[S, D]`.
+
+    The launch goes through the driver, below the Python validation, with
+    row offsets that validation rejects. The values sit between NaN guards
+    at least as long as the values, and the output between canaries. A row
+    range that was not clamped to the row count would read a guard, or
+    leave the allocation, at a flat index of rows times columns.
+    """
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_rows = _guarded_rows(_VALUE_COUNT, columns)
+    device_offsets = _device_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count * columns)
+
+    _runtime._get_driver().launch_segmented(
+        _column_kernel(),
+        (segment_count,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            device_offsets.data_ptr(),
+            output.data_ptr(),
+            _VALUE_COUNT,
+            segment_count,
+            columns,
+        ),
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(segment_count, columns)
+    assert torch.isfinite(stored).all()
+    assert torch.equal(
+        stored, _clamped_column_sums(host_rows, pairwise(offsets))
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [1, 5, 127, 128, 129, 300])
+def test_column_kernel_stores_one_row_per_segment_and_nothing_else(
+    feature_count,
+):
+    """Bound the columns by the feature count and the blocks by the segments.
+
+    The grid holds two blocks more than there are segments, and a block
+    holds 128 threads whatever the number of columns. A block beyond the
+    segment count and a thread beyond the feature count store nothing: the
+    canaries after the last row and before the first are unchanged. The
+    output is exact, so no thread wrote the slot of another column either.
+    """
+    row_offsets = (0, 7, 7, 40)
+    segment_count = len(row_offsets) - 1
+    values, host_rows = _guarded_rows(row_offsets[-1], feature_count)
+    output, output_buffer = _canaried_output(segment_count * feature_count)
+
+    _runtime._get_driver().launch_segmented(
+        _column_kernel(),
+        (segment_count + 2,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(row_offsets).data_ptr(),
+            output.data_ptr(),
+            row_offsets[-1],
+            segment_count,
+            feature_count,
+        ),
+    )
+
+    torch.cuda.synchronize()
+    assert torch.equal(
+        output.cpu().reshape(segment_count, feature_count),
+        _clamped_column_sums(host_rows, pairwise(row_offsets)),
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, -129, _INT32_MIN])
+def test_column_kernel_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no column for a feature count that names none.
+
+    Host validation never passes such a count. The kernel compares its
+    column index with the count as a signed value, so a count of zero or
+    below starts no column loop: nothing is loaded and nothing is stored.
+    """
+    row_offsets = (0, 7, 40)
+    values, _ = _guarded_rows(row_offsets[-1], 4)
+    output, output_buffer = _canaried_output(2 * 4)
+
+    _runtime._get_driver().launch_segmented(
+        _column_kernel(),
+        (2,),
+        128,
+        torch.cuda.current_stream().cuda_stream,
+        (
+            values.data_ptr(),
+            _device_i32(row_offsets).data_ptr(),
+            output.data_ptr(),
+            row_offsets[-1],
+            2,
+            feature_count,
+        ),
+    )
+
+    _assert_only_stored(output_buffer, {})
 
 
 @requires_cuda

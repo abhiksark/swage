@@ -1,7 +1,7 @@
 // test/Dialect/Swage/invalid-roles.mlir
 // RUN: swage-opt %s --split-input-file --verify-diagnostics
 
-// expected-error @below {{swage.role<values> requires a rank-one memref, got 'i32'}}
+// expected-error @below {{swage.role<values> requires a memref of rank one or two, got 'i32'}}
 func.func @values_on_a_count(
     %values: i32 {swage.role = #swage.role<values>}) {
   return
@@ -9,9 +9,9 @@ func.func @values_on_a_count(
 
 // -----
 
-// expected-error @below {{swage.role<output> requires a rank-one memref, got 'memref<?x?xf32>'}}
-func.func @output_of_rank_two(
-    %output: memref<?x?xf32> {swage.role = #swage.role<output>}) {
+// expected-error @below {{swage.role<output> requires a memref of rank one or two, got 'memref<?x?x?xf32>'}}
+func.func @output_of_rank_three(
+    %output: memref<?x?x?xf32> {swage.role = #swage.role<output>}) {
   return
 }
 
@@ -67,8 +67,25 @@ func.func @unknown_argument_attribute(
 // -----
 
 func.func @unknown_role(
-    // expected-error @below {{expected ::mlir::swage::ArgumentRole to be one of: values, offsets, output, value_count, segment_count}}
+    // expected-error @below {{expected ::mlir::swage::ArgumentRole to be one of: values, offsets, output, value_count, segment_count, feature_count}}
     // expected-error @below {{failed to parse Swage_ArgumentRoleAttr parameter 'value'}}
     %values: memref<?xf32> {swage.role = #swage.role<input>}) {
+  return
+}
+
+// -----
+
+// expected-error @below {{swage.role<feature_count> requires a signless integer, got 'index'}}
+func.func @index_feature_count(
+    %feature_count: index {swage.role = #swage.role<feature_count>}) {
+  return
+}
+
+// -----
+
+// expected-error @below {{swage.role<feature_count> is declared by argument #0 and again by argument #1}}
+func.func @two_feature_counts(
+    %columns: i32 {swage.role = #swage.role<feature_count>},
+    %features: i32 {swage.role = #swage.role<feature_count>}) {
   return
 }

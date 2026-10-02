@@ -206,9 +206,77 @@ bool convertSegmentTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
   return true;
 }
 
+/// The column tile of rank-two values, at the insertion point of `body`,
+/// for the segment `segment` of a block that passed its guard: thread `t`
+/// reduces the columns `t`, `t + block`, and so on of the rows of the
+/// segment, one after the other, and stores each result itself.
+///
+/// A column is a strided run of the row-order values: it starts at
+/// `start * columns + column` and takes every `columns`-th element below
+/// `end * columns`, where `[start, end)` are the rows of the segment after
+/// their clamp to the row count. The indices are index values, 64 bits wide
+/// in a kernel, so the element count may exceed what an i32 holds.
+///
+/// Nothing is combined across threads: the consumers run with
+/// `ThreadCombination::None`, the kernel holds no shuffle, barrier, or
+/// shared memory, and a thread holds one scalar per reduction whatever the
+/// number of columns. The column loop is bounded by `feature_count`, which
+/// is all that keeps a store inside the row of its segment. Returns false
+/// when a consumer could not be legalized.
+bool convertColumnTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
+                       Location loc, Region &region, const SegmentSite &site,
+                       Value featureCount, Value segment, Value threadId,
+                       Value block) {
+  SegmentRange rows = emitSegmentRange(body, loc, site.offsets, site.valueCount,
+                                       segment, Value(), site.zero, site.one);
+  Value columns =
+      arith::IndexCastOp::create(body, loc, body.getIndexType(), featureCount);
+  Value firstRow = arith::MulIOp::create(body, loc, rows.start, columns);
+  Value end = arith::MulIOp::create(body, loc, rows.end, columns);
+  Value outputRow = arith::MulIOp::create(body, loc, segment, columns);
+  Block &consumersBlock = region.front();
+  Value extent;
+  if (consumersBlock.getNumArguments() == 2)
+    extent = arith::SubIOp::create(body, loc, rows.end, rows.start);
+
+  bool converted = true;
+  scf::ForOp::create(
+      body, loc, threadId, columns, block, ValueRange(),
+      [&](OpBuilder &loop, Location loopLoc, Value column, ValueRange) {
+        Value first = arith::AddIOp::create(loop, loopLoc, firstRow, column);
+        rewriter.replaceAllUsesWith(
+            consumersBlock.getArgument(0),
+            ValueRange{site.values, first, end, columns});
+        if (extent)
+          rewriter.replaceAllUsesWith(consumersBlock.getArgument(1), extent);
+        auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
+        SmallVector<Operation *> consumers = operationsOf(consumersBlock);
+        consumers.pop_back();
+        converted = succeeded(legalizeInPlace(rewriter, consumers));
+        if (converted) {
+          moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
+              rewriter, consumersBlock, loop.getInsertionBlock());
+          if (Value scalar = yield.getValue()) {
+            Value total = rewriter.getRemappedValue(scalar);
+            Type pointer = LLVM::LLVMPointerType::get(loop.getContext());
+            Value slot =
+                arith::AddIOp::create(loop, loopLoc, outputRow, column);
+            Value slot64 = arith::IndexCastOp::create(loop, loopLoc,
+                                                      loop.getI64Type(), slot);
+            Value address = LLVM::GEPOp::create(
+                loop, loopLoc, pointer, total.getType(), site.output, slot64);
+            LLVM::StoreOp::create(loop, loopLoc, total, address);
+          }
+        }
+        scf::YieldOp::create(loop, loopLoc);
+      });
+  return converted;
+}
+
 /// One block of threads per task: the kernel prelude, the guard on the task
 /// index, and the segment of the task. The direct kernel uses the block
-/// index as the segment ID; with a task buffer the ID is loaded from it.
+/// index as the segment ID; with a task buffer the ID is loaded from it. A
+/// task of `policy<column>` is the column tile of rank-two values.
 class TasksPattern : public OpConversionPattern<TasksOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -221,6 +289,7 @@ public:
       return rewriter.notifyMatchFailure(tasks, "not in a plan function");
     Location loc = tasks.getLoc();
     Value ids = adaptor.getIds();
+    Value featureCount = adaptor.getFeatureCount();
 
     Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
     Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
@@ -246,8 +315,12 @@ public:
     scf::IfOp::create(
         rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
           converted =
-              convertSegmentTask(rewriter, body, bodyLoc, tasks.getBody(), site,
-                                 ids, taskIndex, threadId, block);
+              featureCount
+                  ? convertColumnTask(rewriter, body, bodyLoc, tasks.getBody(),
+                                      site, featureCount, taskIndex, threadId,
+                                      block)
+                  : convertSegmentTask(rewriter, body, bodyLoc, tasks.getBody(),
+                                       site, ids, taskIndex, threadId, block);
           scf::YieldOp::create(body, bodyLoc);
         });
     if (!converted)

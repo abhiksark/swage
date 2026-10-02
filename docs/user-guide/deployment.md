@@ -60,8 +60,8 @@ PYTHONPATH=build/python_packages \
 artifact: /srv/swage/sm_86
 format_version: 2
 target: sm_86
-programs: segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, ragged_softmax
-kernels: 33
+programs: segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax
+kernels: 41
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -72,7 +72,7 @@ The command takes these options:
 |---|---|
 | `--target` | The NVPTX processor to compile for, one of the processors [Runtime and Environment](../reference/runtime-environment.md#launch-lifecycle) lists. Required. |
 | `--output` | The directory to create. It must not exist, and its parent must. Required. |
-| `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, or `softmax`. A kind alone names the reduction over float32 values, and the kind with `_f64` the one over float64 values. Repeat it to include several. Without it, all nine are included. |
+| `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with `_r2` appended, or `softmax`. A kind alone names the reduction over rank-one float32 values, `_f64` the one over float64 values, and `_r2` the one over rank-two values. Repeat it to include several. Without it, all seventeen are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one of the native build. See [The runtime library](#the-runtime-library). |
 
 These rules hold for every run:
@@ -106,7 +106,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 33 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, ragged_softmax, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 41 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, written by swage 0.5.1 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -138,16 +138,18 @@ still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
-An artifact for all nine programs holds thirty-five files:
+An artifact for all seventeen programs holds forty-three files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: four roles for each of the eight reductions, which are `segmented_sum`, `segmented_max`, `segmented_min`, and `segmented_mean` over float32 values and the same four names with `_f64` over float64 values, and one for `ragged_softmax` |
+| `<program>.<role>.ptx` | One kernel: four roles for each of the eight reductions over rank-one values, which are `segmented_sum`, `segmented_max`, `segmented_min`, and `segmented_mean` over float32 values and the same four names with `_f64` over float64 values; one role for each of the eight reductions over rank-two values, which are those eight names with `_r2`; and one for `ragged_softmax` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
-The roles of a reduction are `cta` for the pure CTA schedule, `mixed` for
-the fused kernel, and `partial` and `merge` for split segments. The `merge`
+The roles of a reduction over rank-one values are `cta` for the pure CTA
+schedule, `mixed` for the fused kernel, and `partial` and `merge` for split
+segments. A reduction over rank-two values has the one role `column`, the
+kernel in which a thread reduces a column. The `merge`
 kernel of a mean takes one buffer more than that of the other reductions:
 the range records of the partial tasks, from which it reads the length of
 each split segment. The softmax
@@ -214,10 +216,10 @@ The fields mean the following:
 | `format_version` | The version of this layout. The loader reads version 2 and refuses any other, also version 1, which an earlier `swage` wrote: write such an artifact again. |
 | `swage_version`, `source_revision`, `llvm_version` | What the native build that compiled the kernels recorded about itself: the `swage` version, the source revision, which ends in `-dirty` for a modified tree, and the LLVM release it links. They are information; the loader does not compare them. |
 | `target` | The NVPTX processor of every kernel. |
-| `target_description` | The widths the kernels were compiled for: the threads of one subgroup, of a block of the `cta` and `mixed` kernels, and of a block of the `partial` and `merge` kernels. The loader requires the two block widths this `swage` launches with. |
+| `target_description` | The widths the kernels were compiled for: the threads of one subgroup, of a block of the `cta`, `mixed`, and `column` kernels, and of a block of the `partial` and `merge` kernels. The loader requires the two block widths this `swage` launches with. |
 | `planning` | The limits the reductions were admitted under: the longest segment of warp work and the longest range of one CTA task. They are the limits `segment_reduce` plans with. |
 | `runtime` | The runtime library: its file, its SHA-256 digest, the machine it was built for, and the version of its C interface. |
-| `programs` | Each program by the name of its kernel function, with the SHA-256 digest of the program text it was compiled from. A reduction also records what the planning admission of the build host returned, which the schedule selection of a call reads. |
+| `programs` | Each program by the name of its kernel function, with the SHA-256 digest of the program text it was compiled from. A reduction over rank-one values also records what the planning admission of the build host returned, which the schedule selection of a call reads. A reduction over rank-two values has one kernel and is not planned. |
 | `kernels` | Each kernel: its program and role, the entry name in the PTX, the threads per block it must be launched with, its file and the SHA-256 digest of that file, and its launch arguments in order. |
 
 An argument has a role and a C type. A pointer type is a device pointer,

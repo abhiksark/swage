@@ -27,7 +27,11 @@ def _no_native_bindings(monkeypatch):
 
 
 class _Tensor:
-    """The metadata of one rank-one tensor, as the checks read it."""
+    """The metadata of one tensor, as the checks read it.
+
+    A tensor of rank two has `count` rows of one column, unless `columns`
+    gives it another width.
+    """
 
     def __init__(
         self,
@@ -37,6 +41,7 @@ class _Tensor:
         dtype=None,
         pointer=0x1000,
         rank=1,
+        columns=1,
         contiguous=True,
         negative=False,
         requires_grad=False,
@@ -45,7 +50,8 @@ class _Tensor:
         self.dtype = torch.float32 if dtype is None else dtype
         self.device = device
         self.requires_grad = requires_grad
-        self._count = count
+        self.shape = (count, columns, *(1,) * (rank - 2))[:rank]
+        self._count = count * (columns if rank > 1 else 1)
         self._pointer = pointer
         self._rank = rank
         self._contiguous = contiguous
@@ -427,6 +433,61 @@ def test_a_float64_reduction_takes_a_float64_out(monkeypatch):
     # A float64 out passes the `out` checks and stops at the missing build.
     with pytest.raises(RuntimeError, match="requires the build-tree"):
         swage.segment_reduce(values, offsets, "sum", out=wide)
+
+
+@pytest.mark.parametrize("rank", [0, 3])
+def test_segment_reduce_rejects_values_of_another_rank_without_bindings(
+    rank, monkeypatch
+):
+    """Name the two ranks of values on a wheel-only install too."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, rank=rank)
+
+    with pytest.raises(TypeError, match="^values must have rank one or two$"):
+        swage.segment_reduce(values, offsets, "sum")
+
+
+@pytest.mark.parametrize(
+    ("out", "found"),
+    [
+        ({"count": 4, "rank": 2, "columns": 2}, r"\(4, 2\)"),
+        ({"count": 5, "rank": 2, "columns": 3}, r"\(5, 3\)"),
+        ({"count": 12}, r"\(12,\)"),
+        ({"count": 4, "rank": 3, "columns": 3}, r"\(4, 3, 1\)"),
+    ],
+)
+def test_out_of_rows_has_one_row_per_segment_and_one_column_per_feature(
+    out, found, monkeypatch
+):
+    """State the shape a result of `[N, D]` values has, and the one found."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, rank=2, columns=3)
+    count = out.pop("count")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^out must have shape \(4, 3\), one row per segment and one "
+            rf"column per feature; found {found}$"
+        ),
+    ):
+        swage.segment_reduce(
+            values, offsets, "sum", out=_Tensor(torch, count, **out)
+        )
+
+
+def test_rank_two_values_reach_the_missing_bindings_error(monkeypatch):
+    """Check `[N, D]` values and their `[S, D]` out before the bindings."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, rank=2, columns=3)
+    out = _Tensor(torch, 4, rank=2, columns=3, pointer=0x9000)
+
+    for keywords in ({}, {"out": out}):
+        with pytest.raises(RuntimeError, match="requires the build-tree"):
+            swage.segment_reduce(values, offsets, "mean", **keywords)
 
 
 def test_out_size_names_what_one_element_belongs_to(monkeypatch):

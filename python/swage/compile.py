@@ -43,6 +43,14 @@ _PROGRAMS = (
     "max_f64",
     "min_f64",
     "mean_f64",
+    "sum_r2",
+    "max_r2",
+    "min_r2",
+    "mean_r2",
+    "sum_f64_r2",
+    "max_f64_r2",
+    "min_f64_r2",
+    "mean_f64_r2",
     "softmax",
 )
 
@@ -61,21 +69,25 @@ def _program(name):
     """Return the kernel name, module text, and planning of one program.
 
     Args:
-        name: A name of `_PROGRAMS`: a kind of the reduction, which is
-            its f32 program, the kind followed by `_f64`, or `"softmax"`.
+        name: A name of `_PROGRAMS`: a kind of the reduction, which is its
+            f32 program over rank-one values, followed by `_f64` for
+            float64 values and by `_r2` for rank-two values, or
+            `"softmax"`.
 
     Returns:
         The name of the kernel function, the semantic module text, and
-        whether the program runs through the planned path.
+        whether the program runs through the planned path. A program over
+        rank-two values has one kernel and is not planned.
     """
     if name == "softmax":
         return "ragged_softmax", _qualification._SOFTMAX_MODULE, False
-    kind, _, element = name.partition("_")
-    element = element or "f32"
+    kind, *suffixes = name.split("_")
+    element = "f64" if "f64" in suffixes else "f32"
+    rank = 2 if "r2" in suffixes else 1
     return (
-        _qualification._reduction_kernel(kind, element),
-        _qualification._semantic_module(kind, element),
-        True,
+        _qualification._reduction_kernel(kind, element, rank),
+        _qualification._semantic_module(kind, element, rank),
+        rank == 1,
     )
 
 

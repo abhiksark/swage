@@ -42,6 +42,7 @@ from swage._segmented_qualification import (
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _reduction_kernel,
+    _semantic_module,
     launch_gpu,
     launch_softmax_gpu,
 )
@@ -1082,6 +1083,41 @@ def test_mean_kernels_divide_once_per_task_and_never_per_chunk(
         assert counts.get(convert, 0) == regions, label
         assert counts.get(divide, 0) == regions, label
         assert counts.get(f"add.rn.{element}", 0) > 0, label
+
+
+@pytest.mark.parametrize("target", ["sm_80", "sm_86"])
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
+def test_column_kernels_hold_arithmetic_of_their_element_type(
+    kind, element, target
+):
+    """The kernel of rank-two values rounds to nearest in one width.
+
+    A column sum is one `add.rn` per row and a mean adds one conversion of
+    the row count and one division. Nothing is contracted, flushed, or of
+    the other width. The address arithmetic of a column, the row times the
+    number of columns, is integer arithmetic and no float instruction.
+    """
+    with ir.Context() as context:
+        swage_dialect.register_dialects(context)
+        module = ir.Module.parse(_semantic_module(kind, element, 2))
+        _, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name=_reduction_kernel(kind, element, 2),
+            block_size=128,
+            target=target,
+        )
+
+    violations, counts = _float_arithmetic(ptx, element)
+
+    assert not violations
+    adds = counts.get(f"add.rn.{element}", 0)
+    assert adds == (1 if kind in ("sum", "mean") else 0)
+    mean = 1 if kind == "mean" else 0
+    assert counts.get(f"div.rn.{element}", 0) == mean
+    assert counts.get(f"cvt.rn.{element}.s32", 0) == mean
+    if kind in ("max", "min"):
+        assert any(name.startswith(f"{kind}.") for name in counts)
 
 
 @_needs_cuda

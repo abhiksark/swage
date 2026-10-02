@@ -44,6 +44,8 @@ ThreadCombination combinationOf(TaskPolicy policy) {
   case TaskPolicy::CTA:
     return ThreadCombination::Block;
   case TaskPolicy::Sequential:
+  case TaskPolicy::Column:
+    // One thread reduces the whole range: the oracle, and a column.
     return ThreadCombination::None;
   }
   llvm_unreachable("unknown task policy");

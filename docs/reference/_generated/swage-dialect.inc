@@ -36,8 +36,14 @@ func.func @segmented_sum(
 - `segment_count` is the extent of `swage.segment_id 0` and the bound of
   every segment index a lowering loads.
 
+A function over rank-two values declares a sixth role:
+
+- `feature_count` is the extent of `swage.segment_id 1`, the number of
+  columns of `values` and of `output`. `value_count` is then the number
+  of rows.
+
 The dialect verifies that a role sits on an argument of a fitting type (a
-rank-one memref for a buffer, with signless integer elements for
-`offsets`, and a signless integer for a count) and that no role is
-declared twice. Which roles a function must declare, and with which
+memref of rank one or two for `values` and `output`, a rank-one memref of
+signless integers for `offsets`, and a signless integer for a count) and
+that no role is declared twice. Which roles a function must declare, and with which
 element and count types, is decided by the lowering that admits it.
