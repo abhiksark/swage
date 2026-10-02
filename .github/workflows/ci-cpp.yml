@@ -209,3 +209,97 @@ jobs:
 
       - name: Run C++ unit tests under sanitizers
         run: ninja -C build-sanitize check-swage-unit
+
+  # Builds the swage-compiler-native wheel with scripts/build_native_wheel.sh,
+  # installs it with the pure Python wheel into a fresh virtual environment,
+  # and runs the checks that need no GPU against that install. The wheels are
+  # uploaded as a workflow artifact. Nothing here publishes them.
+  #
+  # This job has never run: it was added on a branch that was not pushed. Its
+  # commands were run by hand on one machine, outside a runner.
+  native-wheel:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SWAGE_LLVM_HOME: /home/runner/.swage/llvm
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # build-and-test saved or restored this entry before this job started.
+      - name: Restore LLVM install tree
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /home/runner/.swage/llvm/install-${{ needs.build-and-test.outputs.llvm-tag }}
+          key: ${{ needs.build-and-test.outputs.llvm-cache-key }}
+          fail-on-cache-miss: true
+
+      # The lock holds the build backend, nanobind, numpy, ninja, and twine.
+      - name: Install hash-locked tools
+        run: python -m pip install --require-hashes -r requirements-ci.txt
+
+      - name: Build the pure Python wheel
+        run: python -m build --wheel --no-isolation
+
+      - name: Build the native wheel
+        run: ./scripts/build_native_wheel.sh
+
+      - name: Check the wheel metadata
+        run: python -m twine check --strict dist/*.whl
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: swage-wheels-cp313-linux-x86_64
+          path: dist/*.whl
+          if-no-files-found: error
+
+      # The native wheel requires the pure wheel of the same version, and
+      # --no-index makes pip take it from dist/ instead of the older release
+      # that carries the same version number. The binding tests need pytest
+      # and numpy from the lock and import torch.
+      - name: Install the wheels into a fresh environment
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          python="$RUNNER_TEMP/wheel-env/bin/python"
+          "$python" -m pip install --require-hashes -r requirements-ci.txt
+          "$python" -m pip install torch==2.13.0+cpu \
+            --index-url https://download.pytorch.org/whl/cpu/
+          "$python" -m pip install --no-index --find-links dist \
+            swage-compiler-native
+
+      # The tests and the examples are copied out of the checkout and run
+      # from there, so only the installed packages can be imported. Every
+      # CUDA test skips on this runner.
+      - name: Check the installed wheels without the checkout
+        run: |
+          revision="$(git rev-parse HEAD)"
+          python="$RUNNER_TEMP/wheel-env/bin/python"
+          proof="$RUNNER_TEMP/wheel-proof"
+          mkdir -p "$proof/python/tests"
+          cp -r python/tests/mlir "$proof/python/tests/mlir"
+          cp -r examples "$proof/examples"
+          cd "$proof"
+          "$python" -m swage.env
+          "$python" - "$revision" <<'PY'
+          import pathlib
+          import sys
+
+          import swage
+          from swage import env
+
+          report = env.report()
+          installed = pathlib.Path(sys.prefix)
+          for field in ("swage_file", "mlir_swage_file"):
+              assert pathlib.Path(report[field]).is_relative_to(installed), report
+          assert report["native_version"] == swage.__version__, report
+          assert report["native_revision"] == sys.argv[1], report
+          assert report["llvm_linked"], report
+          PY
+          "$python" examples/emit_fixed_vector_add.py
+          "$python" -m pytest -q python/tests/mlir
