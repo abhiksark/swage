@@ -1,7 +1,6 @@
 # python/swage/_segmented_qualification.py
 """Private qualification runner for native segmented programs."""
 
-import hashlib
 import pathlib
 import re
 import shutil
@@ -29,8 +28,10 @@ _LOWERING_PIPELINE = (
 # One memo for every kernel this module compiles and loads. PTX is keyed by
 # the native compile function, the semantic module text, and every code
 # generation option (kernel name, block size, target). Loaded handles are
-# keyed per driver by CUDA context, PTX digest, and kernel name, so a hit
-# never crosses a context or a target.
+# keyed per driver by CUDA context, PTX text, and kernel name, so a hit
+# never crosses a context or a target. Python keeps the hash of a string, and
+# the PTX memo returns the same string for the same kernel, so neither lookup
+# reads the PTX text again.
 #
 # Both memos are bounded: each keeps `_runtime._CACHE_LIMIT` kernels and then
 # forgets its oldest. A forgotten kernel is compiled or loaded again on its
@@ -373,6 +374,59 @@ def _refuse_rebound_storage(binding, prepared):
             )
 
 
+# The NVPTX processor of each CUDA device index. A device keeps its compute
+# capability for as long as the process runs.
+_targets = {}
+
+
+def _target(torch, device_index):
+    """Return the NVPTX processor name of one CUDA device, looked up once."""
+    target = _targets.get(device_index)
+    if target is None:
+        major, minor = torch.cuda.get_device_capability(device_index)
+        target = _targets[device_index] = f"sm_{major}{minor}"
+    return target
+
+
+# The segment ids 0, 1, 2, ... of each CUDA device index, which a launch of
+# one task per segment reads as its task list. They depend on the segment
+# count only, so one tensor per device serves every preparation: it is
+# uploaded once, complete when the upload returns, and only read afterwards.
+# It holds 4 MiB of device memory per device for as long as the process runs.
+_IDENTITY_LIMIT = 1 << 20
+_identity_memo = {}
+
+
+def _identity_ids(torch, device, count):
+    """Return a tensor that starts with the segment ids 0 to `count - 1`.
+
+    Args:
+        torch: The PyTorch module.
+        device: CUDA device of the prepared tensors.
+        count: Number of ids a launch reads, the segment count of the
+            preparation.
+
+    Returns:
+        An int32 tensor on the device with at least `count` ascending ids.
+        Up to `_IDENTITY_LIMIT` ids it is the shared tensor of the device,
+        which needs no kernel and no wait. A longer list is filled on the
+        device for this preparation alone, asynchronously, on the current
+        stream.
+    """
+    if count > _IDENTITY_LIMIT:
+        return torch.arange(count, dtype=torch.int32, device=device)
+    ids = _identity_memo.get(device.index)
+    if ids is None:
+        import numpy
+
+        ids = _identity_memo[device.index] = torch.tensor(
+            numpy.arange(_IDENTITY_LIMIT, dtype=numpy.int32),
+            dtype=torch.int32,
+            device=device,
+        )
+    return ids
+
+
 def _compile_once(compile_ptx, module_text, *, module=None, **options):
     """Compile one kernel at most once per process and return its PTX.
 
@@ -464,11 +518,7 @@ def _load_once(driver, ptx, kernel_name):
     current_context = getattr(driver, "current_context", None)
     if current_context is None:
         return driver.load(ptx, kernel_name)
-    key = (
-        current_context(),
-        hashlib.sha256(ptx.encode()).hexdigest(),
-        kernel_name,
-    )
+    key = (current_context(), ptx, kernel_name)
     loaded = _load_memo.get(driver)
     if loaded is None:
         with _memo_lock:
@@ -613,8 +663,7 @@ def launch_gpu(values, offsets, output, kind, block_size=128):
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = f"segmented_{kind}"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
@@ -691,8 +740,7 @@ def _launch_segmented_sum_tasks(
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
@@ -787,16 +835,23 @@ def _has_small_element_program(module):
     return eligible
 
 
-# One parsed module per semantic module text, with the result of inspecting
-# its element program. Both depend only on the text, so a preparation with
-# new offsets reuses them. Threads share an entry, which is safe because
-# classification holds the GIL and leaves the module unchanged. Compiles do
-# not use these modules: on a miss `_compile_once` parses the text in a
-# context of its own, so a compile never runs on a context shared here.
-# ponytail: nothing is evicted. One context is kept per distinct program
-# text a process prepares; bound it with the kernel memo if a process
-# generates programs without bound.
-_module_memo = {}
+# What a preparation needs to know about a program, none of which depends on
+# the offsets. `_module_memo` keeps one parsed module per semantic module
+# text with the result of inspecting its element program. `_admitted` keeps
+# that result per program text and pair of planning limits the planning pass
+# has accepted, so the pass runs once per program and limits and a later
+# preparation only classifies its offsets.
+#
+# Threads share a parsed module, which is safe because the planning pass
+# holds the GIL and leaves the module unchanged. Compiles do not use these
+# modules: on a miss `_compile_once` parses the text in a context of its
+# own, so a compile never runs on a context shared here.
+#
+# Both memos are bounded like the kernel memos: each keeps
+# `_runtime._CACHE_LIMIT` entries and then forgets its oldest, which is
+# parsed or admitted again on its next use. A hit takes no lock.
+_module_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
+_admitted = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
 
 
 def _parsed_module(module_text):
@@ -818,10 +873,105 @@ def _parsed_module(module_text):
         context = ir.Context()
         swage.register_dialects(context)
         module = ir.Module.parse(module_text, context=context)
-        entry = _module_memo.setdefault(
-            module_text, (module, _has_small_element_program(module))
-        )
+        entry = (module, _has_small_element_program(module))
+        with _memo_lock:
+            _module_memo[module_text] = entry
     return entry
+
+
+def _admit_program(module_text, warp_max_elements, cta_chunk_elements):
+    """Admit one program for planning under one pair of limits, once.
+
+    The planning pass decides whether a program can be classified and
+    whether the limits are valid. Neither depends on the offsets, so the
+    pass runs at the first preparation of a program with a pair of limits,
+    on a layout without segments. Later preparations classify their offsets
+    without the module.
+
+    Args:
+        module_text: Semantic module text that identifies the program.
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+
+    Returns:
+        Whether `_has_small_element_program` holds for the program.
+
+    Raises:
+        ValueError: The planning pass rejects the program or the limits. A
+            rejection is not kept, so every preparation raises it again.
+    """
+    key = (module_text, warp_max_elements, cta_chunk_elements)
+    small_element_program = _admitted.get(key)
+    if small_element_program is None:
+        import numpy
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native_swage,
+        )
+
+        module, small_element_program = _parsed_module(module_text)
+        native_swage._materialize_segmented_plan(
+            module,
+            offsets=numpy.zeros(1, dtype=numpy.int32),
+            value_count=0,
+            segment_count=0,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
+        )
+        with _memo_lock:
+            _admitted[key] = small_element_program
+    return small_element_program
+
+
+def _classifying_validator(warp_max_elements, cta_chunk_elements):
+    """Return an offsets validator that classifies the offsets it admits.
+
+    The native classifier checks everything `_validate_offsets` checks about
+    a host int32 array, so a preparation walks valid offsets once, there,
+    instead of once to validate and once to classify. The classifier runs at
+    the point where `_validate_shapes` validates the offsets, which keeps
+    the order of every error.
+
+    When the classifier refuses, `_validate_offsets` runs and raises its own
+    message for offsets it refuses too. Offsets it admits were refused for
+    the planning limits or for the size of the plan; the classification is
+    then left out, and the caller classifies again after it has admitted
+    the program, which reports the limits first.
+
+    Args:
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+
+    Returns:
+        The validator, with the signature of `_validate_offsets`, and a list
+        that holds the result of `_classify_segments` once the validator
+        has admitted and classified the offsets.
+    """
+    classification = []
+
+    def validate(host_offsets, value_count, output_count):
+        from mlir_swage._mlir_libs._swageDialectsNanobind import (
+            swage as native_swage,
+        )
+
+        segment_count = len(host_offsets) - 1
+        try:
+            classification.append(
+                native_swage._classify_segments(
+                    host_offsets,
+                    value_count=value_count,
+                    segment_count=segment_count,
+                    warp_max_elements=warp_max_elements,
+                    cta_chunk_elements=cta_chunk_elements,
+                )
+            )
+        except (TypeError, ValueError):
+            return _validate_offsets(host_offsets, value_count, output_count)
+        if type(output_count) is not int or output_count < segment_count:
+            classification.clear()
+            return _validate_offsets(host_offsets, value_count, output_count)
+        return segment_count
+
+    return validate, classification
 
 
 def _prepare_planned_reduction(
@@ -869,8 +1019,11 @@ def _prepare_planned_reduction(
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
+    validate, classification = _classifying_validator(
+        warp_max_elements, cta_chunk_elements
+    )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, _validate_offsets
+        values, offsets, output, validate
     )
     offsets_version = _offsets_version(offsets)
     # A launch advances the output version, which the offsets may share.
@@ -880,28 +1033,35 @@ def _prepare_planned_reduction(
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
 
-    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
-    module, small_element_program = _parsed_module(module_text)
-    warp_ids, cta_ids, partial_records, merge_records = (
-        native_swage._materialize_segmented_plan(
-            module,
-            offsets=host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
-        )
+    target = _target(torch, torch.cuda.current_device())
+    small_element_program = _admit_program(
+        module_text, warp_max_elements, cta_chunk_elements
     )
-    partial_count = len(partial_records) // 2
-    merge_count = len(merge_records) // 3
-    direct_warp_count = len(warp_ids)
-    direct_cta_count = len(cta_ids)
+    if not classification:
+        # The classifier refused offsets that are valid. The program and
+        # the limits are admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
+        )
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, the
+    # merge records, and the merge of every partial task, in that order.
+    (
+        records,
+        direct_warp_count,
+        direct_cta_count,
+        partial_count,
+        merge_count,
+    ) = classification[0]
     direct_count = direct_warp_count + direct_cta_count
     # ponytail: a measured two-chunk rule, not a general cost model.
     # Retain splitting for sparse batches, larger tails, or mixed lengths.
@@ -912,7 +1072,8 @@ def _prepare_planned_reduction(
         and segment_count > 0
         and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
         and merge_count == segment_count
-        and int(numpy.diff(host_offsets).max()) <= 2 * cta_chunk_elements
+        and int((host_offsets[1:] - host_offsets[:-1]).max())
+        <= 2 * cta_chunk_elements
         and segment_count
         >= torch.cuda.get_device_properties(
             values.device
@@ -986,29 +1147,25 @@ def _prepare_planned_reduction(
         )
     device = offsets.device
     device_index = device.index
-    all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
-    mixed_tasks = None
-    if direct_count:
-        mixed_tasks = torch.tensor(
-            numpy.concatenate((warp_ids, cta_ids)),
-            dtype=torch.int32,
-            device=device,
-        )
-    partial_ranges = None
-    merge_ranges = None
-    scratch = None
-    if partial_count and not use_direct_cta:
-        partial_ranges = torch.tensor(
-            partial_records, dtype=torch.int32, device=device
-        )
-        merge_ranges = torch.tensor(
-            merge_records, dtype=torch.int32, device=device
-        )
-        scratch = torch.empty(
-            partial_count, dtype=torch.float32, device=device
-        )
+    all_tasks = _identity_ids(torch, device, segment_count)
+    # One upload carries every record the mixed policy launches. The fused
+    # kernel reads the warp ids and then the CTA ids at the start of the
+    # buffer; the partial ranges and the merge records follow them. The
+    # direct-CTA selection launches none of them: every segment is split
+    # then, so there is no direct id either.
+    task_records = None
+    mixed_pointer = partial_pointer = merge_pointer = scratch = None
+    if len(records) and not use_direct_cta:
+        task_records = torch.tensor(records, dtype=torch.int32, device=device)
+        mixed_pointer = task_records.data_ptr()
+        partial_pointer = mixed_pointer + 4 * direct_count
+        merge_pointer = partial_pointer + 8 * partial_count
+        if partial_count:
+            scratch = torch.empty(
+                partial_count, dtype=torch.float32, device=device
+            )
     tasks_ready = torch.cuda.Event()
-    tasks_ready.record(torch.cuda.current_stream())
+    tasks_ready.record(torch.cuda.current_stream(device_index))
 
     tasks_ready_complete = False
 
@@ -1033,27 +1190,26 @@ def _prepare_planned_reduction(
         else:
             stream.wait_event(tasks_ready)
 
-    def submit(function, block_size, task_ids, stream, storage):
-        task_count = task_ids.numel()
-        if task_count == 0:
-            return None
+    def submit(function, block_size, stream, storage):
+        # One task per segment, in segment order: the task list is the
+        # first `segment_count` ids of `all_tasks`.
         wait_for_tasks(stream)
         driver.launch_segmented_tasks(
             function,
-            (task_count,),
+            (segment_count,),
             block_size,
             stream.cuda_stream,
             (
                 storage[0],
                 storage[3],
                 storage[6],
-                task_ids.data_ptr(),
+                all_tasks.data_ptr(),
                 value_count,
-                task_count,
+                segment_count,
                 segment_count,
             ),
         )
-        for tensor in (values, offsets, output, task_ids):
+        for tensor in (values, offsets, output, all_tasks):
             tensor.record_stream(stream)
         wrote_output()
         return None
@@ -1087,26 +1243,14 @@ def _prepare_planned_reduction(
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            warp_function,
-            _WARP_BLOCK,
-            all_tasks,
-            current_stream(),
-            storage,
-        )
+        return submit(warp_function, _WARP_BLOCK, current_stream(), storage)
 
     def cta():
         _require_unchanged_offsets(offsets, offsets_version)
         storage = _storage_binding(values, offsets, output)
         if storage != prepared_storage:
             _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            cta_function,
-            _CTA_BLOCK,
-            all_tasks,
-            current_stream(),
-            storage,
-        )
+        return submit(cta_function, _CTA_BLOCK, current_stream(), storage)
 
     def mixed():
         _require_unchanged_offsets(offsets, offsets_version)
@@ -1126,14 +1270,14 @@ def _prepare_planned_reduction(
                     values_pointer,
                     offsets_pointer,
                     output_pointer,
-                    mixed_tasks.data_ptr(),
+                    mixed_pointer,
                     value_count,
                     direct_warp_count,
                     direct_cta_count,
                     segment_count,
                 ),
             )
-            for tensor in (values, offsets, output, mixed_tasks):
+            for tensor in (values, offsets, output, task_records):
                 tensor.record_stream(stream)
         if partial_count:
             driver.launch_segmented(
@@ -1143,13 +1287,13 @@ def _prepare_planned_reduction(
                 stream.cuda_stream,
                 (
                     values_pointer,
-                    partial_ranges.data_ptr(),
+                    partial_pointer,
                     scratch.data_ptr(),
                     value_count,
                     partial_count,
                 ),
             )
-            for tensor in (values, offsets, partial_ranges, scratch):
+            for tensor in (values, offsets, task_records, scratch):
                 tensor.record_stream(stream)
             driver.launch_segmented(
                 merge_function,
@@ -1159,13 +1303,13 @@ def _prepare_planned_reduction(
                 (
                     scratch.data_ptr(),
                     output_pointer,
-                    merge_ranges.data_ptr(),
+                    merge_pointer,
                     partial_count,
                     merge_count,
                     segment_count,
                 ),
             )
-            for tensor in (offsets, output, merge_ranges, scratch):
+            for tensor in (offsets, output, task_records, scratch):
                 tensor.record_stream(stream)
         wrote_output()
         return None
@@ -1202,8 +1346,11 @@ def _prepare_persistent_sum(
     ):
         raise ValueError("resident_blocks must be a positive u32")
     torch = _runtime._import_torch()
+    validate, classification = _classifying_validator(
+        warp_max_elements, cta_chunk_elements
+    )
     value_count, segment_count, host_offsets = _validate_shapes(
-        values, offsets, output, _validate_offsets
+        values, offsets, output, validate
     )
     offsets_version = _offsets_version(offsets)
     # A launch advances the output version, which the offsets may share.
@@ -1213,25 +1360,30 @@ def _prepare_persistent_sum(
     # also carries the data pointers that the launch passes to the kernel.
     prepared_storage = _storage_binding(values, offsets, output)
 
-    import numpy
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
-    module, _ = _parsed_module(module_text)
-    warp_ids, cta_ids, partial_records, merge_records = (
-        native_swage._materialize_segmented_plan(
-            module,
-            offsets=host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
+    _admit_program(module_text, warp_max_elements, cta_chunk_elements)
+    if not classification:
+        # The classifier refused offsets that are valid. The program and
+        # the limits are admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=warp_max_elements,
+                cta_chunk_elements=cta_chunk_elements,
+            )
         )
+    # One buffer holds the warp ids, the CTA ids, the partial ranges, the
+    # merge records, and the merge of every partial task, in that order.
+    records, warp_count, cta_count, partial_count, merge_count = (
+        classification[0]
     )
     if segment_count == 0:
 
@@ -1250,12 +1402,9 @@ def _prepare_persistent_sum(
         target=target,
     )
 
-    partial_count = len(partial_records) // 2
-    merge_count = len(merge_records) // 3
     warp_slots = _PERSISTENT_BLOCK // _WARP_BLOCK
     work_groups = (
-        len(cta_ids) + partial_count + (len(warp_ids) + warp_slots - 1)
-        // warp_slots
+        cta_count + partial_count + (warp_count + warp_slots - 1) // warp_slots
     )
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if _PERSISTENT_BLOCK > properties.max_threads_per_block:
@@ -1267,40 +1416,25 @@ def _prepare_persistent_sum(
         resident_blocks = properties.multi_processor_count * 2
     active_blocks = min(resident_blocks, work_groups)
 
-    # A merge record is [segment_id, partial_begin, partial_end]. The
-    # partial ranges must follow one another from zero to the partial count;
-    # repeating each merge id by the length of its range then gives the
-    # merge of every partial task, which the kernel indexes unchecked.
-    range_begins = numpy.append(merge_records[1::3], partial_count)
-    range_ends = numpy.append(0, merge_records[2::3])
-    if (range_begins < range_ends).any():
-        raise RuntimeError("partial task belongs to multiple merges")
-    if (range_begins > range_ends).any():
-        raise RuntimeError("partial task has no merge dependency")
-    partial_merge_ids = numpy.repeat(
-        numpy.arange(merge_count, dtype=numpy.int32),
-        merge_records[2::3] - merge_records[1::3],
-    )
-
     driver = _runtime._get_driver()
     _, function = _load_once(driver, ptx, kernel_name)
     device = offsets.device
     device_index = device.index
-    warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
-    cta_tasks = torch.tensor(cta_ids, dtype=torch.int32, device=device)
-    partial_ranges = torch.tensor(
-        partial_records, dtype=torch.int32, device=device
-    )
-    partial_merges = torch.tensor(
-        partial_merge_ids, dtype=torch.int32, device=device
-    )
-    merge_ranges = torch.tensor(
-        merge_records, dtype=torch.int32, device=device
-    )
+    # One upload carries every record. The kernel takes one pointer per
+    # list; the classifier wrote the merge of every partial task behind the
+    # merge records.
+    task_records = torch.tensor(records, dtype=torch.int32, device=device)
+    warp_pointer = task_records.data_ptr()
+    cta_pointer = warp_pointer + 4 * warp_count
+    partial_pointer = cta_pointer + 4 * cta_count
+    merge_pointer = partial_pointer + 8 * partial_count
+    partial_merges_pointer = merge_pointer + 12 * merge_count
     scratch = torch.empty(partial_count, dtype=torch.float32, device=device)
-    counters = torch.zeros(3 + merge_count, dtype=torch.int32, device=device)
+    # Every launch zeroes the counters before it enqueues the kernel, so
+    # they need no initial value.
+    counters = torch.empty(3 + merge_count, dtype=torch.int32, device=device)
     tasks_ready = torch.cuda.Event()
-    tasks_ready.record(torch.cuda.current_stream())
+    tasks_ready.record(torch.cuda.current_stream(device_index))
     tasks_ready_complete = False
     current_context = getattr(driver, "current_context", None)
     prepared_context = None if current_context is None else current_context()
@@ -1392,16 +1526,16 @@ def _prepare_persistent_sum(
                     values_pointer,
                     offsets_pointer,
                     output_pointer,
-                    warp_tasks.data_ptr(),
-                    cta_tasks.data_ptr(),
-                    partial_ranges.data_ptr(),
-                    partial_merges.data_ptr(),
-                    merge_ranges.data_ptr(),
+                    warp_pointer,
+                    cta_pointer,
+                    partial_pointer,
+                    partial_merges_pointer,
+                    merge_pointer,
                     scratch.data_ptr(),
                     counters.data_ptr(),
                     value_count,
-                    len(warp_ids),
-                    len(cta_ids),
+                    warp_count,
+                    cta_count,
                     partial_count,
                     merge_count,
                     segment_count,
@@ -1411,11 +1545,7 @@ def _prepare_persistent_sum(
                 values,
                 offsets,
                 output,
-                warp_tasks,
-                cta_tasks,
-                partial_ranges,
-                partial_merges,
-                merge_ranges,
+                task_records,
                 scratch,
                 counters,
             ):
@@ -1432,8 +1562,8 @@ def _prepare_persistent_sum(
     return _PreparedPersistentSum(
         launch,
         active_blocks,
-        len(warp_ids),
-        len(cta_ids),
+        warp_count,
+        cta_count,
         partial_count,
         merge_count,
     )
@@ -1465,8 +1595,7 @@ def launch_softmax_gpu(values, offsets, output, block_size=128):
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "ragged_softmax"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,

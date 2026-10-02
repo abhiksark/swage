@@ -8,7 +8,8 @@
 //
 // Compiles a Swage semantic module to NVPTX assembly and classifies segment
 // metadata into task records. The contract below holds for every function in
-// this header.
+// this header that takes a module. swageClassifySegments takes none; its own
+// comment states what differs.
 //
 // Module and context
 //   The module is read and never modified: a call clones it and lowers the
@@ -139,6 +140,44 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
     void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData);
+
+/// Receives the records of one classification in one buffer: `warpCount`
+/// warp segment ids, then `ctaCount` CTA segment ids, then `partialCount`
+/// [begin, end] pairs, then `mergeCount`
+/// [segment_id, partial_begin, partial_end] triples, then for each of the
+/// `partialCount` partial tasks the index of its merge triple. The counts
+/// are in ids, pairs, and triples, so the buffer holds
+/// `warpCount + ctaCount + 3 * partialCount + 3 * mergeCount` values.
+typedef void (*SwageTaskRecordsCallback)(const int32_t *records,
+                                         intptr_t warpCount, intptr_t ctaCount,
+                                         intptr_t partialCount,
+                                         intptr_t mergeCount, void *userData);
+
+/// Classifies segment offsets into the records swageMaterializeSegmentedPlan
+/// produces for the same offsets and limits, without a module, and adds the
+/// merge index of every partial task, which follows from those records.
+///
+/// A program is admitted for planning by swageMaterializeSegmentedPlan, which
+/// runs the planning pass on its module and checks the two limits against
+/// it. That result depends on the program and the limits only, so a caller
+/// that classifies many layouts of one program admits it once, for example
+/// with a layout of no segments, and classifies each layout here.
+///
+/// The call reads `offsetCount` i32 offsets, which must equal
+/// `segmentCount + 1`, and nothing else: it takes no module, uses no MLIR
+/// context, and keeps no state, so calls may run on any threads at the same
+/// time. The offsets must not change during the call.
+///
+/// On success `recordsCallback` runs once, under the callback rules above,
+/// and `errorCallback` does not run. On failure `recordsCallback` does not
+/// run, and `errorCallback`, which may be null, receives the reason: there
+/// is no context to carry a diagnostic. The metadata reasons are the ones
+/// swageMaterializeSegmentedPlan reports for the same input.
+MLIR_CAPI_EXPORTED MlirLogicalResult swageClassifySegments(
+    const int32_t *offsets, intptr_t offsetCount, int64_t valueCount,
+    int64_t segmentCount, int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskRecordsCallback recordsCallback, void *recordsUserData,
+    SwageStringCallback errorCallback, void *errorUserData);
 
 #ifdef __cplusplus
 }

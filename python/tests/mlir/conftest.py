@@ -33,3 +33,21 @@ def _isolated_kernel_cache(tmp_path_factory):
         cache_dir = tmp_path_factory.mktemp("swage-cache")
         patch.setenv("SWAGE_CACHE_DIR", str(cache_dir))
         yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _shared_identity_ids():
+    """Upload the shared segment ids before any test replaces a constructor.
+
+    The private runner uploads one tensor of segment ids per CUDA device at
+    its first preparation and keeps it for the process. A test that replaces
+    `torch.tensor` to observe or to fake the uploads of a preparation would
+    otherwise see that upload too, or leave its fake behind as the shared
+    ids, depending on which test runs first.
+    """
+    torch = pytest.importorskip("torch")
+    if torch.cuda.is_available():
+        from swage import _segmented_qualification as qualification
+
+        qualification._identity_ids(torch, torch.device("cuda", 0), 1)
+

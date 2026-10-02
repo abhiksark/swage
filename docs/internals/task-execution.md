@@ -63,6 +63,15 @@ states the rules. A prepared object keeps its kernels loaded for as long as
 it is referenced, and it must outlive a CUDA graph that captured one of its
 launches.
 
+A preparation puts its task records on the device with one upload: the warp
+ids, the CTA ids, the partial ranges, and the merge records share one buffer,
+and each launch passes one pointer per list into it. The pure warp and CTA
+policies run one task per segment in segment order. Up to 1,048,576 segments
+they read the ids from one tensor per device that is uploaded at the first
+preparation and shared by every later one; it holds 4 MiB of device memory
+for the life of the process. Longer id lists are filled on the device for
+their preparation alone.
+
 A prepared launch raises on another device, and in a CUDA context other
 than the one it was prepared in, because its kernels are loaded in one
 context. A thread that has no current CUDA context is given the context of

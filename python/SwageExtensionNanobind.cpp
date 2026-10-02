@@ -303,6 +303,50 @@ materializeSegmentedPlanBuffers(nb::object moduleObject, PlanOffsets offsets,
           takePlanRecords(std::move(merge))};
 }
 
+/// The Python entry point of swageClassifySegments: the records of one
+/// layout in one int32 array, laid out as SwageTaskRecordsCallback states,
+/// then the warp, CTA, partial, and merge counts. It takes no module and
+/// touches no MLIR context, so it needs no ContextUse. The GIL stays held:
+/// the call lasts microseconds, which is less than releasing and retaking
+/// the GIL costs when threads contend for it. The classifier reads the
+/// offsets twice, to count and then to write, so the buffer must not change
+/// during the call; the runtime passes a host copy that nothing else holds.
+std::tuple<PlanRecords, intptr_t, intptr_t, intptr_t, intptr_t>
+classifySegments(PlanOffsets offsets, int64_t valueCount, int64_t segmentCount,
+                 int64_t warpMaxElements, int64_t ctaChunkElements) {
+  struct Classification {
+    std::vector<int32_t> records;
+    intptr_t warpCount = 0;
+    intptr_t ctaCount = 0;
+    intptr_t partialCount = 0;
+    intptr_t mergeCount = 0;
+    std::string error;
+  } classification;
+  auto store = [](const int32_t *records, intptr_t warpCount, intptr_t ctaCount,
+                  intptr_t partialCount, intptr_t mergeCount, void *output) {
+    auto &result = *static_cast<Classification *>(output);
+    result.records.assign(records, records + warpCount + ctaCount +
+                                       3 * partialCount + 3 * mergeCount);
+    result.warpCount = warpCount;
+    result.ctaCount = ctaCount;
+    result.partialCount = partialCount;
+    result.mergeCount = mergeCount;
+  };
+  auto fail = [](MlirStringRef message, void *output) {
+    static_cast<Classification *>(output)->error.assign(message.data,
+                                                        message.length);
+  };
+  MlirLogicalResult result = swageClassifySegments(
+      offsets.data(), static_cast<intptr_t>(offsets.shape(0)), valueCount,
+      segmentCount, warpMaxElements, ctaChunkElements, store, &classification,
+      fail, &classification);
+  if (mlirLogicalResultIsFailure(result))
+    throw nb::value_error(classification.error.c_str());
+  return {takePlanRecords(std::move(classification.records)),
+          classification.warpCount, classification.ctaCount,
+          classification.partialCount, classification.mergeCount};
+}
+
 } // namespace
 
 NB_MODULE(_swageDialectsNanobind, m) {
@@ -412,5 +456,12 @@ NB_MODULE(_swageDialectsNanobind, m) {
              nb::arg("module"), nb::arg("offsets").noconvert(),
              nb::arg("value_count"), nb::arg("segment_count"),
              nb::arg("warp_max_elements") = 32,
+             nb::arg("cta_chunk_elements") = 4096);
+  // The same offsets buffer and limits without a module. A program is
+  // admitted once through `_materialize_segmented_plan`; this classifies
+  // each of its layouts.
+  swageM.def("_classify_segments", &classifySegments,
+             nb::arg("offsets").noconvert(), nb::arg("value_count"),
+             nb::arg("segment_count"), nb::arg("warp_max_elements") = 32,
              nb::arg("cta_chunk_elements") = 4096);
 }
