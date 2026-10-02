@@ -147,6 +147,35 @@ def test_launch_rejects_a_lazy_negation_view():
     assert torch.all(output == 0.0)
 
 
+def test_launch_rejects_tensors_that_require_grad():
+    """Refuse a tensor autograd tracks, because a launch records nothing.
+
+    A leaf, a result with a grad function, and a leaf under `no_grad` all
+    require grad. The detached tensor shares their storage and is admitted.
+    """
+    leaf = torch.ones(129, device="cuda", requires_grad=True)
+    y = torch.ones(129, device="cuda")
+    output = torch.full((129,), -777.0, device="cuda")
+
+    with pytest.raises(ValueError, match="'x_ptr' must not require grad"):
+        _launch(leaf, y, output, 129)
+    with pytest.raises(ValueError, match="'y_ptr' must not require grad"):
+        _launch(y, leaf * 2, output, 129)
+    with pytest.raises(ValueError, match="'output_ptr' must not require grad"):
+        _launch(y, y, leaf, 129)
+    with torch.no_grad():
+        with pytest.raises(ValueError, match="'x_ptr' must not require grad"):
+            _launch(leaf, y, output, 129)
+    torch.cuda.synchronize()
+    assert torch.all(output == -777.0)
+    assert torch.all(leaf == 1.0)
+
+    _launch(leaf.detach(), y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.all(output == 2.0)
+
+
 @pytest.mark.parametrize("shift", [0, 1, 128, -1, -128])
 @pytest.mark.parametrize("overlapped", ["x_ptr", "y_ptr"])
 def test_launch_rejects_an_output_that_overlaps_an_input(overlapped, shift):

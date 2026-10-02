@@ -220,6 +220,7 @@ class _Tensor:
         pointer=0x1000,
         negative=False,
         conjugate=False,
+        requires_grad=False,
     ):
         self.layout = torch.strided
         self.dtype = torch.float32 if dtype is None else dtype
@@ -230,6 +231,7 @@ class _Tensor:
         self._pointer = pointer
         self._negative = negative
         self._conjugate = conjugate
+        self.requires_grad = requires_grad
         self.recorded_streams = []
 
     def dim(self):
@@ -455,6 +457,27 @@ def test_launch_rejects_lazy_views(monkeypatch, name, view, reason):
     )
 
     with pytest.raises(ValueError, match=f"'{name}' must not be a {reason}"):
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert driver.loads == driver.launches == []
+
+
+@pytest.mark.parametrize("name", ["x_ptr", "y_ptr", "output_ptr"])
+def test_launch_rejects_tensors_that_require_grad(monkeypatch, name):
+    """Reject a tensor autograd tracks, because a launch records nothing."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    arguments = _arguments(torch)
+    arguments[name] = _Tensor(
+        torch, pointer=arguments[name].data_ptr(), requires_grad=True
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"'{name}' must not require grad.*pass tensor.detach\\(\\)",
+    ):
         add_kernel.launch(
             arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
         )

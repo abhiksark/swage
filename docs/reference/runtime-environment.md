@@ -16,8 +16,8 @@ tensor, `BLOCK` is a positive integer within the active device limit, and
 parameter names and ordered ABI before reading pointers or starting compiler
 work.
 
-The kernel reads and writes tensor storage through raw pointers, so two more
-checks apply to the tensors:
+The kernel reads and writes tensor storage through raw pointers, so three
+more checks apply to the tensors:
 
 - No tensor may be a lazy negation view or a lazy conjugate view
   (`is_neg()` or `is_conj()`). Such a view shares the storage of its base
@@ -28,6 +28,9 @@ checks apply to the tensors:
   of each tensor, not only the first `n` elements. The two inputs may share
   memory with each other. The check cannot see two virtual mappings of one
   physical allocation.
+- No tensor may require grad. A launch records no gradient, so a result
+  computed from such a tensor would be cut from the autograd graph without
+  an error. Pass `tensor.detach()` to launch without gradients.
 
 A launch requires PyTorch 2.6 or newer, the floor that the `pytorch` extra
 declares, and a `torch.Tensor.record_stream` method. Both are checked before

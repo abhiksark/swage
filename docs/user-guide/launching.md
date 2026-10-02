@@ -20,6 +20,7 @@ It then checks each of the following before anything else happens:
   reads the storage of the base tensor;
 - that the output shares no memory with either input, which also rules out
   in-place use;
+- that no tensor requires grad, because a launch records no gradient;
 - the `n` bound, the `BLOCK` limit, and the required grid.
 
 A launch that fails any of these performs no allocation, no compilation,

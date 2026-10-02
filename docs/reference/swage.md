@@ -140,9 +140,10 @@ Parameters
 :   `arguments`: `x_ptr`, `y_ptr`, `output_ptr`, and `n`. The pointers
     are contiguous rank-one `torch.float32` CUDA tensors on the current
     device; `n` is a nonnegative i32 no larger than any tensor. No tensor
-    may be a lazy negation or conjugate view. The output must not share
-    memory with either input, which also rules out in-place use; the two
-    inputs may share memory with each other.
+    may be a lazy negation or conjugate view, and no tensor may require
+    grad. The output must not share memory with either input, which also
+    rules out in-place use; the two inputs may share memory with each
+    other.
 :   `constexprs`: exactly `BLOCK`, a positive integer within the active
     device limit.
 :   `grid`: the one-dimensional launch geometry, which must equal
@@ -155,10 +156,10 @@ Returns
 Raises
 :   `TypeError`: wrong container, tensor, dtype, rank, or ABI category.
 :   `ValueError`: invalid values, geometry, or device placement; a tensor
-    that is not contiguous or is a lazy negation or conjugate view; an
-    output that overlaps an input; native compiler admission such as an
-    unsupported `sm_*` target; or a cache variable with a value other than
-    the documented ones.
+    that is not contiguous, is a lazy negation or conjugate view, or
+    requires grad; an output that overlaps an input; native compiler
+    admission such as an unsupported `sm_*` target; or a cache variable
+    with a value other than the documented ones.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6 or without
     `torch.Tensor.record_stream`, unavailable CUDA, missing native
     bindings, a kernel that is not cached while `SWAGE_NO_COMPILE=1` is
@@ -192,8 +193,8 @@ The public surface uses four exception classes:
 - `TypeError` reports launch inputs with the wrong container, tensor,
   dtype, rank, or ABI category.
 - `ValueError` reports invalid launch values, geometry, device placement,
-  lazy views, overlapping buffers, native compiler admission, or a cache
-  variable with an undocumented value.
+  lazy views, tensors that require grad, overlapping buffers, native
+  compiler admission, or a cache variable with an undocumented value.
 - `RuntimeError` reports direct kernel calls, symbolic language calls
   outside a captured kernel, missing native bindings, a missing or
   unsupported PyTorch for launch, unavailable CUDA, a refused compile under

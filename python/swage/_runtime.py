@@ -381,6 +381,13 @@ def _validate_launch_tensor(name, tensor, torch):
             f"argument '{name}' must not be a lazy conjugate view; pass "
             "tensor.resolve_conj()"
         )
+    # The kernel reads and writes storage through raw pointers and records
+    # no gradient, so the result would silently be cut from the graph.
+    if tensor.requires_grad:
+        raise ValueError(
+            f"argument '{name}' must not require grad; a launch records no "
+            "gradient, so pass tensor.detach()"
+        )
 
 
 def _validate_output_disjoint(names, tensors):
