@@ -21,7 +21,7 @@ import types
 
 import pytest
 import swage
-from swage import _artifact
+from swage import _artifact, env
 from swage import _segmented_qualification as qualification
 
 PROGRAM_TEXTS = {
@@ -1171,3 +1171,53 @@ def test_a_public_call_needs_no_bindings_with_an_artifact(
         call(values, offsets)
 
     assert sys.modules["mlir_swage"] is None
+
+
+def test_the_environment_report_names_no_artifact_without_the_variable():
+    """Say that segmented calls compile in the reporting process."""
+    assert env.report()["artifact"] == "none (SWAGE_ARTIFACT_DIR is unset)"
+
+
+def test_the_environment_report_describes_the_selected_artifact(
+    artifact_dir, monkeypatch
+):
+    """Name the directory, what it was written for, and what it holds."""
+    _select(monkeypatch, artifact_dir)
+
+    assert env.report()["artifact"] == (
+        f"{artifact_dir} (format 1, target sm_86, 11 kernels of "
+        "segmented_sum, segmented_max, ragged_softmax, written by swage "
+        f"{swage.__version__} at revision "
+        "0123456789abcdef0123456789abcdef01234567)"
+    )
+
+
+def test_the_environment_report_says_why_an_artifact_is_rejected(
+    artifact_dir, monkeypatch
+):
+    """Report the refusal a segmented call would raise, without raising."""
+    (artifact_dir / "manifest.json").unlink()
+    _select(monkeypatch, artifact_dir)
+
+    assert env.report()["artifact"] == (
+        f"rejected (the artifact at {artifact_dir} has no manifest.json)"
+    )
+
+
+def test_the_environment_command_reports_an_artifact_it_cannot_load(
+    artifact_dir,
+):
+    """Exit cleanly on an artifact whose library is not a library."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "swage.env"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=dict(os.environ, SWAGE_ARTIFACT_DIR=str(artifact_dir)),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        f"artifact: rejected (the runtime library of the artifact at "
+        f"{artifact_dir} cannot be loaded: "
+    ) in completed.stdout
