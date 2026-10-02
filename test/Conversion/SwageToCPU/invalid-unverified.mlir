@@ -14,8 +14,11 @@
 
 module {
   func.func @region_with_two_blocks(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -35,8 +38,11 @@ module {
 
 module {
   func.func @region_without_terminator(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -54,8 +60,11 @@ module {
 
 module {
   func.func @region_with_an_extra_argument(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -73,8 +82,11 @@ module {
 
 module {
   func.func @region_ending_in_another_terminator(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -93,8 +105,11 @@ module {
 // The function type has no result, which is all the signature check reads.
 module {
   func.func @return_with_an_operand(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -113,8 +128,11 @@ module {
 // A mapped segment has one use here, but the use is not a segment consumer.
 module {
   func.func @returned_map(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -129,5 +147,28 @@ module {
     }
     memref.store %sum, %output[%sid] : memref<?xf32>
     return %mapped : !swage.segment<f32>
+  }
+}
+
+// -----
+
+// The dialect verifier refuses a role that two arguments declare.
+module {
+  // expected-error@+1 {{swage.role<values> is declared by argument #0 and again by argument #2}}
+  func.func @two_values_arguments(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<values>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid] : memref<?xf32>
+    return
   }
 }

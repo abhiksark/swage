@@ -88,6 +88,43 @@ Read the SSA data flow in source order:
 `arith.mulf` and `arith.addf` are upstream MLIR operations. Swage supplies
 segment semantics rather than duplicating ordinary scalar arithmetic.
 
+## Argument roles
+
+A segment function says what each of its arguments is with the argument
+attribute `swage.role`:
+
+```mlir
+func.func @segmented_sum(
+    %values: memref<?xf32> {swage.role = #swage.role<values>},
+    %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+    %output: memref<?xf32> {swage.role = #swage.role<output>},
+    %value_count: i32 {swage.role = #swage.role<value_count>},
+    %segment_count: i32 {swage.role = #swage.role<segment_count>})
+```
+
+| Role | Argument |
+|---|---|
+| `values` | the buffer that `swage.make_segment` views |
+| `offsets` | the buffer of segment bounds that `swage.make_segment` reads |
+| `output` | the buffer the terminal writes |
+| `value_count` | the element count of `values`, which bounds every range into it |
+| `segment_count` | the extent of `swage.segment_id 0` |
+
+The roles name the arguments, so their order carries no meaning. The
+verifier accepts a role on a rank-one memref (`values`, `output`), on a
+rank-one memref of signless integers (`offsets`), or on a signless integer
+(a count), and rejects a role that two arguments of one function declare. It
+does not require a function to declare roles: the walkthrough module above
+declares none and verifies.
+
+The segmented lowerings require more. Every argument of a function they
+lower declares a role, each of the five roles appears once, and the types
+are the admitted ones: f32 `values` and `output`, i32 `offsets`, and counts
+of the offsets' element type, in dynamically sized buffers with the
+identity layout in the default memory space. A function that falls short is
+rejected with a diagnostic that names the argument or the missing role.
+There is no positional default.
+
 ## Operations
 
 These forms use concrete element types. Other integer or floating-point

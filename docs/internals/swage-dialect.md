@@ -17,6 +17,9 @@ The dialect currently defines:
 - `swage.extent`, which returns a runtime segment length;
 - region-based `swage.map`, `swage.reduce`, and `swage.map_store`;
 - `swage.yield`, the region terminator;
+- the argument attribute `swage.role`, which says what an argument of a
+  segment function is: `values`, `offsets`, `output`, `value_count`, or
+  `segment_count`;
 - reduction kinds `sum`, `max`, and `min` at the dialect level.
 
 Region operations are isolated from above. Outer scalar values enter through

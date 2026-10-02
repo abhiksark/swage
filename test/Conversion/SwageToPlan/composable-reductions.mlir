@@ -6,9 +6,12 @@
 // CHECK-LABEL: func.func private @maximum__swage_plan(
 // CHECK: swage_plan.classify
 module {
-  func.func @maximum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                     %output: memref<?xf32>, %value_count: i32,
-                     %segment_count: i32) {
+  func.func @maximum(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
@@ -27,9 +30,12 @@ module {
 // CHECK-LABEL: func.func private @transformed_sum__swage_plan(
 // CHECK: swage_plan.classify
 module {
-  func.func @transformed_sum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                             %output: memref<?xf32>, %value_count: i32,
-                             %segment_count: i32) {
+  func.func @transformed_sum(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
@@ -49,9 +55,12 @@ module {
 // CHECK-LABEL: func.func private @mapped_sum__swage_plan(
 // CHECK: swage_plan.classify
 module {
-  func.func @mapped_sum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                        %output: memref<?xf32>, %value_count: i32,
-                        %segment_count: i32) {
+  func.func @mapped_sum(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %mapped = swage.map %segment : !swage.segment<f32> -> !swage.segment<f32> {

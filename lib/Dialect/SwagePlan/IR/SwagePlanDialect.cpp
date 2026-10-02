@@ -27,16 +27,23 @@ bool isRankOneMemRef(Type type, Type elementType) {
          memref.getLayout().isIdentity() && !memref.getMemorySpace();
 }
 
+/// Whether the function takes the five arguments of a semantic kernel: the
+/// values and output buffers, the offsets buffer, and two counts. A semantic
+/// kernel names its arguments with roles, so their order is free.
 bool hasCanonicalSemanticABI(func::FuncOp function) {
   FunctionType type = function.getFunctionType();
   if (type.getNumInputs() != 5 || type.getNumResults() != 0)
     return false;
   MLIRContext *context = function.getContext();
-  return isRankOneMemRef(type.getInput(0), Float32Type::get(context)) &&
-         isRankOneMemRef(type.getInput(1), IntegerType::get(context, 32)) &&
-         isRankOneMemRef(type.getInput(2), Float32Type::get(context)) &&
-         type.getInput(3).isSignlessInteger(32) &&
-         type.getInput(4).isSignlessInteger(32);
+  unsigned elementBuffers = 0;
+  unsigned offsetBuffers = 0;
+  unsigned counts = 0;
+  for (Type input : type.getInputs()) {
+    elementBuffers += isRankOneMemRef(input, Float32Type::get(context));
+    offsetBuffers += isRankOneMemRef(input, IntegerType::get(context, 32));
+    counts += input.isSignlessInteger(32);
+  }
+  return elementBuffers == 2 && offsetBuffers == 1 && counts == 2;
 }
 
 } // namespace

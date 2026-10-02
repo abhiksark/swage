@@ -17,7 +17,11 @@ reduction of kind `sum` or `max`, with an optional element expression and
 single-consumer map chains, one rank-one f32 output, and explicit i32
 value and segment counts.
 
-The internal ABI is:
+The function declares what each argument is with a `swage.role` argument
+attribute, as [Textual Swage IR](../language/swage-ir.md#argument-roles)
+describes, and may declare the arguments in any order. A lowering finds an
+argument by its role. The kernel it emits takes its parameters in one fixed
+order, whatever order the function declared:
 
 ```text
 values*, offsets*, output*, value_count:i32, segment_count:i32

@@ -9,6 +9,7 @@
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 
 #include <limits>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -155,8 +156,20 @@ struct SegmentProgram {
   ElementProgram mapStore;      ///< MapStore: the per-element expression.
 };
 
+/// Where a segment function takes each of its arguments. The positions come
+/// from the `swage.role` argument attributes, so no lowering assumes an
+/// argument order.
+struct SegmentABI {
+  unsigned values = 0;
+  unsigned offsets = 0;
+  unsigned output = 0;
+  unsigned valueCount = 0;
+  unsigned segmentCount = 0;
+};
+
 /// Read-only admission result shared by every segmented-program consumer.
 struct SegmentProgramAnalysis {
+  SegmentABI abi;
   SmallVector<SegmentIdOp> segmentIds;
   SmallVector<MakeSegmentOp> segments;
   SmallVector<MapOp> maps;
@@ -215,20 +228,103 @@ SmallVector<MapOp> fusionChain(Value segment) {
   return chain;
 }
 
-LogicalResult verifySegmentedFunctionShape(func::FuncOp function) {
+/// The element types the lowerings admit for the values and the output, and
+/// the index word types they admit for the offsets and the counts. Each
+/// table has one row today.
+bool isAdmittedElementType(Type type) { return type.isF32(); }
+bool isAdmittedIndexType(Type type) { return type.isSignlessInteger(32); }
+
+/// Whether `type` is a rank-one buffer the lowerings can address: a dynamic
+/// size, the identity layout, and the default memory space.
+bool isSegmentBuffer(Type type) {
+  auto memref = dyn_cast<MemRefType>(type);
+  return memref && isRankOneMemRef(type, memref.getElementType());
+}
+
+/// Find the arguments of a segment function through their roles and check
+/// their types. Every argument declares a role, each of the five roles is
+/// declared once, and there is no positional default.
+LogicalResult readSegmentABI(func::FuncOp function, SegmentABI &abi) {
+  constexpr const char *shape =
+      " with a dynamic size, the identity layout, and the default memory "
+      "space, got ";
   FunctionType type = function.getFunctionType();
-  Builder builder(function.getContext());
-  if (type.getNumInputs() != 5 || type.getNumResults() != 0 ||
-      !isRankOneMemRef(type.getInput(0), builder.getF32Type()) ||
-      !isRankOneMemRef(type.getInput(1), builder.getI32Type()) ||
-      !isRankOneMemRef(type.getInput(2), builder.getF32Type()) ||
-      !type.getInput(3).isSignlessInteger(32) ||
-      !type.getInput(4).isSignlessInteger(32))
+  StringRef attribute = SwageDialect::getRoleAttrName();
+  std::optional<unsigned> declared[5];
+  for (unsigned index = 0; index < type.getNumInputs(); ++index) {
+    auto role = dyn_cast_or_null<ArgumentRoleAttr>(
+        function.getArgAttr(index, attribute));
+    if (!role)
+      return function.emitError()
+             << "segment function argument #" << index << " declares no "
+             << attribute
+             << "; every argument declares one of values, offsets, output, "
+                "value_count, and segment_count";
+    std::optional<unsigned> &slot =
+        declared[static_cast<unsigned>(role.getValue())];
+    // The dialect verifier rejects a repeated role; this guards IR that
+    // bypassed it.
+    if (slot)
+      return function.emitError()
+             << attribute << "<" << stringifyArgumentRole(role.getValue())
+             << "> is declared by argument #" << *slot
+             << " and again by argument #" << index;
+    slot = index;
+  }
+  for (ArgumentRole role :
+       {ArgumentRole::Values, ArgumentRole::Offsets, ArgumentRole::Output,
+        ArgumentRole::ValueCount, ArgumentRole::SegmentCount})
+    if (!declared[static_cast<unsigned>(role)])
+      return function.emitError()
+             << "segment function declares no " << attribute << "<"
+             << stringifyArgumentRole(role)
+             << ">; it declares values, offsets, output, value_count, and "
+                "segment_count once each";
+  abi.values = *declared[static_cast<unsigned>(ArgumentRole::Values)];
+  abi.offsets = *declared[static_cast<unsigned>(ArgumentRole::Offsets)];
+  abi.output = *declared[static_cast<unsigned>(ArgumentRole::Output)];
+  abi.valueCount = *declared[static_cast<unsigned>(ArgumentRole::ValueCount)];
+  abi.segmentCount =
+      *declared[static_cast<unsigned>(ArgumentRole::SegmentCount)];
+
+  // The element type comes from the values, and the index word type from
+  // the offsets. The output and the counts follow them.
+  Type valuesType = type.getInput(abi.values);
+  if (!isSegmentBuffer(valuesType) ||
+      !isAdmittedElementType(cast<MemRefType>(valuesType).getElementType()))
     return function.emitError()
-           << "segmented reduction requires rank-one f32 values, rank-one i32 "
-              "offsets, rank-one f32 output, i32 value count, and i32 segment "
-              "count, got "
-           << type;
+           << attribute << "<values> requires a rank-one f32 memref" << shape
+           << valuesType;
+  Type offsetsType = type.getInput(abi.offsets);
+  if (!isSegmentBuffer(offsetsType) ||
+      !isAdmittedIndexType(cast<MemRefType>(offsetsType).getElementType()))
+    return function.emitError()
+           << attribute << "<offsets> requires a rank-one i32 memref" << shape
+           << offsetsType;
+  Type element = cast<MemRefType>(valuesType).getElementType();
+  Type word = cast<MemRefType>(offsetsType).getElementType();
+  Type outputType = type.getInput(abi.output);
+  if (!isRankOneMemRef(outputType, element))
+    return function.emitError()
+           << attribute << "<output> requires a rank-one memref of " << element
+           << ", the element type of the values," << shape << outputType;
+  for (auto [role, index] : {std::pair("value_count", abi.valueCount),
+                             std::pair("segment_count", abi.segmentCount)})
+    if (type.getInput(index) != word)
+      return function.emitError()
+             << attribute << "<" << role << "> requires " << word
+             << ", the element type of the offsets, got "
+             << type.getInput(index);
+  if (type.getNumResults() != 0)
+    return function.emitError()
+           << "segment function must have no result, got " << type;
+  return success();
+}
+
+LogicalResult verifySegmentedFunctionShape(func::FuncOp function,
+                                           SegmentABI &abi) {
+  if (failed(readSegmentABI(function, abi)))
+    return failure();
   if (!function.getBody().hasOneBlock())
     return function.emitError()
            << "segmented reduction requires one block, got "
@@ -278,8 +374,8 @@ LogicalResult verifySegmentRoot(func::FuncOp function,
     return segmentId.emitError()
            << "only swage.segment_id axis 0 is supported, got axis "
            << segmentId.getAxis();
-  if (segment.getValues() != function.getArgument(0) ||
-      segment.getOffsets() != function.getArgument(1) ||
+  if (segment.getValues() != function.getArgument(analysis.abi.values) ||
+      segment.getOffsets() != function.getArgument(analysis.abi.offsets) ||
       segment.getSegmentId() != segmentId.getResult())
     return segment.emitError(
         "make_segment must bind the function values and offsets at segment_id");
@@ -375,13 +471,13 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
     analysis.storedReduction = store.getValue().getDefiningOp<ReduceOp>();
     if (!analysis.storedReduction ||
         !stageOf.contains(analysis.storedReduction.getOperation()) ||
-        store.getMemRef() != function.getArgument(2) ||
+        store.getMemRef() != function.getArgument(analysis.abi.output) ||
         store.getIndices().size() != 1 ||
         store.getIndices().front() != segmentId.getResult())
       return store.emitError(
           "segmented reduction result must be stored at output[segment_id]");
   } else if (analysis.mapStores.front().getOutput() !=
-             function.getArgument(2)) {
+             function.getArgument(analysis.abi.output)) {
     return analysis.mapStores.front().emitError(
         "swage.map_store must write the function output buffer");
   }
@@ -391,7 +487,7 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
 /// Analyze one canonical segment program without mutating it.
 LogicalResult analyzeSegmentProgram(func::FuncOp function,
                                     SegmentProgramAnalysis &analysis) {
-  if (failed(verifySegmentedFunctionShape(function)) ||
+  if (failed(verifySegmentedFunctionShape(function, analysis.abi)) ||
       failed(collectSegmentOperations(function, analysis)) ||
       failed(verifySegmentRoot(function, analysis)) ||
       failed(verifyMapConsumers(analysis)) ||
@@ -487,14 +583,15 @@ LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
 }
 
 void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
-                            int32_t warpMaxElements, int32_t ctaChunkElements) {
+                            const SegmentABI &abi, int32_t warpMaxElements,
+                            int32_t ctaChunkElements) {
   OpBuilder builder(module.getContext());
   Location loc = semanticFunction.getLoc();
   Type taskRange = swage_plan::TaskRangeType::get(module.getContext());
-  auto functionType =
-      builder.getFunctionType({semanticFunction.getArgument(1).getType(),
-                               builder.getI32Type(), builder.getI32Type()},
-                              taskRange);
+  auto functionType = builder.getFunctionType(
+      {semanticFunction.getArgument(abi.offsets).getType(),
+       builder.getI32Type(), builder.getI32Type()},
+      taskRange);
 
   builder.setInsertionPointAfter(semanticFunction);
   auto companion = func::FuncOp::create(
@@ -547,9 +644,12 @@ Value combine(OpBuilder &builder, Location loc, ReductionKind kind,
       .getResult();
 }
 
-void buildSequentialProgram(func::FuncOp function,
+void buildSequentialProgram(func::FuncOp function, const SegmentABI &abi,
                             const SegmentProgram &program) {
   Block &entry = function.getBody().front();
+  Value values = function.getArgument(abi.values);
+  Value offsets = function.getArgument(abi.offsets);
+  Value output = function.getArgument(abi.output);
   while (!entry.empty())
     entry.back().erase();
 
@@ -558,16 +658,16 @@ void buildSequentialProgram(func::FuncOp function,
   builder.setInsertionPointToEnd(&entry);
   Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
   Value one = arith::ConstantIndexOp::create(builder, loc, 1);
-  Value segmentCount = arith::IndexCastOp::create(
-      builder, loc, builder.getIndexType(), function.getArgument(4));
+  Value segmentCount =
+      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                 function.getArgument(abi.segmentCount));
   scf::ForOp::create(
       builder, loc, zero, segmentCount, one, ValueRange(),
       [&](OpBuilder &outer, Location outerLoc, Value segmentId, ValueRange) {
-        Value startI32 = memref::LoadOp::create(
-            outer, outerLoc, function.getArgument(1), segmentId);
+        Value startI32 =
+            memref::LoadOp::create(outer, outerLoc, offsets, segmentId);
         Value next = arith::AddIOp::create(outer, outerLoc, segmentId, one);
-        Value endI32 = memref::LoadOp::create(outer, outerLoc,
-                                              function.getArgument(1), next);
+        Value endI32 = memref::LoadOp::create(outer, outerLoc, offsets, next);
         Value start = arith::IndexCastOp::create(
             outer, outerLoc, outer.getIndexType(), startI32);
         Value end = arith::IndexCastOp::create(outer, outerLoc,
@@ -579,8 +679,8 @@ void buildSequentialProgram(func::FuncOp function,
               outer, outerLoc, start, end, one, ValueRange(identity),
               [&](OpBuilder &inner, Location innerLoc, Value index,
                   ValueRange accumulator) {
-                Value value = memref::LoadOp::create(
-                    inner, innerLoc, function.getArgument(0), index);
+                Value value =
+                    memref::LoadOp::create(inner, innerLoc, values, index);
                 value = evaluateElement(inner, stage.element, value, results);
                 scf::YieldOp::create(inner, innerLoc,
                                      combine(inner, innerLoc, stage.kind,
@@ -590,25 +690,30 @@ void buildSequentialProgram(func::FuncOp function,
         }
         if (program.terminal == TerminalKind::ScalarStore) {
           memref::StoreOp::create(outer, outerLoc,
-                                  results[program.storedReduction],
-                                  function.getArgument(2), segmentId);
+                                  results[program.storedReduction], output,
+                                  segmentId);
         } else {
           scf::ForOp::create(
               outer, outerLoc, start, end, one, ValueRange(),
               [&](OpBuilder &inner, Location innerLoc, Value index,
                   ValueRange) {
-                Value value = memref::LoadOp::create(
-                    inner, innerLoc, function.getArgument(0), index);
+                Value value =
+                    memref::LoadOp::create(inner, innerLoc, values, index);
                 value =
                     evaluateElement(inner, program.mapStore, value, results);
-                memref::StoreOp::create(inner, innerLoc, value,
-                                        function.getArgument(2), index);
+                memref::StoreOp::create(inner, innerLoc, value, output, index);
                 scf::YieldOp::create(inner, innerLoc);
               });
         }
         scf::YieldOp::create(outer, outerLoc);
       });
   func::ReturnOp::create(builder, loc);
+  // The roles are consumed. What remains is ordinary upstream IR, which a
+  // tool that does not know the Swage dialect must be able to parse.
+  for (unsigned index = 0; index < function.getNumArguments(); ++index)
+    function.removeArgAttr(index,
+                           StringAttr::get(function.getContext(),
+                                           SwageDialect::getRoleAttrName()));
 }
 
 /// Clamp one half-open range loaded from device memory, as signed i32, so
@@ -1499,7 +1604,7 @@ public:
     RegionOwner owner;
     SegmentProgram program;
     detachSegmentProgram(analysis, owner, program);
-    buildSequentialProgram(*function, program);
+    buildSequentialProgram(*function, analysis.abi, program);
   }
 };
 
@@ -1732,7 +1837,7 @@ public:
         failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
 
-    buildPlanningCompanion(module, function,
+    buildPlanningCompanion(module, function, analysis.abi,
                            static_cast<int32_t>(warpMaxElements),
                            static_cast<int32_t>(ctaChunkElements));
   }
