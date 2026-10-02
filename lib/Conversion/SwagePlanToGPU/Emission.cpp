@@ -26,25 +26,52 @@ Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
   return mapping.lookup(cast<YieldOp>(body.getTerminator()).getValue());
 }
 
+// The three kind functions are switches without a default, so the compiler
+// reports a kind that has no case, and no kind can take the branch of
+// another.
+
 Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind) {
   FloatType f32 = builder.getF32Type();
-  APFloat identity = kind == ReductionKind::Sum
-                         ? APFloat(f32.getFloatSemantics(), 0)
-                         : APFloat::getInf(f32.getFloatSemantics(), true);
-  return arith::ConstantFloatOp::create(builder, loc, f32, identity);
+  const llvm::fltSemantics &semantics = f32.getFloatSemantics();
+  auto constant = [&](const APFloat &identity) {
+    return Value(arith::ConstantFloatOp::create(builder, loc, f32, identity));
+  };
+  switch (kind) {
+  case ReductionKind::Sum:
+    return constant(APFloat(semantics, 0));
+  case ReductionKind::Max:
+    return constant(APFloat::getInf(semantics, /*Negative=*/true));
+  case ReductionKind::Min:
+    return constant(APFloat::getInf(semantics, /*Negative=*/false));
+  }
+  llvm_unreachable("unknown reduction kind");
 }
 
 Value combine(OpBuilder &builder, Location loc, ReductionKind kind,
               Value accumulator, Value value) {
-  if (kind == ReductionKind::Sum)
+  switch (kind) {
+  case ReductionKind::Sum:
     return arith::AddFOp::create(builder, loc, accumulator, value).getResult();
-  return arith::MaximumFOp::create(builder, loc, accumulator, value)
-      .getResult();
+  case ReductionKind::Max:
+    return arith::MaximumFOp::create(builder, loc, accumulator, value)
+        .getResult();
+  case ReductionKind::Min:
+    return arith::MinimumFOp::create(builder, loc, accumulator, value)
+        .getResult();
+  }
+  llvm_unreachable("unknown reduction kind");
 }
 
 gpu::AllReduceOperation allReduceOperationFor(ReductionKind kind) {
-  return kind == ReductionKind::Sum ? gpu::AllReduceOperation::ADD
-                                    : gpu::AllReduceOperation::MAXIMUMF;
+  switch (kind) {
+  case ReductionKind::Sum:
+    return gpu::AllReduceOperation::ADD;
+  case ReductionKind::Max:
+    return gpu::AllReduceOperation::MAXIMUMF;
+  case ReductionKind::Min:
+    return gpu::AllReduceOperation::MINIMUMF;
+  }
+  llvm_unreachable("unknown reduction kind");
 }
 
 std::pair<Value, Value> clampRange(OpBuilder &builder, Location loc,

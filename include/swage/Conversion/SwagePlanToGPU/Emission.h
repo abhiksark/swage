@@ -66,7 +66,9 @@ using ElementProgramFn = function_ref<Value(OpBuilder &, Value)>;
 Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments);
 
 // What a reduction kind lowers to. A new kind is a case in each of these
-// three functions and nowhere else.
+// three functions. Each is a switch over every kind without a default, so a
+// kind without a case is a compiler diagnostic and never the lowering of
+// another kind.
 
 /// The identity element of a reduction kind.
 Value identityFor(OpBuilder &builder, Location loc, ReductionKind kind);

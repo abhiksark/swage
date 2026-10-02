@@ -8,6 +8,7 @@ set_target_properties(check-swage-unit PROPERTIES FOLDER "Tests")
 add_unittest(check-swage-unit SwageUnitTests
   CodegenCAPITest.cpp
   DialectsCAPITest.cpp
+  EmissionTest.cpp
   KernelLayoutTest.cpp
   RuntimeTest.cpp
   TargetDescriptionTest.cpp
