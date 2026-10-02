@@ -16,6 +16,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
@@ -36,6 +37,11 @@ int main(int argc, char **argv) {
                   mlir::memref::MemRefDialect, mlir::vector::VectorDialect,
                   mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect,
                   mlir::NVVM::NVVMDialect>();
+  // Upstream conversions find their patterns through interfaces that each
+  // dialect receives as an extension. Without them the driver registers
+  // `convert-gpu-to-nvvm` and then aborts when the pass runs, because the
+  // dialects promise a conversion interface that nothing attached.
+  mlir::registerAllExtensions(registry);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Swage optimizer driver\n", registry));

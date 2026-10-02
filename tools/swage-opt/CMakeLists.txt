@@ -5,6 +5,7 @@ set(LIBS
   MLIRSwageFixedBlockToGPU
   MLIRSwageSegmentedReduction
   MLIROptLib
+  MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
   MLIRFuncDialect
   MLIRArithDialect

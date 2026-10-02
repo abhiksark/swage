@@ -33,6 +33,8 @@ gates belong in the roadmap.
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
 - [ADR-0018: Private persistent task queue](../adr/ADR-0018-private-persistent-task-queue.md)
 - [ADR-0019: Composable private segmented reductions](../adr/ADR-0019-composable-private-reductions.md)
+- [ADR-0020: Segmented GPU lowering as a planned per-function conversion](../adr/ADR-0020-planned-per-function-lowering.md)
+  (proposed; the lowering it describes is not implemented)
 
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the
