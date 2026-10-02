@@ -44,8 +44,9 @@ std::optional<TaskPolicy> mlir::swage_plan::policyOfRegion(Region *region) {
   Operation *task = region->getParentOp();
   if (auto tasks = dyn_cast_or_null<TasksOp>(task))
     return tasks.getPolicy();
-  // The threads of a partial task combine across the whole block.
-  if (isa_and_nonnull<PartialTasksOp>(task))
+  // The threads of a partial task and of a merge task combine across the
+  // whole block.
+  if (isa_and_nonnull<PartialTasksOp, MergeTasksOp>(task))
     return TaskPolicy::CTA;
   // The first region of a fused task operation is its warp region.
   if (isa_and_nonnull<FusedTasksOp>(task))
@@ -103,7 +104,7 @@ SwagePlanDialect::verifyOperationAttribute(Operation *op,
     return op->emitError("a plan function has a body of one block");
   Block &body = function.getBody().front();
   if (llvm::range_size(body) != 2 ||
-      !isa<TasksOp, PartialTasksOp, FusedTasksOp>(body.front()) ||
+      !isa<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp>(body.front()) ||
       !isa<func::ReturnOp>(body.back()))
     return op->emitError()
            << "a plan function holds one task operation followed by a return, "
@@ -216,6 +217,27 @@ LogicalResult TasksOp::verifyRegions() {
   if (getOutput())
     return verifyYieldedScalar(getOperation(), getBody(), getOutput());
   return success();
+}
+
+LogicalResult MergeTasksOp::verify() {
+  Type word = cast<MemRefType>(getMerges().getType()).getElementType();
+  const std::pair<const char *, Type> words[] = {
+      {"partial_count", getPartialCount().getType()},
+      {"merge_count", getMergeCount().getType()},
+      {"segment_count", getSegmentCount().getType()}};
+  for (auto [name, type] : words)
+    if (type != word)
+      return emitOpError() << name << " must have the element type of the "
+                           << "merges, " << word << ", got " << type;
+  return success();
+}
+
+LogicalResult MergeTasksOp::verifyRegions() {
+  Type element = cast<MemRefType>(getScratch().getType()).getElementType();
+  if (failed(verifyTaskRegion(getOperation(), getBody(), element, "scratch",
+                              /*allowStores=*/false)))
+    return failure();
+  return verifyYieldedScalar(getOperation(), getBody(), getOutput());
 }
 
 LogicalResult FusedTasksOp::verify() {

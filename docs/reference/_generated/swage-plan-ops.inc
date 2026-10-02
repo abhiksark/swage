@@ -76,6 +76,71 @@ Traits: `RecursiveMemoryEffects`
 | `output` | 1D memref of signless integer or floating-point values |
 
 
+#### `swage_plan.merge_tasks` (swage_plan::MergeTasksOp)
+
+_Reduce the partial results of one split segment per task_
+
+Syntax:
+
+```
+operation ::= `swage_plan.merge_tasks` `scratch` `(` $scratch `:` type($scratch) `)`
+              `partial_count` `(` $partial_count `:` type($partial_count) `)`
+              `merges` `(` $merges `:` type($merges) `)`
+              `merge_count` `(` $merge_count `:` type($merge_count) `)`
+              `segment_count` `(` $segment_count `:` type($segment_count) `)`
+              `into` `(` $output `:` type($output) `)`
+              attr-dict-with-keyword $body
+```
+
+The body of the second stage of a split reduction. Task `t` is the block
+of threads with index `t`. It reads record `t` of `merges`, a
+`[segment, partial_begin, partial_end]` triple of words written by host
+classification, binds the half-open range of scratch slots the record
+names, runs the region on it, and stores the yielded scalar at
+`output[segment]`.
+
+The region holds a `swage.reduce` over the bound range of scratch and
+ends in `swage_plan.yield` with its result. Scratch holds completed
+partial reductions, so the planner writes an identity reduction of the
+kind of the program: the merge combines partial results and never runs
+the element program. The threads of a task combine their partial
+results across the whole block.
+
+Every bound the kernel needs is an operand: a loaded range is clamped to
+`partial_count`, a task index is compared with `merge_count`, and a
+loaded segment is compared with `segment_count`, and one that fails the
+comparison stores nothing.
+
+Example:
+
+```mlir
+swage_plan.merge_tasks scratch(%scratch : memref<?xf32>)
+    partial_count(%partial_count : i32) merges(%merges : memref<?xi32>)
+    merge_count(%merge_count : i32) segment_count(%segment_count : i32)
+    into(%output : memref<?xf32>) {
+^bb0(%partials: !swage.segment<f32>):
+  %sum = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+  ^bb0(%partial: f32):
+    swage.yield %partial : f32
+  }
+  swage_plan.yield %sum : f32
+}
+```
+
+Traits: `RecursiveMemoryEffects`, `SingleBlock`
+
+##### Operands:
+
+| Operand | Description |
+| :-----: | ----------- |
+| `scratch` | 1D memref of signless integer or floating-point values |
+| `partial_count` | signless integer |
+| `merges` | 1D memref of signless integer values |
+| `merge_count` | signless integer |
+| `segment_count` | signless integer |
+| `output` | 1D memref of signless integer or floating-point values |
+
+
 #### `swage_plan.partial_tasks` (swage_plan::PartialTasksOp)
 
 _Reduce one chunk of a long segment per task into scratch_
@@ -231,7 +296,7 @@ the scalar result of the bound segment, which the task operation stores
 at its `into` buffer. Without one, the region writes its results itself,
 through `swage.map_store`.
 
-Traits: `AlwaysSpeculatableImplTrait`, `HasParent<TasksOp, PartialTasksOp, FusedTasksOp>`, `Terminator`
+Traits: `AlwaysSpeculatableImplTrait`, `HasParent<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp>`, `Terminator`
 
 Interfaces: `ConditionallySpeculatable`, `NoMemoryEffect (MemoryEffectOpInterface)`
 

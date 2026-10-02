@@ -18,6 +18,8 @@ The dialect holds what a kernel lowering consumes:
 - `swage_plan.partial_tasks`, the task operation of the first stage of a
   split reduction, which reduces one chunk of a long segment per task into
   a scratch slot;
+- `swage_plan.merge_tasks`, the task operation of the second stage, which
+  reduces the partial results of one split segment per task;
 - `swage_plan.fused_tasks`, the task operation of the fused mixed kernel,
   with one region for a warp task and one for a block task;
 - `swage_plan.yield`, the terminator of a task region;
@@ -66,8 +68,8 @@ What is not in the dialect:
   host classification and no kernel reads them, so they are arguments of
   the classifier and not part of plan IR.
 - Runtime offset contents, which no compiler pass inspects.
-- The split merge and persistent kernels. Their lowerings emit them
-  without a plan stage today;
+- The persistent kernel. Its lowering emits it without a plan stage
+  today;
   [ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
   order in which they move.
 - Packed-warp policies, queues, dependency execution, and a general task
@@ -80,13 +82,15 @@ width, keeps its signature and its callers, and takes no task buffer, and
 the region are lowered by the same patterns on both backends.
 
 `--swage-to-plan` writes plan functions for the direct, task-id,
-fused-mixed, split-partial, and sequential schedules, one per schedule of
-its list, and
+fused-mixed, split-partial, split-merge, and sequential schedules, one per
+schedule of its list, and
 `--swage-plan-to-gpu` converts every plan function of a kernel to a
-`gpu.module` that holds it. The plan function of a split partial kernel is
-named after the kernel, `<function>__partial`, and the records its task
-operation loads are laid out as `TaskRecords.h` says, which the host
-classifier fills by the same fields. There is no public
+`gpu.module` that holds it. The plan function of a split stage is named
+after its kernel, `<function>__partial` or `<function>__merge`, and the
+records its task operation loads are laid out as `TaskRecords.h` says,
+which the host classifier fills by the same fields. The region of a merge
+task is an identity reduction over scratch: the merge combines partial
+results and never runs the element program. There is no public
 `mlir_swage.dialects.swage_plan` Python module contract. The classification
 buckets and task lists that the host produces are drawn in
 [Task Planning](planning.md).

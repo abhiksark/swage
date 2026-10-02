@@ -59,6 +59,9 @@ std::optional<KernelSchedule> kernelSchedule(PlanSchedule schedule) {
   case PlanSchedule::SplitPartial:
     return KernelSchedule{"split-partial", KernelKind::SplitPartial,
                           "__partial", true, false};
+  case PlanSchedule::SplitMerge:
+    return KernelSchedule{"split-merge", KernelKind::SplitMerge, "__merge",
+                          true, false};
   case PlanSchedule::Sequential:
     return std::nullopt;
   }
@@ -68,7 +71,8 @@ std::optional<KernelSchedule> kernelSchedule(PlanSchedule schedule) {
 /// The launch width of the kernel `schedule` plans.
 int64_t blockThreadsOf(PlanSchedule schedule, const PlanOptions &options,
                        const TargetDescription &target) {
-  if (schedule == PlanSchedule::SplitPartial)
+  if (schedule == PlanSchedule::SplitPartial ||
+      schedule == PlanSchedule::SplitMerge)
     return target.splitBlockThreads;
   if (schedule == PlanSchedule::FusedMixed)
     return target.ctaBlockThreads;
@@ -151,6 +155,26 @@ void fillTaskRegion(Operation *task, SegmentProgramAnalysis &analysis,
                                   : Value());
 }
 
+/// Give the task operation of a merge its region: an identity reduction, of
+/// the kind of the program, over the bound range of scratch. Scratch holds
+/// completed partial reductions, so the element program of the function
+/// stays behind with the function and the merge never runs it.
+void fillMergeRegion(Operation *task, SegmentProgramAnalysis &analysis) {
+  Location loc = task->getLoc();
+  ReduceOp reduction = analysis.reductions.front();
+  Type element = reduction.getResult().getType();
+  OpBuilder builder(task->getContext());
+  Block *body = builder.createBlock(
+      &task->getRegion(0), {},
+      {analysis.segments.front().getResult().getType()}, {loc});
+  auto merged = ReduceOp::create(builder, loc, element, body->getArgument(0),
+                                 ValueRange(), reduction.getKind());
+  swage_plan::YieldOp::create(builder, loc, merged.getResult());
+  Block *identity =
+      builder.createBlock(&merged.getBody(), {}, {element}, {loc});
+  YieldOp::create(builder, loc, identity->getArgument(0));
+}
+
 /// Plan an admitted segment function for the CPU oracle, in place. The
 /// function keeps its signature, its roles, and its callers. Its segment
 /// id, segment construction, and scalar store become one sequential task
@@ -225,6 +249,15 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::TaskIds),
         argument(KernelArgument::WarpTaskCount),
         argument(KernelArgument::CtaTaskCount), output);
+  } else if (schedule == PlanSchedule::SplitMerge) {
+    // A merge task reduces the partial results of one split segment.
+    task = swage_plan::MergeTasksOp::create(
+        builder, loc, argument(KernelArgument::Scratch),
+        argument(KernelArgument::PartialCount),
+        argument(KernelArgument::MergeRecords),
+        argument(KernelArgument::MergeCount),
+        argument(KernelArgument::SegmentCount),
+        argument(KernelArgument::Output));
   } else if (schedule == PlanSchedule::SplitPartial) {
     // A partial task reduces one chunk into its scratch slot.
     task = swage_plan::PartialTasksOp::create(
@@ -250,6 +283,11 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         analysis.mapStores.empty() ? output : Value(), policy);
   }
   func::ReturnOp::create(builder, loc);
+  if (schedule == PlanSchedule::SplitMerge) {
+    fillMergeRegion(task, analysis);
+    source.erase();
+    return;
+  }
   fillTaskRegion(task, analysis, output);
   // A warp task and a block task run the same program, so the block region
   // of a fused task operation is a copy of its warp region.
@@ -265,7 +303,7 @@ std::optional<PlanSchedule> parseSchedule(StringRef text) {
     return PlanSchedule::Sequential;
   for (PlanSchedule schedule :
        {PlanSchedule::Direct, PlanSchedule::TaskIds, PlanSchedule::FusedMixed,
-        PlanSchedule::SplitPartial})
+        PlanSchedule::SplitPartial, PlanSchedule::SplitMerge})
     if (text == kernelSchedule(schedule)->name)
       return schedule;
   return std::nullopt;
@@ -297,7 +335,7 @@ public:
       if (!schedule) {
         getOperation().emitError()
             << "schedule must be direct, task-ids, fused-mixed, "
-               "split-partial, or sequential, got '"
+               "split-partial, split-merge, or sequential, got '"
             << name << "'";
         return signalPassFailure();
       }
@@ -319,7 +357,8 @@ private:
           "per segment, the default), task-ids (one block per task of a "
           "task buffer), fused-mixed (warp tasks and block tasks in one "
           "launch), split-partial (one block per chunk of a long segment), "
-          "or sequential (no kernel: the CPU oracle, alone)")};
+          "split-merge (one block per split segment, over its partial "
+          "results), or sequential (no kernel: the CPU oracle, alone)")};
   Option<int64_t> blockThreads{
       *this, "block-threads",
       llvm::cl::desc("Launch width of the direct and task-ids kernels in "

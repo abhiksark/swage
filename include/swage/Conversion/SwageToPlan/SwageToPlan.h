@@ -36,6 +36,9 @@ enum class PlanSchedule {
   /// One block of threads per chunk of a long segment: the first stage of a
   /// split reduction, whose kernel is named `<function>__partial`.
   SplitPartial,
+  /// One block of threads per split segment, which reduces its partial
+  /// results: the second stage, whose kernel is named `<function>__merge`.
+  SplitMerge,
   /// No kernel: one thread visits the segments in order. The CPU oracle.
   Sequential,
 };

@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 to 7 of the migration sequence are implemented
+- Status: accepted; steps 0 to 8 of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
@@ -14,8 +14,9 @@ admission per function, any number of segment functions in a module, and
 the symbol checks before mutation), step 3 (map fusion), and step 4 (the
 plan stage and the conversion for the direct and task-id schedules, softmax
 included), step 5 (the CPU oracle on the shared patterns), step 6 (the
-split partial stage, schedule lists, and the record layouts), and step 7
-(the fused mixed kernel). Not implemented: steps 8 to 10. Until
+split partial stage, schedule lists, and the record layouts), step 7 (the
+fused mixed kernel), and step 8 (the split merge stage). Not implemented:
+steps 9 and 10. Until
 its step lands, a part of the design is written in the conditional below,
 and the segmented lowering works as "Context" describes, except where an
 implemented step replaced it.
@@ -394,8 +395,8 @@ func.func @segmented_sum(%values: memref<?xf32> {...}, %offsets: memref<?xi32> {
 Each operand group carries its types, so the optional groups (`ids`,
 `task_count`, `into`) parse without ambiguity.
 
-Operations. `tasks`, `partial_tasks`, `fused_tasks`, and `yield` exist; each
-of the others would be added in the step whose lowering consumes it:
+Operations. `tasks`, `partial_tasks`, `merge_tasks`, `fused_tasks`, and
+`yield` exist; `persistent_tasks` would be added in step 9:
 
 | Operation | Operands | Regions | Bounds the operation requires |
 |---|---|---|---|
@@ -423,9 +424,11 @@ Notes on the operations:
   fills the warp region and copies it into the block region. They yield a
   scalar and hold no store. `policyOfRegion` gives `warp` for the first
   region and `cta` for the second.
-- The merge region would hold an identity `swage.reduce` of the same kind
-  over scratch. "The merge never runs the element program" would become a
-  property of plan IR, checked by FileCheck.
+- The merge region holds an identity `swage.reduce` of the same kind over
+  scratch, which the planner writes instead of moving the reduction of the
+  function. "The merge never runs the element program" is a property of
+  plan IR: `SwageToPlan/split-merge.mlir` plans a program with a map and a
+  transformed reduction and finds no arithmetic in the merge plan.
 - `policy` reuses the `#swage_plan.policy` attribute. The task-id schedule
   uses `warp` exactly when `block_threads` equals the subgroup width. The
   direct schedule always uses `cta`.
@@ -445,7 +448,7 @@ kernel but the last is planned from a copy of the semantic function.
 | `task-ids` | `@f` | `tasks` with ids | same | yes |
 | `fused-mixed` | `@f` | `fused_tasks` | target value (128) | yes |
 | `split-partial` | `@f__partial` | `partial_tasks` | target value (512) | yes |
-| `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | step 8 |
+| `split-merge` | `@f__merge` | `merge_tasks` | target value (512) | yes |
 | `persistent` | `@f` | `persistent_tasks` | target value (512) | step 9 |
 | `sequential` | `@f` (kept, callers allowed) | `tasks policy<sequential>` | none | yes |
 
@@ -537,7 +540,7 @@ Patterns:
 | `PlanKernelReturnPattern` | `func.return` of a plan function | `gpu.return` | yes |
 | `TasksPattern` | `tasks` | prelude, block-uniform guard, binding (offsets loads, `clampRange`, `isLoadedIndexInRange`), then the sink | yes |
 | `PartialTasksPattern` | `partial_tasks` | prelude, guard, the range record of the chunk (`loadRecordField`, `clampRange`), then the store of the result in the scratch slot of the task | yes |
-| `MergeTasksPattern` | `merge_tasks` | the same shape over merge records | step 8 |
+| `MergeTasksPattern` | `merge_tasks` | the same shape over merge records: the loaded segment is compared with the segment count and gates the store | yes |
 | `FusedTasksPattern` | `fused_tasks` | the fused skeleton, with slots `block_threads / subgroupWidth`; each of its two sites binds and converts a region through `convertSegmentTask`, which `TasksPattern` uses too | yes |
 | `PersistentTasksPattern` | `persistent_tasks` | the persistent skeleton: claims, barriers, fences | step 9 |
 | `ReducePattern` | `swage.reduce` | identity, strided `scf.for`, element program, combine; then the shuffle tree (warp) or `gpu.all_reduce uniform` (CTA) | yes |
@@ -985,8 +988,10 @@ Step 7. Fused mixed.
 
 Step 8. Split merge.
 
-- Files: `merge_tasks` and `MergeTasksPattern`; the rest of
-  `buildSplitGPUProgram` deleted.
+- Files: `merge_tasks` and `MergeTasksPattern`; the split-merge schedule
+  in the planner; the rest of the split emitter deleted, so
+  `--swage-split-segmented-reduction-to-gpu` only plans and converts.
+- Emitted IR: none.
 - Gate: `split-merge.mlir` with its `--implicit-check-not=arith.mulf` and
   `RANGE` runs; the `MERGE` prefixes; a plan-level check that the merge
   region is an identity reduce.

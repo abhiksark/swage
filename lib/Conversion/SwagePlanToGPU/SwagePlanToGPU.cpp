@@ -39,6 +39,7 @@ namespace mlir::swage {
 namespace {
 
 using swage_plan::FusedTasksOp;
+using swage_plan::MergeTasksOp;
 using swage_plan::PartialTasksOp;
 using swage_plan::SwagePlanDialect;
 using swage_plan::TaskPolicy;
@@ -96,7 +97,7 @@ public:
       rewriter.replaceAllUsesWith(argument, parameter);
     if (failed(legalizeInPlace(rewriter, operationsOf(body))))
       return failure();
-    moveConvertedOperations<TasksOp, PartialTasksOp, FusedTasksOp,
+    moveConvertedOperations<TasksOp, PartialTasksOp, MergeTasksOp, FusedTasksOp,
                             func::ReturnOp>(rewriter, body, entry);
     rewriter.eraseOp(function);
     return success();
@@ -405,6 +406,86 @@ public:
   }
 };
 
+/// One block of threads per split segment: the kernel prelude, the guard on
+/// the task index, the merge record of the segment, the reduction of the
+/// region over the scratch slots the record names, and the store of its
+/// result at the segment the record names.
+///
+/// The segment comes from device memory, so it is compared with the segment
+/// count, and one that fails stores nothing. The reduction itself stays
+/// unconditional, which keeps its block-wide combination under the
+/// block-uniform guard alone.
+class MergeTasksPattern : public OpConversionPattern<MergeTasksOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(MergeTasksOp tasks, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    IntegerAttr threads = blockThreadsOf(tasks->getParentOp());
+    if (!threads)
+      return rewriter.notifyMatchFailure(tasks, "not in a plan function");
+    Location loc = tasks.getLoc();
+
+    Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value block =
+        arith::ConstantIndexOp::create(rewriter, loc, threads.getInt());
+    Value taskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getMergeCount());
+    Value inRange = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::slt, taskIndex, taskCount);
+
+    Block &region = tasks.getBody().front();
+    auto yield = cast<swage_plan::YieldOp>(region.getTerminator());
+    bool converted = true;
+    scf::IfOp::create(
+        rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
+          using namespace swage_plan::merge_record;
+          Value records = adaptor.getMerges();
+          Value fields = arith::ConstantIndexOp::create(body, bodyLoc, Words);
+          Value recordBase =
+              arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
+          Value segmentWord =
+              loadRecordField(body, bodyLoc, records, recordBase, Segment);
+          Value segmentInRange = isLoadedIndexInRange(
+              body, bodyLoc, segmentWord, adaptor.getSegmentCount());
+          Value segment = arith::IndexCastOp::create(
+              body, bodyLoc, body.getIndexType(), segmentWord);
+          Value beginWord =
+              loadRecordField(body, bodyLoc, records, recordBase, PartialBegin);
+          Value endWord =
+              loadRecordField(body, bodyLoc, records, recordBase, PartialEnd);
+          // The range indexes scratch, so the partial count bounds it.
+          Value begin;
+          Value end;
+          std::tie(begin, end) = clampRange(body, bodyLoc, beginWord, endWord,
+                                            adaptor.getPartialCount());
+          Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
+          rewriter.replaceAllUsesWith(
+              region.getArgument(0),
+              ValueRange{adaptor.getScratch(), first, end, block});
+
+          SmallVector<Operation *> consumers = operationsOf(region);
+          consumers.pop_back();
+          converted = succeeded(legalizeInPlace(rewriter, consumers));
+          if (converted) {
+            moveConvertedOperations<ReduceOp, swage_plan::YieldOp>(
+                rewriter, region, body.getInsertionBlock());
+            emitLeaderStore(
+                body, bodyLoc, rewriter.getRemappedValue(yield.getValue()),
+                adaptor.getOutput(), segment, threadId, zero, segmentInRange);
+          }
+          scf::YieldOp::create(body, bodyLoc);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
+  }
+};
+
 /// What the patterns rely on and the dialect verifier does not promise,
 /// checked before anything is changed. The planner produces only plan
 /// functions that pass; this is for plan IR that was written by hand. A
@@ -434,6 +515,13 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
                                      fused.getOffsets().getType(),
                                      region->front())))
         return failure();
+    return verifyKernelSymbols(module, function, "");
+  }
+  if (auto merge = dyn_cast<MergeTasksOp>(task)) {
+    if (failed(verifyTaskConsumers(merge, merge.getScratch().getType(),
+                                   merge.getMerges().getType(),
+                                   merge.getBody().front())))
+      return failure();
     return verifyKernelSymbols(module, function, "");
   }
   if (auto partial = dyn_cast<PartialTasksOp>(task)) {
@@ -504,8 +592,8 @@ LogicalResult convertPlanToGPU(ModuleOp module,
   RewritePatternSet patterns(module.getContext());
   patterns.add<PlanKernelFuncPattern, FusedTasksPattern>(module.getContext(),
                                                          target);
-  patterns.add<PlanKernelReturnPattern, TasksPattern, PartialTasksPattern>(
-      module.getContext());
+  patterns.add<PlanKernelReturnPattern, TasksPattern, PartialTasksPattern,
+               MergeTasksPattern>(module.getContext());
   populateSegmentConsumerPatterns(patterns, &target);
   return applyFullConversion(module, legality, std::move(patterns));
 }

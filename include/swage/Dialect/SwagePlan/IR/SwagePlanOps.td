@@ -165,6 +165,66 @@ def SwagePlan_PartialTasksOp
   let hasRegionVerifier = 1;
 }
 
+def SwagePlan_MergeTasksOp
+    : SwagePlan_Op<"merge_tasks", [SingleBlock, RecursiveMemoryEffects]> {
+  let summary = "Reduce the partial results of one split segment per task";
+  let description = [{
+    The body of the second stage of a split reduction. Task `t` is the block
+    of threads with index `t`. It reads record `t` of `merges`, a
+    `[segment, partial_begin, partial_end]` triple of words written by host
+    classification, binds the half-open range of scratch slots the record
+    names, runs the region on it, and stores the yielded scalar at
+    `output[segment]`.
+
+    The region holds a `swage.reduce` over the bound range of scratch and
+    ends in `swage_plan.yield` with its result. Scratch holds completed
+    partial reductions, so the planner writes an identity reduction of the
+    kind of the program: the merge combines partial results and never runs
+    the element program. The threads of a task combine their partial
+    results across the whole block.
+
+    Every bound the kernel needs is an operand: a loaded range is clamped to
+    `partial_count`, a task index is compared with `merge_count`, and a
+    loaded segment is compared with `segment_count`, and one that fails the
+    comparison stores nothing.
+
+    Example:
+
+    ```mlir
+    swage_plan.merge_tasks scratch(%scratch : memref<?xf32>)
+        partial_count(%partial_count : i32) merges(%merges : memref<?xi32>)
+        merge_count(%merge_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%partials: !swage.segment<f32>):
+      %sum = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%partial: f32):
+        swage.yield %partial : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    ```
+  }];
+  let arguments = (ins
+    Arg<SwagePlan_Buffer, "partial results", [MemRead]>:$scratch,
+    AnySignlessInteger:$partial_count,
+    Arg<SwagePlan_WordBuffer, "one merge record per task", [MemRead]>:$merges,
+    AnySignlessInteger:$merge_count,
+    AnySignlessInteger:$segment_count,
+    Arg<SwagePlan_Buffer, "one scalar per split segment", [MemWrite]>:$output);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `scratch` `(` $scratch `:` type($scratch) `)`
+    `partial_count` `(` $partial_count `:` type($partial_count) `)`
+    `merges` `(` $merges `:` type($merges) `)`
+    `merge_count` `(` $merge_count `:` type($merge_count) `)`
+    `segment_count` `(` $segment_count `:` type($segment_count) `)`
+    `into` `(` $output `:` type($output) `)`
+    attr-dict-with-keyword $body
+  }];
+  let hasVerifier = 1;
+  let hasRegionVerifier = 1;
+}
+
 def SwagePlan_FusedTasksOp
     : SwagePlan_Op<"fused_tasks", [RecursiveMemoryEffects]> {
   let summary = "Run warp tasks and block tasks of one task buffer in one "
@@ -240,6 +300,7 @@ def SwagePlan_FusedTasksOp
 def SwagePlan_YieldOp
     : SwagePlan_Op<"yield", [Pure, Terminator,
                              ParentOneOf<["TasksOp", "PartialTasksOp",
+                                          "MergeTasksOp",
                                           "FusedTasksOp"]>]> {
   let summary = "End a task region, with the scalar result of the segment";
   let description = [{

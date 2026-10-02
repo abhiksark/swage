@@ -617,98 +617,6 @@ void buildPersistentProgram(ModuleOp module, func::FuncOp source,
   }
 }
 
-/// Emit the merge stage of a split reduction: one block per split segment,
-/// which reduces the scratch slots its partial tasks wrote and stores the
-/// result at the segment the merge record names. The partial stage comes
-/// from the plan conversion.
-void buildSplitMergeProgram(ModuleOp module, func::FuncOp source,
-                            const ReductionStage &stage,
-                            const TargetDescription &target) {
-  const int64_t blockSize = target.splitBlockThreads;
-  OpBuilder builder(module.getContext());
-  Location loc = source.getLoc();
-  builder.setInsertionPoint(source);
-  auto gpuModule = gpu::GPUModuleOp::create(
-      builder, loc, source.getName().str() + "__merge_module");
-
-  builder.setInsertionPointToStart(gpuModule.getBody());
-  Type pointer = LLVM::LLVMPointerType::get(module.getContext());
-  Type i32 = builder.getI32Type();
-  Type f32 = builder.getF32Type();
-  // A merge loads its output segment from a record, so its parameters end
-  // with the segment count that bounds it.
-  using swage_plan::KernelArgument;
-  const swage_plan::KernelLayout layout =
-      swage_plan::kernelLayout(swage_plan::KernelKind::SplitMerge);
-  SmallVector<Type> inputs;
-  for (KernelArgument parameter : layout.arguments())
-    inputs.push_back(swage_plan::isBuffer(parameter) ? pointer : i32);
-  auto kernelType = FunctionType::get(module.getContext(), inputs, {});
-  auto kernel = gpu::GPUFuncOp::create(
-      builder, loc, source.getName().str() + "__merge", kernelType);
-  kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
-                  builder.getUnitAttr());
-  target.pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
-
-  Block *entry = &kernel.getBody().front();
-  auto argument = [&](KernelArgument parameter) {
-    return Value(entry->getArgument(layout.indexOf(parameter)));
-  };
-  builder.setInsertionPointToStart(entry);
-  Value taskIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
-  Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
-  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
-  Value block = arith::ConstantIndexOp::create(builder, loc, blockSize);
-  Value taskCount =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                 argument(KernelArgument::MergeCount));
-  Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
-                                        taskIndex, taskCount);
-
-  scf::IfOp::create(
-      builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-        using namespace swage_plan::merge_record;
-        Value records = argument(KernelArgument::MergeRecords);
-        Value fields = arith::ConstantIndexOp::create(body, bodyLoc, Words);
-        Value recordBase =
-            arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
-        // A merge loads its output segment from the record, so the segment
-        // count bounds it before the store below. The merge itself stays
-        // unconditional, which keeps its all-reduce under the block-uniform
-        // guard alone.
-        Value outputSegmentI32 =
-            loadRecordField(body, bodyLoc, records, recordBase, Segment);
-        Value outputInRange =
-            isLoadedIndexInRange(body, bodyLoc, outputSegmentI32,
-                                 argument(KernelArgument::SegmentCount));
-        Value outputIndex = arith::IndexCastOp::create(
-            body, bodyLoc, body.getIndexType(), outputSegmentI32);
-        // The range indexes scratch, so the partial count bounds it.
-        Value beginI32 =
-            loadRecordField(body, bodyLoc, records, recordBase, PartialBegin);
-        Value endI32 =
-            loadRecordField(body, bodyLoc, records, recordBase, PartialEnd);
-        Value begin;
-        Value end;
-        std::tie(begin, end) =
-            clampRange(body, bodyLoc, beginI32, endI32,
-                       argument(KernelArgument::PartialCount));
-        Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
-        // Scratch holds completed partial reductions, so the merge combines
-        // them and never runs the element program.
-        Value total = emitReductionStage(
-            body, bodyLoc, &target, stage.kind, f32,
-            {argument(KernelArgument::Scratch), first, end, block},
-            ThreadCombination::Block,
-            [](OpBuilder &, Value value) { return value; });
-        emitLeaderStore(body, bodyLoc, total, argument(KernelArgument::Output),
-                        outputIndex, threadId, zero, outputInRange);
-        scf::YieldOp::create(body, bodyLoc);
-      });
-  gpu::ReturnOp::create(builder, loc);
-  source.erase();
-}
-
 class SegmentedReductionToSCFPass
     : public PassWrapper<SegmentedReductionToSCFPass, OperationPass<ModuleOp>> {
 public:
@@ -938,36 +846,14 @@ public:
 
   void runOnOperation() final {
     ModuleOp module = getOperation();
-    // The partial stage is planned and then converted. The merge stage is
-    // still emitted here.
-    if (!merge) {
-      PlanOptions options;
-      options.schedules = {PlanSchedule::SplitPartial};
-      options.function = selectedFunction;
-      if (failed(planSegmentFunctions(module, options, nvidiaTarget())) ||
-          failed(convertPlanToGPU(module, nvidiaTarget())))
-        signalPassFailure();
-      return;
-    }
-    FailureOr<SmallVector<func::FuncOp>> functions =
-        findSegmentFunctions(module, selectedFunction);
-    if (failed(functions))
-      return signalPassFailure();
-    // Every function is admitted before any is changed, so a rejected module
-    // is left as it was.
-    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
-    for (auto [function, analysis] : llvm::zip(*functions, analyses))
-      if (failed(analyzeSegmentProgram(function, analysis)) ||
-          failed(verifyPlanningProgram(analysis)) ||
-          failed(verifyKernelSymbols(module, function, "__merge")))
-        return signalPassFailure();
-    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
-      RegionOwner owner;
-      SegmentProgram program;
-      detachSegmentProgram(analysis, owner, program);
-      buildSplitMergeProgram(module, function, program.reductions.front(),
-                             nvidiaTarget());
-    }
+    // Each stage is planned and then converted.
+    PlanOptions options;
+    options.schedules = {merge ? PlanSchedule::SplitMerge
+                               : PlanSchedule::SplitPartial};
+    options.function = selectedFunction;
+    if (failed(planSegmentFunctions(module, options, nvidiaTarget())) ||
+        failed(convertPlanToGPU(module, nvidiaTarget())))
+      signalPassFailure();
   }
 
 private:

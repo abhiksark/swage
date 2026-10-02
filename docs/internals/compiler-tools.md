@@ -45,22 +45,22 @@ functions of the C API and not registered passes.
 | `--swage-fuse-maps` | none | Fuse each `swage.map` that has one consumer into that consumer, in every function |
 | `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations, by planning the sequential schedule and converting it |
 | `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512; optional `function` | Lower every admitted private segment function to a GPU kernel module. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
-| `--swage-to-plan` | `schedule`, a list of `direct` (default), `task-ids`, `fused-mixed`, `split-partial`, or `sequential` alone; `block-threads`, default 128, the launch width of the direct and task-id kernels, which the target must admit; optional `function` | Replace every admitted segment function by one plan function per schedule, or plan it in place for the sequential oracle. `task-ids`, `fused-mixed`, and `split-partial` admit a capture-free, single-stage f32 sum or max |
+| `--swage-to-plan` | `schedule`, a list of `direct` (default), `task-ids`, `fused-mixed`, `split-partial`, `split-merge`, or `sequential` alone; `block-threads`, default 128, the launch width of the direct and task-id kernels, which the target must admit; optional `function` | Replace every admitted segment function by one plan function per schedule, or plan it in place for the sequential oracle. Every schedule but `direct` and `sequential` admits a capture-free, single-stage f32 sum or max |
 | `--swage-plan-to-gpu` | none | Convert every plan function to a `gpu.module` that holds its kernel, and leave every other operation as it is |
 | `--swage-plan-to-scf` | none | Convert every sequential task operation to loops over its memrefs, remove the roles of its function, and leave every other operation as it is |
-| `--swage-split-segmented-reduction-to-gpu` | optional `merge`; optional `function` | Lower every admitted private capture-free, single-stage f32 sum or max function to the split partial kernel, by planning and converting it, or to the split merge kernel when `merge` is set |
+| `--swage-split-segmented-reduction-to-gpu` | optional `merge`; optional `function` | Lower every admitted private capture-free, single-stage f32 sum or max function to the split partial kernel, or to the split merge kernel when `merge` is set, by planning and converting it |
 
-The planner and a conversion are the two halves of the direct, task-id,
-fused mixed, and split partial lowerings and of the oracle.
-`--swage-segmented-reduction-to-gpu` runs both for the direct, task-id, and
-fused schedules, `--swage-split-segmented-reduction-to-gpu` for the partial stage,
+The planner and a conversion are the two halves of every lowering but the
+persistent one, and of the oracle. `--swage-segmented-reduction-to-gpu`
+runs both for the direct, task-id, and fused schedules,
+`--swage-split-segmented-reduction-to-gpu` for the two split stages,
 and `--swage-segmented-reduction-to-scf` runs the sequential schedule and
 `--swage-plan-to-scf`. A schedule list plans several kernels of one
 function, one `gpu.module` each:
 
 ```bash
 ./build/bin/swage-opt input.mlir \
-  --swage-to-plan='schedule=task-ids,split-partial block-threads=32' \
+  --swage-to-plan='schedule=task-ids,split-partial,split-merge block-threads=32' \
   --swage-plan-to-gpu
 ```
 
@@ -110,8 +110,8 @@ segment functions compiles one kernel per call.
 
 ## Private segmented modes
 
-The split pass emits one stage per run: the partial kernel by default and the
-merge kernel with `merge`. Both stages admit private capture-free,
+The split pass plans and converts one stage per run: the partial kernel by
+default and the merge kernel with `merge`. Both stages admit private capture-free,
 single-stage f32 sum/max programs with optional map chains and emit
 512-thread kernels whose names carry a `__partial` or `__merge` suffix. Only
 the partial stage evaluates the element program.
