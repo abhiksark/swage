@@ -834,6 +834,107 @@ def test_the_child_process_held_no_compiler(child, device_artifact):
     assert not report["cache"].exists()
 
 
+@pytest.fixture(scope="module")
+def child_with_bindings(device_artifact, tmp_path_factory):
+    """Run a few cases in a process that could import `mlir_swage`.
+
+    The process has the build-tree bindings on its path beside the copy of
+    the pure package, and `SWAGE_ARTIFACT_DIR` names the artifact. After
+    the segmented cases it launches the fixed vector add.
+
+    Returns:
+        The cases and the report the process saved.
+    """
+    root = tmp_path_factory.mktemp("child-with-bindings")
+    package = pathlib.Path(swage.__file__).parent
+    shutil.copytree(
+        package,
+        root / "site" / "swage",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    wanted = ("sum/power-law", "max/uniform", "softmax/many-tiny")
+    cases = {
+        name: case
+        for name, case in _cases().items()
+        if name in wanted or name.endswith("/direct-cta")
+    }
+    torch.save(cases, root / "cases.pt")
+    bindings = pathlib.Path(ir.__file__).absolute().parents[1]
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("SWAGE_NO_COMPILE", "SWAGE_CACHE_DIR")
+    }
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(root / "site"), str(bindings)]
+    )
+    environment["SWAGE_ARTIFACT_DIR"] = str(device_artifact)
+    environment["SWAGE_CACHE_DIR"] = str(root / "cache")
+    completed = subprocess.run(
+        [sys.executable, str(_CHILD), "cases.pt", "report.pt", "importable"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return cases, torch.load(root / "report.pt")
+
+
+@_needs_cuda
+def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
+    child_with_bindings, device_artifact
+):
+    """Run both calls with importable bindings and no compiler library.
+
+    The driver takes its launcher from the runtime library of the selected
+    artifact, so nothing imports `mlir_swage`, which would load LLVM. The
+    child asserts that before it saves its report; the report shows the
+    same.
+    """
+    cases, report = child_with_bindings
+
+    assert sorted(report["results"]) == sorted(cases)
+    assert len(cases) == 5
+    bindings = pathlib.Path(ir.__file__).absolute().parents[1]
+    assert str(bindings) in report["path"]
+    assert report["modules"] == []
+    assert not [
+        path
+        for path in report["mapped"]
+        if COMPILER_LIBRARY.search(os.path.basename(path))
+    ]
+    assert str(device_artifact / "libSwageRuntime.so") in report["mapped"]
+    assert report["launches_with_the_runtime_library"] is True
+    for name, (kind, values, offsets) in cases.items():
+        if kind == "softmax":
+            compiled = swage.segment_softmax(values.cuda(), offsets.cuda())
+        else:
+            compiled = swage.segment_reduce(
+                values.cuda(), offsets.cuda(), kind
+            )
+        assert _bits(report["results"][name]) == _bits(compiled.cpu())
+
+
+@_needs_cuda
+def test_the_vector_add_launches_in_a_process_that_runs_from_an_artifact(
+    child_with_bindings,
+):
+    """Compile and launch the public kernel after calls from an artifact.
+
+    The public launch needs the bindings and imports them, which maps the
+    compiler into the process at that point and not before. The driver
+    keeps the launcher of the runtime library.
+    """
+    _, report = child_with_bindings
+    output, expected = report["vector_add"]
+
+    assert _bits(output) == _bits(expected)
+    assert report["compiler_mapped_after_the_launch"]
+    assert report["launcher_after_the_launch_is_the_runtime_library"] is True
+
+
 def test_the_parent_process_does_hold_the_compiler():
     """Show that the check for mapped libraries can fail.
 

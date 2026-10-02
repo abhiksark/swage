@@ -1876,17 +1876,39 @@ class _CudaDriver:
             ctypes.POINTER(ctypes.c_char_p),
         ]
         self.library.cuGetErrorString.restype = ctypes.c_int
-        # The compiled launcher skips per-launch ctypes marshalling; the
-        # ctypes path stays as the fallback when the build-tree bindings
-        # cannot be imported. A wheel-only install cannot launch from a
-        # warm cache: with no native libraries to identify, it never reads
-        # the persistent cache.
-        # Bindings built for another swage version are refused here, not
-        # replaced by the fallback.
+        self._native_launch = self._choose_launcher()
+
+    @staticmethod
+    def _choose_launcher():
+        """Return the compiled launcher of this process, or None for ctypes.
+
+        A process that names an artifact launches through the runtime
+        library of the artifact and never imports the bindings here, which
+        would load LLVM into a process that selected an artifact to stay
+        without it. A directory that cannot be used leaves the launcher
+        open: the call that needs the artifact reports why, and a kernel
+        of an artifact that loads later lends its launcher.
+
+        Without an artifact the compiled launcher of the bindings skips
+        per-launch ctypes marshalling; the ctypes path stays as the
+        fallback when the build-tree bindings cannot be imported. A
+        wheel-only install cannot launch from a warm cache: with no native
+        libraries to identify, it never reads the persistent cache.
+        Bindings built for another swage version are refused here, not
+        replaced by the fallback.
+        """
+        # Imported here because the artifact module imports this one.
+        from . import _artifact
+
+        if os.environ.get(_artifact._ENVIRONMENT):
+            try:
+                return _artifact.selected()._launch_kernel
+            except RuntimeError:
+                return None
         try:
-            self._native_launch = _native_bindings()._launch_kernel
+            return _native_bindings()._launch_kernel
         except ImportError:
-            self._native_launch = None
+            return None
 
     def _call(self, name, *arguments):
         result = getattr(self.library, name)(*arguments)

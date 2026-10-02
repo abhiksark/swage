@@ -2,16 +2,21 @@
 """Run the public segmented calls from an artifact in a bare process.
 
 `test_artifact.py` starts this script in a process of its own, with
-`SWAGE_ARTIFACT_DIR` set and with a copy of the pure `swage` package as the
-only Swage code on the path. The script makes `mlir_swage` unimportable,
-runs every case it is given, and reports what the process loaded:
+`SWAGE_ARTIFACT_DIR` set and with a copy of the pure `swage` package on the
+path. The script runs every case it is given and reports what the process
+loaded:
 
-    python artifact_child.py CASES RESULTS
+    python artifact_child.py CASES RESULTS [importable]
 
 CASES is a `torch.save` file of `{name: (kind, values, offsets)}` with host
 tensors, where kind is `"sum"`, `"max"`, or `"softmax"`. RESULTS receives
 the host result of every case, the files mapped into the process, and what
 the driver launches with.
+
+Without the third argument the script makes `mlir_swage` unimportable
+first. With `importable` it leaves the bindings on the path, checks that
+the segmented calls did not import them, and then launches the fixed
+vector add, which does need them, to show that both run in one process.
 """
 
 import importlib.abc
@@ -49,9 +54,48 @@ def mapped_files():
         )
 
 
-def main(cases_path, results_path):
+def _launch_vector_add(swage, torch):
+    """Compile and launch the fixed vector add, which needs the bindings.
+
+    Returns:
+        The output and the expected sum, on the host.
+    """
+    import swage.language as sl
+
+    @swage.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    count, block = 1025, 64
+    x = torch.arange(count, dtype=torch.float32, device="cuda")
+    y = torch.full((count,), 0.5, device="cuda")
+    output = torch.full((count,), float("nan"), device="cuda")
+    add_kernel.launch(
+        arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": count},
+        constexprs={"BLOCK": block},
+        grid=((count + block - 1) // block,),
+    )
+    return output.cpu(), (x + y).cpu()
+
+
+def _compiler_libraries():
+    """Return the mapped files that belong to the compiler."""
+    return [
+        path.strip()
+        for path in mapped_files()
+        if COMPILER_LIBRARY.search(os.path.basename(path.strip()))
+    ]
+
+
+def main(cases_path, results_path, bindings="blocked"):
     """Run every case from the selected artifact and save the report."""
-    sys.meta_path.insert(0, _NoNativeBindings())
+    if bindings == "blocked":
+        sys.meta_path.insert(0, _NoNativeBindings())
     import swage
     import torch
     from swage import _artifact, _runtime
@@ -74,21 +118,29 @@ def main(cases_path, results_path):
     assert "mlir_swage" not in sys.modules, "mlir_swage was imported"
     assert not compiler, f"compiler libraries are mapped: {compiler}"
     launcher = _runtime._get_driver()._native_launch
-    torch.save(
-        {
-            "results": results,
-            "mapped": mapped,
-            "swage_file": swage.__file__,
-            "path": list(sys.path),
-            "modules": sorted(
-                name for name in sys.modules if name.startswith("mlir")
-            ),
-            "launches_with_the_runtime_library": (
-                getattr(launcher, "__self__", None) is _artifact.selected()
-            ),
-        },
-        results_path,
-    )
+    report = {
+        "results": results,
+        "mapped": mapped,
+        "swage_file": swage.__file__,
+        "path": list(sys.path),
+        "modules": sorted(
+            name for name in sys.modules if name.startswith("mlir")
+        ),
+        "launches_with_the_runtime_library": (
+            getattr(launcher, "__self__", None) is _artifact.selected()
+        ),
+    }
+    if bindings == "importable":
+        # The same process can still compile: the public launch imports the
+        # bindings, and the driver keeps the launcher of the artifact.
+        output, expected = _launch_vector_add(swage, torch)
+        launcher = _runtime._get_driver()._native_launch
+        report["vector_add"] = (output, expected)
+        report["compiler_mapped_after_the_launch"] = _compiler_libraries()
+        report["launcher_after_the_launch_is_the_runtime_library"] = (
+            getattr(launcher, "__self__", None) is _artifact.selected()
+        )
+    torch.save(report, results_path)
 
 
 if __name__ == "__main__":

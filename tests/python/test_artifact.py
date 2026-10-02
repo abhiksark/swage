@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import types
+from unittest import mock
 
 import pytest
 import swage
@@ -503,6 +504,67 @@ def test_a_kernel_lends_the_launcher_to_a_driver_without_one(
     artifact.kernel(*_request())
 
     assert compiled._native_launch is print
+
+
+def _bindings_that_must_stay_unimported(monkeypatch):
+    """Make the bindings importable and fail the test if they are asked."""
+    monkeypatch.setattr(
+        _artifact._runtime.ctypes, "CDLL", lambda name: mock.MagicMock()
+    )
+    asked = []
+
+    def native_bindings():
+        asked.append("bindings")
+        return types.SimpleNamespace(_launch_kernel=print)
+
+    monkeypatch.setattr(_artifact._runtime, "_native_bindings", native_bindings)
+    return asked
+
+
+def test_a_driver_takes_its_launcher_from_a_selected_artifact(
+    artifact_dir, monkeypatch
+):
+    """Launch through the runtime library and leave the bindings alone.
+
+    The compiled launcher of the bindings loads LLVM with them. A process
+    that selected an artifact must not depend on the bindings being absent
+    to stay free of LLVM, so its driver does not ask for them.
+    """
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    artifact = _load(monkeypatch, artifact_dir)
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch == artifact._launch_kernel
+    assert asked == []
+
+
+def test_a_driver_takes_the_bindings_without_an_artifact(monkeypatch):
+    """Keep the compiled launcher of the bindings as the default."""
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch is print
+    assert asked == ["bindings"]
+
+
+def test_a_driver_does_not_fall_back_to_the_bindings_for_a_bad_artifact(
+    tmp_path, monkeypatch
+):
+    """Leave the launcher open when the selected directory cannot be used.
+
+    The call that needs the artifact reports why it is refused. The driver
+    serves other launches through ctypes meanwhile, and a kernel of an
+    artifact that loads later lends it the launcher.
+    """
+    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    _select(monkeypatch, tmp_path / "missing")
+
+    driver = _artifact._runtime._CudaDriver()
+
+    assert driver._native_launch is None
+    assert asked == []
 
 
 @pytest.mark.parametrize(
