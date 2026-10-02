@@ -740,11 +740,14 @@ _SUM_KERNELS = [
     ("persistent", "_compile_persistent_segmented_reduction_ptx", {}),
 ]
 
-_FLOAT_INSTRUCTION = re.compile(
-    r"^\s*(?P<name>[a-z][a-z0-9]*)(?P<modifiers>(?:\.[A-Za-z0-9]+)*)"
-    r"\.(?P<type>f16|f32|f64)\s",
+# An instruction with its dotted suffixes, as `add.rn.f32` or
+# `cvt.rn.f32.f64`. One that names a float type in any suffix is a float
+# instruction: a conversion names its float type before its last suffix.
+_INSTRUCTION = re.compile(
+    r"^\s*(?P<name>[a-z][a-z0-9]*)(?P<suffixes>(?:\.[A-Za-z0-9]+)+)\s",
     re.MULTILINE,
 )
+_FLOAT_TYPES = {"f16", "f32", "f64"}
 _ROUNDED = {"add", "sub", "mul", "div"}
 
 
@@ -767,7 +770,9 @@ def _float_arithmetic(ptx, element="f32"):
     `.ftz` would flush subnormal values to zero and `.sat` would clamp, so
     both are violations. So is any float type other than the element type:
     a narrower instruction in an f64 kernel would lose bits, and a wider
-    one in an f32 kernel would round twice.
+    one in an f32 kernel would round twice. The rule covers every suffix,
+    so a conversion between the two widths, such as `cvt.rn.f32.f64`, is a
+    violation in a kernel of either type.
 
     Returns:
         A list of violating instruction spellings and a dict that counts
@@ -775,11 +780,15 @@ def _float_arithmetic(ptx, element="f32"):
     """
     violations = []
     counts = {}
-    for match in _FLOAT_INSTRUCTION.finditer(ptx):
+    for match in _INSTRUCTION.finditer(ptx):
         name = match["name"]
-        modifiers = match["modifiers"].split(".")[1:]
-        spelling = f"{name}{match['modifiers']}.{match['type']}"
-        if name in ("fma", "mad") or match["type"] != element:
+        suffixes = match["suffixes"].split(".")[1:]
+        types = [suffix for suffix in suffixes if suffix in _FLOAT_TYPES]
+        if not types:
+            continue
+        modifiers = [suffix for suffix in suffixes if suffix not in types]
+        spelling = f"{name}{match['suffixes']}"
+        if name in ("fma", "mad") or any(kind != element for kind in types):
             violations.append(spelling)
         elif name in _ROUNDED and modifiers != ["rn"]:
             violations.append(spelling)
@@ -856,17 +865,25 @@ def test_float_arithmetic_scan_holds_a_kernel_to_its_element_type():
         "selp.f64",
     ]
     unsafe_wide = ["add.f64", "fma.rn.f64", "mul.rn.ftz.f64", "sub.rz.f64"]
+    # A conversion between the widths belongs in no kernel, and one from an
+    # integer belongs in the kernel of its float type only. The float type
+    # of a conversion is not its last suffix.
+    between = ["cvt.rn.f32.f64", "cvt.f64.f32"]
+    from_integer = ["cvt.rn.f64.s32"]
+    integer = ["cvt.s64.s32", "ld.global.b64", "selp.b64"]
     ptx = "".join(
         f"\t{spelling} \t%r1, %r2, %r3;\n"
-        for spelling in (*narrow, *wide, *unsafe_wide)
+        for spelling in (
+            *narrow, *wide, *unsafe_wide, *between, *from_integer, *integer
+        )
     )
 
     as_f64, counts_f64 = _float_arithmetic(ptx, "f64")
     as_f32, counts_f32 = _float_arithmetic(ptx, "f32")
 
-    assert as_f64 == [*narrow, *unsafe_wide]
-    assert counts_f64 == dict.fromkeys(wide, 1)
-    assert as_f32 == [*wide, *unsafe_wide]
+    assert as_f64 == [*narrow, *unsafe_wide, *between]
+    assert counts_f64 == dict.fromkeys([*wide, *from_integer], 1)
+    assert as_f32 == [*wide, *unsafe_wide, *between, *from_integer]
     assert counts_f32 == dict.fromkeys(narrow, 1)
 
 
