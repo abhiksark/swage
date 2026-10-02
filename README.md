@@ -98,7 +98,8 @@ ninja -C build check-swage-python
 ```
 
 The native package is imported from `build/python_packages`, or installed
-from a native wheel built on the same machine:
+into a fresh virtual environment from a native wheel built on the same
+machine:
 
 ```bash
 python -m build --wheel
