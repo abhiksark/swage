@@ -179,13 +179,24 @@ records, the scratch, and the event are released when the call returns.
 
 `torch.segment_reduce` does none of the host work. When the offsets change on
 every call, expect `segment_reduce` to be slower than `torch.segment_reduce`.
-[Benchmarks](../internals/benchmarks.md#harness-methods) describes the
-harness that times this regime. No committed record of it exists yet, so
-this page states no number.
+One committed record measures that regime, on one NVIDIA RTX A6000 at
+revision `453c56e`:
 
-The recorded comparisons on that page were taken with a private prepared
-launch, which prepares one layout once and launches it many times. That path
-is not public, and its numbers do not describe these calls.
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
+
+The measured candidate is not this call. It is the private preparation with
+schedule selection disabled, followed by the mixed launch into a caller's
+output. `segment_reduce` runs the same preparation with automatic schedule
+selection and allocates its result when no `out` is passed, and no harness
+times it. Read the figures as the cost of the preparation that a call
+repeats, not as a measurement of the call.
+[Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
+reports the record and its limits: one GPU, one seed per distribution, and a
+machine that was not quiet.
+
+The other recorded comparisons on that page were taken with a private
+prepared launch, which prepares one layout once and launches it many times.
+That path is not public, and its numbers do not describe these calls.
 
 The first calls of a process cost more:
 

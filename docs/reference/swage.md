@@ -188,7 +188,11 @@ Reduce every segment of `values` to one f32 result on the GPU. Segment `i`
 is `values[offsets[i]:offsets[i + 1]]`. The call validates its tensors,
 copies the offsets to the host to validate and classify them, enqueues its
 kernels on the current PyTorch CUDA stream, and returns without waiting for
-them. Every call repeats the host work.
+them. Every call repeats the host work, so with offsets that change on every
+call it is slower than `torch.segment_reduce`.
+[Segmented Calls](../user-guide/segmented-calls.md#what-a-call-costs) cites
+the committed record of the private preparation that the call repeats; no
+record times the call itself.
 
 Parameters
 :   `values`: a contiguous rank-one `torch.float32` CUDA tensor on the

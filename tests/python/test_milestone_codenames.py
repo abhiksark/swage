@@ -40,6 +40,8 @@ _CODENAME = re.compile(
 )
 # Assembled at run time so this tracked file never spells a codename.
 _SAMPLE_CODENAME = "M" + "7"
+# Committed benchmark records are raw evidence and are never edited.
+_RECORD_DIRECTORY = Path("benchmarks/results")
 # Variables that point git at a repository, index, object store, or work
 # tree. Git sets them while it runs a hook, and they take precedence over
 # the directory given with -C, so they are never passed on.
@@ -166,6 +168,14 @@ def _violations(root):
         # source generator or TeX file is scanned instead.
         if relative.suffix.lower() == ".svg":
             continue
+        # A JSON benchmark record holds device fields such as the NVIDIA
+        # performance state, whose values read like planning identifiers.
+        # The pages and scripts that describe a record are still scanned.
+        if (
+            relative.suffix.lower() == ".json"
+            and _RECORD_DIRECTORY in relative.parents
+        ):
+            continue
         try:
             text = (root / relative).read_text()
         except (OSError, UnicodeDecodeError):
@@ -193,6 +203,22 @@ def test_milestone_codenames_stay_in_planning_history():
     violations = _violations(REPO_ROOT)
 
     assert not violations, "\n" + "\n".join(violations)
+
+
+def test_benchmark_record_text_is_not_scanned_but_its_page_is(tmp_path):
+    """A device field in a JSON record is not a codename; prose still is."""
+    state = "P" + "0"
+    record = f'{{"gpu": {{"pstate": "{state}"}}}}\n'
+    _write(tmp_path, "benchmarks/results/run/summary.json", record)
+    _write(tmp_path, "benchmarks/results/run.md", f"state {state}\n")
+    _write(tmp_path, "benchmarks/other.json", record)
+    _write(tmp_path, f"benchmarks/results/{_SAMPLE_CODENAME}.json", "{}\n")
+
+    assert sorted(_violations(tmp_path)) == [
+        f"benchmarks/other.json:1: unexpected {state!r}",
+        f"benchmarks/results/{_SAMPLE_CODENAME}.json: codename in path",
+        f"benchmarks/results/run.md:1: unexpected {state!r}",
+    ]
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")

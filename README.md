@@ -45,7 +45,8 @@ release, except for the items marked as completed after it.
   the current CUDA device, and nothing else: no other dtype, kind, or rank,
   and no gradient. A call validates and classifies its offsets on the host
   every time, so with offsets that change on every call it is slower than
-  `torch.segment_reduce`; no committed record measures that yet.
+  `torch.segment_reduce`. A committed record measures the private
+  preparation that the call repeats, not the call itself.
   [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
   and the cost.
 
@@ -76,7 +77,8 @@ Each item of evidence was recorded on one NVIDIA RTX A6000 (`sm_86`):
   [ADR-0016](docs/adr/ADR-0016-fused-mixed-policy-schedule.md) before the
   passing run. Both ratios describe the PTX of the revision they were
   measured at. Kernels generated now also pass through an LLVM pass pipeline
-  before PTX emission, and no committed record measures them.
+  before PTX emission. The gate has not been rerun on them; a later
+  committed record measures them with another harness.
 - Split correctness: exact and nontrivial f32 split sums match PyTorch and
   the CPU oracle. Split execution is a correctness result and does not retune
   the frozen benchmark.
