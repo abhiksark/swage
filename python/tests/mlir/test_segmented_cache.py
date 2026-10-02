@@ -340,6 +340,25 @@ def test_load_memo_reuses_one_module_within_a_context():
     ]
 
 
+def test_load_memo_hit_does_not_read_the_ptx_text_again():
+    """Look a loaded kernel up by its text without hashing the text."""
+
+    class _Text(str):
+        def encode(self, *_args, **_kwargs):
+            pytest.fail("a lookup must not encode the PTX text")
+
+    driver = _FakeDriver()
+    ptx = _Text("ptx")
+
+    first = qualification._load_once(driver, ptx, "segmented_sum")
+    second = qualification._load_once(driver, ptx, "segmented_sum")
+    other = qualification._load_once(driver, _Text("other"), "segmented_sum")
+
+    assert first is second
+    assert other != first
+    assert [loaded[1] for loaded in driver.loads] == ["ptx", "other"]
+
+
 def test_load_memo_does_not_cross_cuda_contexts():
     """Load again in a second context and keep both handles apart."""
     driver = _FakeDriver(context=1)

@@ -906,3 +906,32 @@ def test_a_refused_program_or_limit_is_refused_at_every_preparation(
             )
     assert qualification._admitted == {}
 
+
+@requires_cuda
+def test_later_preparations_repeat_no_device_or_program_lookup(monkeypatch):
+    """Ask for the device target once, and never fill the counters."""
+    cases = [_integer_case(lengths) for lengths in ([1, 33, 5000], [40] * 7)]
+    capability = _CountingCalls(torch.cuda.get_device_capability)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
+    monkeypatch.setattr(qualification, "_targets", {})
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("the persistent counters are zeroed by every launch")
+
+    monkeypatch.setattr(torch, "zeros", fail)
+    for prepare, policy in (
+        (qualification._prepare_planned_sum, "mixed"),
+        (qualification._prepare_persistent_sum, "launch"),
+    ):
+        for values, offsets, expected in cases:
+            output = torch.full((len(expected),), float("nan"), device="cuda")
+            prepared = prepare(values.cuda(), offsets.cuda(), output)
+            for _ in range(2):
+                output.fill_(float("nan"))
+                getattr(prepared, policy)()
+                torch.testing.assert_close(
+                    output.cpu(), expected, rtol=0, atol=0
+                )
+
+    assert len(capability.calls) == 1
+

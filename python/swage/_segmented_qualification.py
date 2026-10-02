@@ -1,7 +1,6 @@
 # python/swage/_segmented_qualification.py
 """Private qualification runner for native segmented programs."""
 
-import hashlib
 import pathlib
 import re
 import shutil
@@ -29,8 +28,10 @@ _LOWERING_PIPELINE = (
 # One memo for every kernel this module compiles and loads. PTX is keyed by
 # the native compile function, the semantic module text, and every code
 # generation option (kernel name, block size, target). Loaded handles are
-# keyed per driver by CUDA context, PTX digest, and kernel name, so a hit
-# never crosses a context or a target.
+# keyed per driver by CUDA context, PTX text, and kernel name, so a hit
+# never crosses a context or a target. Python keeps the hash of a string, and
+# the PTX memo returns the same string for the same kernel, so neither lookup
+# reads the PTX text again.
 #
 # Both memos are bounded: each keeps `_runtime._CACHE_LIMIT` kernels and then
 # forgets its oldest. A forgotten kernel is compiled or loaded again on its
@@ -355,6 +356,20 @@ def _refuse_rebound_storage(binding, prepared):
             )
 
 
+# The NVPTX processor of each CUDA device index. A device keeps its compute
+# capability for as long as the process runs.
+_targets = {}
+
+
+def _target(torch, device_index):
+    """Return the NVPTX processor name of one CUDA device, looked up once."""
+    target = _targets.get(device_index)
+    if target is None:
+        major, minor = torch.cuda.get_device_capability(device_index)
+        target = _targets[device_index] = f"sm_{major}{minor}"
+    return target
+
+
 def _compile_once(compile_ptx, module_text, *, module=None, **options):
     """Compile one kernel at most once per process and return its PTX.
 
@@ -446,11 +461,7 @@ def _load_once(driver, ptx, kernel_name):
     current_context = getattr(driver, "current_context", None)
     if current_context is None:
         return driver.load(ptx, kernel_name)
-    key = (
-        current_context(),
-        hashlib.sha256(ptx.encode()).hexdigest(),
-        kernel_name,
-    )
+    key = (current_context(), ptx, kernel_name)
     loaded = _load_memo.get(driver)
     if loaded is None:
         with _memo_lock:
@@ -595,8 +606,7 @@ def launch_gpu(values, offsets, output, kind, block_size=128):
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = f"segmented_{kind}"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
@@ -672,8 +682,7 @@ def _launch_segmented_sum_tasks(
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
@@ -910,8 +919,7 @@ def _prepare_planned_reduction(
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     small_element_program = _admit_program(
         module_text, warp_max_elements, cta_chunk_elements
     )
@@ -1032,7 +1040,7 @@ def _prepare_planned_reduction(
                 partial_count, dtype=torch.float32, device=device
             )
     tasks_ready = torch.cuda.Event()
-    tasks_ready.record(torch.cuda.current_stream())
+    tasks_ready.record(torch.cuda.current_stream(device_index))
 
     tasks_ready_complete = False
 
@@ -1230,8 +1238,7 @@ def _prepare_persistent_sum(
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
     module_text = _semantic_module("sum")
     _admit_program(module_text, warp_max_elements, cta_chunk_elements)
@@ -1310,9 +1317,11 @@ def _prepare_persistent_sum(
     merge_pointer = partial_pointer + 8 * partial_count
     partial_merges_pointer = merge_pointer + 12 * merge_count
     scratch = torch.empty(partial_count, dtype=torch.float32, device=device)
-    counters = torch.zeros(3 + merge_count, dtype=torch.int32, device=device)
+    # Every launch zeroes the counters before it enqueues the kernel, so
+    # they need no initial value.
+    counters = torch.empty(3 + merge_count, dtype=torch.int32, device=device)
     tasks_ready = torch.cuda.Event()
-    tasks_ready.record(torch.cuda.current_stream())
+    tasks_ready.record(torch.cuda.current_stream(device_index))
     tasks_ready_complete = False
     current_context = getattr(driver, "current_context", None)
     prepared_context = None if current_context is None else current_context()
@@ -1471,8 +1480,7 @@ def launch_softmax_gpu(values, offsets, output, block_size=128):
         swage as native_swage,
     )
 
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    target = f"sm_{major}{minor}"
+    target = _target(torch, torch.cuda.current_device())
     kernel_name = "ragged_softmax"
     ptx = _compile_once(
         native_swage._compile_segmented_reduction_ptx,
