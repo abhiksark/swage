@@ -15,6 +15,31 @@ include "mlir/IR/CommonTypeConstraints.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+def Swage_ArgumentRoleValues : I32EnumAttrCase<"Values", 0, "values">;
+def Swage_ArgumentRoleOffsets : I32EnumAttrCase<"Offsets", 1, "offsets">;
+def Swage_ArgumentRoleOutput : I32EnumAttrCase<"Output", 2, "output">;
+def Swage_ArgumentRoleValueCount
+    : I32EnumAttrCase<"ValueCount", 3, "value_count">;
+def Swage_ArgumentRoleSegmentCount
+    : I32EnumAttrCase<"SegmentCount", 4, "segment_count">;
+
+def Swage_ArgumentRole
+    : I32EnumAttr<"ArgumentRole",
+                  "what one argument of a segment function is",
+                  [Swage_ArgumentRoleValues, Swage_ArgumentRoleOffsets,
+                   Swage_ArgumentRoleOutput, Swage_ArgumentRoleValueCount,
+                   Swage_ArgumentRoleSegmentCount]> {
+  let cppNamespace = "::mlir::swage";
+  let genSpecializedAttr = 0;
+}
+
+// The value of the `swage.role` argument attribute. The dialect description
+// states the contract of each role.
+def Swage_ArgumentRoleAttr
+    : EnumAttr<Swage_Dialect, Swage_ArgumentRole, "role"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def Swage_ProgramIdOp : Swage_Op<"program_id", [Pure]> {
   let summary = "Id of the current logical fixed-block program along an axis";
   let description = [{
