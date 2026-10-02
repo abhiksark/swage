@@ -67,8 +67,10 @@ release. The pure Python package on another platform is unknown.
 PyTorch is optional. Metadata inference, launch, and the segmented calls
 need it. Capture, the kernel-language check, the environment report, and
 emission with an explicit signature do not. The segmented calls also need
-`numpy`, which no extra of the package declares; the binding requirements
-of the native build install it.
+`numpy`, which the `pytorch` extra declares without a version bound. The
+binding requirements of the native build install it too, and the tests run
+with `numpy` 2.1.2. A segmented call without it raises a `RuntimeError`
+that names it; `tests/python/test_segments.py`.
 
 | PyTorch | Status | Evidence |
 |---|---|---|
@@ -121,6 +123,8 @@ surface than the tables above suggest for the package as a whole:
 | f32 values with int32 offsets, rank one | The only admitted data model | Other dtypes and ranks raise a `TypeError`; the same file |
 | A second GPU on one host | Unknown | The calls require the current device; the tests run on a host with one GPU |
 | Gradients | Rejected | `values` that require grad raise a `ValueError`; the same files |
+| Tensors created under `torch.inference_mode()` | Tested in the GPU tier on `sm_86` | `values`, `offsets`, and `out` are inference tensors in `python/tests/mlir/test_public_segments.py` |
+| An install without `numpy` | Rejected | A `RuntimeError` that names `numpy`, with the bindings and with an artifact; `tests/python/test_segments.py` and `tests/python/test_artifact.py` block the import |
 
 The GPU tests of the segmented calls ran on one NVIDIA RTX A6000 with
 PyTorch 2.12.0+cu130 and Python 3.13, on the branch that added the calls.
@@ -142,6 +146,7 @@ the next section defines it.
 | Selection, verification, the trust rule, and every refusal | Tested in the pure Python tier | `tests/python/test_artifact.py`, with a stand-in for the runtime library |
 | The classifier of the runtime library | Tested in the native tier | `unittests/RuntimeTest.cpp` and `python/tests/mlir/test_segmented_classification.py` compare it with the compiler's classifier |
 | Both calls from an artifact, in a process that cannot import `mlir_swage` | Tested in the GPU tier on `sm_86` | `python/tests/mlir/test_artifact.py`: no LLVM or MLIR library is mapped, the results agree with PyTorch and float64 references, and they equal the compiled path bit for bit |
+| Both calls from an artifact, in a process in which `mlir_swage` is importable | Tested in the GPU tier on `sm_86` | The same file: no LLVM or MLIR library is mapped until the process launches the fixed vector add, which compiles |
 | The same in a fresh virtual environment that holds the pure wheel, PyTorch 2.12.0+cu130, `numpy` 2.1.2, and no checkout or build tree on any path | Checked by hand | Run once on the Linux x86-64 machine with the NVIDIA RTX A6000, Python 3.13 |
 | An artifact for another target than the device | Rejected | A `RuntimeError` before any kernel is loaded; the same file |
 | An artifact directory owned by another account | Tested with a simulated owner. Checked by hand under a second user id, without a GPU | `tests/python/test_artifact.py` reports another owner and another effective user to the loader. Once, in a container without a GPU, a process under another user id loaded an artifact that was mounted read-only and owned by the account that wrote it, and classified with its runtime library; no kernel was launched there |

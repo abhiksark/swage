@@ -289,12 +289,14 @@ A call makes its checks in a fixed order, all before the first enqueue:
    that cannot be used stops the call here. Without the variable, a
    wheel-only install stops here with a `RuntimeError` that names the
    installation page.
-4. CUDA graph capture, and for `segment_reduce` the inference state of
-   `offsets`.
-5. The shared validation of dtype, rank, layout, lazy views, the offsets on
+4. `numpy`, which holds the host copy of the offsets. An install without
+   it stops here with a `RuntimeError` that names `numpy` and the
+   installation page.
+5. CUDA graph capture.
+6. The shared validation of dtype, rank, layout, lazy views, the offsets on
    a host copy, and the device.
 
-A result that the call allocates is allocated before step 5, so a call that
+A result that the call allocates is allocated before step 6, so a call that
 fails there has allocated and released one tensor.
 
 Preparation and launch follow these rules:
@@ -306,34 +308,60 @@ Preparation and launch follow these rules:
   [Module lifetime](#module-lifetime).
 - No plan is kept between calls. A second call with the same offsets tensor
   copies and classifies it again.
-- `segment_reduce` runs the `mixed` schedule of the private planned path
-  with the default limits and automatic schedule selection.
-  `segment_softmax` runs the one-CTA path with a 128-thread block. Neither
-  call takes a scheduling argument.
+- `segment_reduce` validates, classifies, and enqueues the `mixed` schedule
+  of the private planned path in one step, with the default limits and
+  automatic schedule selection. For the same batch it returns the bits of
+  the prepared private `mixed` launch. `segment_softmax` runs the one-CTA
+  path with a 128-thread block. Neither call takes a scheduling argument.
+- `segment_reduce` prepares nothing it does not launch. A batch compiles
+  and loads the fused kernel when it has segments of up to 4096 elements
+  and the partial and merge kernels when it has longer ones. A batch that
+  the selection rule sends to the pure CTA kernel compiles and loads that
+  kernel alone. The pure warp kernel is never compiled.
 - Kernels are enqueued on the stream that is current at the call, and
   `values`, `offsets`, and the result are retained through
   `record_stream()`.
-- After the enqueue, the version counter of the result is advanced. The
-  counters of `values` and `offsets` are not. `segment_reduce` also advances
-  the counter of the result once while it prepares, so a call that is
-  refused after that point, or that has no segment, leaves the result
-  unwritten with its counter moved. `segment_softmax` advances it only when
-  it enqueues.
-- The task records, the split scratch, and the CUDA event of a
-  `segment_reduce` call are released when the call returns. Device memory,
-  the number of loaded modules, and the number of live events stay flat
-  over repeated calls with new offsets.
+- After the enqueue, the version counter of the result is advanced once.
+  A call that enqueues nothing, because it is refused or because its batch
+  has no segment, leaves the counter where it was. The counters of `values`
+  and `offsets` are not advanced.
+- The task records and the split scratch of a `segment_reduce` call are
+  released when the call returns, and a call creates no CUDA event. Device
+  memory and the number of loaded modules stay flat over repeated calls
+  with new offsets.
 - Compiled kernels are kept in the in-process caches of the private
   helpers, which [Module lifetime](#module-lifetime) describes, and are not
   written to the persistent cache. With an artifact selected, the same
   caches hold kernels that were read from the artifact, and nothing is
   compiled; [Artifacts](#artifacts) states the rules. The first
-  `segment_reduce` call on a
-  device also uploads the shared segment ids that
+  `segment_reduce` call on a device whose batch goes to the pure CTA kernel
+  also uploads the shared segment ids that
   [Task Execution](../internals/task-execution.md) describes, which hold
   4 MiB of device memory for the life of the process.
 
-Four conditions are refused with an error instead of being handled:
+A prepared private launch guards the time between its preparation and a
+later launch. A segmented call has no such time: it enqueues what it
+classified before it returns, and the caller runs nothing in between. Four
+guards of a prepared launch are therefore not part of a call:
+
+- The version counter of the offsets is not compared, so `values`,
+  `offsets`, and `out` may all be inference tensors, which have no counter.
+- The storage of the tensors is not compared. The data pointers are read
+  after validation and passed to the driver in the same call.
+- The CUDA context is not compared. The kernels are loaded, or found
+  loaded, in the context that is current at the call.
+- No event orders the task records before the kernels. Both use the stream
+  that is current at the call.
+
+Everything else is checked on every call: the shared validation of step 6,
+with the offsets on a host copy, and the refusals below. A write to the
+offsets from another thread, or by a kernel on another stream, between the
+host copy and the enqueue is not detected, as a prepared launch does not
+detect a write that PyTorch does not count. The kernels clamp every range
+they load to the buffer it indexes, so such a write cannot move an access
+outside the buffers.
+
+Three conditions are refused with an error instead of being handled:
 
 - A stream that is capturing a CUDA graph. The call raises a `RuntimeError`
   before the host copy, so the capture stays valid. A prepared private
@@ -341,15 +369,10 @@ Four conditions are refused with an error instead of being handled:
   repeat its preparation.
 - `values` that require grad, with a `ValueError`. A call records no
   gradient.
-- For `segment_reduce`, offsets that are an inference tensor, with a
-  `ValueError`. The preparation compares a version counter that an
-  inference tensor does not have. Offsets made outside
-  `torch.inference_mode()`, or cloned outside it, are admitted, also when
-  the call runs inside it. `segment_softmax` accepts inference tensors.
 - `SWAGE_NO_COMPILE=1` with a kernel the process does not hold and no
   artifact selected; [Cache variables](#cache-variables) states the rule.
 
-A fifth refusal exists only with `SWAGE_ARTIFACT_DIR` set: an artifact that
+A fourth refusal exists only with `SWAGE_ARTIFACT_DIR` set: an artifact that
 cannot be used, or that does not hold the kernels of the call, raises a
 `RuntimeError`. [Artifacts](#artifacts) lists the cases.
 
@@ -612,10 +635,33 @@ artifact it cannot use.
 An artifact concerns the segmented calls only. The public `launch()` of the
 fixed vector add does not read it and behaves as the sections above state.
 When `mlir_swage` is importable beside a selected artifact, the kernels and
-the classification still come from the artifact, and the driver wrapper
-still takes its launcher from the bindings, which loads the compiler
-libraries. A process that must map no LLVM or MLIR library must therefore
-not have `mlir_swage` importable.
+the classification still come from the artifact. A driver wrapper that is
+created while an artifact is selected takes its launcher from the runtime
+library of the artifact and does not import the bindings, so a process that
+runs only the segmented calls maps no LLVM or MLIR library whether or not
+`mlir_swage` is importable. Three rules bound this:
+
+- The launcher is chosen when the process first uses the driver. Set
+  `SWAGE_ARTIFACT_DIR` before that. A driver that was created earlier keeps
+  the launcher it took.
+- A selected directory that cannot be used leaves the driver on the ctypes
+  path. The bindings are not imported in its place.
+- A `launch()` of the fixed vector add in such a process imports the
+  bindings to compile, which maps the compiler libraries from then on, and
+  enqueues through the launcher of the artifact.
+
+## Test and development settings
+
+One variable serves the tests and no public call.
+
+`SWAGE_ORACLE_BUILD_DIR` names the Swage build directory from which the
+private CPU oracle takes its tools. The oracle runs `bin/swage-opt` of that
+directory and reads its `CMakeCache.txt` to find the LLVM install the build
+was configured with, whose `mlir-opt`, `mlir-runner`, and runner libraries
+it uses. Without the variable the directory is `build` in the checkout that
+`swage` was imported from, which a `swage` installed from a wheel does not
+have. The variable is read at every oracle call. A directory that lacks
+either file raises a `RuntimeError` that names what is missing.
 
 ## Debug dumps
 

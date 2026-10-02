@@ -204,8 +204,7 @@ Parameters
 :   `offsets`: a contiguous rank-one `torch.int32` tensor on the same
     device with one entry more than there are segments. It starts at zero,
     never decreases, and ends at or below the number of values. Values past
-    the final offset belong to no segment. It must not be an inference
-    tensor.
+    the final offset belong to no segment.
 :   `kind`: `"sum"` or `"max"`. The sum of an empty segment is `0.0` and
     its maximum is negative infinity. A maximum over a NaN is NaN. A sum
     follows IEEE-754 addition, and its rounding depends on the schedule the
@@ -220,28 +219,30 @@ Returns
     `out` is `None`, with one element per segment. The kernels that write
     it are enqueued and may not have finished. Submitted tensors are
     retained through `record_stream()`, and the version counter of the
-    result is advanced.
+    result is advanced when a kernel is enqueued. `values`, `offsets`, and
+    `out` may be inference tensors.
 
 Raises
 :   `TypeError`: an argument is not a tensor, or a tensor has the wrong
     dtype, rank, or device type.
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
     is a lazy view, requires grad, or is on another device; offsets that
-    are an inference tensor or break the offsets contract; an `out` of the
-    wrong size or one that overlaps an input.
+    break the offsets contract; an `out` of the wrong size or one that
+    overlaps an input.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
     native bindings while no artifact is selected, an artifact selected by
     `SWAGE_ARTIFACT_DIR` that cannot be used or does not hold the kernels of
-    the call, unavailable CUDA, a current stream that is capturing a CUDA
+    the call, a missing `numpy`, unavailable CUDA, a current stream that is
+    capturing a CUDA
     graph, a kernel that the process does not hold while
     `SWAGE_NO_COMPILE=1` is set and no artifact is selected, or a runtime
     driver failure.
 
 The checks run in this order: the PyTorch check, `kind`, the tensor type of
 `values` and `offsets` and the grad state of `values`, `out`, the selected
-artifact or the native bindings, CUDA graph capture, the inference state of
-`offsets`, and then the shared validation of dtype, rank, layout, offsets,
-and device. All of them precede the first enqueue.
+artifact or the native bindings, `numpy`, CUDA graph capture, and then the
+shared validation of dtype, rank, layout, offsets, and device. All of them
+precede the first enqueue.
 
 Example
 
@@ -271,9 +272,9 @@ waiting for it.
 
 Parameters
 :   `values`: as for `segment_reduce`.
-:   `offsets`: as for `segment_reduce`, with two differences. The final
+:   `offsets`: as for `segment_reduce`, with one difference. The final
     offset must equal the number of values, so that every value belongs to
-    a segment. An inference tensor is accepted.
+    a segment.
 :   `out`: as for `segment_reduce`, with exactly one element per value.
 
 Returns
@@ -284,9 +285,8 @@ Returns
     version counter of the result is advanced when a kernel is enqueued.
 
 Raises
-:   The exceptions of `segment_reduce`, without the `kind` and the
-    inference-tensor errors. Offsets that end below the number of values
-    raise a `ValueError`.
+:   The exceptions of `segment_reduce`, without the `kind` error. Offsets
+    that end below the number of values raise a `ValueError`.
 
 Example
 

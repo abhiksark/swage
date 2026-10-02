@@ -51,9 +51,11 @@ point where the offsets are validated. When the classifier refuses, the
 Python validation runs and raises its own message, so the exception types,
 the messages, and their order are unchanged.
 
-The private `_prepare_planned_reduction` helper, through which every
-`swage.segment_reduce` call prepares with the defaults below, can select the
-existing pure CTA implementation after validating the native plan. With default 4096-element
+The private `_prepare_planned_reduction` helper can select the existing
+pure CTA implementation after validating the native plan. The public
+`swage.segment_reduce` applies the same rule with the defaults below through
+`_launch_planned_reduction`, which enqueues the selected schedule in one
+step and prepares no other policy. With default 4096-element
 chunks, it avoids splitting when every segment has 4097–8192 elements and the
 batch has at least as many segments as the device has SMs. The selected
 `mixed` callable aliases `cta`, and preparation skips split kernel compilation

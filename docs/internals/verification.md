@@ -95,13 +95,20 @@ The public segmented calls have these checks in
   Softmax outputs stay within the relative bound of
   [Ragged Softmax](ragged-softmax.md#accuracy) against float64
   `torch.softmax`.
-- Schedule: a public sum equals the private `mixed` launch with default
-  limits and automatic selection bit for bit, and its bits change between
-  two batch sizes around the SM count of the device.
+- Schedule: a public sum and a public maximum equal the prepared private
+  `mixed` launch with default limits and automatic selection bit for bit,
+  on every batch of the differential suite, on both sides of the selection
+  rule, and on one segment of 300,001 elements. The bits of a sum change
+  between two batch sizes around the SM count of the device.
+- Preparation: a call compiles and loads only the kernels its batch
+  launches, never the pure warp kernel, and reads the shared segment ids
+  only for a batch that the selection rule sends to the pure CTA kernel.
+- Inference mode: both calls run with `values`, `offsets`, and `out`
+  created under `torch.inference_mode()`.
 - Resource use: 300 calls with offsets not seen before load no module,
-  unload none, never synchronize the context, compile nothing, create and
-  destroy one CUDA event per reduction, leave device memory where it was,
-  and leave nothing for the cycle collector.
+  unload none, never synchronize the context, compile nothing, create no
+  CUDA event, leave device memory where it was, and leave nothing for the
+  cycle collector.
 
 These checks were executed on that device from the branch that added the
 calls. The trusted GPU workflow has not executed them yet.
@@ -130,7 +137,9 @@ these checks:
   file whose name contains `LLVM`, `MLIR`, `mlir`, `SwagePythonCAPI`,
   `swageDialects`, or `nanobind`. Its results pass the comparisons of the
   public calls above and equal the results of the compiled path bit for
-  bit.
+  bit. A second process, in which `mlir_swage` is importable, runs a subset
+  of those batches from the artifact with no such file mapped, and then
+  launches the fixed vector add, which maps the compiler.
 
 These checks were executed from the branch that added artifacts. The
 trusted GPU workflow has not executed them yet.

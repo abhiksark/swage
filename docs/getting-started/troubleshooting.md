@@ -179,9 +179,8 @@ enqueued in these cases:
 
 - The current stream is capturing a CUDA graph. Make the call outside the
   capture.
-- The offsets of a `segment_reduce` call were created under
-  `torch.inference_mode()`. Create them before entering the context, or
-  clone them outside it.
+- `numpy` cannot be imported. Install it, for example through the
+  `pytorch` extra of the package, which declares it.
 - `values` require grad. Pass `values.detach()`; the calls record no
   gradient.
 

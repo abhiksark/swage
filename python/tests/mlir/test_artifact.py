@@ -1033,7 +1033,7 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
 
     The batches reach the fused, partial, and merge kernels, the task-ID
     CTA kernel through the direct-CTA selection, and the softmax kernel.
-    The pure warp kernel is prepared and never launched by a public call.
+    A public call never requests the pure warp kernel.
     """
     _select(monkeypatch, device_artifact)
     artifact = _artifact.selected()

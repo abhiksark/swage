@@ -74,8 +74,9 @@ _TASK_ARGUMENTS = (
     _SEGMENT_COUNT,
 )
 _SEGMENTED = "_compile_segmented_reduction_ptx"
-# The kernels `segment_reduce` can launch for one kind. The pure warp kernel
-# is prepared with the others and is not launched by the public call.
+# The kernels of the private planned path for one kind. `segment_reduce`
+# requests all of them except the pure warp kernel, which format version 1
+# lists and the loader requires all the same.
 _REDUCTION_KERNELS = (
     _Kernel(
         "warp",

@@ -17,9 +17,9 @@ the storage they read. This page shows a call, states what it returns and
 what it costs, and lists where it is refused.
 
 Both calls need the CUDA GPU tier: the native build, PyTorch 2.6 or newer,
-`numpy`, which the binding requirements in
-[Installation](../getting-started/installation.md) include, and an NVIDIA
-GPU. They are not part of the released `0.5.1` wheel. The
+`numpy`, which the `pytorch` extra of the package and the binding
+requirements in [Installation](../getting-started/installation.md) include,
+and an NVIDIA GPU. They are not part of the released `0.5.1` wheel. The
 [Support Matrix](../reference/support-matrix.md) lists the versions and the
 GPU the tests run on. An artifact directory that a native build wrote ahead
 of time can take the place of the native build;
@@ -82,8 +82,10 @@ Without `out`, the call allocates the result on the device of `values`.
 
 After a call that enqueued a kernel, the version counter of the result has
 advanced, as after an in-place PyTorch operation. A backward pass that saved
-`out` before the call therefore raises instead of using the new values. The
-counters of `values` and `offsets` do not move.
+`out` before the call therefore raises instead of using the new values. A
+call that enqueues nothing, because it is refused or its batch has no
+segment, leaves the counter of `out` alone. The counters of `values` and
+`offsets` do not move.
 
 ## Results
 
@@ -172,12 +174,12 @@ preparation for the next call:
    queued on the current stream.
 2. It validates the offsets on the host and, for `segment_reduce`,
    classifies every segment into warp, CTA, and split tasks.
-3. For `segment_reduce`, it uploads the task records, allocates scratch for
-   split segments, and records one CUDA event.
+3. For `segment_reduce`, it uploads the task records and allocates scratch
+   for split segments.
 4. It enqueues the kernels.
 
 A second call with the same offsets tensor repeats all four steps. The task
-records, the scratch, and the event are released when the call returns.
+records and the scratch are released when the call returns.
 
 `torch.segment_reduce` does none of the host work. When the offsets change on
 every call, expect `segment_reduce` to be slower than `torch.segment_reduce`.
@@ -186,12 +188,14 @@ revision `453c56e`:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
-The measured candidate is not this call. It is the private preparation with
-schedule selection disabled, followed by the mixed launch into a caller's
-output. `segment_reduce` runs the same preparation with automatic schedule
-selection and allocates its result when no `out` is passed, and no harness
-times it. Read the figures as the cost of the preparation that a call
-repeats, not as a measurement of the call.
+The measured candidate is not this call. It is a private preparation of
+three scheduling policies with schedule selection disabled, followed by the
+mixed launch into a caller's output. `segment_reduce` validates and
+classifies in the same way, prepares only the schedule it launches, selects
+the schedule automatically, and allocates its result when no `out` is
+passed. The harness has since gained a candidate that times the call
+itself, and no committed record holds it. Read the figures as a measurement
+of that private preparation, not of the call.
 [Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
 reports the record and its limits: one GPU, one seed per distribution, and a
 machine that was not quiet.
@@ -202,14 +206,18 @@ That path is not public, and its numbers do not describe these calls.
 
 The first calls of a process cost more:
 
-- A call compiles each kernel it needs that the process does not hold yet,
-  and loads it into the CUDA context. A reduction kind has up to five
-  kernels and the softmax has one. Kernels stay in the process for later
-  calls and are never written to the persistent cache. With an artifact
+- A call compiles each kernel its batch needs that the process does not
+  hold yet, and loads it into the CUDA context. A reduction kind has four
+  kernels that a batch can need: one for segments of up to 4096 elements,
+  two for longer segments, and one for a batch that the selection rule of
+  [Sum rounding](#sum-rounding) sends to the 128-lane tree. The softmax has
+  one. Kernels stay in the process for later calls and are never written to
+  the persistent cache. With an artifact
   selected, a call compiles nothing: the first call reads and verifies the
   directory, and each kernel is loaded from it when a call first needs it.
-- The first `segment_reduce` call on a device uploads a table of segment
-  ids that holds 4 MiB of device memory for the life of the process.
+- The first `segment_reduce` call on a device whose batch meets that
+  selection rule uploads a table of segment ids that holds 4 MiB of device
+  memory for the life of the process.
 
 ## Where a call is refused
 
@@ -223,11 +231,9 @@ Every refusal below raises before anything is enqueued.
   a capturing stream cannot do, and a replay would not repeat the
   preparation. The check comes first, so the capture stays usable for the
   PyTorch work around the call.
-- **Offsets made under `torch.inference_mode()`.** `segment_reduce` raises a
-  `ValueError` for offsets that are an inference tensor. Create the offsets
-  before entering the context, or clone them outside it. The call itself
-  runs inside the context, and `values` and the result may be inference
-  tensors. `segment_softmax` also takes offsets made inside the context.
+- **A missing `numpy`.** A call raises a `RuntimeError` that names `numpy`
+  and the installation page. The calls copy the offsets into a `numpy`
+  array on the host, with the native build and with an artifact.
 - **`SWAGE_NO_COMPILE=1`.** A call whose kernels the process does not hold
   raises a `RuntimeError`, because the segmented kernels are not in the
   persistent cache. A process that starts with the switch set cannot run a
@@ -245,12 +251,17 @@ Every refusal below raises before anything is enqueued.
 - **PyTorch older than 2.6.** A call raises the `RuntimeError` of
   `launch()`, before it looks at an argument.
 
-Two more rules follow from how PyTorch handles streams and threads:
+Three more rules follow from how PyTorch handles streams, threads, and
+inference mode:
 
 - A call enqueues on the stream that is current when it is made. Inputs
   that were produced on another stream must be complete before the call, as
   for any PyTorch operation that crosses streams.
 - A call works on a thread that has not used CUDA before.
+- A call works inside `torch.inference_mode()`, and `values`, `offsets`,
+  and `out` may be tensors that were created inside it. A call enqueues
+  what it classified before it returns, so it has no need to detect a later
+  change to the offsets.
 
 Continue with [Running Without the Compiler](deployment.md), which compiles
 the kernels of these two calls ahead of time and serves the calls from the

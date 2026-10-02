@@ -75,9 +75,8 @@ to its `offsets`:
   compare. Create the offsets outside the context, or clone them outside
   it. Offsets created under `torch.no_grad()` are admitted, and a launch
   may be prepared and run inside `torch.inference_mode()` with offsets that
-  were created outside it. `swage.segment_reduce` prepares a launch on every
-  call, so this rule applies to it. `swage.segment_softmax` and the one-shot
-  helpers accept inference tensors.
+  were created outside it. The public calls and the one-shot helpers keep
+  no plan and compare no counter, so they accept inference tensors.
 - `offsets` does not change after preparation. Each launch compares the
   version counter, data pointer, element count, and dtype of the tensor
   with the ones recorded at preparation, and raises a `RuntimeError` before

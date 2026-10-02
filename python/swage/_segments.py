@@ -24,8 +24,10 @@ def segment_reduce(values, offsets, kind, *, out=None):
     returns without waiting for the result.
 
     Every call repeats the host work, also when the offsets are the ones of
-    the call before, so a call costs more than its kernels. Compiled kernels
-    are kept in the process and reused by later calls. When
+    the call before, so a call costs more than its kernels. A call keeps no
+    plan and compares no version counter, so the tensors may be inference
+    tensors. Compiled kernels are kept in the process and reused by later
+    calls, and a call compiles only the kernels its batch launches. When
     `SWAGE_ARTIFACT_DIR` names an artifact that `python -m swage.compile`
     wrote, the kernels come from it and nothing is compiled.
 
@@ -36,8 +38,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
         offsets: Contiguous rank-one `torch.int32` tensor on the same
             device, with one entry more than there are segments. It starts
             at zero, never decreases, and ends at or below the number of
-            values. Two equal neighbors describe an empty segment. It must
-            not be an inference tensor.
+            values. Two equal neighbors describe an empty segment.
         kind: `"sum"` or `"max"`. The sum of an empty segment is `0.0` and
             its maximum is negative infinity. A maximum over a NaN is NaN,
             and a sum follows IEEE-754 addition. The rounding of a sum
@@ -52,7 +53,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
         `out`, or a new tensor on the device of `values` when `out` is
         None, with one element per segment. The kernels that write it are
         enqueued and may not have finished. The version counter of the
-        tensor is advanced.
+        tensor is advanced when a kernel is enqueued.
 
     Raises:
         TypeError: An argument is not a tensor, or a tensor has the wrong
@@ -64,10 +65,10 @@ def segment_reduce(values, offsets, kind, *, out=None):
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
-            be used or does not hold the kernels of the call; CUDA is
-            unavailable; the current stream is capturing a CUDA graph; or
-            a kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
-            is set.
+            be used or does not hold the kernels of the call; numpy is
+            missing; CUDA is unavailable; the current stream is capturing
+            a CUDA graph; or a kernel would have to be compiled while
+            `SWAGE_NO_COMPILE=1` is set.
     """
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
@@ -127,9 +128,10 @@ def segment_softmax(values, offsets, *, out=None):
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
-            be used or does not hold the kernel; CUDA is unavailable; the
-            current stream is capturing a CUDA graph; or the kernel would
-            have to be compiled while `SWAGE_NO_COMPILE=1` is set.
+            be used or does not hold the kernel; numpy is missing; CUDA is
+            unavailable; the current stream is capturing a CUDA graph; or
+            the kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
+            is set.
     """
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
