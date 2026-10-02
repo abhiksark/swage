@@ -397,7 +397,7 @@ def runtime_classifier(tmp_path_factory):
     """Return the classifier of the runtime library an artifact ships."""
     directory = tmp_path_factory.mktemp("classifier") / "artifact"
     with contextlib.redirect_stdout(io.StringIO()):
-        status = compile.main(
+        status = compile._main(
             ["--target", "sm_86", "--output", str(directory)]
             + ["--program", "softmax"]
         )

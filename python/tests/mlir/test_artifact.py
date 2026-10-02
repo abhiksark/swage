@@ -64,7 +64,7 @@ def _run(*arguments):
         contextlib.redirect_stdout(output),
         contextlib.redirect_stderr(errors),
     ):
-        status = compile.main([str(argument) for argument in arguments])
+        status = compile._main([str(argument) for argument in arguments])
     return status, output.getvalue(), errors.getvalue()
 
 
@@ -311,7 +311,7 @@ def test_the_command_needs_no_gpu_and_no_pytorch(tmp_path):
         "import sys\n"
         "sys.modules['torch'] = None\n"
         "from swage import compile\n"
-        "status = compile.main(sys.argv[1:])\n"
+        "status = compile._main(sys.argv[1:])\n"
         "assert sys.modules['torch'] is None\n"
         "sys.exit(status)\n"
     )

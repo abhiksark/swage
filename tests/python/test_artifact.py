@@ -1182,7 +1182,7 @@ def test_the_compile_command_stays_light_and_needs_the_bindings(tmp_path):
         "from swage import compile\n"
         "for name in ('torch', 'numpy'):\n"
         "    assert name not in sys.modules, name\n"
-        "sys.exit(compile.main(sys.argv[1:]))\n"
+        "sys.exit(compile._main(sys.argv[1:]))\n"
     )
 
     completed = subprocess.run(
@@ -1252,3 +1252,23 @@ def test_the_environment_command_reports_an_artifact_it_cannot_load(
         f"artifact: rejected (the runtime library of the artifact at "
         f"{artifact_dir} cannot be loaded: "
     ) in completed.stdout
+
+
+def test_the_compile_module_defines_no_public_name():
+    """Offer the command and nothing to call."""
+    from swage import compile
+
+    defined = [
+        name
+        for name, value in vars(compile).items()
+        if not name.startswith("_")
+        and getattr(value, "__module__", None) == compile.__name__
+    ]
+
+    assert defined == []
+    assert swage.__all__ == [
+        "CompilationError",
+        "jit",
+        "segment_reduce",
+        "segment_softmax",
+    ]

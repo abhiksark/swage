@@ -12,7 +12,8 @@ bindings and numpy. It needs no GPU and no PyTorch, and the target does not
 have to be the processor of the build host.
 
 A process that sets `SWAGE_ARTIFACT_DIR` to the directory runs the two
-calls from it without `mlir_swage`; see `swage._artifact`.
+calls from it without `mlir_swage`; see `swage._artifact`. The module is a
+command and has no public name.
 """
 
 import argparse
@@ -260,7 +261,7 @@ def _write_artifact(output, target, programs, runtime_library):
     return manifest, hashlib.sha256(encoded).hexdigest()
 
 
-def main(argv=None):
+def _main(argv=None):
     """Write one artifact and print what it holds as key/value lines.
 
     Args:
@@ -332,4 +333,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main())

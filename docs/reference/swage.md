@@ -362,8 +362,8 @@ Output and exit status
     `SWAGE_ARTIFACT_DIR`, `SWAGE_NO_COMPILE=1`, and a runtime library that
     is not an ELF library for `x86_64` or `aarch64`.
 
-The module has no other public name. A process runs the two calls from the
-directory when `SWAGE_ARTIFACT_DIR` names it.
+The module is a command: it defines no public function or class. A process
+runs the two calls from the directory when `SWAGE_ARTIFACT_DIR` names it.
 [Running Without the Compiler](../user-guide/deployment.md) describes the
 files and the manifest, and
 [Runtime and Environment](runtime-environment.md#artifacts) states what the

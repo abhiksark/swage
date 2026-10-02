@@ -138,6 +138,7 @@ the next section defines it.
 | Aspect | Status | Evidence |
 |---|---|---|
 | Writing an artifact for each admitted processor, with no device and no PyTorch | Tested in the native tier | `python/tests/mlir/test_artifact.py` writes one per processor, and one in a process where PyTorch cannot be imported and no device is visible |
+| Writing an artifact from an installed native wheel | Unknown | The wheel carries the runtime library that the command copies; the command was run from a build tree only |
 | Selection, verification, the trust rule, and every refusal | Tested in the pure Python tier | `tests/python/test_artifact.py`, with a stand-in for the runtime library |
 | The classifier of the runtime library | Tested in the native tier | `unittests/RuntimeTest.cpp` and `python/tests/mlir/test_segmented_classification.py` compare it with the compiler's classifier |
 | Both calls from an artifact, in a process that cannot import `mlir_swage` | Tested in the GPU tier on `sm_86` | `python/tests/mlir/test_artifact.py`: no LLVM or MLIR library is mapped, the results agree with PyTorch and float64 references, and they equal the compiled path bit for bit |
