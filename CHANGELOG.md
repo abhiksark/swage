@@ -26,6 +26,8 @@ semantic versioning (`0.x`; anything may change).
   `python -m swage.env` reports the selected artifact. `libSwageRuntime` and
   `swage-c/Runtime.h` (the task classifier and a kernel launcher in plain C)
   are built and installed beside the bindings, for Linux x86-64 only.
+- ADR-0021 records artifact format version 1: what the manifest holds, what
+  the loader verifies, the trust rule, and what is out of scope.
 - `scripts/build_native_wheel.sh` builds a `swage-compiler-native` wheel of
   `mlir_swage` from a checkout; no native wheel is published. The bindings
   record the `swage` version and source revision they were built from,
@@ -100,6 +102,21 @@ semantic versioning (`0.x`; anything may change).
 
 ### Changed
 
+- `swage.segment_reduce` validates, classifies, and enqueues in one step. It
+  compiles and loads only the kernels its batch launches, creates no CUDA
+  event, accepts tensors created under `torch.inference_mode()`, and
+  advances the version counter of its result only after an enqueue. Result
+  bits are unchanged.
+- The segmented calls raise a `RuntimeError` that names numpy when it is
+  missing, and the `pytorch` extra declares it.
+- A CUDA driver wrapper created while `SWAGE_ARTIFACT_DIR` is set takes its
+  launcher from the artifact, so a process that runs the segmented calls
+  from an artifact maps no LLVM library even when `mlir_swage` is
+  importable.
+- `SWAGE_ORACLE_BUILD_DIR` names the build directory of the private CPU
+  oracle, for a `swage` that is not imported from a checkout.
+- Benchmarks: `swage_public_call` in the fresh-offsets harness times the
+  public call itself. No record holds it yet.
 - A segment function declares its arguments with `swage.role`, in any order,
   and a module may hold any number of segment functions. A caller of a
   kernel or a symbol clash is diagnosed before a GPU lowering changes the
