@@ -192,6 +192,13 @@ of the `swage_mixed` sample spent in the private preparation:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-32768.inc"
 
+Triton in the same regime at 32,768 segments. "Best planned" is taken over
+the one-block and the looping planned configurations together, with the
+partition timed, and the fifth column counts the looped configurations at
+or below torch:
+
+--8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-triton-32768.inc"
+
 ### One frozen layout, repeated launches
 
 `benchmark_triton_comparison.py` prepares one layout per row once and times
