@@ -1253,8 +1253,11 @@ def test_every_launch_advances_the_output_version_only(path):
     output = torch.zeros(size, device="cuda")
     if path in _PREPARED:
         launch = _prepared_launch(path, values, offsets, output)
+        # Preparation advances it once, to see whether offsets share it.
+        assert output._version == 1
     else:
         launch = _one_shot_launch(path, values, offsets, output)
+        assert output._version == 0
     weights = torch.ones(size, device="cuda", requires_grad=True)
     kept = [values._version, offsets._version]
 

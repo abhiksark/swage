@@ -139,8 +139,9 @@ then. The comparison is one host attribute read. It has these limits:
   offsets did not change, because every view of a tensor shares one version
   counter. A launch into such a view counts as a write, since a launch
   advances the version counter of its output. The output of the prepared
-  launch itself is exempt: preparation detects a counter shared between
-  offsets and output and allows for it.
+  launch itself is exempt: preparation advances the version counter of the
+  output once, sees whether the offsets counter moved with it, and allows
+  for that at every launch.
 - A replayed CUDA graph runs no host check.
 
 <div class="doc-figure" tabindex="0" markdown="1">

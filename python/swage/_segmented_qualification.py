@@ -860,7 +860,9 @@ def _prepare_planned_reduction(
         writes to values and output are fine, and a tensor that was given
         another data pointer, element count, or dtype since, for example
         through `tensor.data = other`, raises RuntimeError before anything
-        is enqueued. Kernels are compiled once per kernel and target and
+        is enqueued. Each launch advances the version counter of output,
+        and preparation advances it once to learn whether offsets share
+        that counter. Kernels are compiled once per kernel and target and
         loaded once per CUDA context, so a preparation compiles and loads
         only the kernels the process has not already compiled and loaded.
     """
@@ -1188,8 +1190,10 @@ def _prepare_persistent_sum(
     preparation: in-place writes to values and output are fine, and a
     tensor that was given another data pointer, element count, or dtype
     since, for example through `tensor.data = other`, raises RuntimeError
-    before anything is enqueued. The kernel is compiled once per target and
-    loaded once per CUDA context.
+    before anything is enqueued. Each launch advances the version counter
+    of output, and preparation advances it once to learn whether offsets
+    share that counter. The kernel is compiled once per target and loaded
+    once per CUDA context.
     """
     if resident_blocks is not None and (
         type(resident_blocks) is not int
