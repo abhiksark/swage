@@ -878,8 +878,9 @@ How the design would make the later work easier:
    classification.
 3. Require `swage.role` on every argument? Recommended: yes, with the 37 lit
    inputs and two Python templates edited mechanically in step 2.
-4. Commit the 552 digest pairs? Recommended: yes, regenerated only in a
-   pin-bump change or a change that states why the emitted text moves.
+4. Keep the committed digest matrix of step 0 as a permanent gate, with
+   regeneration allowed only in a pin-bump change or a change that states
+   which kernels move and why? Recommended: yes.
 5. Migrate the persistent kernel, or drop it, given that ADR-0018 is still
    proposed after a failed gate? Recommended: migrate it last. It is tested
    and clean under racecheck. If it is dropped instead, step 9 becomes a
