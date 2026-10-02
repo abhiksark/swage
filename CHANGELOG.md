@@ -8,6 +8,21 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
+  segment gives positive infinity for `min` and NaN for `mean`; a NaN
+  element gives NaN. A mean is the sum of the same call divided by the
+  segment length, bit for bit (ADR-0008 amended).
+- `swage.segment_reduce` takes `torch.float64` values and returns float64
+  on every static schedule, with sums within `k * eps64 * sum(|x|)`.
+  `swage.segment_softmax` refuses float64 because the device has no 64-bit
+  `exp2`. Persistent execution stays float32.
+- Both public calls take `torch.int64` offsets, validated by their 64-bit
+  values and narrowed on the host; the cap of `2**31 - 1` rows and segments
+  stays.
+- `swage.segment_reduce` takes `[N, D]` values and returns `[S, D]` through
+  one column kernel with one block per segment and no split;
+  `swage.segment_softmax` takes `[N, D]` float32 values and normalizes per
+  column. ADR-0022 records the wider data model.
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` for `"sum"` and
   `"max"`, and `swage.segment_softmax(values, offsets, *, out=None)`: the
   first public segmented calls, over rank-one f32 values and int32 offsets on
@@ -147,6 +162,9 @@ semantic versioning (`0.x`; anything may change).
 - The benchmark pages report the regime with changing offsets and the rows
   where looped and planned Triton are faster, and the comparison study sets
   the older record beside the new one.
+- Artifacts are format version 2: the role list is per program, the
+  manifest records the target description, and the unlaunched warp kernel
+  is gone. A version 1 artifact is refused and must be written again.
 - The persistent cache key identifies native libraries by ELF build id or
   content digest instead of name, size, and modification time, and no longer
   includes the checkout's LLVM pin. Existing cache entries are not reused.
@@ -322,6 +340,10 @@ semantic versioning (`0.x`; anything may change).
   opposite sign. It is now rejected.
 - The documented sum bound of the default `mixed` schedule now covers the
   batches that automatic selection moves to the CTA schedule.
+- The PTX arithmetic scan in the numerics tests never examined mixed-case
+  modifiers such as `max.NaN.f32` and judged conversions by one of their
+  types; it now checks every instruction against the element type of the
+  kernel.
 - An atomic cache write closed its file descriptor twice when the publish
   failed, which could close a descriptor owned by another thread.
 - A prepared static launch on a thread with no CUDA context failed with an
