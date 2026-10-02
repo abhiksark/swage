@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-20
+- Amended: 2026-10-02, the statement about copies and synchronization
 
 ## Context
 
@@ -19,10 +20,16 @@ backend. Unsupported semantic shapes and ABIs fail before translation.
 
 PyTorch continues to own tensor storage, the active device and context, and
 the current stream. The runtime validates the complete host boundary before
-compiler or driver work and never copies, casts, synchronizes, switches
-devices, creates a CUDA context, or falls back. PyTorch, `mlir_swage`, and
-`libcuda` remain lazy dependencies; `emit_mlir()` remains compile-only and
-direct kernel calls remain unavailable.
+compiler or driver work and never casts, switches devices, creates a CUDA
+context, or falls back. The public launch does not copy tensors. A launch
+of a kernel that is already loaded does not synchronize. A launch that
+loads a kernel may synchronize the context once, to unload modules that
+nothing holds any more. The private helpers copy the offsets, and
+caller-supplied task IDs, to the host when a call is validated or a plan is
+prepared, and each copy of a CUDA tensor waits for the work queued on it.
+PyTorch, `mlir_swage`, and `libcuda` remain lazy dependencies;
+`emit_mlir()` remains compile-only and direct kernel calls remain
+unavailable.
 
 Cache identity covers every compiler input and the exact target architecture.
 Persistent reuse is limited to processes that can identify the compiler they
