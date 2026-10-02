@@ -4,7 +4,8 @@
 
 Swage has two installation boundaries. The published `swage-compiler` wheel
 contains the pure Python `swage` package. Compiler emission and execution also
-require the native `mlir_swage` package from a build tree.
+require the native `mlir_swage` package, from a build tree or from a native
+wheel built on the same machine. No native wheel is published.
 
 ## Install the Python package
 
@@ -33,8 +34,9 @@ python -m pip install -e ".[dev]"
 ```
 
 The wheel does not contain compiler libraries, `swage-opt`, generated MLIR
-bindings, or the native `mlir_swage` package. Native wheel packaging is
-deferred. A wheel-only install can import `swage`, report package and
+bindings, or the native `mlir_swage` package. No native wheel is published;
+[Build a native wheel](#build-a-native-wheel) describes how to build one
+from a checkout. A wheel-only install can import `swage`, report package and
 environment facts, capture kernel source, and check a kernel against the
 kernel language. It cannot emit MLIR or launch a kernel.
 
@@ -168,43 +170,83 @@ If CMake is asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install
 without Python bindings, configuration fails instead of silently omitting the
 package.
 
-### Copying the native package
+## Build a native wheel
 
-Native packaging is not provided yet. There is no native wheel, and no
-deployment step is tested: `cmake --install` carries install rules for
-`mlir_swage` that the MLIR build functions generate, and no test or
-workflow runs them.
-
-The build-tree package is not relocatable as it is.
-`build/python_packages/mlir_swage` holds absolute symbolic links into the
-LLVM install and into the checkout, so a copy that keeps the links stops
-importing where those paths do not exist. A copy that follows the links
-does not depend on them:
+No native wheel is published. `scripts/build_native_wheel.sh` builds one
+from a checkout, against the same LLVM/MLIR install that `build_swage.sh`
+uses and for the same `python`:
 
 ```bash
-mkdir -p /path/to/site
-cp -rL build/python_packages/mlir_swage /path/to/site/
-cp -r python/swage /path/to/site/
-PYTHONPATH=/path/to/site python -m swage.env
+python -m build --wheel
+./scripts/build_native_wheel.sh
 ```
 
-This was checked by hand on the machine that built it, with only that
-directory on `PYTHONPATH` and with the build tree, the LLVM install, and the
-checkout hidden from the process. MLIR emission, a vector-add launch, a
-private segmented sum, and reuse of the persistent cache by a second process
-all worked. These limits apply:
+Both wheels land in `dist/`. The first command needs the `dev` extra and
+writes `swage_compiler-<version>-py3-none-any.whl`. The second writes
+`swage_compiler_native-<version>-cp313-cp313-linux_x86_64.whl` for CPython
+3.13. It builds in `build-native-wheel`, or in the directory named by
+`SWAGE_WHEEL_BUILD_DIR`, and accepts `SWAGE_LLVM_HOME`, `MLIR_DIR`, and
+`LLVM_DIR` as `build_swage.sh` does. `CMAKE_BUILD_PARALLEL_LEVEL` sets the
+number of build jobs.
 
-- No test in the repository covers the copy, and it was not tried on
-  another machine. The native libraries still load the C++ runtime, `libz`,
-  and `libzstd` from outside the copy.
-- The copy is larger than the build-tree package, because each link is
-  replaced by the file it points to.
-- The copy is not a checkout, so `python -m swage.env` prints
-  `revision: None` and `llvm_pin: None`, and the copy does not reuse
-  persistent cache entries that the checkout wrote.
-- A native build contains third-party code.
-  [`THIRD_PARTY_NOTICES.md`](https://github.com/abhiksark/swage/blob/main/THIRD_PARTY_NOTICES.md)
-  must go with any copy that leaves the machine that built it.
+Install the pair into a fresh virtual environment of the same Python
+version, from that directory only:
+
+```bash
+python -m pip install --no-index --find-links dist swage-compiler-native
+python -m swage.env
+```
+
+The native wheel requires the `swage-compiler` wheel of the same version.
+`--no-index` makes pip take that wheel from `dist/`: the `0.5.1` on PyPI is
+the released package, which carries the same version number as the current
+source tree and older code. PyTorch is installed separately when a launch
+needs it.
+
+The native wheel has these properties:
+
+- It holds the `mlir_swage` package: the MLIR Python bindings, the Swage
+  dialect bindings, and the compiler library they share. It also holds
+  `LICENSE` and
+  [`THIRD_PARTY_NOTICES.md`](https://github.com/abhiksark/swage/blob/main/THIRD_PARTY_NOTICES.md),
+  because the libraries contain LLVM, MLIR, and nanobind code.
+- It records the `swage` version, the source revision, and the LLVM version
+  it was built from. `python -m swage.env` prints them as `native_version`,
+  `native_revision`, and `llvm_linked`. `swage` refuses bindings that were
+  built for another version or that record none;
+  [Runtime and Environment](../reference/runtime-environment.md#frontend-and-bindings)
+  states the rule.
+- It contains no link and no library search path into the build tree, the
+  LLVM install, or the checkout. The script stops when the staged package
+  has an absolute symbolic link, a library that searches outside its own
+  directory, or a library that needs a shared library found neither in the
+  wheel nor among the C and C++ runtime, `libz`, and `libzstd`.
+- With the pinned LLVM in the `Release` build type, the wheel is about
+  43 MB and installs to about 120 MB.
+
+These limits apply:
+
+- The wheel is built for one Python version, the `python` on `PATH`. Only a
+  CPython 3.13 wheel has been built and installed.
+- The wheel carries the plain `linux_x86_64` platform tag. Its libraries are
+  linked on the build host and load the C and C++ runtime, `libz.so.1`, and
+  `libzstd.so.1` from the system, so the installing system must provide
+  them and must not be older than the build host. Nothing checks the wheel
+  against a `manylinux` policy.
+- The wheel was installed and exercised on the machine that built it: the
+  environment report, both committed examples, and `python/tests/mlir` ran
+  in a virtual environment with no checkout and no build tree on any path.
+  It was not tried on another machine.
+- The native libraries contain source file paths of the build host in
+  their assertion messages.
+- The `native-wheel` job of the `ci-cpp` workflow builds the wheel on a
+  hosted runner, uploads it as a workflow artifact, and runs the checks
+  that need no GPU against an install of it. That job has never run. No
+  workflow publishes the wheel.
+
+A build-tree package can still be used in place as the previous section
+describes. It is not relocatable: `build/python_packages/mlir_swage` holds
+absolute symbolic links into the LLVM install and into the checkout.
 
 Installation is complete when the relevant build and test commands succeed.
 Continue with the [Quickstart](quickstart.md), or use

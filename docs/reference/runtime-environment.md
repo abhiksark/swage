@@ -265,8 +265,8 @@ while a capture is open.
 
 The specialization key contains normalized source, kernel name, ordered ABI
 descriptors, sorted compile-time values, exact compute capability, code
-generation options, frontend identity, native compiler identity, dialect
-version, and LLVM version.
+generation options, frontend identity, native compiler identity, and
+dialect version.
 
 The two compiler identities are read from the files on disk, not from the
 checkout they came from:
@@ -275,15 +275,41 @@ checkout they came from:
   installed `swage` package, taken in sorted name order. Only regular files
   count; names that start with a dot, dangling symlinks, and directories are
   skipped.
-- Native compiler identity is the file name, size, and modification time of
-  the nanobind extension and the `libSwagePythonCAPI` library in
-  `mlir_swage/_mlir_libs`.
+- Native compiler identity is the file name and a content identity of the
+  nanobind extension and of the `libSwagePythonCAPI` library in
+  `mlir_swage/_mlir_libs`. The content identity is the ELF build id of the
+  library, written as `build-id:<hex>`. The linker derives it from the
+  linked contents, and the build of `mlir_swage` asks the linker for one. A
+  library without a build id is identified by the SHA-256 digest of the
+  whole file, written as `sha256:<hex>`. A symbolic link counts as the file
+  it leads to.
 
 Editing a frontend file or rebuilding the native libraries therefore changes
 the key, and entries written by the earlier compiler are no longer matched.
-The native identity reads file metadata, not file contents: a library
-replaced by one with the same name, size, and modification time is not
-detected.
+File sizes and file times are not part of the key:
+
+- The same libraries give the same key after a copy, an archive round trip,
+  or an install that sets every file time to one value. A build-tree
+  package and a wheel made from that build therefore share entries, since
+  stripping a library keeps its build id.
+- Libraries with other contents give another key, whatever their sizes and
+  file times are.
+- The LLVM version is not a separate field. The native identity is derived
+  from the libraries that contain LLVM, and the pinned tag in
+  `cmake/llvm-version.txt` exists only in a checkout, so a field read from
+  it would give an installed package another key than a checkout.
+
+Reading a build id takes tens of microseconds per library. The digest of a
+library without one is computed once per process, at the first launch that
+looks up the persistent cache, and again only if the file changes: about
+60 ms for the 114 MB compiler library of a stripped `Release` build, measured
+on the machine that qualifies the GPU tier.
+
+A build id identifies what the linker produced. A library that is modified
+after linking, for example by a binary patch, keeps its build id and is not
+detected. Entries written before the key carried a content identity are no
+longer matched; they stay in the cache root until the entry bound evicts
+them.
 
 A process runs the code it loaded, and nothing records which bytes that was.
 The persistent cache is therefore used only when the files on disk are known
@@ -453,7 +479,8 @@ were linked against, the native extension file, backend status, and the
 state of the persistent cache. It exits cleanly when optional components are
 absent and reports them as unavailable.
 
-With the build-tree bindings on the path, the report looks like this:
+With the bindings importable, here from a build tree, the report looks like
+this:
 
 ```text
 swage: 0.5.1
@@ -469,6 +496,8 @@ gpu: {'name': 'NVIDIA RTX A6000', 'compute_capability': '8.6'}
 target: sm_86 (qualified)
 llvm_pin: llvmorg-22.1.8
 llvm_linked: 22.1.8
+native_version: 0.5.1
+native_revision: 0123456789abcdef0123456789abcdef01234567
 mlir_swage_file: /home/user/swage/build/python_packages/mlir_swage/_mlir_libs/_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so
 backends: {'mlir': 'available (linked LLVM 22.1.8)'}
 cache_dir: /home/user/.cache/swage
@@ -476,7 +505,7 @@ cache: active (reads and writes; 12 of at most 1024 entries)
 compile_on_miss: allowed
 ```
 
-Five fields identify the code and the native build:
+Seven fields identify the code and the native build:
 
 - `revision` is the abbreviated git HEAD of the Swage checkout that `swage`
   was imported from, with `-dirty` appended when tracked files are
@@ -490,13 +519,51 @@ Five fields identify the code and the native build:
   It comes from the native library, not from `cmake/llvm-version.txt`, and
   is `None` when the bindings cannot be imported or were built before they
   recorded a version.
+- `native_version` is the `swage` version the bindings were built for, and
+  `native_revision` is the full git commit of the sources they were built
+  from. The revision ends in `-dirty` when a tracked file differed from that
+  commit, and reads `unknown` when the sources were not a git checkout. Both
+  are compiled into the extension. They are `None` when the bindings cannot
+  be imported or are refused.
 - `mlir_swage_file` is the native extension that was loaded. `mlir_swage` is
   a namespace package with no file of its own, so the extension names the
-  build tree. It is `None` when the bindings cannot be imported.
+  build tree or the installed wheel. It is `None` when the bindings cannot
+  be imported or are refused.
 - `backends` records whether `mlir_swage` imports in the reporting process.
-  It reads `available (linked LLVM <version>)` when the import succeeds and
-  `unavailable (build-tree mlir_swage bindings not importable)` when it
-  fails.
+  It reads `available (linked LLVM <version>)` when the import succeeds,
+  `unavailable (mlir_swage bindings not importable)` when it fails, and
+  `rejected (<reason>)` when the bindings load but were not built for this
+  `swage`.
+
+### Frontend and bindings
+
+The `swage` package and the `mlir_swage` bindings are built from one source
+tree and must match. The bindings record the `swage` version they were
+built for, and `swage` checks it once per process, when the bindings are
+first imported or first used:
+
+- Bindings built for another `swage` version are refused with a
+  `RuntimeError` that names both versions and both locations. Emission and
+  launch raise it, and an import of the extension fails with it as the
+  cause.
+- Bindings that record no version are refused in the same way. They come
+  from a build that predates this check.
+- The source revision is not compared between two installed packages,
+  because the `swage-compiler` wheel records no revision. Two different
+  revisions that carry the same version number are therefore accepted as a
+  pair. The report shows `revision` and `native_revision` side by side.
+- In a git checkout a different revision is expected: the frontend is
+  edited and committed without a native rebuild. There `swage` compares the
+  native sources of the checkout with the revision the bindings were built
+  from, and warns once with a `RuntimeWarning` when they differ or when the
+  checkout does not have that revision. It does not refuse. Bindings built
+  from a modified tree, whose revision ends in `-dirty`, are not compared.
+- A `swage` package from before this check cannot refuse anything. When
+  such a package uses bindings that carry the check, the bindings warn once
+  that nothing verified the pair.
+
+The check covers the public paths, `emit_mlir()` and `launch()`, and every
+import of the extension made after `swage` was imported.
 
 `cuda_driver` is the CUDA version that `libcuda.so.1` reports. It needs no
 PyTorch, so a CPU-only PyTorch build beside an installed driver shows

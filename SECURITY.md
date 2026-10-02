@@ -17,14 +17,17 @@ Within that model, the project still commits to:
 - Validating tensor device, dtype, layout, and bounds metadata at the
   runtime boundary, including overflow-safe offset validation.
 - Cache integrity: cache keys include the SHA-256 digest of the frontend
-  sources, the file name, size, and modification time of each native
-  compiler library (the nanobind extension and `libSwagePythonCAPI`), and
-  the target. The native part of the key is file metadata read from disk.
-  It is not a digest of the library contents and not a record of the code
-  the process loaded, so it does not detect a library replaced by one with
-  the same name, size, and modification time. Where file times are
-  normalized, as in a reproducibly built image, it reduces to the name and
-  size. Cache entries must be owned by the current user and must not be
+  sources, a content identity of each native compiler library (the nanobind
+  extension and `libSwagePythonCAPI`), and the target. The content identity
+  is the ELF build id that the linker derived from the library, or the
+  SHA-256 digest of the whole file for a library without one. File names
+  are part of the key; file sizes and times are not. The identity is read
+  from the files on disk and is not a record of the code the process
+  loaded, so the cache is used only when no identified file changed after
+  the process started. A build id identifies a linked library, not every
+  byte of the file: a library altered after linking keeps its build id, and
+  such a change is not detected. Cache entries must be owned by the current
+  user and must not be
   world-writable or symlinks; PTX is not loaded from cache entries that
   fail metadata validation. The cache root is bounded, 1024 entries unless
   `SWAGE_CACHE_MAX_ENTRIES` sets another bound, and eviction removes only

@@ -41,8 +41,10 @@ The hosted jobs install one hash-locked tool set from `requirements-ci.txt`.
 `ci-cpp` also defines a `format` job, which checks the C and C++ sources
 with `clang-format`, and a `sanitizers` job, which runs the lit suite and
 the C++ unit tests under AddressSanitizer and UndefinedBehaviorSanitizer.
-These two jobs have not yet run on hosted CI, and no row below relies on
-them.
+`ci-cpp` also defines a `native-wheel` job, which builds the
+`swage-compiler-native` wheel, installs it into a fresh virtual environment,
+and runs the checks that need no GPU. These three jobs have not yet run on
+hosted CI, and no row below relies on them.
 
 All tiers run on Linux x86-64. The native build requires Linux x86-64 and
 the exact LLVM release in `cmake/llvm-version.txt`; CMake rejects any other
@@ -102,6 +104,23 @@ private segmented paths. Committed records under `benchmarks/results/` also
 report benchmark runs and one correctness run on an NVIDIA GeForce RTX 5090
 (`sm_120`), taken outside the workflows. They are recorded evidence and do
 not make `sm_120` qualified; see [Benchmarks](../internals/benchmarks.md).
+
+## Native wheel
+
+No native wheel is published. `scripts/build_native_wheel.sh` builds
+`swage-compiler-native` from a checkout;
+[Installation](../getting-started/installation.md#build-a-native-wheel)
+describes it. These rows use the statuses of the tables above, and one
+more: **Checked by hand** means the commands were run once on one machine
+and no workflow repeats them.
+
+| Environment | Status | Evidence |
+|---|---|---|
+| A CPython 3.13 wheel, installed on the Linux x86-64 machine that built it (Ubuntu 22.04, glibc 2.35, NVIDIA RTX A6000) | Checked by hand | In a fresh virtual environment with no checkout and no build tree on any path: `python -m swage.env`, both committed examples, and `python/tests/mlir` including the CUDA tests |
+| The same wheel on another machine or another Linux distribution | Unknown | The wheel carries the `linux_x86_64` tag and is not checked against a `manylinux` policy; it was not installed anywhere else |
+| A wheel for another Python version | Unknown | The script builds for the `python` on `PATH`; no other version was built |
+| A wheel built on a hosted runner | Unknown | The `native-wheel` job of `ci-cpp` has never run |
+| Bindings built for another `swage` version, or that record none | Rejected | `swage` raises when it first uses the bindings; `tests/python/test_native_identity.py`, `python/tests/mlir/test_native_identity.py` |
 
 ## Stability
 
