@@ -1,6 +1,7 @@
 # python/swage/_segmented_qualification.py
 """Private qualification runner for native segmented programs."""
 
+import os
 import pathlib
 import re
 import shutil
@@ -2116,12 +2117,49 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
     return "\n".join(lines)
 
 
-def _llvm_root(root):
-    """Find the pinned install used to configure the current build."""
-    cache = root / "build" / "CMakeCache.txt"
+# Names the Swage build directory the CPU oracle takes its tools from. It is
+# a test and development setting: a `swage` that was installed from a wheel
+# has no build directory beside it.
+_ORACLE_BUILD = "SWAGE_ORACLE_BUILD_DIR"
+_ORACLE_BUILD_FILES = ("CMakeCache.txt", "bin/swage-opt")
+
+
+def _oracle_build():
+    """Return the Swage build directory the CPU oracle takes its tools from.
+
+    The oracle runs `bin/swage-opt` of a build directory and reads its
+    `CMakeCache.txt` to find the LLVM install that build was configured
+    with. `SWAGE_ORACLE_BUILD_DIR` names the directory. Without it, the
+    directory is `build` in the checkout this module was imported from.
+    The variable is read at every call.
+
+    Raises:
+        RuntimeError: The directory lacks one of the two files.
+    """
+    named = os.environ.get(_ORACLE_BUILD)
+    if named:
+        build = pathlib.Path(named)
+        subject, remedy = f"{_ORACLE_BUILD} names {build}, which", ""
+    else:
+        build = pathlib.Path(__file__).resolve().parents[2] / "build"
+        subject, remedy = str(build), f". Set {_ORACLE_BUILD} to one"
+    missing = [
+        name for name in _ORACLE_BUILD_FILES if not (build / name).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{subject} lacks {' and '.join(missing)}; the CPU oracle needs "
+            f"a Swage build directory{remedy}"
+        )
+    return build
+
+
+def _llvm_root(build):
+    """Find the pinned install that a Swage build was configured with."""
+    cache = build / "CMakeCache.txt"
     match = re.search(r"^MLIR_DIR:[^=]*=(.+)$", cache.read_text(), re.MULTILINE)
     if not match:
-        raise RuntimeError("build/CMakeCache.txt does not identify MLIR_DIR")
+        raise RuntimeError(f"{cache} does not identify MLIR_DIR")
     return pathlib.Path(match.group(1)).parents[2]
 
 
@@ -2167,9 +2205,9 @@ def _execute(module_text):
     is reinterpreted as the f32 it encodes, so the returned Python floats
     hold the computed values with no decimal rounding in between.
     """
-    root = pathlib.Path(__file__).resolve().parents[2]
-    llvm_root = _llvm_root(root)
-    swage_opt = root / "build" / "bin" / "swage-opt"
+    build = _oracle_build()
+    llvm_root = _llvm_root(build)
+    swage_opt = build / "bin" / "swage-opt"
     mlir_opt = _llvm_tool(llvm_root, "mlir-opt")
     mlir_runner = _llvm_tool(llvm_root, "mlir-runner")
     lowered = _run(
