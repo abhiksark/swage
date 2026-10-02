@@ -36,6 +36,7 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
+#include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
 #include "swage/Target/TargetDescription.h"
@@ -54,6 +55,7 @@
 #include "llvm/Target/TargetMachine.h"
 
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -586,36 +588,27 @@ MlirLogicalResult swageMaterializeSegmentedPlan(
   ModuleOp source = unwrap(module);
   if (failed(verify(source)))
     return mlirLogicalResultFailure();
-  OwningOpRef<ModuleOp> planned = source.clone();
-  PassManager manager(source.getContext());
   llvm::StringRef kernel = unwrap(kernelName);
   if (!source.lookupSymbol<func::FuncOp>(kernel)) {
     source.emitError() << "kernel_name '" << kernel
                        << "' does not name a function of the module";
     return mlirLogicalResultFailure();
   }
-  manager.addPass(
-      swage::createSwageToPlanPass(warpMaxElements, ctaChunkElements, kernel));
-  if (failed(manager.run(*planned)))
-    return mlirLogicalResultFailure();
-
-  // The pass planned the one function `kernel` names, so the classifier of
-  // that kernel is the one it added.
-  SmallVector<swage_plan::ClassifyOp> classifiers;
-  planned->walk([&](swage_plan::ClassifyOp classify) {
-    if (classify.getKernel() == kernel)
-      classifiers.push_back(classify);
-  });
-  if (classifiers.size() != 1) {
-    source.emitError() << "planning must produce one swage_plan.classify of @"
-                       << kernel << ", found " << classifiers.size();
+  // The limits steer the classification below and nothing else, so they are
+  // checked here and never reach the IR.
+  if (warpMaxElements <= 0 || ctaChunkElements <= 0 ||
+      warpMaxElements > ctaChunkElements ||
+      ctaChunkElements > std::numeric_limits<int32_t>::max()) {
+    source.emitError("planning limits must satisfy 0 < warp-max-elements <= "
+                     "cta-chunk-elements <= INT32_MAX");
     return mlirLogicalResultFailure();
   }
+  if (failed(swage::admitTaskProgram(source, kernel)))
+    return mlirLogicalResultFailure();
 
   auto tasks = swage_plan::classifyTasks(
       ArrayRef(offsets, static_cast<size_t>(offsetCount)), valueCount,
-      segmentCount, classifiers.front().getWarpMaxElements(),
-      classifiers.front().getCtaChunkElements());
+      segmentCount, warpMaxElements, ctaChunkElements);
   if (!tasks) {
     source.emitError(llvm::toString(tasks.takeError()));
     return mlirLogicalResultFailure();

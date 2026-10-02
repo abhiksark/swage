@@ -8,7 +8,9 @@
 
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Conversion/SwagePlanToGPU/Emission.h"
+#include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
 #include "swage/Conversion/SwageToPlan/Admission.h"
+#include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 
 #include <limits>
 #include <optional>
@@ -34,6 +36,7 @@
 #include "swage/Dialect/Swage/IR/SwageOps.h"
 #include "swage/Dialect/Swage/Transforms/FuseMaps.h"
 #include "swage/Dialect/SwagePlan/IR/KernelLayout.h"
+#include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
@@ -95,19 +98,7 @@ private:
 /// map behind and every consumer reads the segment of `make_segment`.
 void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
                           SegmentProgram &program) {
-  // The fusion function is applied to the admitted consumers directly. The
-  // greedy pattern driver would also delete dead operations, and a program
-  // may hold a reduction that nothing reads, which is lowered as a stage.
-  IRRewriter rewriter(analysis.reductions.front()->getContext());
-  auto fuse = [&](Operation *consumer) {
-    while (succeeded(fuseMapIntoConsumer(consumer, rewriter))) {
-    }
-  };
-  for (ReduceOp reduction : analysis.reductions)
-    fuse(reduction);
-  for (MapStoreOp mapStore : analysis.mapStores)
-    fuse(mapStore);
-  analysis.maps.clear();
+  fuseAdmittedMaps(analysis);
 
   DenseMap<Operation *, unsigned> stageOf;
   for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
@@ -134,37 +125,6 @@ void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
     MapStoreOp mapStore = analysis.mapStores.front();
     program.mapStore = takeElement(mapStore, mapStore.getCaptures());
   }
-}
-
-void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
-                            const SegmentABI &abi, int32_t warpMaxElements,
-                            int32_t ctaChunkElements) {
-  OpBuilder builder(module.getContext());
-  Location loc = semanticFunction.getLoc();
-  Type taskRange = swage_plan::TaskRangeType::get(module.getContext());
-  auto functionType = builder.getFunctionType(
-      {semanticFunction.getArgument(abi.offsets).getType(),
-       builder.getI32Type(), builder.getI32Type()},
-      taskRange);
-
-  builder.setInsertionPointAfter(semanticFunction);
-  auto companion = func::FuncOp::create(
-      builder, loc, semanticFunction.getName().str() + "__swage_plan",
-      functionType);
-  companion.setPrivate();
-  Block *entry = companion.addEntryBlock();
-  builder.setInsertionPointToStart(entry);
-  ArrayAttr policies = builder.getArrayAttr(
-      {swage_plan::TaskPolicyAttr::get(module.getContext(),
-                                       swage_plan::TaskPolicy::Warp),
-       swage_plan::TaskPolicyAttr::get(module.getContext(),
-                                       swage_plan::TaskPolicy::CTA)});
-  auto tasks = swage_plan::ClassifyOp::create(
-      builder, loc, taskRange, entry->getArgument(0), entry->getArgument(1),
-      entry->getArgument(2), semanticFunction.getName(),
-      static_cast<uint32_t>(warpMaxElements),
-      static_cast<uint32_t>(ctaChunkElements), policies);
-  func::ReturnOp::create(builder, loc, tasks.getResult());
 }
 
 /// Apply an admitted element expression to one loaded value.
@@ -248,10 +208,12 @@ void buildSequentialProgram(func::FuncOp function, const SegmentABI &abi,
                                            SwageDialect::getRoleAttrName()));
 }
 
+/// Emit the fused mixed kernel, or the persistent kernel when `persistent`
+/// is set. The direct and task-id kernels come from the plan conversion.
 void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program,
                      const TargetDescription &target, int64_t blockSize,
-                     bool useTaskIds, bool fusedMixed, bool persistent) {
+                     bool persistent) {
   OpBuilder builder(module.getContext());
   Location loc = source.getLoc();
   builder.setInsertionPoint(source);
@@ -262,17 +224,11 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
   Type pointer = LLVM::LLVMPointerType::get(module.getContext());
   Type i32 = builder.getI32Type();
   Type f32 = builder.getF32Type();
-  // The task-ID, fused, and persistent kernels load segment IDs from a task
-  // buffer. The direct kernel uses the block index as the segment ID.
+  // Both kernels load segment IDs from task buffers.
   using swage_plan::KernelArgument;
-  swage_plan::KernelKind kind = swage_plan::KernelKind::Direct;
-  if (persistent)
-    kind = swage_plan::KernelKind::Persistent;
-  else if (fusedMixed)
-    kind = swage_plan::KernelKind::FusedMixed;
-  else if (useTaskIds)
-    kind = swage_plan::KernelKind::TaskIds;
-  const swage_plan::KernelLayout layout = swage_plan::kernelLayout(kind);
+  const swage_plan::KernelLayout layout =
+      swage_plan::kernelLayout(persistent ? swage_plan::KernelKind::Persistent
+                                          : swage_plan::KernelKind::FusedMixed);
   SmallVector<Type> inputs;
   for (KernelArgument parameter : layout.arguments())
     inputs.push_back(swage_plan::isBuffer(parameter) ? pointer : i32);
@@ -728,91 +684,62 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
     return;
   }
 
-  if (fusedMixed) {
-    // One warp task per subgroup of the block: `four` slots, and `three` to
-    // round the warp task count up to whole blocks.
-    int64_t slots = target.slotsPerBlock(static_cast<int32_t>(blockSize));
-    Value three = arith::ConstantIndexOp::create(builder, loc, slots - 1);
-    Value four = arith::ConstantIndexOp::create(builder, loc, slots);
-    Value warp =
-        arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
-    Value warpTaskCount =
-        arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                   argument(KernelArgument::WarpTaskCount));
-    Value ctaTaskCount =
-        arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
-                                   argument(KernelArgument::CtaTaskCount));
-    Value roundedWarpTaskCount =
-        arith::AddIOp::create(builder, loc, warpTaskCount, three);
-    Value warpBlockCount =
-        arith::DivUIOp::create(builder, loc, roundedWarpTaskCount, four);
-    Value isWarpBlock = arith::CmpIOp::create(
-        builder, loc, arith::CmpIPredicate::ult, taskIndex, warpBlockCount);
-    scf::IfOp::create(
-        builder, loc, isWarpBlock,
-        [&](OpBuilder &warpBlock, Location warpLoc) {
-          Value physicalWarp =
-              arith::DivUIOp::create(warpBlock, warpLoc, threadId, warp);
-          Value lane =
-              arith::RemUIOp::create(warpBlock, warpLoc, threadId, warp);
-          Value firstTask =
-              arith::MulIOp::create(warpBlock, warpLoc, taskIndex, four);
-          Value warpTaskId = arith::AddIOp::create(warpBlock, warpLoc,
-                                                   firstTask, physicalWarp);
-          Value inRange = arith::CmpIOp::create(warpBlock, warpLoc,
-                                                arith::CmpIPredicate::ult,
-                                                warpTaskId, warpTaskCount);
-          scf::IfOp::create(warpBlock, warpLoc, inRange,
-                            [&](OpBuilder &task, Location taskLoc) {
-                              emitTaskSegment(task, taskLoc,
-                                              argument(KernelArgument::TaskIds),
-                                              warpTaskId, lane, warp, true);
-                              scf::YieldOp::create(task, taskLoc);
-                            });
-          scf::YieldOp::create(warpBlock, warpLoc);
-        },
-        [&](OpBuilder &ctaBlock, Location ctaLoc) {
-          Value ctaTaskId = arith::SubIOp::create(ctaBlock, ctaLoc, taskIndex,
-                                                  warpBlockCount);
-          Value inRange =
-              arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
-                                    ctaTaskId, ctaTaskCount);
-          scf::IfOp::create(ctaBlock, ctaLoc, inRange,
-                            [&](OpBuilder &task, Location taskLoc) {
-                              Value mixedTaskId = arith::AddIOp::create(
-                                  task, taskLoc, warpTaskCount, ctaTaskId);
-                              emitTaskSegment(task, taskLoc,
-                                              argument(KernelArgument::TaskIds),
-                                              mixedTaskId, threadId, block,
-                                              false);
-                              scf::YieldOp::create(task, taskLoc);
-                            });
-          scf::YieldOp::create(ctaBlock, ctaLoc);
-        });
-    gpu::ReturnOp::create(builder, loc);
-    source.erase();
-    return;
-  }
-
-  // One block per task with a task buffer, and one per segment without.
-  Value taskCount = arith::IndexCastOp::create(
-      builder, loc, builder.getIndexType(),
-      argument(useTaskIds ? KernelArgument::TaskCount
-                          : KernelArgument::SegmentCount));
-  Value inRange = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
-                                        taskIndex, taskCount);
-
+  // One warp task per subgroup of the block: `four` slots, and `three` to
+  // round the warp task count up to whole blocks.
+  int64_t slots = target.slotsPerBlock(static_cast<int32_t>(blockSize));
+  Value three = arith::ConstantIndexOp::create(builder, loc, slots - 1);
+  Value four = arith::ConstantIndexOp::create(builder, loc, slots);
+  Value warp =
+      arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
+  Value warpTaskCount =
+      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                 argument(KernelArgument::WarpTaskCount));
+  Value ctaTaskCount =
+      arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                 argument(KernelArgument::CtaTaskCount));
+  Value roundedWarpTaskCount =
+      arith::AddIOp::create(builder, loc, warpTaskCount, three);
+  Value warpBlockCount =
+      arith::DivUIOp::create(builder, loc, roundedWarpTaskCount, four);
+  Value isWarpBlock = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::ult, taskIndex, warpBlockCount);
   scf::IfOp::create(
-      builder, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-        if (useTaskIds)
-          emitTaskSegment(body, bodyLoc, argument(KernelArgument::TaskIds),
-                          taskIndex, threadId, block,
-                          blockSize == target.subgroupWidth);
-        else
-          emitSegment(body, bodyLoc, taskIndex, Value(), threadId, block,
-                      false);
-
-        scf::YieldOp::create(body, bodyLoc);
+      builder, loc, isWarpBlock,
+      [&](OpBuilder &warpBlock, Location warpLoc) {
+        Value physicalWarp =
+            arith::DivUIOp::create(warpBlock, warpLoc, threadId, warp);
+        Value lane = arith::RemUIOp::create(warpBlock, warpLoc, threadId, warp);
+        Value firstTask =
+            arith::MulIOp::create(warpBlock, warpLoc, taskIndex, four);
+        Value warpTaskId =
+            arith::AddIOp::create(warpBlock, warpLoc, firstTask, physicalWarp);
+        Value inRange =
+            arith::CmpIOp::create(warpBlock, warpLoc, arith::CmpIPredicate::ult,
+                                  warpTaskId, warpTaskCount);
+        scf::IfOp::create(warpBlock, warpLoc, inRange,
+                          [&](OpBuilder &task, Location taskLoc) {
+                            emitTaskSegment(task, taskLoc,
+                                            argument(KernelArgument::TaskIds),
+                                            warpTaskId, lane, warp, true);
+                            scf::YieldOp::create(task, taskLoc);
+                          });
+        scf::YieldOp::create(warpBlock, warpLoc);
+      },
+      [&](OpBuilder &ctaBlock, Location ctaLoc) {
+        Value ctaTaskId =
+            arith::SubIOp::create(ctaBlock, ctaLoc, taskIndex, warpBlockCount);
+        Value inRange =
+            arith::CmpIOp::create(ctaBlock, ctaLoc, arith::CmpIPredicate::ult,
+                                  ctaTaskId, ctaTaskCount);
+        scf::IfOp::create(
+            ctaBlock, ctaLoc, inRange, [&](OpBuilder &task, Location taskLoc) {
+              Value mixedTaskId = arith::AddIOp::create(
+                  task, taskLoc, warpTaskCount, ctaTaskId);
+              emitTaskSegment(task, taskLoc, argument(KernelArgument::TaskIds),
+                              mixedTaskId, threadId, block, false);
+              scf::YieldOp::create(task, taskLoc);
+            });
+        scf::YieldOp::create(ctaBlock, ctaLoc);
       });
   gpu::ReturnOp::create(builder, loc);
   source.erase();
@@ -1051,7 +978,8 @@ public:
 
   void getDependentDialects(DialectRegistry &registry) const final {
     registry.insert<arith::ArithDialect, gpu::GPUDialect, LLVM::LLVMDialect,
-                    NVVM::NVVMDialect, scf::SCFDialect>();
+                    NVVM::NVVMDialect, scf::SCFDialect,
+                    swage_plan::SwagePlanDialect>();
   }
 
   void runOnOperation() final {
@@ -1104,6 +1032,19 @@ public:
       return signalPassFailure();
     }
     ModuleOp module = getOperation();
+    // The direct and task-id schedules are planned and then converted. The
+    // fused and persistent schedules are still emitted here.
+    if (!fusedMixed && !persistent) {
+      PlanOptions options;
+      options.schedule =
+          useTaskIds ? PlanSchedule::TaskIds : PlanSchedule::Direct;
+      options.blockThreads = blockSize;
+      options.function = selectedFunction;
+      if (failed(planSegmentFunctions(module, options, *target)) ||
+          failed(convertPlanToGPU(module, *target)))
+        signalPassFailure();
+      return;
+    }
     FailureOr<SmallVector<func::FuncOp>> functions =
         findSegmentFunctions(module, selectedFunction);
     if (failed(functions))
@@ -1114,8 +1055,7 @@ public:
     for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
       if (failed(analyzeSegmentProgram(function, analysis)))
         return signalPassFailure();
-      if ((useTaskIds || fusedMixed || persistent) &&
-          failed(verifyPlanningProgram(analysis)))
+      if (failed(verifyPlanningProgram(analysis)))
         return signalPassFailure();
       if (persistent && failed(verifyPersistentProgram(analysis)))
         return signalPassFailure();
@@ -1126,8 +1066,8 @@ public:
       RegionOwner owner;
       SegmentProgram program;
       detachSegmentProgram(analysis, owner, program);
-      buildGPUProgram(module, function, program, *target, blockSize, useTaskIds,
-                      fusedMixed, persistent);
+      buildGPUProgram(module, function, program, *target, blockSize,
+                      persistent);
     }
   }
 
@@ -1222,83 +1162,6 @@ private:
                      "that holds Swage operations")};
 };
 
-class SwageToPlanPass
-    : public PassWrapper<SwageToPlanPass, OperationPass<ModuleOp>> {
-public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwageToPlanPass)
-
-  SwageToPlanPass() = default;
-  SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
-    warpMaxElements = other.warpMaxElements.getValue();
-    ctaChunkElements = other.ctaChunkElements.getValue();
-    selectedFunction = other.selectedFunction.getValue();
-  }
-  SwageToPlanPass(int64_t requestedWarpMaxElements,
-                  int64_t requestedCtaChunkElements, StringRef function) {
-    warpMaxElements = requestedWarpMaxElements;
-    ctaChunkElements = requestedCtaChunkElements;
-    selectedFunction = function.str();
-  }
-
-  StringRef getArgument() const final { return "swage-to-plan"; }
-  StringRef getDescription() const final {
-    return "Add runtime classification for every capture-free sum or max "
-           "function";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const final {
-    registry.insert<func::FuncDialect, swage_plan::SwagePlanDialect>();
-  }
-
-  void runOnOperation() final {
-    ModuleOp module = getOperation();
-    if (warpMaxElements <= 0 || ctaChunkElements <= 0 ||
-        warpMaxElements > ctaChunkElements ||
-        ctaChunkElements > std::numeric_limits<int32_t>::max()) {
-      module.emitError("planning limits must satisfy 0 < warp-max-elements <= "
-                       "cta-chunk-elements <= INT32_MAX");
-      return signalPassFailure();
-    }
-
-    FailureOr<SmallVector<func::FuncOp>> functions =
-        findSegmentFunctions(module, selectedFunction);
-    if (failed(functions))
-      return signalPassFailure();
-    // Every function is admitted before any companion is added, so a
-    // rejected module is left as it was.
-    SmallVector<SegmentProgramAnalysis, 1> analyses(functions->size());
-    for (auto [function, analysis] : llvm::zip(*functions, analyses)) {
-      std::string companionName = function.getName().str() + "__swage_plan";
-      if (SymbolTable::lookupSymbolIn(module.getOperation(), companionName)) {
-        module.emitError() << "planning companion symbol @" << companionName
-                           << " already exists";
-        return signalPassFailure();
-      }
-      if (failed(analyzeSegmentProgram(function, analysis)) ||
-          failed(verifyPlanningProgram(analysis)))
-        return signalPassFailure();
-    }
-    for (auto [function, analysis] : llvm::zip(*functions, analyses))
-      buildPlanningCompanion(module, function, analysis.abi,
-                             static_cast<int32_t>(warpMaxElements),
-                             static_cast<int32_t>(ctaChunkElements));
-  }
-
-private:
-  Option<int64_t> warpMaxElements{
-      *this, "warp-max-elements",
-      llvm::cl::desc("Maximum segment length admitted for warp policy"),
-      llvm::cl::init(nvidiaTarget().defaultWarpMaxElements)};
-  Option<int64_t> ctaChunkElements{
-      *this, "cta-chunk-elements",
-      llvm::cl::desc("Maximum input elements in one CTA task"),
-      llvm::cl::init(nvidiaTarget().defaultCtaChunkElements)};
-  Option<std::string> selectedFunction{
-      *this, "function",
-      llvm::cl::desc("Plan only this function instead of every function that "
-                     "holds Swage operations")};
-};
-
 } // namespace
 
 std::unique_ptr<Pass> createSegmentedReductionToSCFPass() {
@@ -1336,18 +1199,10 @@ std::unique_ptr<Pass> createSplitMergeReductionToGPUPass(StringRef function) {
   return std::make_unique<SplitSegmentedReductionToGPUPass>(true, function);
 }
 
-std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements,
-                                            int64_t ctaChunkElements,
-                                            StringRef function) {
-  return std::make_unique<SwageToPlanPass>(warpMaxElements, ctaChunkElements,
-                                           function);
-}
-
 void registerSegmentedReductionPasses() {
   PassRegistration<SegmentedReductionToSCFPass>();
   PassRegistration<SegmentedReductionToGPUPass>();
   PassRegistration<SplitSegmentedReductionToGPUPass>();
-  PassRegistration<SwageToPlanPass>();
 }
 
 } // namespace mlir::swage

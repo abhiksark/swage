@@ -89,11 +89,16 @@ pipeline and links to exact references live in
 ## Planning invariants
 
 `swage_plan` is a distinct private dialect because scheduling and semantic
-meaning have different invariants. Its current surface records only warp and
-CTA policies, one opaque task-range result, and one classification operation
-for an admitted capture-free, single-stage f32 sum or max. Static emitters
-reuse element programs and map chains; split merges combine scalar partials
-without reapplying element expressions.
+meaning have different invariants. It holds what a kernel lowering consumes:
+a plan function, whose signature is the parameter list of a kernel and whose
+launch width is an attribute, and a task operation that takes every buffer
+and every device bound as an operand. The direct and task-id kernels are
+planned and then converted; the fused mixed, split, and persistent kernels
+are still emitted by their lowerings without a plan stage
+([ADR-0020](docs/adr/ADR-0020-planned-per-function-lowering.md)). The
+planning limits steer host classification only and are not part of plan IR.
+Static emitters reuse element programs and map chains; split merges combine
+scalar partials without reapplying element expressions.
 
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.

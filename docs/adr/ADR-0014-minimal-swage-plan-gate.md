@@ -4,7 +4,9 @@
 - Status: accepted; extended by
   [ADR-0015](ADR-0015-minimal-mixed-policy-execution.md),
   [ADR-0017](ADR-0017-private-split-cta-reductions.md), and
-  [ADR-0019](ADR-0019-composable-private-reductions.md); see
+  [ADR-0019](ADR-0019-composable-private-reductions.md); its planning
+  dialect boundary is superseded by
+  [ADR-0020](ADR-0020-planned-per-function-lowering.md); see
   [Later decisions](#later-decisions)
 - Date: 2026-08-23
 
@@ -140,8 +142,17 @@ This decision does not add:
 
 ## Later decisions
 
-This record describes the gate as first accepted. Three of its statements
+This record describes the gate as first accepted. Four of its statements
 no longer match the code, and each is replaced by a later record:
+
+- Dialect boundary: this record says the dialect holds the policy
+  attribute, `!swage_plan.task_range`, and `swage_plan.classify`, and that
+  the pass adds a `<kernel>__swage_plan` companion.
+  [ADR-0020](ADR-0020-planned-per-function-lowering.md) removes the type,
+  the operation, and the companion. Plan IR is now a plan function with one
+  task operation that the GPU lowering consumes, and the planning limits
+  are arguments of the host classifier. The split of responsibilities
+  between compile time and run time, and the host descriptors, stand.
 
 - Admission: this record says the pass rejects max reductions, transformed
   sums, and maps.

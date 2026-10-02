@@ -45,7 +45,7 @@ REQUIRED_LABELS = {
         "cta_task_count",
     ),
     "plan-classification": (
-        "swage_plan.classify",
+        "swageClassifySegments",
         "empty",
         "warp",
         "cta",

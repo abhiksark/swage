@@ -76,32 +76,38 @@ TEST(DialectsCAPITest, ThePlanHandleRegistersThePlanningDialect) {
   MlirDialectHandle handle = mlirGetDialectHandle__swage_plan__();
   EXPECT_EQ(str(mlirDialectHandleGetNamespace(handle)), "swage_plan");
   ASSERT_FALSE(mlirContextIsRegisteredOperation(session.context,
-                                                ref("swage_plan.classify")));
+                                                ref("swage_plan.tasks")));
 
   session.load(handle);
 
   EXPECT_TRUE(mlirContextIsRegisteredOperation(session.context,
-                                               ref("swage_plan.classify")));
+                                               ref("swage_plan.tasks")));
 }
 
 TEST(DialectsCAPITest, ThePlanHandleLetsACallerParsePlanningIR) {
   Session session;
   session.load(mlirGetDialectHandle__func__());
+  session.load(mlirGetDialectHandle__swage__());
   session.load(mlirGetDialectHandle__swage_plan__());
 
   MlirModule module = mlirModuleCreateParse(session.context, ref(R"mlir(
 module {
-  func.func private @semantic_sum(
-      memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
-
-  func.func @classify(%offsets: memref<?xi32>, %value_count: i32,
-                      %segment_count: i32) -> !swage_plan.task_range {
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {
-        cta_chunk_elements = 4096 : i32, kernel = @semantic_sum,
-        policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>],
-        warp_max_elements = 32 : i32}
-        : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
+  func.func @segmented_sum(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
   }
 }
 )mlir"));

@@ -81,10 +81,33 @@ Exact admitted module shapes and internal ABIs live in
 [Segmented Reductions](segmented-reductions.md) and
 [Ragged Softmax](ragged-softmax.md).
 
+## Plan stage
+
+The direct kernel and the task-id kernel are lowered in two steps. The
+planner replaces an admitted segment function by a plan function: the
+parameter list of the kernel, its launch width, and one `swage_plan.tasks`
+operation that takes every buffer and every bound as an operand and holds
+the reductions and stores of one bound segment. A dialect conversion then
+turns each plan function into a `gpu.module`, with one pattern per
+operation. `--swage-to-plan` and `--swage-plan-to-gpu` run the two steps
+from text, and `--swage-segmented-reduction-to-gpu` runs both for these two
+schedules. The fused mixed, split, and persistent kernels are emitted by
+their lowerings without a plan stage;
+[ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md) records the
+order in which they move.
+
+```text
+swage (roles on arguments)
+  --swage-to-plan='schedule=...'   admit, fuse maps, build one plan function
+swage_plan (kernel signature + task operation with explicit bounds)
+  --swage-plan-to-gpu              dialect conversion, no options
+gpu + scf + arith + llvm
+```
+
 ## Private SwagePlan branch
 
-For a capture-free, single-stage f32 sum or max, admission can add a planning
-companion without mutating the semantic function. Validated host metadata is
+For a capture-free, single-stage f32 sum or max, planning admission accepts
+the program without changing the module. Validated host metadata is
 then classified and materialized into direct IDs or split records. Private
 lowering factories produce the direct, partial, and merge kernels used by the
 qualification runtime. Element programs and single-consumer map chains are

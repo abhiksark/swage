@@ -13,4 +13,5 @@ add_mlir_dialect_library(MLIRSwagePlan
   LINK_LIBS PUBLIC
   MLIRFuncDialect
   MLIRIR
+  MLIRSwage
 )

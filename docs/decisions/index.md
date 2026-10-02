@@ -28,6 +28,7 @@ gates belong in the roadmap.
 
 - [ADR-0013: Segmented fusion and map-store ABI](../adr/ADR-0013-fusion-and-map-store-abi.md)
 - [ADR-0014: Minimal SwagePlan gate](../adr/ADR-0014-minimal-swage-plan-gate.md)
+  (its planning dialect boundary is superseded by ADR-0020)
 - [ADR-0015: Minimal mixed-policy execution](../adr/ADR-0015-minimal-mixed-policy-execution.md)
 - [ADR-0016: Fused mixed-policy schedule](../adr/ADR-0016-fused-mixed-policy-schedule.md)
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)

@@ -48,6 +48,12 @@ struct SegmentProgramAnalysis {
   ReduceOp storedReduction;
 };
 
+/// The element types the lowerings admit for the values and the output, and
+/// the index word types they admit for the offsets and the counts. Each
+/// table has one row today.
+bool isAdmittedElementType(Type type);
+bool isAdmittedIndexType(Type type);
+
 /// The functions a pass lowers: every function that holds a Swage operation,
 /// or the one function that `selected` names. A module without a segment
 /// function gives an empty list, and the pass leaves it as it is.
@@ -65,8 +71,20 @@ LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
 LogicalResult analyzeSegmentProgram(func::FuncOp function,
                                     SegmentProgramAnalysis &analysis);
 
+/// Check the element programs of the maps, reductions, and stores listed in
+/// `analysis`: captures are f32 results of reductions, kinds are ones a
+/// lowering implements, and regions hold admitted f32 operations only.
+LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis);
+
 /// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis);
+
+/// Fuse every map of an admitted function into its consumer. This is the
+/// first change a lowering makes, so it runs only after every function has
+/// been admitted. Admission gives every map one consumer, so no map is left
+/// and every consumer reads the segment of `make_segment`; `analysis.maps`
+/// is emptied.
+void fuseAdmittedMaps(SegmentProgramAnalysis &analysis);
 
 /// Persistent partials and merges still implement only identity sum.
 LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis);

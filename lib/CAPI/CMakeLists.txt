@@ -29,6 +29,7 @@ add_mlir_public_c_api_library(SwageCAPI
   MLIRSwagePlan
   MLIRSwageSegmentedReduction
   MLIRSwageTarget
+  MLIRSwageToPlan
   MLIRTargetLLVM
   MLIRUBToLLVM
   MLIRVectorToLLVM

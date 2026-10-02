@@ -367,6 +367,17 @@ TEST(CodegenCAPITest, ACompileLoadsTheLoweringDialectsIntoTheCallersContext) {
     EXPECT_TRUE(session.isRegistered(operation)) << operation;
 }
 
+TEST(CodegenCAPITest, ASegmentedCompileLoadsThePlanningDialect) {
+  Session session;
+  ASSERT_FALSE(session.isRegistered("swage_plan.tasks"));
+
+  // The direct kernel is planned and then converted, so its compile builds
+  // plan operations in the context of the module.
+  ASSERT_TRUE(session.compile(entryPoints()[1]).succeeded);
+
+  EXPECT_TRUE(session.isRegistered("swage_plan.tasks"));
+}
+
 TEST(CodegenCAPITest, RepeatedCompilesInOneContextGiveTheSamePTX) {
   for (const EntryPoint &entryPoint : entryPoints()) {
     SCOPED_TRACE(entryPoint.name);
@@ -744,14 +755,16 @@ TEST(CodegenCAPITest, MaterializesOneRecordListPerPolicy) {
   EXPECT_EQ(plan.merge, (std::vector<int32_t>{2, 0, 3}));
 }
 
-TEST(CodegenCAPITest, APlanCallLoadsThePlanningDialect) {
+TEST(CodegenCAPITest, APlanCallLeavesItsContextUnchanged) {
   Session session;
   const int64_t offsets[] = {0};
-  ASSERT_FALSE(session.isRegistered("swage_plan.classify"));
+  ASSERT_FALSE(session.isRegistered("swage_plan.tasks"));
 
+  // A plan call admits the program and classifies the offsets. It builds no
+  // IR, so it loads no dialect.
   ASSERT_TRUE(materialize(session, offsets, 1, 0, 0).succeeded);
 
-  EXPECT_TRUE(session.isRegistered("swage_plan.classify"));
+  EXPECT_FALSE(session.isRegistered("swage_plan.tasks"));
 }
 
 TEST(CodegenCAPITest, APlanCallReportsRejectedArguments) {

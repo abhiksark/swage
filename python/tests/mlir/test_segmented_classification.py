@@ -820,7 +820,7 @@ class _CountingCalls:
 
 @requires_cuda
 def test_a_program_is_admitted_once_per_pair_of_limits(monkeypatch):
-    """Run the planning pass once, then classify each layout without it."""
+    """Admit a program once, then classify each layout without it."""
     layouts = [[1, 33, 5000], [40] * 7, [0, 9000, 2], [4097, 31]]
     cases = [
         _integer_case(lengths, seed=index)
@@ -862,7 +862,7 @@ def test_a_program_is_admitted_once_per_pair_of_limits(monkeypatch):
 def test_a_refused_program_or_limit_is_refused_at_every_preparation(
     monkeypatch,
 ):
-    """Keep no admission for what the planning pass rejects."""
+    """Keep no admission for what planning admission rejects."""
     values, offsets, _ = _integer_case([3, 40])
     arguments = (values.cuda(), offsets.cuda(), torch.empty(2, device="cuda"))
     monkeypatch.setattr(qualification, "_admitted", {})

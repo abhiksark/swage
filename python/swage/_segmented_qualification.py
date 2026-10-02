@@ -885,11 +885,11 @@ def _has_small_element_program(module):
 # What a preparation needs to know about a program, none of which depends on
 # the offsets. `_module_memo` keeps one parsed module per semantic module
 # text with the result of inspecting its element program. `_admitted` keeps
-# that result per program text and pair of planning limits the planning pass
-# has accepted, so the pass runs once per program and limits and a later
-# preparation only classifies its offsets.
+# that result per program text and pair of planning limits that planning
+# admission has accepted, so admission runs once per program and limits and
+# a later preparation only classifies its offsets.
 #
-# Threads share a parsed module, which is safe because the planning pass
+# Threads share a parsed module, which is safe because planning admission
 # holds the GIL and leaves the module unchanged. Compiles do not use these
 # modules: on a miss `_compile_once` parses the text in a context of its
 # own, so a compile never runs on a context shared here.
@@ -931,11 +931,11 @@ def _admit_program(
 ):
     """Admit one program for planning under one pair of limits, once.
 
-    The planning pass decides whether a program can be classified and
-    whether the limits are valid. Neither depends on the offsets, so the
-    pass runs at the first preparation of a program with a pair of limits,
-    on a layout without segments. Later preparations classify their offsets
-    without the module.
+    Planning admission decides whether a program can be classified and
+    whether the limits are valid. Neither depends on the offsets, so
+    admission runs at the first preparation of a program with a pair of
+    limits, on a layout without segments. Later preparations classify their
+    offsets without the module.
 
     Args:
         module_text: Semantic module text that identifies the program.
@@ -947,7 +947,7 @@ def _admit_program(
         Whether `_has_small_element_program` holds for the program.
 
     Raises:
-        ValueError: The planning pass rejects the program or the limits. A
+        ValueError: Planning admission rejects the program or the limits. A
             rejection is not kept, so every preparation raises it again.
     """
     key = (module_text, kernel_name, warp_max_elements, cta_chunk_elements)

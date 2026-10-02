@@ -45,18 +45,29 @@ functions of the C API and not registered passes.
 | `--swage-fuse-maps` | none | Fuse each `swage.map` that has one consumer into that consumer, in every function |
 | `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512; optional `function` | Lower every admitted private segment function to a GPU kernel module. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
-| `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096; optional `function` | Add one private planning companion for every capture-free, single-stage f32 sum or max function |
+| `--swage-to-plan` | `schedule`, `direct` (default) or `task-ids`; `block-threads`, default 128, a launch width the target admits; optional `function` | Replace every admitted segment function by the plan function of the kernel the schedule selects. `task-ids` admits a capture-free, single-stage f32 sum or max |
+| `--swage-plan-to-gpu` | none | Convert every plan function to a `gpu.module` that holds its kernel, and leave every other operation as it is |
 | `--swage-split-segmented-reduction-to-gpu` | optional `merge`; optional `function` | Lower every admitted private capture-free, single-stage f32 sum or max function to the split partial kernel, or to the split merge kernel when `merge` is set |
 
-Planning limits must satisfy:
+The planner and the conversion are the two halves of the direct and
+task-id lowerings, and `--swage-segmented-reduction-to-gpu` runs both for
+those two schedules:
+
+```bash
+./build/bin/swage-opt input.mlir \
+  --swage-to-plan='schedule=task-ids block-threads=32' --swage-plan-to-gpu
+```
+
+Plan IR is described on [SwagePlan Dialect](swage-plan-dialect.md). The
+planner does not lower a general task graph or inspect runtime offset
+contents, and it takes no planning limit: the limits
 
 ```text
 0 < warp-max-elements <= cta-chunk-elements <= INT32_MAX
 ```
 
-The planning pass preserves each admitted semantic function and adds one
-private companion with `swage_plan.classify` for it. It does not lower a
-general task graph or inspect runtime offset contents.
+steer host classification only, and `swageMaterializeSegmentedPlan` checks
+them.
 
 ## Functions and symbols
 
@@ -72,14 +83,17 @@ four segmented passes treat a module the same way:
   fails when the name is not a function of the module or names a function
   without Swage operations.
 - A pass admits every function it will lower before it changes any of them,
-  so a module that is rejected is left as it was.
+  so a module that is rejected is left as it was. The conversion checks
+  every plan function before it changes any, in the same way.
 
 A GPU lowering replaces a segment function by a `gpu.module` named
 `<kernel>_module`, where `<kernel>` is the function name, followed by
 `__partial` or `__merge` for a split stage. Before it changes anything, the
 pass requires that nothing in the module refers to the function, that
 `<kernel>_module` is not defined, and, for a split stage, that `<kernel>` is
-not defined. The sequential lowering rewrites a function in place, so a
+not defined. The planner applies the same rules before it writes a plan
+function, and the conversion applies them to every plan function, including
+one written by hand. The sequential lowering rewrites a function in place, so a
 function it lowers may have callers.
 
 The code generation C API passes its `kernelName` as `function` and then
@@ -125,7 +139,8 @@ under `lib/cmake/swage`. A consumer loads it with
 `find_package(Swage REQUIRED CONFIG)`:
 
 - The imported targets are `MLIRSwage`, `MLIRSwageTransforms`,
-  `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageFixedBlockToGPU`,
+  `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageToPlan`,
+  `MLIRSwagePlanToGPU`, `MLIRSwageFixedBlockToGPU`,
   `MLIRSwageSegmentedReduction`, and `SwageCAPI`.
 - The targets carry no include directories, as the MLIR targets do not, so
   the consumer adds `SWAGE_INCLUDE_DIRS`, `MLIR_INCLUDE_DIRS`, and

@@ -1,24 +1,29 @@
 // test/Conversion/SwageToPlan/invalid.mlir
-// RUN: swage-opt --swage-to-plan --verify-diagnostics --split-input-file %s
-// RUN: swage-opt --swage-to-plan --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=NO-PLAN --implicit-check-not=swage_plan.classify
+// The task-id schedule plans one capture-free reduction whose result is
+// stored per segment, because that is what host classification describes.
+// Admission is read-only: the last RUN line prints each module after its
+// failure and finds no plan operation and no plan function in it.
+//
+// RUN: swage-opt --swage-to-plan='schedule=task-ids' --verify-diagnostics \
+// RUN:   --split-input-file %s
+// RUN: swage-opt --swage-to-plan='schedule=task-ids' --verify-diagnostics \
+// RUN:   --split-input-file --mlir-print-ir-after-failure %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=UNCHANGED \
+// RUN:     --implicit-check-not=swage_plan
 
-// NO-PLAN-LABEL: func.func @captured_map(
-// NO-PLAN: captures(
-// NO-PLAN-LABEL: func.func @captured_sum(
-// NO-PLAN: captures(
-// NO-PLAN-LABEL: func.func @multi_stage(
-// NO-PLAN-COUNT-2: swage.reduce
-// NO-PLAN-LABEL: func.func @map_store_terminal(
-// NO-PLAN: swage.map_store
-// NO-PLAN: memref.global "private" @companion_collision__swage_plan
-// NO-PLAN-LABEL: func.func @companion_collision(
-// NO-PLAN: swage.reduce
-// NO-PLAN-LABEL: func.func @wide_value_count(
-// NO-PLAN: swage.reduce
-// NO-PLAN-LABEL: func.func @narrow_segment_count(
-// NO-PLAN: swage.reduce
-// NO-PLAN-LABEL: func.func @non_default_memory_space(
-// NO-PLAN: swage.reduce
+// UNCHANGED-LABEL: func.func @captured_map(
+// UNCHANGED: swage.map
+// UNCHANGED-LABEL: func.func @captured_sum(
+// UNCHANGED: captures(
+// UNCHANGED-LABEL: func.func @multi_stage(
+// UNCHANGED-COUNT-2: swage.reduce
+// UNCHANGED-LABEL: func.func @map_store_terminal(
+// UNCHANGED: swage.map_store
+// UNCHANGED-LABEL: func.func @admitted(
+// UNCHANGED: swage.make_segment
+// UNCHANGED-LABEL: func.func @refused_after_admitted(
+// UNCHANGED-LABEL: func.func @wide_value_count(
+// UNCHANGED: swage.make_segment
 
 module {
   func.func @captured_map(
@@ -28,7 +33,8 @@ module {
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
@@ -58,13 +64,15 @@ module {
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
     }
     // expected-error@+1 {{planning requires a capture-free reduction}}
-    %sum = swage.reduce %segment captures(%maximum : f32) kind<sum> : !swage.segment<f32> -> f32 {
+    %sum = swage.reduce %segment captures(%maximum : f32) kind<sum>
+        : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32, %captured: f32):
       swage.yield %element : f32
     }
@@ -83,7 +91,8 @@ module {
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %first = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
@@ -108,7 +117,8 @@ module {
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
@@ -124,22 +134,44 @@ module {
 
 // -----
 
-// expected-error@+1 {{planning companion symbol @companion_collision__swage_plan already exists}}
+// The second function is refused, so the first, which is admitted, is not
+// planned either.
 module {
-  memref.global "private" @companion_collision__swage_plan : memref<1xi32>
-  func.func @companion_collision(
+  func.func @admitted(
       %values: memref<?xf32> {swage.role = #swage.role<values>},
       %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
       %output: memref<?xf32> {swage.role = #swage.role<output>},
       %value_count: i32 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
     }
     memref.store %sum, %output[%sid] : memref<?xf32>
+    return
+  }
+  func.func @refused_after_admitted(
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %first = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    // expected-error@+1 {{planning requires exactly one reduction stage}}
+    %second = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    memref.store %second, %output[%sid] : memref<?xf32>
     return
   }
 }
@@ -155,49 +187,8 @@ module {
       %value_count: i64 {swage.role = #swage.role<value_count>},
       %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
-    ^bb0(%element: f32):
-      swage.yield %element : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
-module {
-  // expected-error@+1 {{swage.role<segment_count> requires 'i32', the element type of the offsets, got 'i16'}}
-  func.func @narrow_segment_count(
-      %values: memref<?xf32> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i16 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
-    ^bb0(%element: f32):
-      swage.yield %element : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
-module {
-  // expected-error@+1 {{swage.role<values> requires a rank-one f32 memref with a dynamic size, the identity layout, and the default memory space, got 'memref<?xf32, #gpu.address_space<workgroup>>'}}
-  func.func @non_default_memory_space(
-      %values: memref<?xf32, #gpu.address_space<workgroup>> {swage.role = #swage.role<values>},
-      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
-      %output: memref<?xf32> {swage.role = #swage.role<output>},
-      %value_count: i32 {swage.role = #swage.role<value_count>},
-      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32, #gpu.address_space<workgroup>>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32

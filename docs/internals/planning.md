@@ -2,21 +2,29 @@
 
 # Task Planning
 
-The SwagePlan gate turns an admitted capture-free sum or max into
-classified tasks without executing them. This page records the
+Planning turns an admitted capture-free sum or max and its runtime offsets
+into classified tasks without executing them. This page records the
 exact internal contracts; none of them is a public API.
 
 *Qualified through compile-only compiler and classifier tests; see
 [Verification](verification.md) and
 [ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
-`--swage-to-plan` admits a capture-free, single-stage f32 sum or max with
+Planning admission accepts a capture-free, single-stage f32 sum or max with
 optional single-consumer map chains and a scalar output per segment. Element
 regions use the existing admitted arithmetic and `math.exp2` operations.
-Admission is read-only. On success it preserves the semantic function and adds
-a private companion with `swage_plan.classify`. Captures, multiple reductions,
-and map-store outputs remain outside static planning. Persistent execution
-retains its separate identity-sum restriction.
+Admission is read-only analysis of one segment function. Captures, multiple
+reductions, and map-store outputs remain outside static planning. Persistent
+execution retains its separate identity-sum restriction.
+
+Two callers run the same admission. `--swage-to-plan` with
+`schedule=task-ids` admits a function and then replaces it by the plan
+function of the task-id kernel, described on
+[SwagePlan Dialect](swage-plan-dialect.md). The private runner admits a
+program through `swageMaterializeSegmentedPlan`, which also checks the two
+planning limits and builds no IR. The limits steer host classification and
+no kernel reads them, so they are arguments of the classifier and do not
+appear in plan IR.
 
 The default legal policy order is warp then CTA. The default warp limit is 32
 elements, and the default CTA chunk limit is 4096 elements. The host
@@ -27,8 +35,8 @@ above the CTA chunk limit classify as split work;
 validated planning-limit invariant.
 
 Admission and classification are separate steps. Admission depends on the
-program and the two limits only, so the private runner runs the planning pass
-once per program and pair of limits, on a layout without segments. Each
+program and the two limits only, so the private runner admits once per
+program and pair of limits, on a layout without segments. Each
 preparation then classifies its offsets through `swageClassifySegments`, which
 takes the offsets buffer and the limits, uses no module and no MLIR context,
 and writes the warp ids, the CTA ids, the partial ranges, the merge records,
@@ -75,5 +83,5 @@ Native classification, descriptors, and public APIs are unchanged.
 *SwagePlan classification buckets, including the split bucket, and the validated planning-limit invariant. [Open the full-size figure](../assets/figures/plan-classification.svg).*
 
 Continue with [Task Execution](task-execution.md) for the qualified
-warp, CTA, and fused paths. The planning IR itself is on the previous page,
+warp, CTA, and fused paths. Plan IR itself is on the previous page,
 [SwagePlan Dialect](swage-plan-dialect.md).

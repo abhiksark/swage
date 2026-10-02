@@ -42,9 +42,6 @@ std::unique_ptr<Pass>
 createSplitPartialReductionToGPUPass(llvm::StringRef function = "");
 std::unique_ptr<Pass>
 createSplitMergeReductionToGPUPass(llvm::StringRef function = "");
-std::unique_ptr<Pass> createSwageToPlanPass(int64_t warpMaxElements,
-                                            int64_t ctaChunkElements,
-                                            llvm::StringRef function = "");
 void registerSegmentedReductionPasses();
 
 } // namespace mlir::swage

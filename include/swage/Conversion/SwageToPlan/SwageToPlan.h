@@ -1,0 +1,66 @@
+// include/swage/Conversion/SwageToPlan/SwageToPlan.h
+//===- SwageToPlan.h - Segment functions to plan functions ----*- C++ -*-===//
+//
+// Part of the Swage project, under the MIT License.
+// See LICENSE for license information.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SWAGE_CONVERSION_SWAGETOPLAN_SWAGETOPLAN_H
+#define SWAGE_CONVERSION_SWAGETOPLAN_SWAGETOPLAN_H
+
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/LogicalResult.h"
+
+#include <cstdint>
+#include <memory>
+
+namespace mlir {
+class ModuleOp;
+class Pass;
+} // namespace mlir
+
+namespace mlir::swage {
+
+struct TargetDescription;
+
+/// The kernel a plan function describes.
+enum class PlanSchedule {
+  /// One block of threads per segment.
+  Direct,
+  /// One block of threads per task; a task buffer names the segment.
+  TaskIds,
+};
+
+struct PlanOptions {
+  PlanSchedule schedule = PlanSchedule::Direct;
+  /// The launch width of the kernel, in threads.
+  int64_t blockThreads = 0;
+  /// Plan only the function of this name. Empty plans every function that
+  /// holds Swage operations.
+  llvm::StringRef function;
+};
+
+/// Replace each selected segment function of `module` by a plan function: a
+/// function with the parameter list of the kernel, a
+/// `swage_plan.block_threads` attribute, and one task operation that holds
+/// the reductions and stores of the program.
+///
+/// Every function is admitted before any is changed, so `module` is
+/// unchanged when this fails. Other functions are left as they are.
+llvm::LogicalResult planSegmentFunctions(ModuleOp module,
+                                         const PlanOptions &options,
+                                         const TargetDescription &target);
+
+/// Whether the segment function named `function` holds a program that host
+/// classification can turn into tasks: one capture-free sum or max whose
+/// result is stored per segment. Reads `module` and never changes it.
+llvm::LogicalResult admitTaskProgram(ModuleOp module, llvm::StringRef function);
+
+/// `--swage-to-plan`: `planSegmentFunctions` for `nvidiaTarget()`.
+std::unique_ptr<Pass> createSwageToPlanPass();
+void registerSwageToPlanPass();
+
+} // namespace mlir::swage
+
+#endif // SWAGE_CONVERSION_SWAGETOPLAN_SWAGETOPLAN_H

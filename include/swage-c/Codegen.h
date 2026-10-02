@@ -17,8 +17,10 @@
 //   that context. A compile function appends a dialect registry that carries
 //   the LLVM conversion interfaces, registers the LLVM IR translation
 //   interfaces, and loads the dialects the lowering produces, among them gpu,
-//   scf, llvm, and nvvm. swageMaterializeSegmentedPlan loads swage_plan.
-//   These changes stay after the call returns and repeating them is harmless.
+//   scf, llvm, and nvvm, and swage_plan when the kernel is planned before
+//   it is lowered. These changes stay after the call returns and repeating
+//   them is harmless. swageMaterializeSegmentedPlan builds no IR and leaves
+//   the context as it was.
 //   The dialects of the input itself (swage, func, arith, math, memref,
 //   vector) must already be loaded, which parsing the module ensures.
 //
@@ -148,6 +150,9 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
 /// Admits the function `kernelName` names for planning and classifies the
 /// offsets into one record list per callback. The function must hold a
 /// capture-free sum or max; other functions of the module are not looked at.
+/// The limits must satisfy
+/// `0 < warpMaxElements <= ctaChunkElements <= INT32_MAX`. The call reads
+/// the module and runs no pass.
 /// Callback counts are flat i32 element counts. Partial records use
 /// [begin, end] pairs; merge records use
 /// [segment_id, partial_begin, partial_end] triples.
@@ -177,8 +182,8 @@ typedef void (*SwageTaskRecordsCallback)(const int32_t *records,
 /// merge index of every partial task, which follows from those records.
 ///
 /// A program is admitted for planning by swageMaterializeSegmentedPlan, which
-/// runs the planning pass on its module and checks the two limits against
-/// it. That result depends on the program and the limits only, so a caller
+/// checks the named function of its module and the two limits. That result
+/// depends on the program and the limits only, so a caller
 /// that classifies many layouts of one program admits it once, for example
 /// with a layout of no segments, and classifies each layout here.
 ///

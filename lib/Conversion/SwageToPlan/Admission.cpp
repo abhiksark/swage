@@ -14,11 +14,17 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
+#include "swage/Dialect/Swage/Transforms/FuseMaps.h"
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir::swage {
+
+bool isAdmittedElementType(Type type) { return type.isF32(); }
+bool isAdmittedIndexType(Type type) { return type.isSignlessInteger(32); }
+
 namespace {
 
 bool isRankOneMemRef(Type type, Type elementType) {
@@ -176,12 +182,6 @@ LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
 }
 
 namespace {
-
-/// The element types the lowerings admit for the values and the output, and
-/// the index word types they admit for the offsets and the counts. Each
-/// table has one row today.
-bool isAdmittedElementType(Type type) { return type.isF32(); }
-bool isAdmittedIndexType(Type type) { return type.isSignlessInteger(32); }
 
 /// Whether `type` is a rank-one buffer the lowerings can address: a dynamic
 /// size, the identity layout, and the default memory space.
@@ -435,6 +435,14 @@ verifySegmentTerminal(func::FuncOp function, SegmentProgramAnalysis &analysis,
 
 } // namespace
 
+LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis) {
+  if (failed(verifySegmentCaptures(analysis)) ||
+      failed(verifyReductionKinds(analysis)) ||
+      failed(verifySegmentRegions(analysis)))
+    return failure();
+  return success();
+}
+
 /// Analyze one canonical segment program without mutating it.
 LogicalResult analyzeSegmentProgram(func::FuncOp function,
                                     SegmentProgramAnalysis &analysis) {
@@ -442,9 +450,7 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
       failed(collectSegmentOperations(function, analysis)) ||
       failed(verifySegmentRoot(function, analysis)) ||
       failed(verifyMapConsumers(analysis)) ||
-      failed(verifySegmentCaptures(analysis)) ||
-      failed(verifyReductionKinds(analysis)) ||
-      failed(verifySegmentRegions(analysis)))
+      failed(verifyConsumerPrograms(analysis)))
     return failure();
 
   DenseMap<Operation *, unsigned> stageOf = indexReductionStages(analysis);
@@ -491,6 +497,22 @@ LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
     return reduction.emitError(
         "persistent execution requires an identity reduction region");
   return success();
+}
+
+void fuseAdmittedMaps(SegmentProgramAnalysis &analysis) {
+  // The fusion function is applied to the admitted consumers directly. The
+  // greedy pattern driver would also delete dead operations, and a program
+  // may hold a reduction that nothing reads, which is lowered as a stage.
+  IRRewriter rewriter(analysis.reductions.front()->getContext());
+  auto fuse = [&](Operation *consumer) {
+    while (succeeded(fuseMapIntoConsumer(consumer, rewriter))) {
+    }
+  };
+  for (ReduceOp reduction : analysis.reductions)
+    fuse(reduction);
+  for (MapStoreOp mapStore : analysis.mapStores)
+    fuse(mapStore);
+  analysis.maps.clear();
 }
 
 } // namespace mlir::swage
