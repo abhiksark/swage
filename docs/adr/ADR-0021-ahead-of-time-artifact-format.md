@@ -1,8 +1,9 @@
 <!-- docs/adr/ADR-0021-ahead-of-time-artifact-format.md -->
-# ADR-0021: Ahead-of-time artifact format, version 1
+# ADR-0021: Ahead-of-time artifact format
 
 - Status: accepted
 - Date: 2026-10-02
+- Amended: 2026-10-03, format version 2
 
 ## Context
 
@@ -16,33 +17,38 @@ The persistent cache does not answer this. Its key includes the frontend
 sources and the native libraries of the process that reads it, an entry
 must be owned by the current user, and the segmented kernels are not in it.
 
-The kernels of the two calls are a closed set. Three fixed programs produce
-eleven kernels for one NVPTX processor, and none of them depends on the
-tensors of a call. They can be compiled once, on a build host, for a named
-processor.
+The kernels of the two calls are a closed set for a given `swage`: a fixed
+list of programs, each with a fixed list of kernels for one NVPTX processor.
+None of them depends on the tensors of a call. They can be compiled once,
+on a build host, for a named processor.
 
 ## Decision
 
 An artifact is one directory that a build host writes and a serving process
 reads. `python -m swage.compile` writes it, and `SWAGE_ARTIFACT_DIR` selects
-it. This record fixes format version 1.
+it. This record fixes format version 2. "Format version 1" at the end
+states what the first format held and why it was replaced.
 
 ### What an artifact holds
 
 - `manifest.json`, which describes everything else.
-- One PTX text file per kernel, named `<program>.<role>.ptx`. The programs
-  are `segmented_sum`, `segmented_max`, and `ragged_softmax`. A reduction
-  has the roles `warp`, `cta`, `mixed`, `partial`, and `merge`. The softmax
-  has the role `cta`.
+- One PTX text file per kernel, named `<program>.<role>.ptx`. A reduction
+  has the roles `cta`, `mixed`, `partial`, and `merge`. The softmax has the
+  role `cta`.
 - `libSwageRuntime.so`, a C library that classifies offsets into task
   records and enqueues one kernel through `libcuda.so.1`. It needs nothing
   from LLVM.
 
-A reduction lists all five roles, also the pure `warp` kernel, which the
-public call does not launch. The kernel table of version 1 is the table of
-the private planned path, and the loader requires every kernel of a listed
-program, so that a missing kernel is found when the artifact is loaded and
-not at the first batch that needs it.
+The programs and the roles of each program are the kernel table of the
+`swage` that writes the artifact: every program a public call can run, and
+for each program the kernels a call of it can launch. The format does not
+fix the list of programs. A later `swage` may add a program to its table
+without a new format version, and an artifact that was written before does
+not hold it.
+
+The loader requires every kernel of a listed program, so that a missing
+kernel is found when the artifact is loaded and not at the first batch that
+needs it.
 
 ### The manifest
 
@@ -50,9 +56,10 @@ The manifest is a JSON object with these fields:
 
 | Field | Contents |
 |---|---|
-| `format_version` | The integer `1`. |
+| `format_version` | The integer `2`. |
 | `swage_version`, `source_revision`, `llvm_version` | What the native build that compiled the kernels recorded about itself. |
 | `target` | The NVPTX processor of every kernel, such as `sm_86`. |
+| `target_description` | `subgroup_width`, `cta_block_threads`, and `split_block_threads`, the widths of the target description the kernels were compiled for. |
 | `planning` | `warp_max_elements` and `cta_chunk_elements`, the limits the reductions were admitted under. |
 | `runtime` | The runtime library: `file`, `sha256`, the `machine` it was built for, and the `abi_version` of its C interface. |
 | `programs` | A list. Each entry has the `name` of the kernel function and the `sha256` of the program text. A reduction also has `small_element_program`, the answer of planning admission on the build host. |
@@ -67,8 +74,11 @@ The directory is read once per process, at the first call that would
 otherwise need the bindings. Before anything is loaded, the loader requires
 all of the following:
 
-- The manifest is a JSON object with `format_version` equal to `1`, and
+- The manifest is a JSON object with `format_version` equal to `2`, and
   every field has its JSON type.
+- The two block widths of `target_description` are the ones this `swage`
+  launches the kernels with, and the subgroup width divides the CTA block
+  into whole subgroups.
 - Every program is one this `swage` runs.
 - Every kernel belongs to a listed program and has a role of the kernel
   table, at most once.
@@ -159,7 +169,7 @@ whether or not `mlir_swage` is importable.
   private helpers are not served from an artifact.
 - A lower cost per call. A call from an artifact does the host work of a
   compiled call.
-- Authentication. Version 1 has no signature.
+- Authentication. The format has no signature.
 - Compatibility across source revisions. An artifact is written again with
   the `swage` that loads it. A later format changes `format_version`, and a
   loader refuses a version it does not read.
@@ -178,8 +188,24 @@ a block width, or a program text makes older artifacts unloadable, and the
 loader says so before a launch. Tests hold the table to the kernel layouts
 of the compiler and to the PTX each kernel declares.
 
-The format lists one kernel per reduction that the public call does not
-launch. Removing it needs a new format version.
+## Format version 1
+
+The first format differed from version 2 in two ways:
+
+- A reduction listed a fifth role, `warp`: the pure warp kernel of the
+  private prepared path, which no public call launches. The loader required
+  it all the same.
+- The manifest recorded no widths. The loader took the block widths from
+  its kernel table and the subgroup width from the launch width of the
+  `warp` kernel.
+
+Version 2 drops the kernel and records the three widths in
+`target_description`. The runner needs the subgroup width to compute the
+grid of the fused kernel, which serves one warp task per subgroup of a
+block, and no kernel of the version 2 table is launched one subgroup wide.
+
+A loader of version 2 refuses a version 1 artifact, and the error says to
+write the artifact again with the `swage` that loads it.
 
 ## Evidence
 

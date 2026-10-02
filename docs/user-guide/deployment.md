@@ -58,10 +58,10 @@ PYTHONPATH=build/python_packages \
 
 ```text
 artifact: /srv/swage/sm_86
-format_version: 1
+format_version: 2
 target: sm_86
 programs: segmented_sum, segmented_max, ragged_softmax
-kernels: 11
+kernels: 9
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -106,7 +106,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 1, target sm_86, 11 kernels of segmented_sum, segmented_max, ragged_softmax, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 9 kernels of segmented_sum, segmented_max, ragged_softmax, written by swage 0.5.1 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -138,30 +138,33 @@ still compiles, so it imports `mlir_swage` and loads LLVM at that point.
 
 ## What the directory holds
 
-An artifact for all three programs holds thirteen files:
+An artifact for all three programs holds eleven files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: five roles for `segmented_sum`, five for `segmented_max`, and one for `ragged_softmax` |
+| `<program>.<role>.ptx` | One kernel: four roles for `segmented_sum`, four for `segmented_max`, and one for `ragged_softmax` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
-The roles of a reduction are `warp` and `cta` for the two pure schedules,
-`mixed` for the fused kernel, and `partial` and `merge` for split segments.
-The softmax has one `cta` kernel. `segment_reduce` does not request the
-`warp` kernel. Format version 1 lists it for every reduction, and the
-loader requires it, so that the kernel table stays that of the private
-planned path.
+The roles of a reduction are `cta` for the pure CTA schedule, `mixed` for
+the fused kernel, and `partial` and `merge` for split segments. The softmax
+has one `cta` kernel. These are the kernels a call can launch, and the
+loader requires each of them for every program the artifact lists.
 
 The manifest is JSON. This one is shortened to the first kernel:
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "swage_version": "0.5.1",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "llvm_version": "22.1.8",
   "target": "sm_86",
+  "target_description": {
+    "subgroup_width": 32,
+    "cta_block_threads": 128,
+    "split_block_threads": 512
+  },
   "planning": {
     "warp_max_elements": 32,
     "cta_chunk_elements": 4096
@@ -182,10 +185,10 @@ The manifest is JSON. This one is shortened to the first kernel:
   "kernels": [
     {
       "program": "segmented_sum",
-      "role": "warp",
+      "role": "cta",
       "entry": "segmented_sum",
-      "block_size": 32,
-      "file": "segmented_sum.warp.ptx",
+      "block_size": 128,
+      "file": "segmented_sum.cta.ptx",
       "sha256": "<64 hexadecimal digits>",
       "arguments": [
         {"role": "values", "type": "const float*"},
@@ -205,9 +208,10 @@ The fields mean the following:
 
 | Field | Meaning |
 |---|---|
-| `format_version` | The version of this layout. The loader reads version 1 and refuses any other. |
+| `format_version` | The version of this layout. The loader reads version 2 and refuses any other, also version 1, which an earlier `swage` wrote: write such an artifact again. |
 | `swage_version`, `source_revision`, `llvm_version` | What the native build that compiled the kernels recorded about itself: the `swage` version, the source revision, which ends in `-dirty` for a modified tree, and the LLVM release it links. They are information; the loader does not compare them. |
 | `target` | The NVPTX processor of every kernel. |
+| `target_description` | The widths the kernels were compiled for: the threads of one subgroup, of a block of the `cta` and `mixed` kernels, and of a block of the `partial` and `merge` kernels. The loader requires the two block widths this `swage` launches with. |
 | `planning` | The limits the reductions were admitted under: the longest segment of warp work and the longest range of one CTA task. They are the limits `segment_reduce` plans with. |
 | `runtime` | The runtime library: its file, its SHA-256 digest, the machine it was built for, and the version of its C interface. |
 | `programs` | Each program by the name of its kernel function, with the SHA-256 digest of the program text it was compiled from. A reduction also records what the planning admission of the build host returned, which the schedule selection of a call reads. |

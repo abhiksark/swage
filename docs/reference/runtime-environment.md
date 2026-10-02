@@ -597,8 +597,12 @@ Verification covers the whole directory before anything is used:
   regular files after symbolic links are followed, and must not have the
   group-write or the other-write permission bit. The owner is not compared
   with the current user, and a read-only directory is admitted.
-- The manifest must be JSON of format version 1 with every field of the
-  expected type.
+- The manifest must be JSON of format version 2 with every field of the
+  expected type. An artifact of format version 1, which an earlier `swage`
+  wrote, is refused and has to be written again.
+- The block widths the manifest records must be the ones this `swage`
+  launches the kernels with, and its subgroup width must divide the CTA
+  block into whole subgroups.
 - Each kernel file and the runtime library must have the SHA-256 digest the
   manifest states, and the manifest may name only files directly in the
   directory.
@@ -620,10 +624,10 @@ A call then uses the artifact in place of the native bindings:
   the planning limits the manifest records. Native admission does not run.
 - Offsets are classified by the runtime library, which admits and refuses
   what the native classifier does, with the same messages.
-- The block widths and the planning defaults, which the runner otherwise
-  reads from the native target description, are answered by the artifact:
-  the widths its kernels were compiled for and the limits its programs were
-  admitted under.
+- The block widths, the subgroup width, and the planning defaults, which
+  the runner otherwise reads from the native target description, are
+  answered by the artifact from its manifest: the widths its kernels were
+  compiled for and the limits its programs were admitted under.
 - Nothing is compiled. A private qualification helper that asks for a
   kernel outside the artifact is refused in the same way.
 

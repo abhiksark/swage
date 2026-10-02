@@ -27,7 +27,7 @@ from . import _runtime
 
 _ENVIRONMENT = "SWAGE_ARTIFACT_DIR"
 _MANIFEST = "manifest.json"
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 # SWAGE_RUNTIME_ABI_VERSION of include/swage-c/Runtime.h, which the calls
 # into the runtime library below are written against.
 _RUNTIME_ABI_VERSION = 1
@@ -74,23 +74,23 @@ _TASK_ARGUMENTS = (
     _SEGMENT_COUNT,
 )
 _SEGMENTED = "_compile_segmented_reduction_ptx"
-# The kernels of the private planned path for one kind. `segment_reduce`
-# requests all of them except the pure warp kernel, which format version 1
-# lists and the loader requires all the same.
+# The threads per block of the kernels below, by the field of the target
+# description that the runner launches each with.
+_CTA_BLOCK = 128
+_SPLIT_BLOCK = 512
+_BLOCK_WIDTHS = {
+    "cta_block_threads": _CTA_BLOCK,
+    "split_block_threads": _SPLIT_BLOCK,
+}
+# The kernels `segment_reduce` can request for one kind. The pure warp
+# kernel of the private prepared path is not among them: no public call
+# launches it.
 _REDUCTION_KERNELS = (
-    _Kernel(
-        "warp",
-        _SEGMENTED,
-        (("block_size", 32), ("use_task_ids", True)),
-        32,
-        "",
-        _TASK_ARGUMENTS,
-    ),
     _Kernel(
         "cta",
         _SEGMENTED,
-        (("block_size", 128), ("use_task_ids", True)),
-        128,
+        (("block_size", _CTA_BLOCK), ("use_task_ids", True)),
+        _CTA_BLOCK,
         "",
         _TASK_ARGUMENTS,
     ),
@@ -98,7 +98,7 @@ _REDUCTION_KERNELS = (
         "mixed",
         "_compile_fused_segmented_reduction_ptx",
         (),
-        128,
+        _CTA_BLOCK,
         "",
         (
             _VALUES,
@@ -115,7 +115,7 @@ _REDUCTION_KERNELS = (
         "partial",
         "_compile_split_partial_reduction_ptx",
         (),
-        512,
+        _SPLIT_BLOCK,
         "__partial",
         (
             _VALUES,
@@ -129,7 +129,7 @@ _REDUCTION_KERNELS = (
         "merge",
         "_compile_split_merge_reduction_ptx",
         (),
-        512,
+        _SPLIT_BLOCK,
         "__merge",
         (
             ("scratch", "const float*"),
@@ -147,8 +147,8 @@ _SOFTMAX_KERNELS = (
     _Kernel(
         "cta",
         _SEGMENTED,
-        (("block_size", 128),),
-        128,
+        (("block_size", _CTA_BLOCK),),
+        _CTA_BLOCK,
         "",
         (_VALUES, _OFFSETS, _OUTPUT, _VALUE_COUNT, _SEGMENT_COUNT),
     ),
@@ -272,19 +272,39 @@ class _Artifact:
     def _describe_target(self):
         """Return what the runner reads from the native target description.
 
-        The widths are those of the kernel table, which every kernel of the
-        manifest is required to have, and the planning defaults are the
-        limits the build host admitted the programs under. A block of the
-        warp kernel is one subgroup.
+        The widths are the ones the build host compiled the kernels for,
+        which the manifest records, and the planning defaults are the limits
+        it admitted the programs under. The two block widths must be the
+        ones of the kernel table. The subgroup width is in no kernel of the
+        table: the fused kernel serves one warp task per subgroup of a
+        block, and the runner computes its grid from that width.
+
+        Raises:
+            RuntimeError: A width is missing, is not the one this `swage`
+                launches with, or does not divide a block into subgroups.
         """
+        recorded = self._field(self.manifest, "target_description", dict)
         widths = {
-            kernel.role: kernel.block_size for kernel in _REDUCTION_KERNELS
+            name: self._field(recorded, name, int)
+            for name in ("subgroup_width", *_BLOCK_WIDTHS)
         }
+        for name, launched in _BLOCK_WIDTHS.items():
+            if widths[name] != launched:
+                raise RuntimeError(
+                    f"{self._where} was written for {name}={widths[name]}; "
+                    f"this swage launches those kernels with {launched} "
+                    "threads per block"
+                )
+        subgroup_width = widths["subgroup_width"]
+        if subgroup_width <= 0 or _CTA_BLOCK % subgroup_width:
+            raise RuntimeError(
+                f"{self._where} was written for subgroup_width="
+                f"{subgroup_width}, which does not divide its "
+                f"cta_block_threads={_CTA_BLOCK} into whole subgroups"
+            )
         warp_max_elements, cta_chunk_elements = self._planning
         return types.SimpleNamespace(
-            subgroup_width=widths["warp"],
-            cta_block_threads=widths["cta"],
-            split_block_threads=widths["partial"],
+            **widths,
             default_warp_max_elements=warp_max_elements,
             default_cta_chunk_elements=cta_chunk_elements,
         )

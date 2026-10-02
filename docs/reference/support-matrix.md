@@ -152,6 +152,7 @@ the next section defines it.
 | An artifact directory owned by another account | Tested with a simulated owner. Checked by hand under a second user id, without a GPU | `tests/python/test_artifact.py` reports another owner and another effective user to the loader. Once, in a container without a GPU, a process under another user id loaded an artifact that was mounted read-only and owned by the account that wrote it, and classified with its runtime library; no kernel was launched there |
 | A read-only artifact directory | Tested in the pure Python tier | The same file removes every write permission before loading |
 | An artifact on a host of another machine, such as AArch64 | Unknown | No runtime library was built for another machine. The loader refuses an artifact whose library names another machine; the same files |
+| An artifact of format version 1, which an earlier `swage` wrote | Rejected | A `RuntimeError` that names both versions and says to write the artifact again; `tests/python/test_artifact.py` |
 | An artifact loaded by a `swage` of another source revision | Rejected when a program text differs, otherwise unknown | The loader compares the digest of each program text and the launch description of each kernel, and nothing else of the two revisions |
 
 The GPU rows ran on one NVIDIA RTX A6000 with PyTorch 2.12.0+cu130 and

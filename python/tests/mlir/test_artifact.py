@@ -113,7 +113,7 @@ def _kernel_ids():
 def test_the_command_writes_the_kernels_the_library_and_a_manifest(
     written, manifest
 ):
-    """Write eleven kernels, the runtime library, and what describes them."""
+    """Write nine kernels, the runtime library, and what describes them."""
     names = sorted(path.name for path in written.iterdir())
 
     assert names == sorted(
@@ -123,19 +123,20 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 11
+    assert len(_kernel_ids()) == 9
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
         "source_revision",
         "llvm_version",
         "target",
+        "target_description",
         "planning",
         "runtime",
         "programs",
         "kernels",
     ]
-    assert manifest["format_version"] == 1
+    assert manifest["format_version"] == 2
     assert manifest["swage_version"] == swage.__version__
     assert manifest["source_revision"] == native_swage.__source_revision__
     assert manifest["llvm_version"] == native_swage.__llvm_version__
@@ -167,11 +168,21 @@ def test_the_manifest_states_the_planning_limits_of_the_public_call(manifest):
     }
 
 
+def test_the_manifest_states_the_widths_of_the_native_description(manifest):
+    """Record the widths the kernels were compiled for, as the runner reads."""
+    description = native_swage._target_description()
+
+    assert manifest["target_description"] == {
+        "subgroup_width": description["subgroup_width"],
+        "cta_block_threads": description["cta_block_threads"],
+        "split_block_threads": description["split_block_threads"],
+    }
+
+
 def test_the_kernel_table_uses_the_widths_of_the_native_description():
     """Keep the pinned launch widths equal to what the compiler lowers for."""
     description = native_swage._target_description()
     widths = {
-        "warp": description["subgroup_width"],
         "cta": description["cta_block_threads"],
         "mixed": description["cta_block_threads"],
         "partial": description["split_block_threads"],
@@ -301,11 +312,11 @@ def test_the_manifest_describes_each_kernel_as_its_ptx_declares_it(
 def test_the_command_writes_an_artifact_for_every_admitted_processor(
     processor, tmp_path
 ):
-    """Compile all eleven kernels for each processor, without a device."""
+    """Compile every kernel for each processor, without a device."""
     output = _written(tmp_path / "artifact", f"sm_{processor}")
     kernels = sorted(output.glob("*.ptx"))
 
-    assert len(kernels) == 11
+    assert len(kernels) == len(_kernel_ids())
     for kernel in kernels:
         assert f".target sm_{processor}\n" in kernel.read_text()
     assert json.loads((output / "manifest.json").read_text())["target"] == (
@@ -322,10 +333,10 @@ def test_the_command_reports_what_it_wrote(tmp_path):
     assert (status, errors) == (0, "")
     assert printed.splitlines() == [
         f"artifact: {output}",
-        "format_version: 1",
+        "format_version: 2",
         "target: sm_86",
         "programs: segmented_sum, segmented_max, ragged_softmax",
-        "kernels: 11",
+        "kernels: 9",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -399,7 +410,7 @@ def test_the_command_writes_only_the_programs_it_is_given(tmp_path):
         "segmented_sum",
         "segmented_max",
     ]
-    assert len(written["kernels"]) == 10
+    assert len(written["kernels"]) == 8
     assert not (output / "ragged_softmax.cta.ptx").exists()
 
 
@@ -487,7 +498,8 @@ def test_a_run_that_fails_while_writing_leaves_nothing_behind(
     errors = _refused(tmp_path, "--target", "sm_86", "--output", output)
 
     assert errors == "error: the rename was refused\n"
-    assert len(staged[0]) == 13
+    # Every kernel, the manifest, and the runtime library.
+    assert len(staged[0]) == len(_kernel_ids()) + 2
     assert list(tmp_path.iterdir()) == []
 
 

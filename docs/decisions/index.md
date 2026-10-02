@@ -40,7 +40,7 @@ gates belong in the roadmap.
 
 ## Deployment
 
-- [ADR-0021: Ahead-of-time artifact format, version 1](../adr/ADR-0021-ahead-of-time-artifact-format.md)
+- [ADR-0021: Ahead-of-time artifact format](../adr/ADR-0021-ahead-of-time-artifact-format.md)
 
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the

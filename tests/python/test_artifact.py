@@ -105,11 +105,16 @@ def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
                 }
             )
     return {
-        "format_version": 1,
+        "format_version": 2,
         "swage_version": swage.__version__,
         "source_revision": "0123456789abcdef0123456789abcdef01234567",
         "llvm_version": "22.1.8",
         "target": target,
+        "target_description": {
+            "subgroup_width": 32,
+            "cta_block_threads": 128,
+            "split_block_threads": 512,
+        },
         "planning": {"warp_max_elements": 32, "cta_chunk_elements": 4096},
         "runtime": {
             "file": "libSwageRuntime.so",
@@ -170,7 +175,7 @@ def _load(monkeypatch, directory):
     return _artifact.selected()
 
 
-def _request(program="segmented_sum", role="warp", target="sm_86"):
+def _request(program="segmented_sum", role="cta", target="sm_86"):
     """Return what the runner passes for one kernel of one program."""
     kernel = next(
         kernel
@@ -234,14 +239,6 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
     )
     segmented = "_compile_segmented_reduction_ptx"
     reduction = [
-        (
-            "warp",
-            segmented,
-            (("block_size", 32), ("use_task_ids", True)),
-            32,
-            "",
-            task,
-        ),
         (
             "cta",
             segmented,
@@ -339,13 +336,12 @@ def test_the_kernel_table_uses_the_block_sizes_of_the_runner():
     """Keep the table equal to the widths the runner launches with."""
     description = _compiler_target_description()
     widths = {
-        "warp": description["subgroupWidth"],
         "cta": description["ctaBlockThreads"],
         "mixed": description["ctaBlockThreads"],
         "partial": description["splitBlockThreads"],
         "merge": description["splitBlockThreads"],
     }
-    assert set(widths.values()) == {32, 128, 512}
+    assert set(widths.values()) == {128, 512}
 
     for kernels in _artifact._PROGRAMS.values():
         for kernel in kernels:
@@ -386,7 +382,6 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
     """Name and order every launch argument as the lowering emits it."""
     layouts, roles = _compiler_kernel_layouts()
     layout_of = {
-        "warp": "taskId",
         "cta": "taskId",
         "mixed": "fusedMixed",
         "partial": "splitPartial",
@@ -426,6 +421,22 @@ def test_an_artifact_gives_the_runner_its_block_widths_and_limits(
     assert sys.modules["mlir_swage"] is None
 
 
+def test_the_subgroup_width_of_the_runner_is_the_one_of_the_manifest(
+    tmp_path, monkeypatch
+):
+    """Read the width the build host compiled the fused kernel for.
+
+    The fused kernel serves one warp task per subgroup, and the runner
+    computes its grid from that width. No kernel of the table is launched
+    one subgroup wide, so the width comes from the manifest.
+    """
+    manifest = _manifest()
+    manifest["target_description"]["subgroup_width"] = 16
+    _select(monkeypatch, _write(tmp_path / "artifact", manifest))
+
+    assert qualification._target_description().subgroup_width == 16
+
+
 def test_a_selected_artifact_is_read_and_verified_once(
     artifact_dir, monkeypatch
 ):
@@ -437,7 +448,7 @@ def test_a_selected_artifact_is_read_and_verified_once(
     assert _artifact.selected() is artifact
     assert artifact.target == "sm_86"
     assert artifact.directory == artifact_dir
-    assert artifact.kernel(*_request()) == "// segmented_sum warp\n"
+    assert artifact.kernel(*_request()) == "// segmented_sum cta\n"
 
 
 def test_an_artifact_serves_every_kernel_of_its_programs(
@@ -657,15 +668,63 @@ def _set(manifest, path, value):
     ("change", "message"),
     [
         (
-            lambda manifest: _set(manifest, ["format_version"], 2),
-            "the artifact at {root} has manifest format version 2; this "
-            "swage reads format version 1. Write the artifact again with "
+            lambda manifest: _set(manifest, ["format_version"], 1),
+            "the artifact at {root} has manifest format version 1; this "
+            "swage reads format version 2. Write the artifact again with "
+            "the swage that loads it",
+        ),
+        (
+            lambda manifest: _set(manifest, ["format_version"], 3),
+            "the artifact at {root} has manifest format version 3; this "
+            "swage reads format version 2. Write the artifact again with "
             "the swage that loads it",
         ),
         (
             lambda manifest: _drop(manifest, "format_version"),
             "the artifact at {root} has manifest format version None; this "
-            "swage reads format version 1.",
+            "swage reads format version 2.",
+        ),
+        (
+            lambda manifest: _drop(manifest, "target_description"),
+            "the manifest of the artifact at {root} is malformed: "
+            "target_description must be an object",
+        ),
+        (
+            lambda manifest: _set(
+                manifest, ["target_description", "subgroup_width"], "32"
+            ),
+            "the manifest of the artifact at {root} is malformed: "
+            "subgroup_width must be an integer",
+        ),
+        (
+            lambda manifest: _set(
+                manifest, ["target_description", "cta_block_threads"], 256
+            ),
+            "the artifact at {root} was written for cta_block_threads=256; "
+            "this swage launches those kernels with 128 threads per block",
+        ),
+        (
+            lambda manifest: _set(
+                manifest, ["target_description", "split_block_threads"], 256
+            ),
+            "the artifact at {root} was written for split_block_threads=256; "
+            "this swage launches those kernels with 512 threads per block",
+        ),
+        (
+            lambda manifest: _set(
+                manifest, ["target_description", "subgroup_width"], 48
+            ),
+            "the artifact at {root} was written for subgroup_width=48, "
+            "which does not divide its cta_block_threads=128 into whole "
+            "subgroups",
+        ),
+        (
+            lambda manifest: _set(
+                manifest, ["target_description", "subgroup_width"], 0
+            ),
+            "the artifact at {root} was written for subgroup_width=0, "
+            "which does not divide its cta_block_threads=128 into whole "
+            "subgroups",
         ),
         (
             lambda manifest: _drop(manifest, "target"),
@@ -718,28 +777,28 @@ def _set(manifest, path, value):
         ),
         (
             lambda manifest: manifest["kernels"].append(manifest["kernels"][0]),
-            "the manifest of the artifact at {root} lists the warp kernel "
+            "the manifest of the artifact at {root} lists the cta kernel "
             "of segmented_sum twice",
         ),
         (
-            lambda manifest: manifest["kernels"].pop(3),
+            lambda manifest: manifest["kernels"].pop(2),
             "the artifact at {root} lacks the partial kernel of "
             "segmented_sum, which a call can launch",
         ),
         (
             lambda manifest: _set(
-                manifest, ["programs", 0, "name"], "segmented_min"
+                manifest, ["programs", 0, "name"], "segmented_prod"
             ),
             "the manifest of the artifact at {root} lists the program "
-            "'segmented_min', which this swage does not run",
+            "'segmented_prod', which this swage does not run",
         ),
         (
-            lambda manifest: _set(manifest, ["kernels", 2, "block_size"], 256),
+            lambda manifest: _set(manifest, ["kernels", 1, "block_size"], 256),
             "the mixed kernel of segmented_sum in the artifact at {root} "
             "has block size 256; this swage launches it with 128",
         ),
         (
-            lambda manifest: manifest["kernels"][1]["arguments"].pop(),
+            lambda manifest: manifest["kernels"][0]["arguments"].pop(),
             "the cta kernel of segmented_sum in the artifact at {root} "
             "takes (values: const float*, offsets: const int32_t*, output: "
             "float*, task_ids: const int32_t*, value_count: int32_t, "
@@ -750,7 +809,7 @@ def _set(manifest, path, value):
         ),
         (
             lambda manifest: _set(
-                manifest, ["kernels", 4, "entry"], "segmented_sum"
+                manifest, ["kernels", 3, "entry"], "segmented_sum"
             ),
             "the merge kernel of segmented_sum in the artifact at {root} "
             "has entry 'segmented_sum'; this swage loads "
@@ -768,8 +827,15 @@ def _set(manifest, path, value):
         ),
     ],
     ids=[
-        "format-version",
+        "format-version-1",
+        "format-version-3",
         "no-format-version",
+        "no-target-description",
+        "width-type",
+        "cta-width",
+        "split-width",
+        "subgroup-width",
+        "no-subgroup-width",
         "no-target",
         "planning-type",
         "limit-type",
@@ -905,8 +971,8 @@ def test_symbolic_links_are_followed_and_judged_by_their_target(
     """Admit a linked directory and a linked file, and check what they are."""
     store = tmp_path / "store"
     store.mkdir(mode=0o755)
-    kernel = artifact_dir / "segmented_sum.warp.ptx"
-    stored = store / "warp.ptx"
+    kernel = artifact_dir / "segmented_sum.cta.ptx"
+    stored = store / "cta.ptx"
     stored.write_bytes(kernel.read_bytes())
     stored.chmod(0o644)
     kernel.unlink()
@@ -916,7 +982,7 @@ def test_symbolic_links_are_followed_and_judged_by_their_target(
 
     artifact = _load(monkeypatch, link)
 
-    assert artifact.kernel(*_request()) == "// segmented_sum warp\n"
+    assert artifact.kernel(*_request()) == "// segmented_sum cta\n"
 
     stored.chmod(0o664)
     monkeypatch.setattr(_artifact, "_selected", (None, None))
@@ -964,7 +1030,7 @@ def test_a_program_the_artifact_does_not_hold_is_refused(
 
     assert str(error.value) == (
         f"the artifact at {root} holds no kernel 'segmented_max' "
-        "(_compile_segmented_reduction_ptx, block_size=32, "
+        "(_compile_segmented_reduction_ptx, block_size=128, "
         "use_task_ids=True); it holds the programs segmented_sum. Nothing "
         "was compiled or launched"
     )
@@ -990,6 +1056,16 @@ def test_a_request_outside_the_table_is_refused(artifact_dir, monkeypatch):
             text,
             {"kernel_name": "segmented_sum", "target": "sm_86"},
         )
+    # The pure warp kernel belongs to the private prepared path. A public
+    # call never launches it, so format version 2 does not hold it.
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"holds no kernel 'segmented_sum' \(_compile_segmented_reduction"
+            r"_ptx, block_size=32, use_task_ids=True\)"
+        ),
+    ):
+        artifact.kernel(compiler, text, {**options, "block_size": 32})
 
 
 def test_a_program_text_other_than_the_compiled_one_is_refused(
@@ -1397,7 +1473,7 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 1, target sm_86, 11 kernels of "
+        f"{artifact_dir} (format 2, target sm_86, 9 kernels of "
         "segmented_sum, segmented_max, ragged_softmax, written by swage "
         f"{swage.__version__} at revision "
         "0123456789abcdef0123456789abcdef01234567)"

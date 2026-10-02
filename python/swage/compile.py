@@ -218,12 +218,17 @@ def _write_artifact(output, target, programs, runtime_library):
     library = pathlib.Path(runtime_library or _packaged_runtime())
     runtime = library.read_bytes()
     warp_max_elements, cta_chunk_elements = _planning_limits()
+    description = _qualification._target_description()
     manifest = {
         "format_version": _artifact._FORMAT_VERSION,
         "swage_version": __version__,
         "source_revision": native.__source_revision__,
         "llvm_version": native.__llvm_version__,
         "target": target,
+        "target_description": {
+            name: getattr(description, name)
+            for name in ("subgroup_width", *_artifact._BLOCK_WIDTHS)
+        },
         "planning": {
             "warp_max_elements": warp_max_elements,
             "cta_chunk_elements": cta_chunk_elements,
