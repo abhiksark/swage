@@ -77,20 +77,14 @@ def segment_reduce(values, offsets, kind, *, out=None):
     _require_out(torch, out, segment_count, "segment", values, offsets)
     _require_bindings("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
-    if offsets.is_inference():
-        raise ValueError(
-            "offsets must not be an inference tensor; create or clone the "
-            "offsets outside torch.inference_mode()"
-        )
     output = _result(torch, out, segment_count, values)
-    prepared = _qualification._prepare_planned_reduction(
+    _qualification._launch_planned_reduction(
         values,
         offsets,
         output,
         module_text=_qualification._semantic_module(kind),
         kernel_name=f"segmented_{kind}",
     )
-    prepared.mixed()
     return output
 
 
