@@ -29,6 +29,12 @@ and `map_store` declare a read of their segment. `map_store` is the only Swage
 operation that writes, and it writes only the segment's corresponding output
 range.
 
+A mapped segment is a lazy view that its consumer evaluates. The dialect
+transform `--swage-fuse-maps` (`lib/Dialect/Swage/Transforms/FuseMaps.cpp`)
+fuses a map that has one consumer into that consumer, and the segmented
+lowerings apply the same rewrite to every map of an admitted function
+before they emit code.
+
 The type and operations parse, print, and verify independently of whether a
 particular lowering admits them. Current segmented lowering supports a
 narrower private subset described in [Segmented Reductions](segmented-reductions.md).

@@ -103,9 +103,15 @@ block arguments after the element argument, in order. The yield type
 defines the result segment's element type. Over an empty segment the
 result is an empty segment (ADR-0008).
 
-The operation reads the values and offsets buffers behind the segment
-handle. It declares that read on its segment operand in addition to the
-effects of its region, so two instances are not merged across a write.
+The result is a lazy view of the operand segment. The map computes no
+element where it appears: each consumer of the result applies the region
+to the elements it reads, when it reads them. A consumer therefore sees
+a write to the buffers that happens between the map and the consumer,
+and fusing a map into its consumer does not change a program.
+
+The operation declares a read of the values and offsets buffers behind
+the segment handle on its segment operand, in addition to the effects of
+its region, so two instances are not merged across a write.
 
 Example:
 
@@ -154,7 +160,9 @@ alias the segment's values buffer (a runtime obligation). Over an empty
 segment nothing is written.
 
 The operation also reads the values and offsets buffers behind the
-segment handle and declares that read on its segment operand.
+segment handle and declares that read on its segment operand. Its
+effects include the effects of its region, as for `swage.map` and
+`swage.reduce`, because a fused map runs inside that region.
 
 Example:
 
@@ -165,7 +173,7 @@ swage.map_store %seg, %out : !swage.segment<f32>, memref<?xf32> {
 }
 ```
 
-Traits: `IsolatedFromAbove`
+Traits: `IsolatedFromAbove`, `RecursiveMemoryEffects`
 
 ##### Operands:
 

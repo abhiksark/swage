@@ -42,6 +42,7 @@ functions of the C API and not registered passes.
 | Pass argument | Options | Current admitted purpose |
 |---|---|---|
 | `--swage-fixed-block-to-gpu` | required positive `block-size` | Lower the canonical fixed vector-add shape to one GPU x-thread per lane |
+| `--swage-fuse-maps` | none | Fuse each `swage.map` that has one consumer into that consumer, in every function |
 | `--swage-segmented-reduction-to-scf` | optional `function` | Lower every admitted private segmented sum, max, or fused softmax function to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required `block-size` from 1 to 1024 whose warp count, `ceil(block-size / 32)`, is a power of two; optional `use-task-ids`; optional `fused-mixed`, requires block size 128; optional `persistent`, requires block size 512; optional `function` | Lower every admitted private segment function to a GPU kernel module. `use-task-ids` cannot be combined with `fused-mixed` or `persistent` |
 | `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096; optional `function` | Add one private planning companion for every capture-free, single-stage f32 sum or max function |
@@ -123,9 +124,9 @@ optimizer pipeline.
 under `lib/cmake/swage`. A consumer loads it with
 `find_package(Swage REQUIRED CONFIG)`:
 
-- The imported targets are `MLIRSwage`, `MLIRSwagePlan`,
-  `MLIRSwageFixedBlockToGPU`, `MLIRSwageSegmentedReduction`, and
-  `SwageCAPI`.
+- The imported targets are `MLIRSwage`, `MLIRSwageTransforms`,
+  `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageFixedBlockToGPU`,
+  `MLIRSwageSegmentedReduction`, and `SwageCAPI`.
 - The targets carry no include directories, as the MLIR targets do not, so
   the consumer adds `SWAGE_INCLUDE_DIRS`, `MLIR_INCLUDE_DIRS`, and
   `LLVM_INCLUDE_DIRS`.

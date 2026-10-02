@@ -25,10 +25,12 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
+#include "swage/Dialect/Swage/Transforms/FuseMaps.h"
 #include "swage/Dialect/SwagePlan/IR/KernelLayout.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Target/TargetDescription.h"
@@ -125,13 +127,13 @@ Value inlineRegion(OpBuilder &builder, Region &region, ValueRange arguments) {
   return mapping.lookup(cast<YieldOp>(body.getTerminator()).getValue());
 }
 
-/// A per-element expression: the fused `swage.map` bodies in application
-/// order, followed by the consumer's own body. `captures[i]` lists, for
-/// `regions[i]`, the reduction stages whose results bind to that region's
-/// capture arguments, in order.
+/// A per-element expression: the region of a consumer after map fusion,
+/// which holds the bodies of the fused maps in application order followed
+/// by the consumer's own. `captures` lists the reduction stages whose
+/// results bind to the capture arguments of the region, in order.
 struct ElementProgram {
-  SmallVector<Region *> regions;
-  SmallVector<SmallVector<unsigned>> captures;
+  Region *region = nullptr;
+  SmallVector<unsigned> captures;
 };
 
 /// One `swage.reduce` and the element expression feeding it.
@@ -270,19 +272,6 @@ LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
     return diagnostic;
   }
   return success();
-}
-
-/// Walk back through fused maps to the root segment, collecting them in
-/// application order. Every segment value in an admitted body is defined by
-/// a map or by the single make_segment, so the walk always terminates.
-SmallVector<MapOp> fusionChain(Value segment) {
-  SmallVector<MapOp> chain;
-  while (auto map = segment.getDefiningOp<MapOp>()) {
-    chain.push_back(map);
-    segment = map.getSegment();
-  }
-  std::reverse(chain.begin(), chain.end());
-  return chain;
 }
 
 /// The element types the lowerings admit for the values and the output, and
@@ -562,9 +551,26 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
   return success();
 }
 
-/// Detach regions only after read-only admission has succeeded.
+/// Fuse every map into its consumer and detach the consumer regions. This
+/// changes the function, so it runs only after read-only admission has
+/// succeeded. Admission gives every map one consumer, so fusion leaves no
+/// map behind and every consumer reads the segment of `make_segment`.
 void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
                           SegmentProgram &program) {
+  // The fusion function is applied to the admitted consumers directly. The
+  // greedy pattern driver would also delete dead operations, and a program
+  // may hold a reduction that nothing reads, which is lowered as a stage.
+  IRRewriter rewriter(analysis.reductions.front()->getContext());
+  auto fuse = [&](Operation *consumer) {
+    while (succeeded(fuseMapIntoConsumer(consumer, rewriter))) {
+    }
+  };
+  for (ReduceOp reduction : analysis.reductions)
+    fuse(reduction);
+  for (MapStoreOp mapStore : analysis.mapStores)
+    fuse(mapStore);
+  analysis.maps.clear();
+
   DenseMap<Operation *, unsigned> stageOf;
   for (auto [index, reduction] : llvm::enumerate(analysis.reductions))
     stageOf[reduction.getOperation()] = index;
@@ -573,32 +579,22 @@ void detachSegmentProgram(SegmentProgramAnalysis &analysis, RegionOwner &owner,
   if (analysis.mapStores.empty())
     program.storedReduction =
         stageOf.lookup(analysis.storedReduction.getOperation());
-  auto takeElement = [&](Operation *consumer, ValueRange consumerCaptures,
-                         Value consumerSegment) {
+  auto takeElement = [&](Operation *consumer, ValueRange captures) {
     ElementProgram element;
-    auto append = [&](Region &body, ValueRange captures) {
-      SmallVector<unsigned> indices;
-      for (Value capture : captures)
-        indices.push_back(stageOf.lookup(capture.getDefiningOp()));
-      element.regions.push_back(owner.take(body));
-      element.captures.push_back(std::move(indices));
-    };
-    for (MapOp map : fusionChain(consumerSegment))
-      append(map.getBody(), map.getCaptures());
-    append(consumer->getRegion(0), consumerCaptures);
+    for (Value capture : captures)
+      element.captures.push_back(stageOf.lookup(capture.getDefiningOp()));
+    element.region = owner.take(consumer->getRegion(0));
     return element;
   };
   for (ReduceOp reduction : analysis.reductions) {
     ReductionStage stage;
     stage.kind = reduction.getKind();
-    stage.element =
-        takeElement(reduction, reduction.getCaptures(), reduction.getSegment());
+    stage.element = takeElement(reduction, reduction.getCaptures());
     program.reductions.push_back(std::move(stage));
   }
   if (!analysis.mapStores.empty()) {
     MapStoreOp mapStore = analysis.mapStores.front();
-    program.mapStore =
-        takeElement(mapStore, mapStore.getCaptures(), mapStore.getSegment());
+    program.mapStore = takeElement(mapStore, mapStore.getCaptures());
   }
 }
 
@@ -673,14 +669,10 @@ void buildPlanningCompanion(ModuleOp module, func::FuncOp semanticFunction,
 /// Apply an admitted element expression to one loaded value.
 Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
                       Value value, ArrayRef<Value> reductions) {
-  for (auto [region, captures] :
-       llvm::zip_equal(element.regions, element.captures)) {
-    SmallVector<Value> arguments{value};
-    for (unsigned stage : captures)
-      arguments.push_back(reductions[stage]);
-    value = inlineRegion(builder, *region, arguments);
-  }
-  return value;
+  SmallVector<Value> arguments{value};
+  for (unsigned stage : element.captures)
+    arguments.push_back(reductions[stage]);
+  return inlineRegion(builder, *element.region, arguments);
 }
 
 /// The identity element of a reduction kind.

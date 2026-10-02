@@ -2,6 +2,7 @@
 set(LIBS
   MLIRSwage
   MLIRSwagePlan
+  MLIRSwageTransforms
   MLIRSwageFixedBlockToGPU
   MLIRSwageSegmentedReduction
   MLIROptLib

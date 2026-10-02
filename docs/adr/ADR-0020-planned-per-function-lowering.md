@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0020-planned-per-function-lowering.md -->
 # ADR-0020: Segmented GPU lowering as a planned per-function conversion
 
-- Status: accepted; steps 0 to 2 of the migration sequence are implemented
+- Status: accepted; steps 0 to 3 of the migration sequence are implemented
 - Date: 2026-10-02
 - Accepted: 2026-10-02, with the recommended answer to every question at the
   end
@@ -9,9 +9,10 @@
 The design is built one migration step at a time, and this page says which
 steps exist. Implemented: step 0 (the digest gate, dialect extensions in
 `swage-opt`, and a lit test of the nested NVVM pipeline), step 1 (the
-target description), and step 2 (argument roles, the kernel layouts,
+target description), step 2 (argument roles, the kernel layouts,
 admission per function, any number of segment functions in a module, and
-the symbol checks before mutation). Not implemented: steps 3 to 10. Until
+the symbol checks before mutation), and step 3 (map fusion). Not
+implemented: steps 4 to 10. Until
 its step lands, a part of the design is written in the conditional below,
 and the segmented lowering works as "Context" describes, except where an
 implemented step replaced it.
@@ -540,21 +541,28 @@ C API (`lib/CAPI/Codegen.cpp`):
 
 ### Map fusion
 
-`swage.map` would be lowered by fusion, not by emitting code.
+Implemented in step 3. `swage.map` is lowered by fusion, not by emitting
+code.
 
-- Patterns: `FuseMapIntoReduce`, `FuseMapIntoMapStore`, and
-  `FuseMapIntoMap` would be `RewritePattern` classes rooted at the
-  consumer. Each would inline the region of a single-consumer map ahead of
-  the consumer's own and concatenate captures. They would run with
-  `applyPatternsGreedily`.
+- Rewrite: `fuseMapIntoConsumer` moves the region of a single-consumer map
+  ahead of the consumer's own and puts the captures of the map ahead of the
+  captures of the consumer. `FuseMapIntoReduce`, `FuseMapIntoMapStore`, and
+  `FuseMapIntoMap` are `RewritePattern` classes rooted at the consumer that
+  call it.
 - Location: `lib/Dialect/Swage/Transforms/FuseMaps.cpp`, library
-  `MLIRSwageTransforms`, registered as `--swage-fuse-maps`.
-- Order: fusion would run after admission, so "planning requires
-  capture-free maps" and "swage.map result must have exactly one segment
-  consumer" stay attached to the map.
-- Semantics: the `swage.map` description would gain one sentence saying the
-  result is a lazy view read at each consumer. `swage.map_store` would gain
-  `RecursiveMemoryEffects`.
+  `MLIRSwageTransforms`. The pass `--swage-fuse-maps` runs the patterns
+  with `applyPatternsGreedily`, with folding, constant merging, and region
+  simplification off.
+- In the lowerings the same function is applied to the admitted consumers
+  directly, not through the greedy driver. The driver also deletes dead
+  operations, and an admitted program may hold a reduction that nothing
+  reads, which the emitters lower as a stage. `unused-reduction.mlir` pins
+  that.
+- Order: fusion runs after admission, so "planning requires capture-free
+  maps" and "swage.map result must have exactly one segment consumer" stay
+  attached to the map. `fusionChain` is deleted.
+- Semantics: the `swage.map` description says the result is a lazy view
+  read at each consumer. `swage.map_store` has `RecursiveMemoryEffects`.
 
 ### Target description
 

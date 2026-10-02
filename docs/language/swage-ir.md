@@ -210,6 +210,14 @@ The region must terminate with `swage.yield`. The yielded type must equal
 the result segment's element type, so a map may change element type, as
 the `f32` to `f64` example does. An empty input maps to an empty segment.
 
+The result is a lazy view of the input segment. The map computes no element
+where it appears: each consumer of the result applies the region to the
+elements it reads, when it reads them. A consumer therefore sees a write to
+the buffers that happens between the map and the consumer. The pass
+`--swage-fuse-maps` writes this out: it moves the region of a map that has
+one consumer in front of the region of that consumer, puts the captures of
+the map ahead of the captures of the consumer, and removes the map.
+
 ### `swage.reduce`
 
 ```mlir
@@ -281,7 +289,8 @@ This terminal operation has no SSA result. It writes the per-element
 results only to the segment's corresponding output range,
 `output[offsets[id] : offsets[id + 1]]`. An empty segment writes nothing.
 The explicit write effect on the output keeps the operation alive under
-dead-code elimination.
+dead-code elimination. The effects of the operation include the effects of
+its region, as they do for `map` and `reduce`.
 
 The output buffer must not alias the segment's values buffer. This is a
 runtime obligation, not something dialect type verification proves.
@@ -314,8 +323,11 @@ element, respectively.
   and backend work belong to upstream MLIR dialects, not duplicate Swage
   operations.
 - **The terminal store owns the write.** `swage.map_store` is the only
-  Swage operation that declares a write. `map` and `reduce` track
-  nested operations' memory effects recursively.
+  Swage operation that declares a write. `map`, `reduce`, and `map_store`
+  track nested operations' memory effects recursively.
+- **A mapped segment is a lazy view.** A `swage.map` is evaluated by its
+  consumer, element by element, so fusing a map into its one consumer
+  leaves a program unchanged.
 - **Segment consumers declare their read.** `swage.extent`, `swage.map`,
   `swage.reduce`, and `swage.map_store` read the values and offsets
   buffers behind the segment handle and declare a read on their segment

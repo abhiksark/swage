@@ -2,8 +2,9 @@
 #
 # Package configuration for an installed Swage. A consumer writes
 # `find_package(Swage REQUIRED CONFIG)` and links the imported targets
-# MLIRSwage, MLIRSwagePlan, MLIRSwageFixedBlockToGPU,
-# MLIRSwageSegmentedReduction, or SwageCAPI. The targets carry no include
+# MLIRSwage, MLIRSwageTransforms, MLIRSwagePlan, MLIRSwageTarget,
+# MLIRSwageFixedBlockToGPU, MLIRSwageSegmentedReduction, or SwageCAPI. The
+# targets carry no include
 # directories, as with MLIR itself, so the consumer also adds
 # SWAGE_INCLUDE_DIRS, MLIR_INCLUDE_DIRS, and LLVM_INCLUDE_DIRS.
 

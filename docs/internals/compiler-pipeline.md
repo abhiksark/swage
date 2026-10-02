@@ -70,7 +70,9 @@ Canonical segmented sum, max, and stable ragged-softmax modules enter through
 native qualification, not the public Python frontend. A segment function
 declares its arguments with `swage.role` attributes, a module may hold any
 number of segment functions, and each conversion lowers every one of them
-or the one its `function` option names. One conversion creates
+or the one its `function` option names. A conversion first fuses every
+`swage.map` of an admitted function into its consumer, so each reduction
+and each terminal store carries one element region. One conversion creates
 a sequential CPU correctness oracle. Another creates one CTA per segment and
 continues through upstream GPU, NVVM, LLVM, and NVPTX stages. The public
 `swage.segment_softmax` launches the softmax module on that GPU path.

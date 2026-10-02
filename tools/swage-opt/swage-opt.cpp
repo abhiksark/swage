@@ -23,12 +23,14 @@
 #include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
 #include "swage/Conversion/SegmentedReduction/SegmentedReduction.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
+#include "swage/Dialect/Swage/Transforms/FuseMaps.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::swage::registerFixedBlockToGPUPass();
   mlir::swage::registerSegmentedReductionPasses();
+  mlir::swage::registerFuseMapsPass();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::swage::SwageDialect, mlir::swage_plan::SwagePlanDialect,
