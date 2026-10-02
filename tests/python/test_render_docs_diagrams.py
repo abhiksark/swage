@@ -18,10 +18,11 @@ EXPECTED_OUTPUTS = {
 REQUIRED_LABELS = {
     "capability-boundary.svg": (
         "PUBLIC TODAY",
+        "segment_reduce and segment_softmax calls",
         "PRIVATE QUALIFICATION",
         "not a public API",
         "PLANNED",
-        "public segmented API",
+        "segment syntax",
         "split softmax",
     ),
     "frontend-boundary.svg": (
@@ -49,6 +50,8 @@ REQUIRED_LABELS = {
         "segmented direct",
         "SwagePlan direct + split",
         "direct or split sum or max",
+        "runs segment_softmax",
+        "runs segment_reduce",
         "GPU / SCF / NVVM / LLVM",
         "CUDA Driver API",
         "sequential CPU oracle",
