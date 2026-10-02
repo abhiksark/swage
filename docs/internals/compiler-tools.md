@@ -25,7 +25,17 @@ MLIR surface, which is broader than the public Python kernel language:
 
 It registers the `swage` and `swage_plan` dialects plus the upstream dialects
 used by current test and lowering paths. It also registers upstream MLIR
-passes.
+passes and the upstream dialect extensions those passes look up, so the
+pipeline the code generation C API builds runs from text:
+
+```bash
+./build/bin/swage-opt input.mlir \
+  --pass-pipeline='builtin.module(swage-segmented-reduction-to-gpu{block-size=128},gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))'
+```
+
+A pipeline in the driver ends there. The two steps the C API runs
+afterwards, the replacement of libdevice calls and PTX emission, are
+functions of the C API and not registered passes.
 
 ## Registered Swage passes
 
