@@ -227,13 +227,21 @@ def _reference_prepare(torch):
 
 
 def _swage(torch, **changes):
-    """Return stand-ins for the two private Swage entry points."""
+    """Return stand-ins for the Swage entry points the harness times."""
 
     def launch(values, offsets, output, kind):
         assert kind == "sum"
         output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
 
-    entries = {"prepare": _reference_prepare(torch), "launch": launch}
+    def public(values, offsets, kind, *, out):
+        launch(values, offsets, out, kind)
+        return out
+
+    entries = {
+        "prepare": _reference_prepare(torch),
+        "launch": launch,
+        "public": public,
+    }
     entries.update(changes)
     return types.SimpleNamespace(**entries)
 
@@ -270,6 +278,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
     assert fresh_offsets._candidate_names(triton_available=False) == (
         "swage_mixed",
         "swage_cta_call",
+        "swage_public_call",
         "torch",
         "torch_pad_to_max",
     )
@@ -279,6 +288,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
     assert configuration["candidates"] == [
         "swage_mixed",
         "swage_cta_call",
+        "swage_public_call",
         "torch",
         "torch_pad_to_max",
     ]
@@ -291,23 +301,24 @@ def test_looped_candidates_cover_the_declared_sweep(fresh_offsets):
     """Time every looped configuration instead of one chosen afterwards."""
     names = fresh_offsets._candidate_names(triton_available=True)
 
-    assert names[:4] == (
+    assert names[:5] == (
         "swage_mixed",
         "swage_cta_call",
+        "swage_public_call",
         "torch",
         "torch_pad_to_max",
     )
-    assert len(names) == 4 + 15 + 4 + 15
-    looped = names[4:19]
+    assert len(names) == 5 + 15 + 4 + 15
+    looped = names[5:20]
     assert {name.split("_")[2] for name in looped} == {
         f"b{block}" for block in _LOOPED_BLOCKS
     }
     assert all(name.startswith("triton_looped_b") for name in looped)
-    assert names[19:23] == tuple(
+    assert names[20:24] == tuple(
         f"triton_planned_w{warps}" for warps in (1, 2, 4, 8)
     )
     # The looping matched scheduler sweeps the blocks and warps of looped.
-    assert names[23:] == tuple(
+    assert names[24:] == tuple(
         name.replace("triton_looped", "triton_planned_looped")
         for name in looped
     )
@@ -1396,6 +1407,91 @@ def test_warm_calls_repeat_the_candidate_on_one_layout_that_is_never_timed(
     assert row["check"]["exact_segments"] == 3 * 64
 
 
+def test_the_public_call_candidate_times_segment_reduce_itself(
+    fresh_offsets,
+):
+    """Time what a user calls: one public reduction into a caller's buffer.
+
+    The candidate passes the layout to `swage.segment_reduce` with `"sum"`
+    and an `out` buffer, so the call allocates nothing, and it follows the
+    warm step of every candidate. It has no separate preparation, so it
+    adds nothing to the preparation series of `swage_mixed`.
+    """
+    torch = pytest.importorskip("torch")
+    calls = []
+
+    def public(values, offsets, kind, *, out):
+        calls.append((kind, int(offsets[-1]), out))
+        out.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+        return out
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        swage=types.SimpleNamespace(public=public),
+        only=["swage_public_call"],
+        warm_calls=2,
+    )
+
+    timed_totals = [
+        entry["layout_statistics"]["total"] for entry in row["iterations"]
+    ]
+    (warm_total,) = {total for _, total, _ in calls} - set(timed_totals)
+    assert row["candidates"] == ["swage_public_call"]
+    assert {kind for kind, _, _ in calls} == {"sum"}
+    assert [total for _, total, _ in calls] == [
+        total
+        for timed in timed_totals
+        for total in (warm_total, warm_total, timed)
+    ]
+    outputs = [out for _, _, out in calls]
+    assert outputs[0] is not outputs[2]
+    assert all(
+        out is (outputs[2] if index % 3 == 2 else outputs[0])
+        for index, out in enumerate(outputs)
+    )
+    assert len(row["raw_samples_us"]["swage_public_call"]) == 2
+    assert row["swage_mixed_prepare_samples_us"] == []
+    assert row["check"]["exact_segments"] == 3 * 64
+
+
+def test_a_wrong_public_call_is_rejected(fresh_offsets):
+    """Check the public candidate against the reference like any other."""
+    torch = pytest.importorskip("torch")
+
+    def public(values, offsets, kind, *, out):
+        out.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+        out[-1] += 0.25
+        return out
+
+    with pytest.raises(AssertionError, match="swage_public_call on bimodal"):
+        _run(
+            fresh_offsets,
+            torch,
+            "bimodal",
+            swage=types.SimpleNamespace(public=public),
+            only=["swage_public_call"],
+        )
+
+
+def test_a_public_call_that_writes_nothing_is_rejected(fresh_offsets):
+    """Read the result from the buffer the candidate was given."""
+    torch = pytest.importorskip("torch")
+
+    def public(values, offsets, kind, *, out):
+        return out
+
+    with pytest.raises(AssertionError, match="swage_public_call on bimodal"):
+        _run(
+            fresh_offsets,
+            torch,
+            "bimodal",
+            swage=types.SimpleNamespace(public=public),
+            only=["swage_public_call"],
+        )
+
+
 def test_without_warm_calls_every_call_is_a_timed_call(fresh_offsets):
     """Reproduce the earlier method when the warm step is switched off."""
     torch = pytest.importorskip("torch")
@@ -1728,6 +1824,25 @@ def test_configuration_states_the_filter_and_the_warm_step(fresh_offsets):
     )
     assert off["warm_step"]["calls"] == 0
     assert off["warm_step"]["step"].startswith("none")
+
+
+def test_configuration_states_what_the_public_call_candidate_times(
+    fresh_offsets,
+):
+    """Say that the public candidate is the user's call, selection included."""
+    configuration = fresh_offsets._configuration(
+        segment_count=2048, warmups=1, samples=3, triton_available=False
+    )
+
+    region = configuration["timed_region"]["swage_public_call"]
+    assert region.startswith("one swage.segment_reduce call with out=")
+    assert "argument checks" in region
+    assert "classification" in region
+    assert region.endswith("then synchronize")
+    policy = configuration["swage_policy"]
+    assert "swage_public_call times the public swage.segment_reduce" in policy
+    assert "selects the schedule" in policy
+    assert "no separate preparation sample" in policy
 
 
 def test_a_family_left_out_by_option_is_not_reported_as_skipped(

@@ -406,7 +406,13 @@ def _candidate_names(*, triton_available):
         and with Triton the looped sweep, the planned scheduler with its
         one-block tasks, and the planned scheduler with looping tasks.
     """
-    names = ["swage_mixed", "swage_cta_call", "torch", "torch_pad_to_max"]
+    names = [
+        "swage_mixed",
+        "swage_cta_call",
+        "swage_public_call",
+        "torch",
+        "torch_pad_to_max",
+    ]
     if triton_available:
         looped = _triton_looped_configs()
         names.extend(f"triton_looped_b{b}_w{w}" for b, w in looped)
@@ -610,6 +616,13 @@ def _configuration(
             "each segment in 128-thread blocks), then synchronize; no "
             "classification and no task upload"
         ),
+        "swage_public_call": (
+            "one swage.segment_reduce call with out= (the argument checks, "
+            "offset validation and transfer to the host, classification, "
+            "schedule selection, whatever kernel compilation and module "
+            "loading the call performs at this revision, task upload, and "
+            "the launches of the selected schedule), then synchronize"
+        ),
         "torch": (
             "torch.segment_reduce on the device offsets with its output "
             "allocation, then synchronize"
@@ -706,7 +719,11 @@ def _configuration(
             "cost their kernel and module memo lookups and the memoized "
             "identity task ids. swage_cta_call times the one private call "
             "that validates and launches a single policy; it does not "
-            "classify"
+            "classify. swage_public_call times the public "
+            "swage.segment_reduce, the call a user makes: it selects the "
+            "schedule automatically, which swage_mixed disables, so the two "
+            "can run different kernels on one layout, and it has no "
+            "separate preparation sample"
         ),
         "triton_looped": (
             "every block and warp configuration is timed; none is selected"
@@ -940,7 +957,8 @@ def _candidates(
 
     Args:
         torch: The PyTorch module.
-        swage: The private Swage entry points ``prepare`` and ``launch``.
+        swage: The Swage entry points: the private ``prepare`` and
+            ``launch``, and ``public``, which is ``swage.segment_reduce``.
         kernels: The Triton kernels, or None without Triton.
         names: Names of the candidates to build.
         segment_count: Segments per layout.
@@ -979,6 +997,18 @@ def _candidates(
         def call(layout):
             swage.launch(layout.values, layout.offsets, output, "sum")
             return output
+
+        return call
+
+    def swage_public_call():
+        output = output_of("swage_public_call")
+
+        def call(layout):
+            # The buffer is the caller's, as for the other Swage
+            # candidates, so the call allocates no result.
+            return swage.public(
+                layout.values, layout.offsets, "sum", out=output
+            )
 
         return call
 
@@ -1030,6 +1060,7 @@ def _candidates(
     builders = {
         "swage_mixed": swage_mixed,
         "swage_cta_call": swage_cta_call,
+        "swage_public_call": swage_public_call,
         "torch": torch_reduce,
         "torch_pad_to_max": torch_pad_to_max,
     }
@@ -1360,7 +1391,9 @@ def main():
             flush=True,
         )
     runner = types.SimpleNamespace(
-        prepare=_prepare_planned_sum, launch=launch_gpu
+        prepare=_prepare_planned_sum,
+        launch=launch_gpu,
+        public=swage.segment_reduce,
     )
 
     results = []
