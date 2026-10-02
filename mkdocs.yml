@@ -112,3 +112,4 @@ nav:
       - "ADR-0017: Private split-CTA reductions": adr/ADR-0017-private-split-cta-reductions.md
       - "ADR-0018: Private persistent task queue": adr/ADR-0018-private-persistent-task-queue.md
       - "ADR-0019: Composable private reductions": adr/ADR-0019-composable-private-reductions.md
+      - "ADR-0020: Planned per-function lowering (proposed)": adr/ADR-0020-planned-per-function-lowering.md
