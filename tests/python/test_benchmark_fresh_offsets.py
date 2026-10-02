@@ -168,6 +168,52 @@ class _EmulatedLoopedKernel:
         return launch
 
 
+class _EmulatedTaskKernel:
+    """Sum each listed segment on the CPU, as a Triton task kernel does.
+
+    Args:
+        one_block: Whether a task reads one block of ``BLOCK`` or ``WARP``
+            elements, as the packed and the one-block kernels do, or loops
+            over its whole segment.
+        extra: Elements admitted past the segment end.
+        shift: Offset of the window that is read for every segment that
+            leaves room for it.
+    """
+
+    def __init__(self, one_block, extra=0, shift=0):
+        self._one_block = one_block
+        self._extra = extra
+        self._shift = shift
+
+    def __getitem__(self, grid):
+        def launch(values, offsets, output, ids, *counts, num_warps,
+                   BLOCK=None, WARP=None, TASKS=None):
+            data = values.tolist()
+            bounds = offsets.tolist()
+            for sid in ids.tolist():
+                begin, end = bounds[sid], bounds[sid + 1]
+                if 0 <= begin + self._shift and end + self._shift <= len(data):
+                    begin, end = begin + self._shift, end + self._shift
+                stop = min(end + self._extra, len(data))
+                if self._one_block:
+                    stop = min(stop, begin + (BLOCK or WARP))
+                output[sid] = sum(data[begin:stop])
+
+        return launch
+
+
+def _kernels(**changes):
+    """Return CPU stand-ins for every Triton kernel the harness launches."""
+    kernels = {
+        "looped": _EmulatedLoopedKernel(),
+        "packed": _EmulatedTaskKernel(one_block=True),
+        "cta": _EmulatedTaskKernel(one_block=True),
+        "cta_looped": _EmulatedTaskKernel(one_block=False),
+    }
+    kernels.update(changes)
+    return types.SimpleNamespace(**kernels)
+
+
 def _reference_prepare(torch):
     """Return a stand-in for the planned preparation that sums on the CPU."""
 
@@ -178,6 +224,18 @@ def _reference_prepare(torch):
         return types.SimpleNamespace(mixed=mixed)
 
     return prepare
+
+
+def _swage(torch, **changes):
+    """Return stand-ins for the two private Swage entry points."""
+
+    def launch(values, offsets, output, kind):
+        assert kind == "sum"
+        output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+
+    entries = {"prepare": _reference_prepare(torch), "launch": launch}
+    entries.update(changes)
+    return types.SimpleNamespace(**entries)
 
 
 def test_harnesses_import_without_torch_or_triton():
@@ -211,6 +269,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
     assert fresh_offsets._optional_triton() is None
     assert fresh_offsets._candidate_names(triton_available=False) == (
         "swage_mixed",
+        "swage_cta_call",
         "torch",
         "torch_pad_to_max",
     )
@@ -219,6 +278,7 @@ def test_missing_triton_drops_only_the_looped_candidates(
     )
     assert configuration["candidates"] == [
         "swage_mixed",
+        "swage_cta_call",
         "torch",
         "torch_pad_to_max",
     ]
@@ -231,15 +291,26 @@ def test_looped_candidates_cover_the_declared_sweep(fresh_offsets):
     """Time every looped configuration instead of one chosen afterwards."""
     names = fresh_offsets._candidate_names(triton_available=True)
 
-    assert names[:3] == ("swage_mixed", "torch", "torch_pad_to_max")
-    assert len(names) == 3 + 15
-    assert {name.split("_")[2] for name in names[3:]} == {
+    assert names[:4] == (
+        "swage_mixed",
+        "swage_cta_call",
+        "torch",
+        "torch_pad_to_max",
+    )
+    assert len(names) == 4 + 15 + 4 + 15
+    looped = names[4:19]
+    assert {name.split("_")[2] for name in looped} == {
         f"b{block}" for block in _LOOPED_BLOCKS
     }
-    assert all(name.startswith("triton_looped_b") for name in names[3:])
-    assert fresh_offsets._candidate_names(
-        triton_available=True, pad_to_max=False
-    ) == (names[0], names[1], *names[3:])
+    assert all(name.startswith("triton_looped_b") for name in looped)
+    assert names[19:23] == tuple(
+        f"triton_planned_w{warps}" for warps in (1, 2, 4, 8)
+    )
+    # The looping matched scheduler sweeps the blocks and warps of looped.
+    assert names[23:] == tuple(
+        name.replace("triton_looped", "triton_planned_looped")
+        for name in looped
+    )
 
 
 def test_looped_sweep_has_no_longest_segment_floor(triton_comparison):
@@ -316,7 +387,12 @@ def test_candidate_order_is_a_seeded_permutation(fresh_offsets):
 
 def test_no_candidate_keeps_a_fixed_neighbour(fresh_offsets):
     """Spread who runs right after the slow candidate across iterations."""
-    names = fresh_offsets._candidate_names(triton_available=True)
+    names = fresh_offsets._select(
+        fresh_offsets._candidate_names(triton_available=True),
+        ["swage_mixed", "torch", "torch_pad_to_max", "triton_looped"],
+        (),
+    )
+    assert len(names) == 18
     followers = collections.Counter()
     positions = collections.Counter()
     for iteration in range(105):
@@ -448,6 +524,64 @@ def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
     ] * 3
 
 
+def test_warm_step_runs_before_the_timer_and_outside_it(fresh_offsets):
+    """Warm, synchronize, start, run, synchronize, stop: per candidate."""
+    log = []
+    now = [0]
+
+    def clock():
+        log.append("clock")
+        return now[0]
+
+    def synchronize():
+        log.append("synchronize")
+        now[0] += 3_000
+
+    def candidate(name):
+        def run(layout):
+            log.append(f"{name} on {layout}")
+            now[0] += 5_000
+            return name
+
+        return run
+
+    def warm(name):
+        log.append(f"warm {name}")
+        now[0] += 700_000
+
+    iterations = fresh_offsets._measure(
+        ["l0", "l1"],
+        [["a", "b"], ["b", "a"]],
+        {"a": candidate("a"), "b": candidate("b")},
+        lambda name, result, layout: log.append(f"check {name}"),
+        warmups=1,
+        synchronize=synchronize,
+        clock=clock,
+        warm=warm,
+    )
+
+    assert log == [
+        step
+        for layout, order in (("l0", "ab"), ("l1", "ba"))
+        for name in order
+        for step in (
+            f"warm {name}",
+            "synchronize",
+            "clock",
+            f"{name} on {layout}",
+            "synchronize",
+            "clock",
+            f"check {name}",
+        )
+    ]
+    # Still the candidate and the device work it left behind, 5 us plus
+    # 3 us, whatever the warm step cost.
+    assert [iteration["samples_us"] for iteration in iterations] == [
+        {"a": 8.0, "b": 8.0},
+        {"b": 8.0, "a": 8.0},
+    ]
+
+
 def test_exact_values_make_any_extra_or_missing_element_visible(
     triton_comparison,
 ):
@@ -513,8 +647,8 @@ def test_run_distribution_checks_and_records_every_candidate(
 
     row = fresh_offsets._run_distribution(
         torch,
-        _reference_prepare(torch),
-        _EmulatedLoopedKernel(),
+        _swage(torch),
+        _kernels(),
         name,
         64,
         1,
@@ -530,6 +664,16 @@ def test_run_distribution_checks_and_records_every_candidate(
     assert row["seed"] == 7
     assert row["values"] == "quarters"
     assert row["skipped"] == {}
+    assert row["excluded"] == []
+    assert row["candidates"] == list(candidates)
+    assert row["warm_layout_seed"] == 7 + 3
+    planned = [name for name in candidates if "planned" in name]
+    assert len(planned) == 4 + 15
+    assert set(row["triton_planned_partition_samples_us"]) == set(planned)
+    assert all(
+        len(series) == 2
+        for series in row["triton_planned_partition_samples_us"].values()
+    )
     assert row["check"] == {
         "exact_segments": 3 * 64,
         "bounded_segments": 0,
@@ -586,8 +730,8 @@ def test_reading_one_element_past_a_segment_end_is_rejected(
     with pytest.raises(AssertionError, match=f"triton_looped.* on {name}"):
         fresh_offsets._run_distribution(
             torch,
-            _reference_prepare(torch),
-            _EmulatedLoopedKernel(extra=1),
+            _swage(torch),
+            _kernels(looped=_EmulatedLoopedKernel(extra=1)),
             name,
             64,
             1,
@@ -608,10 +752,13 @@ def _run(fresh_offsets, torch, name, **changes):
         "clock_tick_us": 0.04,
     }
     options.update(changes)
-    kernel = options.pop("kernel", _EmulatedLoopedKernel())
-    prepare = options.pop("prepare", _reference_prepare(torch))
+    kernels = options.pop("kernels", _kernels())
+    swage = options.pop("swage", None) or _swage(
+        torch, prepare=options.pop("prepare", _reference_prepare(torch))
+    )
+    segment_count = options.pop("segment_count", 64)
     return fresh_offsets._run_distribution(
-        torch, prepare, kernel, name, 64, 1, 2, **options
+        torch, swage, kernels, name, segment_count, 1, 2, **options
     )
 
 
@@ -623,11 +770,15 @@ def test_pad_to_max_is_skipped_with_its_bytes_when_it_does_not_fit(
 
     row = _run(fresh_offsets, torch, "power-law", free_bytes=lambda: 1000)
 
+    # Three timed layouts and the warm layout, which is padded as well.
     longest = max(
-        entry["layout_statistics"]["max"] for entry in row["iterations"]
+        max(layout.lengths)
+        for layout in fresh_offsets._layout_pool("power-law", 64, 4, 7)
     )
-    candidates = fresh_offsets._candidate_names(
-        triton_available=True, pad_to_max=False
+    candidates = fresh_offsets._select(
+        fresh_offsets._candidate_names(triton_available=True),
+        None,
+        ["torch_pad_to_max"],
     )
     assert "torch_pad_to_max" not in candidates
     assert set(row["raw_samples_us"]) == set(candidates)
@@ -719,6 +870,19 @@ def test_headline_names_the_fastest_looped_configuration(fresh_offsets):
         "swage_mixed": 20_000.0,
         "torch": 55.3,
         "torch_pad_to_max": 900.0,
+    }
+    # A filtered run prints what it timed, one line per Triton family.
+    filtered = {
+        "swage_cta_call": {"median": 61.04},
+        "triton_planned_w1": {"median": 44.0},
+        "triton_planned_w4": {"median": 41.0},
+        "triton_planned_looped_b128_w1": {"median": 30.0},
+        "triton_planned_looped_b256_w2": {"median": 33.0},
+    }
+    assert fresh_offsets._headline(filtered) == {
+        "swage_cta_call": 61.0,
+        "fastest triton_planned_w4": 41.0,
+        "fastest triton_planned_looped_b128_w1": 30.0,
     }
 
 
@@ -1168,3 +1332,426 @@ def test_configuration_states_the_methods(fresh_offsets):
     assert "padding" in configuration["timed_region"]["torch_pad_to_max"]
     assert "offsets" in configuration["effective_gb_per_s"]
     assert "float64" in configuration["correctness"]
+
+
+def _recording_swage(torch, calls):
+    """Return Swage stand-ins that log every call with its offsets total."""
+
+    def prepare(values, offsets, output, *, warp_max_elements):
+        calls.append(("prepare", int(offsets[-1]), output))
+
+        def mixed():
+            output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+
+        return types.SimpleNamespace(mixed=mixed)
+
+    def launch(values, offsets, output, kind):
+        calls.append(("launch", int(offsets[-1]), output))
+        output.copy_(torch.segment_reduce(values, "sum", offsets=offsets))
+
+    return types.SimpleNamespace(prepare=prepare, launch=launch)
+
+
+def test_warm_calls_repeat_the_candidate_on_one_layout_that_is_never_timed(
+    fresh_offsets,
+):
+    """Precede every sample by calls of the same candidate elsewhere."""
+    torch = pytest.importorskip("torch")
+    calls = []
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        swage=_recording_swage(torch, calls),
+        only=["swage_mixed", "swage_cta_call"],
+        warm_calls=2,
+    )
+
+    timed_totals = [
+        entry["layout_statistics"]["total"] for entry in row["iterations"]
+    ]
+    (warm_total,) = {total for _, total, _ in calls} - set(timed_totals)
+    assert row["warm_layout_seed"] == 7 + 3
+    assert warm_total == sum(
+        fresh_offsets._layout_pool("bimodal", 64, 4, 7)[-1].lengths
+    )
+    for kind in ("prepare", "launch"):
+        totals = [total for call, total, _ in calls if call == kind]
+        # Two warm calls, then the timed call, for each of three layouts.
+        assert totals == [
+            total
+            for timed in timed_totals
+            for total in (warm_total, warm_total, timed)
+        ]
+        outputs = [output for call, _, output in calls if call == kind]
+        warm_output, timed_output = outputs[0], outputs[2]
+        assert warm_output is not timed_output
+        assert all(
+            output is (timed_output if index % 3 == 2 else warm_output)
+            for index, output in enumerate(outputs)
+        )
+    # Only the timed preparations are in the preparation series.
+    assert len(row["swage_mixed_prepare_samples_us"]) == 2
+    assert row["check"]["exact_segments"] == 3 * 64
+
+
+def test_without_warm_calls_every_call_is_a_timed_call(fresh_offsets):
+    """Reproduce the earlier method when the warm step is switched off."""
+    torch = pytest.importorskip("torch")
+    calls = []
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        swage=_recording_swage(torch, calls),
+        only=["swage_mixed"],
+        warm_calls=0,
+    )
+
+    assert row["warm_layout_seed"] is None
+    assert [total for _, total, _ in calls] == [
+        entry["layout_statistics"]["total"] for entry in row["iterations"]
+    ]
+
+
+def test_the_warm_layout_exists_only_with_a_warm_step(fresh_offsets):
+    """Size pad-to-max by the layouts a run really uses."""
+    torch = pytest.importorskip("torch")
+    # At seed 6 the fourth bimodal layout has the longest segment.
+    pool = fresh_offsets._layout_pool("bimodal", 64, 4, 6)
+    timed_longest = max(max(layout.lengths) for layout in pool[:3])
+    warm_longest = max(pool[3].lengths)
+    assert warm_longest > timed_longest
+
+    options = {"seed": 6, "only": ["torch", "torch_pad_to_max"]}
+    without = _run(fresh_offsets, torch, "bimodal", warm_calls=0, **options)
+    warmed = _run(fresh_offsets, torch, "bimodal", warm_calls=1, **options)
+
+    assert without["pad_to_max"]["longest_segment"] == timed_longest
+    assert warmed["pad_to_max"]["longest_segment"] == warm_longest
+    assert warmed["warm_layout_seed"] == 6 + 3
+
+
+def test_a_warm_call_cannot_stand_in_for_an_unwritten_timed_result(
+    fresh_offsets,
+):
+    """Keep the unwritten-output check when a warm call wrote a result."""
+    torch = pytest.importorskip("torch")
+    seen = []
+
+    def prepare(values, offsets, output, *, warp_max_elements):
+        def mixed():
+            # Writes on the warm layout only, which is prepared first.
+            if not seen or int(offsets[-1]) == seen[0]:
+                seen.append(int(offsets[-1]))
+                output.copy_(
+                    torch.segment_reduce(values, "sum", offsets=offsets)
+                )
+
+        return types.SimpleNamespace(mixed=mixed)
+
+    with pytest.raises(AssertionError, match="swage_mixed on bimodal"):
+        _run(
+            fresh_offsets,
+            torch,
+            "bimodal",
+            prepare=prepare,
+            only=["swage_mixed"],
+            warm_calls=1,
+        )
+
+
+def test_filtered_row_times_only_the_selected_candidates(fresh_offsets):
+    """Leave pad-to-max out by option and record that it was."""
+    torch = pytest.importorskip("torch")
+    budget_reads = []
+
+    def free_bytes():
+        budget_reads.append(1)
+        return 1 << 30
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        exclude=["torch_pad_to_max", "triton_planned_looped"],
+        free_bytes=free_bytes,
+    )
+
+    names = fresh_offsets._candidate_names(triton_available=True)
+    kept = [
+        name
+        for name in names
+        if name != "torch_pad_to_max"
+        and not name.startswith("triton_planned_looped")
+    ]
+    assert row["candidates"] == kept
+    assert set(row["raw_samples_us"]) == set(kept)
+    assert row["excluded"] == [name for name in names if name not in kept]
+    assert row["skipped"] == {}
+    assert row["pad_to_max"]["timed"] is False
+    assert all(
+        sorted(entry["candidate_order"]) == sorted(kept)
+        for entry in row["iterations"]
+    )
+    assert (
+        row["iterations"][0]["order_seed"],
+        row["iterations"][0]["candidate_order"],
+    ) == fresh_offsets._candidate_order(kept, 7, "bimodal", 0)
+
+
+def test_named_candidates_run_alone(fresh_offsets):
+    """Time a short list, by candidate name or by family."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "many-tiny",
+        only=["swage_mixed", "torch", "triton_planned"],
+    )
+
+    assert row["candidates"] == [
+        "swage_mixed",
+        "torch",
+        *(f"triton_planned_w{warps}" for warps in (1, 2, 4, 8)),
+    ]
+    assert "torch_pad_to_max" in row["excluded"]
+
+
+def test_a_filter_that_leaves_no_candidate_is_an_error(fresh_offsets):
+    """Refuse a row on which nothing that was named can run."""
+    torch = pytest.importorskip("torch")
+
+    with pytest.raises(ValueError, match="no candidate.*power-law"):
+        _run(
+            fresh_offsets,
+            torch,
+            "power-law",
+            segment_count=2048,
+            only=["triton_planned"],
+            warm_calls=0,
+        )
+
+
+def test_one_block_planned_triton_is_skipped_by_the_longest_pool_segment(
+    fresh_offsets,
+):
+    """Decide the skip on the whole row, not layout by layout."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "power-law",
+        segment_count=2048,
+        only=["torch", "triton_planned", "triton_planned_looped_b256_w4"],
+        warm_calls=1,
+    )
+
+    assert row["candidates"] == ["torch", "triton_planned_looped_b256_w4"]
+    assert set(row["skipped"]) == {"triton_planned"}
+    # Skipped, not excluded: the filter asked for it.
+    assert "triton_planned_w1" not in row["excluded"]
+    assert "4096" in row["skipped"]["triton_planned"]
+    assert str(row["pad_to_max"]["longest_segment"]) in (
+        row["skipped"]["triton_planned"]
+    )
+    assert row["pad_to_max"]["longest_segment"] > 4096
+    assert list(row["triton_planned_partition_samples_us"]) == [
+        "triton_planned_looped_b256_w4"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kernels", "family"),
+    [
+        (
+            {"cta_looped": _EmulatedTaskKernel(one_block=False, extra=1)},
+            "triton_planned_looped",
+        ),
+        (
+            {"cta_looped": _EmulatedTaskKernel(one_block=False, shift=-1)},
+            "triton_planned_looped",
+        ),
+        (
+            {"cta": _EmulatedTaskKernel(one_block=True, shift=-1)},
+            "triton_planned",
+        ),
+        (
+            {"packed": _EmulatedTaskKernel(one_block=True, extra=1)},
+            "triton_planned",
+        ),
+    ],
+)
+def test_a_wrong_planned_kernel_is_rejected(fresh_offsets, kernels, family):
+    """Check the planned candidates as strictly as the looped ones."""
+    torch = pytest.importorskip("torch")
+
+    with pytest.raises(AssertionError, match=f"{family}_.* on bimodal"):
+        _run(
+            fresh_offsets,
+            torch,
+            "bimodal",
+            kernels=_kernels(**kernels),
+            only=[family],
+            warm_calls=0,
+        )
+
+
+def test_planned_triton_partitions_inside_the_timed_call(
+    fresh_offsets, monkeypatch
+):
+    """Plan every fresh layout again; never reuse a task list."""
+    torch = pytest.importorskip("torch")
+    partitioned = []
+    partition = fresh_offsets._partition_tasks
+
+    def recording(torch, offsets):
+        partitioned.append(int(offsets[-1]))
+        return partition(torch, offsets)
+
+    monkeypatch.setattr(fresh_offsets, "_partition_tasks", recording)
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "bimodal",
+        only=["triton_planned_w4", "triton_planned_looped_b128_w2"],
+        warm_calls=0,
+    )
+
+    totals = [
+        entry["layout_statistics"]["total"] for entry in row["iterations"]
+    ]
+    assert sorted(partitioned) == sorted(totals * 2)
+    assert set(row["triton_planned_partition_samples_us"]) == {
+        "triton_planned_w4",
+        "triton_planned_looped_b128_w2",
+    }
+    for name, series in row["triton_planned_partition_samples_us"].items():
+        assert len(series) == 2
+        assert all(
+            0 < part <= whole
+            for part, whole in zip(series, row["raw_samples_us"][name])
+        )
+
+
+def test_arguments_take_a_candidate_filter_and_warm_calls(fresh_offsets):
+    """Offer the filter and the warm step; reject what names nothing."""
+    default = fresh_offsets._arguments(["--output", "x.json"])
+    chosen = fresh_offsets._arguments(
+        [
+            "--output",
+            "x.json",
+            "--candidates",
+            "swage_mixed",
+            "torch",
+            "triton_planned_looped",
+            "--exclude-candidates",
+            "triton_planned_looped_b128_w1",
+            "--warm-calls",
+            "0",
+        ]
+    )
+
+    assert default.candidates is None
+    assert default.exclude_candidates == []
+    assert default.warm_calls == 2
+    assert chosen.candidates == [
+        "swage_mixed",
+        "torch",
+        "triton_planned_looped",
+    ]
+    assert chosen.exclude_candidates == ["triton_planned_looped_b128_w1"]
+    assert chosen.warm_calls == 0
+    for extra in (
+        ["--candidates", "pad_to_max"],
+        ["--exclude-candidates", "triton_fixed"],
+        ["--warm-calls", "-1"],
+    ):
+        with pytest.raises(SystemExit):
+            fresh_offsets._arguments(["--output", "x.json", *extra])
+
+
+def test_a_named_triton_candidate_requires_triton(fresh_offsets):
+    """Fail instead of dropping a candidate that was asked for by name."""
+    fresh_offsets._require_available(["torch", "triton_looped"], True)
+    fresh_offsets._require_available(None, False)
+    fresh_offsets._require_available(["torch", "swage_mixed"], False)
+    with pytest.raises(RuntimeError, match="triton_looped.*not installed"):
+        fresh_offsets._require_available(["torch", "triton_looped"], False)
+
+
+def test_configuration_states_the_filter_and_the_warm_step(fresh_offsets):
+    """Say which candidates ran and what preceded every sample."""
+    configuration = fresh_offsets._configuration(
+        segment_count=2048,
+        warmups=1,
+        samples=3,
+        triton_available=True,
+        candidates=["swage_mixed", "swage_cta_call", "triton_planned"],
+        exclude_candidates=["triton_planned_w8"],
+        warm_calls=2,
+    )
+
+    assert configuration["candidates"] == [
+        "swage_mixed",
+        "swage_cta_call",
+        "triton_planned_w1",
+        "triton_planned_w2",
+        "triton_planned_w4",
+    ]
+    assert configuration["candidate_filter"]["candidates"] == [
+        "swage_mixed",
+        "swage_cta_call",
+        "triton_planned",
+    ]
+    assert configuration["candidate_filter"]["exclude_candidates"] == [
+        "triton_planned_w8"
+    ]
+    assert configuration["warm_step"]["calls"] == 2
+    assert "same candidate" in configuration["warm_step"]["step"]
+    assert "same candidate" in configuration["timer"]["batching"]
+    assert "no mixed-only preparation" in configuration["swage_policy"]
+    assert "launch_gpu" in configuration["timed_region"]["swage_cta_call"]
+    assert "nonzero" in configuration["timed_region"]["triton_planned"]
+    assert "nonzero" in configuration["timed_region"]["triton_planned_looped"]
+    off = fresh_offsets._configuration(
+        segment_count=2048,
+        warmups=1,
+        samples=3,
+        triton_available=True,
+        warm_calls=0,
+    )
+    assert off["warm_step"]["calls"] == 0
+    assert off["warm_step"]["step"].startswith("none")
+
+
+def test_a_family_left_out_by_option_is_not_reported_as_skipped(
+    fresh_offsets,
+):
+    """Keep excluded, by option, apart from skipped, by inability."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets,
+        torch,
+        "power-law",
+        segment_count=2048,
+        only=["torch", "triton_looped_b256_w4"],
+        free_bytes=lambda: 1000,
+        warm_calls=0,
+    )
+
+    # Neither pad-to-max nor the one-block planned baseline can run on
+    # this row, but neither was asked for.
+    assert row["skipped"] == {}
+    assert row["candidates"] == ["torch", "triton_looped_b256_w4"]
+    assert {"torch_pad_to_max", "triton_planned_w1", "swage_mixed"} <= set(
+        row["excluded"]
+    )
+    names = fresh_offsets._candidate_names(triton_available=True)
+    assert sorted(row["candidates"] + row["excluded"]) == sorted(names)

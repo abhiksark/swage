@@ -7,8 +7,15 @@ that no earlier iteration used, and the timed region runs from offsets in to
 result out. Preparation is therefore inside the timed region on purpose.
 
 It is a research harness, not a CI gate. Triton is imported only when the
-benchmark runs; the project does not depend on Triton, and the looped Triton
-candidates are skipped when it is not installed.
+benchmark runs; the project does not depend on Triton, and the Triton
+candidates are left out when it is not installed.
+
+Candidates are timed in a new random order every iteration, so what runs
+before a sample changes from sample to sample, and what it leaves behind in
+the host caches and in the device's idle state lands in the next sample.
+Each sample is therefore preceded by untimed calls of the same candidate on
+one layout that is never timed (--warm-calls). --candidates and
+--exclude-candidates choose what is timed.
 
 Run with PYTHONPATH=python:build/python_packages and --output result.json.
 A full run requires a clean worktree. Use --smoke to check the harness on a
@@ -28,26 +35,36 @@ import random
 import subprocess
 import sys
 import time
+import types
 from datetime import datetime, timezone
 from typing import NamedTuple
 
 import benchmark_provenance
 from benchmark_triton_comparison import (
     _PADDED_BYTES_PER_ELEMENT,
+    _PLANNED_CTA_BLOCK,
+    _PLANNED_WARPS,
     _QUANTUM,
+    _add_candidate_filter,
     _check_modes,
+    _check_selectors,
     _check_sums,
+    _family,
     _free_device_bytes,
     _gb_per_s,
     _launch_triton_looped,
-    _make_triton_looped_sum,
+    _launch_triton_planned,
+    _make_triton_kernels,
     _median_iqr,
     _padded_inputs,
     _padded_sum,
+    _partition_tasks,
+    _select,
     _sum_reference,
     _triton_looped_configs,
     _useful_bytes,
     _values,
+    _wanted_skips,
 )
 from distributions import generate_lengths, summarize_lengths, worst_case_total
 
@@ -58,6 +75,7 @@ _SAMPLES = 100
 _SMOKE_SEGMENT_COUNT = 2_048
 _SMOKE_WARMUPS = 1
 _SMOKE_SAMPLES = 3
+_WARM_CALLS = 2
 _WARP_MAX_ELEMENTS = 32
 _DISTRIBUTIONS = (
     "uniform",
@@ -157,9 +175,29 @@ def _arguments(argv=None):
             "within the f32 any-order bound."
         ),
     )
+    _add_candidate_filter(parser)
+    parser.add_argument(
+        "--warm-calls",
+        type=int,
+        default=_WARM_CALLS,
+        help=(
+            "Untimed calls of a candidate, on one layout that is never "
+            "timed, before each of its samples. 0 times every candidate "
+            "straight after the previous one."
+        ),
+    )
     arguments = parser.parse_args(argv)
     if arguments.samples < 2 or arguments.warmups < 1:
         parser.error("samples must be >= 2 and warmups must be >= 1")
+    if arguments.warm_calls < 0:
+        parser.error("warm-calls must not be negative")
+    try:
+        _check_selectors(
+            [*(arguments.candidates or ()), *arguments.exclude_candidates],
+            _candidate_names(triton_available=True),
+        )
+    except ValueError as error:
+        parser.error(str(error))
     segment_count = _sizes(arguments)[0]
     if segment_count <= 0:
         parser.error("segment-count must be positive")
@@ -357,17 +395,52 @@ def _nvidia_driver():
     return versions[0]
 
 
-def _candidate_names(*, triton_available, pad_to_max=True):
-    """Return the names of the candidates this run times."""
-    names = ["swage_mixed", "torch"]
-    if pad_to_max:
-        names.append("torch_pad_to_max")
+def _candidate_names(*, triton_available):
+    """Return the names of every candidate, in a fixed order.
+
+    Args:
+        triton_available: Whether Triton is installed.
+
+    Returns:
+        The candidate names: the Swage candidates, the PyTorch baselines,
+        and with Triton the looped sweep, the planned scheduler with its
+        one-block tasks, and the planned scheduler with looping tasks.
+    """
+    names = ["swage_mixed", "swage_cta_call", "torch", "torch_pad_to_max"]
     if triton_available:
-        names.extend(
-            f"triton_looped_b{block}_w{warps}"
-            for block, warps in _triton_looped_configs()
-        )
+        looped = _triton_looped_configs()
+        names.extend(f"triton_looped_b{b}_w{w}" for b, w in looped)
+        names.extend(f"triton_planned_w{w}" for w in _PLANNED_WARPS)
+        names.extend(f"triton_planned_looped_b{b}_w{w}" for b, w in looped)
     return tuple(names)
+
+
+def _require_available(candidates, triton_available):
+    """Refuse a run that names a candidate it cannot time.
+
+    Args:
+        candidates: The --candidates selectors, or None without the option.
+        triton_available: Whether Triton is installed.
+
+    Raises:
+        RuntimeError: If a selector names only Triton candidates and Triton
+            is not installed. Without the option the Triton candidates are
+            left out and the record says so; a candidate that was asked for
+            by name is not dropped silently.
+    """
+    if candidates is None or triton_available:
+        return
+    available = _candidate_names(triton_available=False)
+    missing = [
+        selector
+        for selector in candidates
+        if not _select(available, [selector], ())
+    ]
+    if missing:
+        raise RuntimeError(
+            f"--candidates names {', '.join(missing)}, but Triton is not "
+            "installed"
+        )
 
 
 def _layout_pool(name, count, size, seed):
@@ -432,6 +505,7 @@ def _measure(
     warmups,
     synchronize,
     clock=time.perf_counter_ns,
+    warm=None,
 ):
     """Time every candidate once on each layout, from offsets in to result.
 
@@ -445,6 +519,9 @@ def _measure(
         warmups: Leading iterations that are flagged as not timed.
         synchronize: Callable that waits for all device work.
         clock: Monotonic nanosecond clock.
+        warm: Callable taking a candidate name, run before each sample of
+            that candidate and outside its timer, or None. It is the same
+            step for every candidate and every iteration.
 
     Returns:
         One entry per iteration with its timed flag, the candidate order it
@@ -454,6 +531,8 @@ def _measure(
     for index, (layout, order) in enumerate(zip(layouts, orders, strict=True)):
         samples = {}
         for name in order:
+            if warm is not None:
+                warm(name)
             synchronize()
             start = clock()
             result = candidates[name](layout)
@@ -513,6 +592,9 @@ def _configuration(
     seed=_SEED,
     values="quarters",
     clock_tick_us=None,
+    candidates=None,
+    exclude_candidates=(),
+    warm_calls=_WARM_CALLS,
 ):
     """Return the benchmark contract, including what the timer covers."""
     timed_region = {
@@ -521,6 +603,12 @@ def _configuration(
             "host, classification, whatever kernel compilation and module "
             "loading the preparation path performs at this revision, task "
             "upload), then the mixed launch and synchronize"
+        ),
+        "swage_cta_call": (
+            "one launch_gpu call (offset validation and transfer to the "
+            "host, then one launch of the pure CTA kernel, which walks "
+            "each segment in 128-thread blocks), then synchronize; no "
+            "classification and no task upload"
         ),
         "torch": (
             "torch.segment_reduce on the device offsets with its output "
@@ -537,6 +625,33 @@ def _configuration(
             "one launch of the looped kernel, then synchronize; it needs "
             "no host classification"
         )
+        partition = (
+            "the partition (two torch.nonzero calls over the segment "
+            "lengths on the device, each waiting for the device, and the "
+            "conversion of the ids to int32), then the packed launch of "
+            "the short tasks, "
+        )
+        timed_region["triton_planned"] = (
+            f"{partition}one launch that reads one block of "
+            f"{_PLANNED_CTA_BLOCK} elements per longer task, then "
+            "synchronize"
+        )
+        timed_region["triton_planned_looped"] = (
+            f"{partition}one launch whose longer tasks loop over their "
+            "segment in fixed blocks, then synchronize"
+        )
+    if warm_calls:
+        warm_step = (
+            f"before each sample, {warm_calls} untimed calls of the same "
+            "candidate on the row's warm layout, each followed by a "
+            "synchronize; the warm layout has its own seed and its own "
+            "output buffer and is never timed or checked"
+        )
+    else:
+        warm_step = (
+            "none; a sample starts straight after the check of the "
+            "previous candidate"
+        )
     return {
         "distributions": list(distributions),
         "segment_count": segment_count,
@@ -551,21 +666,62 @@ def _configuration(
         "samples": samples,
         "layouts_per_distribution": warmups + samples,
         "layout_reuse": "none; every iteration takes the next unused layout",
-        "candidates": list(_candidate_names(triton_available=triton_available)),
+        "candidates": _select(
+            _candidate_names(triton_available=triton_available),
+            candidates,
+            exclude_candidates,
+        ),
+        "candidate_filter": {
+            "candidates": candidates,
+            "exclude_candidates": list(exclude_candidates),
+            "note": (
+                "a name selects one candidate or a family; each row lists "
+                "the candidates it timed under candidates, what the filter "
+                "left out under excluded, and what it could not run under "
+                "skipped"
+            ),
+        },
         "candidate_order": (
             "a new random permutation every iteration, shuffled by "
             "random.Random(order_seed) with order_seed "
             "'<seed>:<distribution>:<iteration>'; the seed and the order "
             "are recorded with each iteration"
         ),
+        "warm_step": {
+            "calls": warm_calls,
+            "step": warm_step,
+            "reason": (
+                "the candidate that ran before a sample leaves the host "
+                "caches and the device in a state that the next sample "
+                "pays for; the step is the same for every candidate, so "
+                "every sample follows a call of its own candidate"
+            ),
+        },
         "warp_max_elements": _WARP_MAX_ELEMENTS,
         "swage_policy": (
-            "_prepare_planned_sum with select_schedule=False; the "
-            "preparation builds the warp, CTA, and mixed policies and only "
-            "mixed is launched"
+            "swage_mixed times _prepare_planned_sum with "
+            "select_schedule=False. The private runner has no mixed-only "
+            "preparation: one call returns the warp, CTA, and mixed "
+            "policies, and only mixed is launched. The two unused policies "
+            "cost their kernel and module memo lookups and the memoized "
+            "identity task ids. swage_cta_call times the one private call "
+            "that validates and launches a single policy; it does not "
+            "classify"
         ),
         "triton_looped": (
             "every block and warp configuration is timed; none is selected"
+            if triton_available
+            else "skipped: Triton is not installed"
+        ),
+        "triton_planned": (
+            "the packed-warp and one-block task kernels of the comparison "
+            "harness, with the partition of every fresh layout inside the "
+            "timed call; a row whose longest segment exceeds "
+            f"{_PLANNED_CTA_BLOCK} elements skips it. "
+            "triton_planned_looped packs the short tasks the same way and "
+            "loops over the longer ones, with the block and warp sweep of "
+            "triton_looped. triton_planned_partition_samples_us is the "
+            "part of each sample spent in the partition"
             if triton_available
             else "skipped: Triton is not installed"
         ),
@@ -601,6 +757,12 @@ def _configuration(
             "batching": (
                 "none; a sample is one call on one fresh layout, because "
                 "a second call on the same layout would not be fresh"
+                + (
+                    f"; it follows {warm_calls} untimed calls of the same "
+                    "candidate on another layout"
+                    if warm_calls
+                    else ""
+                )
             ),
         },
         "effective_gb_per_s": (
@@ -618,8 +780,9 @@ def _configuration(
             "layout generation",
             "offsets and values upload",
             "reference computation and the correctness check",
-            "output allocation for swage_mixed and triton_looped",
+            "output allocation for the Swage and Triton candidates",
             "CUDA, native compiler, and Triton initialization (warmups)",
+            "the warm step",
         ],
     }
 
@@ -763,12 +926,76 @@ def _upload(torch, pool, device, values_kind, seed):
     return uploaded
 
 
-def _looped_candidate(kernel, output, segment_count, block, warps):
-    """Return one looped Triton configuration as a layout candidate."""
+def _candidates(
+    torch,
+    swage,
+    kernels,
+    names,
+    segment_count,
+    output_of,
+    prepare_us,
+    partition_us,
+):
+    """Return the named candidates as callables that take a layout.
 
-    def launch(layout):
-        return _launch_triton_looped(
-            kernel,
+    Args:
+        torch: The PyTorch module.
+        swage: The private Swage entry points ``prepare`` and ``launch``.
+        kernels: The Triton kernels, or None without Triton.
+        names: Names of the candidates to build.
+        segment_count: Segments per layout.
+        output_of: Callable returning the output buffer of a named
+            candidate. The timed candidates and the warm candidates are
+            built with different buffers.
+        prepare_us: List that receives the microseconds each
+            ``swage_mixed`` call spends in its preparation.
+        partition_us: Mapping that receives, per planned Triton candidate,
+            the microseconds each call spends in its partition.
+
+    Returns:
+        The candidates by name, in the order of ``names``.
+    """
+
+    def swage_mixed():
+        output = output_of("swage_mixed")
+
+        def call(layout):
+            start = time.perf_counter_ns()
+            prepared = swage.prepare(
+                layout.values,
+                layout.offsets,
+                output,
+                warp_max_elements=_WARP_MAX_ELEMENTS,
+            )
+            prepare_us.append((time.perf_counter_ns() - start) / 1_000.0)
+            prepared.mixed()
+            return output
+
+        return call
+
+    def swage_cta_call():
+        output = output_of("swage_cta_call")
+
+        def call(layout):
+            swage.launch(layout.values, layout.offsets, output, "sum")
+            return output
+
+        return call
+
+    def torch_reduce():
+        return lambda layout: torch.segment_reduce(
+            layout.values, "sum", offsets=layout.offsets
+        )
+
+    def torch_pad_to_max():
+        return lambda layout: _padded_sum(
+            *_padded_inputs(torch, layout.values, layout.offsets)
+        )
+
+    def looped(candidate, block, warps):
+        output = output_of(candidate)
+        return lambda layout: _launch_triton_looped(
+            kernels.looped,
             layout.values,
             layout.offsets,
             output,
@@ -777,13 +1004,58 @@ def _looped_candidate(kernel, output, segment_count, block, warps):
             warps,
         )
 
-    return launch
+    def planned(candidate, warps, block=None):
+        output = output_of(candidate)
+        series = partition_us.setdefault(candidate, [])
+
+        def call(layout):
+            # A fresh layout has no task lists yet, so the partition is
+            # part of the call, as the Swage preparation is.
+            start = time.perf_counter_ns()
+            warp_ids, cta_ids = _partition_tasks(torch, layout.offsets)
+            series.append((time.perf_counter_ns() - start) / 1_000.0)
+            return _launch_triton_planned(
+                kernels,
+                layout.values,
+                layout.offsets,
+                output,
+                warp_ids,
+                cta_ids,
+                warps=warps,
+                block=block,
+            )
+
+        return call
+
+    builders = {
+        "swage_mixed": swage_mixed,
+        "swage_cta_call": swage_cta_call,
+        "torch": torch_reduce,
+        "torch_pad_to_max": torch_pad_to_max,
+    }
+    for block, warps in _triton_looped_configs():
+        candidate = f"triton_looped_b{block}_w{warps}"
+        builders[candidate] = (
+            lambda candidate=candidate, block=block, warps=warps:
+            looped(candidate, block, warps)
+        )
+        candidate = f"triton_planned_looped_b{block}_w{warps}"
+        builders[candidate] = (
+            lambda candidate=candidate, block=block, warps=warps:
+            planned(candidate, warps, block)
+        )
+    for warps in _PLANNED_WARPS:
+        candidate = f"triton_planned_w{warps}"
+        builders[candidate] = (
+            lambda candidate=candidate, warps=warps: planned(candidate, warps)
+        )
+    return {candidate: builders[candidate]() for candidate in names}
 
 
 def _run_distribution(
     torch,
-    prepare,
-    looped_kernel,
+    swage,
+    kernels,
     name,
     segment_count,
     warmups,
@@ -795,13 +1067,18 @@ def _run_distribution(
     clock_tick_us,
     seed=_SEED,
     values_kind="quarters",
+    only=None,
+    exclude=(),
+    warm_calls=_WARM_CALLS,
 ):
-    """Measure every candidate on one distribution's fresh layouts.
+    """Measure the selected candidates on one distribution's fresh layouts.
 
     Args:
         torch: The PyTorch module.
-        prepare: The private planned-sum preparation function.
-        looped_kernel: The looped Triton kernel, or None without Triton.
+        swage: The private Swage entry points: ``prepare``, the planned-sum
+            preparation, and ``launch``, the single-policy call.
+        kernels: The Triton kernels ``looped``, ``packed``, ``cta``, and
+            ``cta_looped``, or None without Triton.
         name: Distribution name.
         segment_count: Segments per layout.
         warmups: Leading iterations that are checked but not recorded.
@@ -813,25 +1090,50 @@ def _run_distribution(
         clock_tick_us: Measured tick of the sample clock, or None.
         seed: Seed of the first layout, the values, and the orders.
         values_kind: ``quarters`` or ``normal``.
+        only: Candidate filter selectors to keep, or None for all.
+        exclude: Candidate filter selectors to leave out.
+        warm_calls: Untimed calls of a candidate on the row's warm layout
+            before each of its samples.
 
     Returns:
-        The record row for this distribution.
+        The record row for this distribution. ``candidates`` lists what was
+        timed, ``excluded`` what the filter left out, and ``skipped`` what
+        the row cannot run, with the reason.
+
+    Raises:
+        ValueError: If the filter leaves no candidate the row can run.
     """
-    pool = _layout_pool(name, segment_count, warmups + samples, seed)
-    layouts = _upload(torch, pool, device, values_kind, seed)
+    timed = warmups + samples
+    # With a warm step the pool holds one more layout, which is distinct
+    # from every timed layout like any other and is never timed.
+    pool = _layout_pool(name, segment_count, timed + bool(warm_calls), seed)
+    uploaded = _upload(torch, pool, device, values_kind, seed)
+    layouts = uploaded[:timed]
     longest = max(max(layout.lengths) for layout in pool)
     padded_bytes = segment_count * longest * _PADDED_BYTES_PER_ELEMENT
     budget = free_bytes()
-    pad_to_max = padded_bytes <= budget
-    skipped = {}
-    if not pad_to_max:
-        skipped["torch_pad_to_max"] = (
+    unable = {}
+    if padded_bytes > budget:
+        unable["torch_pad_to_max"] = (
             f"padding {segment_count} segments to {longest} elements needs "
             f"{padded_bytes} bytes and {budget} are free"
         )
-    names = _candidate_names(
-        triton_available=looped_kernel is not None, pad_to_max=pad_to_max
-    )
+    if kernels is not None and longest > _PLANNED_CTA_BLOCK:
+        unable["triton_planned"] = (
+            f"its task kernel reads one block of {_PLANNED_CTA_BLOCK} "
+            f"elements and the longest segment of the row has {longest}"
+        )
+    # Every candidate is timed, excluded by the filter, or skipped because
+    # the filter keeps it and the row cannot run it.
+    universe = _candidate_names(triton_available=kernels is not None)
+    wanted = _select(universe, only, exclude)
+    skipped = _wanted_skips(unable, wanted)
+    names = [name for name in wanted if _family(name) not in unable]
+    if not names:
+        raise ValueError(
+            "the candidate filter leaves no candidate that can run on "
+            f"{name} with {segment_count} segments"
+        )
     # A result that was never written must not pass the correctness check.
     outputs = {
         candidate: torch.full((segment_count,), float("nan"), device=device)
@@ -839,38 +1141,38 @@ def _run_distribution(
         if not candidate.startswith("torch")
     }
     prepare_us = []
-
-    def swage_mixed(layout):
-        start = time.perf_counter_ns()
-        prepared = prepare(
-            layout.values,
-            layout.offsets,
-            outputs["swage_mixed"],
-            warp_max_elements=_WARP_MAX_ELEMENTS,
+    partition_us = {}
+    candidates = _candidates(
+        torch,
+        swage,
+        kernels,
+        names,
+        segment_count,
+        outputs.__getitem__,
+        prepare_us,
+        partition_us,
+    )
+    warm = None
+    if warm_calls:
+        warm_layout = uploaded[-1]
+        # The warm calls write elsewhere, so a timed call that writes
+        # nothing still leaves its own output unwritten.
+        warm_output = torch.empty(segment_count, device=device)
+        warm_candidates = _candidates(
+            torch,
+            swage,
+            kernels,
+            names,
+            segment_count,
+            lambda candidate: warm_output,
+            [],
+            {},
         )
-        prepare_us.append((time.perf_counter_ns() - start) / 1_000.0)
-        prepared.mixed()
-        return outputs["swage_mixed"]
 
-    def torch_reduce(layout):
-        return torch.segment_reduce(
-            layout.values, "sum", offsets=layout.offsets
-        )
-
-    def torch_pad_to_max(layout):
-        return _padded_sum(
-            *_padded_inputs(torch, layout.values, layout.offsets)
-        )
-
-    candidates = {"swage_mixed": swage_mixed, "torch": torch_reduce}
-    if pad_to_max:
-        candidates["torch_pad_to_max"] = torch_pad_to_max
-    if looped_kernel is not None:
-        for block, warps in _triton_looped_configs():
-            candidate = f"triton_looped_b{block}_w{warps}"
-            candidates[candidate] = _looped_candidate(
-                looped_kernel, outputs[candidate], segment_count, block, warps
-            )
+        def warm(candidate):
+            for _ in range(warm_calls):
+                warm_candidates[candidate](warm_layout)
+                synchronize()
 
     def check(candidate, result, layout):
         _check_sums(
@@ -884,8 +1186,7 @@ def _run_distribution(
             outputs[candidate].fill_(float("nan"))
 
     orders = [
-        _candidate_order(names, seed, name, index)
-        for index in range(len(pool))
+        _candidate_order(names, seed, name, index) for index in range(timed)
     ]
     iterations = _measure(
         layouts,
@@ -894,9 +1195,11 @@ def _run_distribution(
         check,
         warmups=warmups,
         synchronize=synchronize,
+        warm=warm,
     )
     useful_bytes = [
-        _useful_bytes(layout.offsets[-1], segment_count) for layout in pool
+        _useful_bytes(layout.offsets[-1], segment_count)
+        for layout in pool[:timed]
     ]
     raw = _timed_samples(iterations, names)
     summary = {
@@ -908,12 +1211,17 @@ def _run_distribution(
         "segment_count": segment_count,
         "seed": seed,
         "values": values_kind,
+        "candidates": list(names),
+        "excluded": [
+            candidate for candidate in universe if candidate not in wanted
+        ],
         "skipped": skipped,
+        "warm_layout_seed": pool[-1].seed if warm_calls else None,
         "pad_to_max": {
             "longest_segment": longest,
             "padded_bytes": padded_bytes,
             "free_bytes": budget,
-            "timed": pad_to_max,
+            "timed": "torch_pad_to_max" in names,
         },
         "check": {
             mode: sum(counts[mode] for counts in modes) for mode in modes[0]
@@ -927,7 +1235,7 @@ def _run_distribution(
                 **iteration,
             }
             for layout, layout_bytes, (order_seed, _), iteration in zip(
-                pool, useful_bytes, orders, iterations, strict=True
+                pool[:timed], useful_bytes, orders, iterations, strict=True
             )
         ],
         "raw_samples_us": raw,
@@ -952,6 +1260,10 @@ def _run_distribution(
             for candidate, timing in summary.items()
         },
         "swage_mixed_prepare_samples_us": prepare_us[warmups:],
+        "triton_planned_partition_samples_us": {
+            candidate: series[warmups:]
+            for candidate, series in partition_us.items()
+        },
         "correctness_passed": True,
     }
 
@@ -962,19 +1274,18 @@ def _headline(summary):
         candidate: round(timing["median"], 1)
         for candidate, timing in summary.items()
     }
-    looped = {
-        candidate: median
-        for candidate, median in medians.items()
-        if candidate.startswith("triton_looped")
-    }
     headline = {
-        name: medians[name]
-        for name in ("swage_mixed", "torch", "torch_pad_to_max")
-        if name in medians
+        name: median for name, median in medians.items() if "triton" not in name
     }
-    if looped:
-        fastest = min(looped, key=looped.get)
-        headline[f"fastest {fastest}"] = looped[fastest]
+    for family in ("triton_looped", "triton_planned", "triton_planned_looped"):
+        swept = {
+            candidate: median
+            for candidate, median in medians.items()
+            if _family(candidate) == family
+        }
+        if swept:
+            fastest = min(swept, key=swept.get)
+            headline[f"fastest {fastest}"] = swept[fastest]
     return headline
 
 
@@ -1000,7 +1311,10 @@ def main():
     import torch
     from mlir_swage._mlir_libs import _swageDialectsNanobind as native_extension
     from swage import _runtime
-    from swage._segmented_qualification import _prepare_planned_sum
+    from swage._segmented_qualification import (
+        _prepare_planned_sum,
+        launch_gpu,
+    )
 
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -1038,16 +1352,23 @@ def main():
         nvidia_driver=_nvidia_driver(),
         triton_version=triton.__version__ if triton else None,
     )
-    looped_kernel = _make_triton_looped_sum() if triton else None
+    _require_available(arguments.candidates, triton is not None)
+    kernels = _make_triton_kernels() if triton else None
     if triton is None:
-        print("Triton is not installed; skipping triton_looped", flush=True)
+        print(
+            "Triton is not installed; leaving out the Triton candidates",
+            flush=True,
+        )
+    runner = types.SimpleNamespace(
+        prepare=_prepare_planned_sum, launch=launch_gpu
+    )
 
     results = []
     for name in arguments.distributions:
         row = _run_distribution(
             torch,
-            _prepare_planned_sum,
-            looped_kernel,
+            runner,
+            kernels,
             name,
             segment_count,
             warmups,
@@ -1058,6 +1379,9 @@ def main():
             clock_tick_us=clock_tick_us,
             seed=arguments.seed,
             values_kind=arguments.values,
+            only=arguments.candidates,
+            exclude=arguments.exclude_candidates,
+            warm_calls=arguments.warm_calls,
         )
         results.append(row)
         print(f"{name}: median_us={_headline(row['summary_us'])}", flush=True)
@@ -1076,6 +1400,9 @@ def main():
             seed=arguments.seed,
             values=arguments.values,
             clock_tick_us=clock_tick_us,
+            candidates=arguments.candidates,
+            exclude_candidates=arguments.exclude_candidates,
+            warm_calls=arguments.warm_calls,
         ),
         results=results,
         imported_code=imported_code,

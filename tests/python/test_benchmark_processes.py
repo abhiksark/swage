@@ -36,14 +36,19 @@ def _provenance(seen=False):
         "other_compute_process_seen": seen,
         "gpu_state_before": {"gpu": {"temperature.gpu": "50"}},
         "gpu_state_after": {"gpu": {"temperature.gpu": "60"}},
+        "cpu_frequency_before": {"governors": {"powersave": 24}},
+        "cpu_frequency_after": {"governors": {"powersave": 24}},
+        "cpu_governor_unchanged": True,
     }
 
 
-def _fresh_record(swage, torch, pad=None, seen=False):
+def _fresh_record(swage, torch, pad=None, seen=False, looped=None):
     """Return a fresh-offsets record with one power-law row."""
     medians = {"swage_mixed": swage, "torch": torch}
     if pad is not None:
         medians["torch_pad_to_max"] = pad
+    if looped is not None:
+        medians["triton_looped_b256_w4"] = looped
     return {
         "benchmark": "fresh-offsets-segmented-sum",
         "recorded_at": "2026-10-01T00:00:00+00:00",
@@ -138,7 +143,8 @@ def test_arguments_default_to_five_processes(processes):
     )
 
     assert arguments.processes == 5
-    assert arguments.reference == "torch"
+    assert arguments.reference == ["torch"]
+    assert arguments.summarize is None
     assert arguments.output_dir == pathlib.Path("out")
     assert arguments.command == ["bench.py", "--smoke"]
     assert (
@@ -149,6 +155,32 @@ def test_arguments_default_to_five_processes(processes):
     )
 
 
+def test_arguments_take_several_references_and_a_summarize_directory(
+    processes,
+):
+    """Name the candidates of interest; summarize records already taken."""
+    run = processes._arguments(
+        [
+            "--output-dir",
+            "out",
+            "--reference",
+            "torch",
+            "triton_looped_b256_w4",
+            "--",
+            "bench.py",
+        ]
+    )
+    again = processes._arguments(
+        ["--summarize", "out", "--reference", "triton_planned_looped_b256_w4"]
+    )
+
+    assert run.reference == ["torch", "triton_looped_b256_w4"]
+    assert run.command == ["bench.py"]
+    assert again.summarize == pathlib.Path("out")
+    assert again.reference == ["triton_planned_looped_b256_w4"]
+    assert again.command == []
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -156,6 +188,9 @@ def test_arguments_default_to_five_processes(processes):
         ["--output-dir", "out", "--processes", "1", "bench.py"],
         ["--output-dir", "out", "bench.py", "--output", "x.json"],
         ["bench.py"],
+        ["--summarize", "out", "bench.py"],
+        ["--summarize", "out", "--output-dir", "other"],
+        ["--summarize", "out", "--processes", "3"],
     ],
 )
 def test_arguments_reject_what_cannot_be_repeated(processes, argv):
@@ -280,10 +315,11 @@ def test_summary_reports_the_median_and_the_range_across_processes(processes):
         _fresh_record(110.0, 11.0),
     ]
 
-    rows, incomplete = processes._summarize(
-        [processes._series(record) for record in records], "torch"
+    rows, incomplete, missing = processes._summarize(
+        [processes._series(record) for record in records], ["torch"]
     )
 
+    assert missing == {}
     swage = rows["power-law"]["end_to_end"]["swage_mixed"]
     assert swage["median_us"] == {
         "process_values": [100.0, 130.0, 90.0, 120.0, 110.0],
@@ -312,8 +348,8 @@ def test_summary_lists_a_candidate_that_some_process_did_not_time(processes):
         _fresh_record(100.0, 10.0, pad=500.0),
     ]
 
-    rows, incomplete = processes._summarize(
-        [processes._series(record) for record in records], "torch"
+    rows, incomplete, _ = processes._summarize(
+        [processes._series(record) for record in records], ["torch"]
     )
 
     assert set(rows["power-law"]["end_to_end"]) == {"swage_mixed", "torch"}
@@ -322,16 +358,84 @@ def test_summary_lists_a_candidate_that_some_process_did_not_time(processes):
     }
 
 
-def test_summary_without_the_reference_has_no_ratios(processes):
-    """Report times alone when no process timed the reference."""
-    rows, _ = processes._summarize(
-        [processes._series(_fresh_record(100.0, 10.0))] * 2, "triton"
+def test_summary_forms_ratios_against_every_named_reference(processes):
+    """Express Swage against a Triton candidate, not only against torch."""
+    records = [
+        _fresh_record(100.0, 10.0, looped=50.0),
+        _fresh_record(120.0, 20.0, looped=40.0),
+        _fresh_record(90.0, 10.0, looped=45.0),
+    ]
+
+    rows, _, missing = processes._summarize(
+        [processes._series(record) for record in records],
+        ["torch", "triton_looped_b256_w4"],
     )
 
+    swage = rows["power-law"]["end_to_end"]["swage_mixed"]
+    assert swage["ratio_to_torch"]["process_values"] == [10.0, 6.0, 9.0]
+    assert swage["ratio_to_triton_looped_b256_w4"] == {
+        "process_values": [2.0, 3.0, 2.0],
+        "median": 2.0,
+        "min": 2.0,
+        "max": 3.0,
+    }
+    assert missing == {}
+
+
+def test_a_reference_missing_from_a_row_is_listed_not_defaulted(processes):
+    """Say where a reference was not timed; form no other ratio instead."""
+    with_pad = processes._series(_fresh_record(100.0, 10.0, pad=400.0))
+    with_pad["uniform"] = with_pad.pop("power-law")
+    without_pad = processes._series(_fresh_record(100.0, 10.0))
+    series = [{**with_pad, **without_pad}] * 2
+
+    rows, _, missing = processes._summarize(series, ["torch_pad_to_max"])
+
+    assert rows["uniform"]["end_to_end"]["swage_mixed"][
+        "ratio_to_torch_pad_to_max"
+    ]["median"] == 0.25
     assert set(rows["power-law"]["end_to_end"]["swage_mixed"]) == {
         "median_us",
         "effective_gb_per_s",
     }
+    assert missing == {"torch_pad_to_max": {"power-law": ["end_to_end"]}}
+
+
+def test_a_reference_that_one_process_did_not_time_gives_no_ratio(
+    processes,
+):
+    """Pair a ratio inside every process or not at all."""
+    records = [
+        _fresh_record(100.0, 10.0, pad=400.0),
+        _fresh_record(100.0, 10.0),
+        _fresh_record(100.0, 10.0, pad=500.0),
+    ]
+
+    rows, incomplete, missing = processes._summarize(
+        [processes._series(record) for record in records],
+        ["torch_pad_to_max"],
+    )
+
+    assert "ratio_to_torch_pad_to_max" not in (
+        rows["power-law"]["end_to_end"]["swage_mixed"]
+    )
+    assert missing == {"torch_pad_to_max": {"power-law": ["end_to_end"]}}
+    assert incomplete == {
+        "power-law": {"end_to_end": {"torch_pad_to_max": [1, 3]}}
+    }
+
+
+def test_a_reference_that_no_row_timed_is_an_error(processes):
+    """Refuse a reference name that matches nothing in the records."""
+    series = processes._series(_fresh_record(100.0, 10.0, looped=50.0))
+
+    processes._require_references(series, ["torch", "triton_looped_b256_w4"])
+    with pytest.raises(
+        ValueError, match="triton_looped_b256_w8.*swage_mixed, torch"
+    ):
+        processes._require_references(
+            series, ["torch", "triton_looped_b256_w8"]
+        )
 
 
 @pytest.mark.parametrize(
@@ -400,7 +504,8 @@ def test_main_writes_the_process_records_and_one_summary(
     ]
     assert summary["benchmark"] == "fresh-offsets-segmented-sum"
     assert summary["processes"] == 3
-    assert summary["reference"] == "torch"
+    assert summary["references"] == ["torch"]
+    assert summary["reference_missing"] == {}
     assert summary["smoke"] is False
     assert summary["command"] == [
         "benchmarks/benchmark_fresh_offsets.py",
@@ -424,6 +529,12 @@ def test_main_writes_the_process_records_and_one_summary(
     assert summary["process_records"][0]["gpu_state_before"] == {
         "gpu": {"temperature.gpu": "50"}
     }
+    assert summary["process_records"][0]["cpu_frequency_before"] == {
+        "governors": {"powersave": 24}
+    }
+    assert [
+        entry["cpu_governor_unchanged"] for entry in summary["process_records"]
+    ] == [True] * 3
     assert summary["rows"]["power-law"]["end_to_end"]["swage_mixed"][
         "median_us"
     ] == {
@@ -451,3 +562,98 @@ def test_main_marks_a_summary_of_smoke_records(
 
     summary = json.loads((tmp_path / "run" / "summary.json").read_text())
     assert summary["smoke"] is True
+
+
+def test_main_stops_after_one_process_when_a_reference_is_unknown(
+    processes, tmp_path, monkeypatch
+):
+    """Fail early instead of running five processes for no ratio."""
+    calls = []
+    records = [_fresh_record(100.0, 10.0) for _ in range(3)]
+    monkeypatch.setattr(
+        processes.subprocess, "run", _writing_run(records, calls)
+    )
+    output_dir = tmp_path / "run"
+
+    with pytest.raises(ValueError, match="reference triton_looped_b256_w4"):
+        processes.main(
+            [
+                "--processes",
+                "3",
+                "--output-dir",
+                str(output_dir),
+                "--reference",
+                "torch",
+                "triton_looped_b256_w4",
+                "--",
+                "b.py",
+            ]
+        )
+
+    assert len(calls) == 1
+    assert [path.name for path in output_dir.iterdir()] == ["process-1.json"]
+
+
+def _write_records(directory, records):
+    """Write process records as a finished run leaves them."""
+    directory.mkdir(parents=True)
+    for index, record in enumerate(records, start=1):
+        (directory / f"process-{index}.json").write_text(json.dumps(record))
+
+
+def test_summarize_reads_existing_records_against_another_reference(
+    processes, tmp_path, monkeypatch, capsys
+):
+    """Form new ratios from a finished run without running it again."""
+    records = [
+        _fresh_record(100.0 + index, 10.0, looped=50.0) for index in range(11)
+    ]
+    run = tmp_path / "run"
+    _write_records(run, records)
+    (run / "summary.json").write_text("{}")
+
+    def no_run(command, **options):
+        raise AssertionError("summarizing must not start a process")
+
+    monkeypatch.setattr(processes.subprocess, "run", no_run)
+
+    processes.main(
+        ["--summarize", str(run), "--reference", "triton_looped_b256_w4"]
+    )
+
+    output = run / "summary-triton_looped_b256_w4.json"
+    summary = json.loads(output.read_text())
+    assert str(output) in capsys.readouterr().out
+    assert (run / "summary.json").read_text() == "{}"
+    assert summary["processes"] == 11
+    assert summary["command"] is None
+    assert summary["references"] == ["triton_looped_b256_w4"]
+    # Process 10 and 11 come after process 9, not after process 1.
+    assert [entry["record"] for entry in summary["process_records"]] == [
+        f"process-{index}.json" for index in range(1, 12)
+    ]
+    swage = summary["rows"]["power-law"]["end_to_end"]["swage_mixed"]
+    assert swage["median_us"]["process_values"] == [
+        100.0 + index for index in range(11)
+    ]
+    assert swage["ratio_to_triton_looped_b256_w4"]["min"] == 2.0
+    assert "ratio_to_torch" not in swage
+
+
+def test_summarize_does_not_overwrite_or_invent(processes, tmp_path):
+    """Refuse an existing summary, an empty directory, a wrong reference."""
+    run = tmp_path / "run"
+    _write_records(run, [_fresh_record(100.0, 10.0) for _ in range(2)])
+    arguments = ["--summarize", str(run), "--reference", "torch"]
+
+    processes.main(arguments)
+    with pytest.raises(FileExistsError, match="summary-torch.json"):
+        processes.main(arguments)
+    with pytest.raises(ValueError, match="reference triton_looped_b256_w4"):
+        processes.main(
+            ["--summarize", str(run), "--reference", "triton_looped_b256_w4"]
+        )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="no process records"):
+        processes.main(["--summarize", str(empty)])

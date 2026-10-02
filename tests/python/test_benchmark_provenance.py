@@ -61,6 +61,110 @@ def _stub_torch(uuid="1b08842a-4c6e-32aa-53de-5b3f8553388b"):
     )
 
 
+def _sysfs(root, governors, driver="amd-pstate-epp"):
+    """Write a fake CPU sysfs tree; a governor of None has no file."""
+    for index, governor in enumerate(governors):
+        policy = root / f"cpu{index}" / "cpufreq"
+        policy.mkdir(parents=True, exist_ok=True)
+        if governor is None:
+            (policy / "scaling_governor").unlink(missing_ok=True)
+        else:
+            (policy / "scaling_governor").write_text(f"{governor}\n")
+    # Directories beside the CPUs that are not CPUs.
+    for name in ("cpufreq", "cpuidle"):
+        (root / name).mkdir(exist_ok=True)
+    if driver is not None and governors:
+        (root / "cpu0" / "cpufreq" / "scaling_driver").write_text(
+            f"{driver}\n"
+        )
+        (
+            root / "cpu0" / "cpufreq" / "energy_performance_preference"
+        ).write_text("balance_performance\n")
+    return root
+
+
+def test_cpu_frequency_policy_counts_the_governor_of_every_cpu(
+    provenance, tmp_path
+):
+    """Record the frequency governor the host side of a launch ran under."""
+    root = _sysfs(tmp_path, ["powersave"] * 4)
+
+    assert provenance.cpu_frequency_policy(root) == {
+        "governors": {"powersave": 4},
+        "scaling_driver": "amd-pstate-epp",
+        "energy_performance_preference": "balance_performance",
+    }
+
+
+def test_cpu_frequency_policy_records_what_it_cannot_read_as_unknown(
+    provenance, tmp_path
+):
+    """Count a CPU without a governor file instead of leaving it out."""
+    root = _sysfs(
+        tmp_path / "mixed",
+        ["powersave", "performance", None, "powersave"],
+        driver=None,
+    )
+
+    assert provenance.cpu_frequency_policy(root) == {
+        "governors": {"performance": 1, "powersave": 2, "unknown": 1},
+        "scaling_driver": None,
+        "energy_performance_preference": None,
+    }
+    assert provenance.cpu_frequency_policy(tmp_path / "missing") == {
+        "governors": {},
+        "scaling_driver": None,
+        "energy_performance_preference": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "unchanged"),
+    [
+        ({"powersave": 4}, {"powersave": 4}, True),
+        ({"powersave": 4}, {"performance": 4}, False),
+        ({"powersave": 4}, {"performance": 1, "powersave": 3}, False),
+        ({"powersave": 3, "unknown": 1}, {"powersave": 3, "unknown": 1}, None),
+        ({}, {}, None),
+        ({"powersave": 4}, {}, None),
+    ],
+)
+def test_governor_unchanged_is_tri_state(
+    provenance, before, after, unchanged
+):
+    """Say the governor held, changed, or could not be read."""
+    assert (
+        provenance.cpu_governor_unchanged(
+            {"governors": before}, {"governors": after}
+        )
+        is unchanged
+    )
+
+
+def test_block_states_the_governor_before_and_after(provenance, tmp_path):
+    """Sample the governor around the run and keep a change once seen."""
+    root = _sysfs(tmp_path, ["powersave"] * 2)
+    quiet = _nvidia_smi([_GPU_ROW], [])
+    build = {"loaded_ptx": []}
+
+    block = provenance.start(_stub_torch(), build, run=quiet, cpu_root=root)
+    assert block["cpu_frequency_before"]["governors"] == {"powersave": 2}
+    assert "cpu_governor_unchanged" not in block
+    provenance.finish(block, run=quiet, cpu_root=root)
+    assert block["cpu_frequency_after"] == block["cpu_frequency_before"]
+    assert block["cpu_governor_unchanged"] is True
+
+    _sysfs(root, ["performance"] * 2)
+    provenance.finish(block, run=quiet, cpu_root=root)
+    assert block["cpu_frequency_after"]["governors"] == {"performance": 2}
+    assert block["cpu_governor_unchanged"] is False
+
+    # A later sample that matches the first does not undo the change.
+    _sysfs(root, ["powersave"] * 2)
+    provenance.finish(block, run=quiet, cpu_root=root)
+    assert block["cpu_governor_unchanged"] is False
+
+
 def test_cpu_model_reads_the_first_model_name(provenance, tmp_path):
     """Record the processor that ran the host side of every launch."""
     cpuinfo = tmp_path / "cpuinfo"
@@ -333,7 +437,9 @@ def test_clock_tick_is_the_smallest_advance_of_back_to_back_reads(provenance):
     assert provenance.clock_tick_us(lambda: 7, reads=5) is None
 
 
-def test_block_carries_every_provenance_field(provenance, monkeypatch):
+def test_block_carries_every_provenance_field(
+    provenance, monkeypatch, tmp_path
+):
     """Assemble the fields a reader needs to place a measurement."""
     monkeypatch.setattr(provenance, "cpu_model", lambda: "Test CPU")
     monkeypatch.setattr(provenance, "package_version", lambda name: "3.7.0")
@@ -353,7 +459,8 @@ def test_block_carries_every_provenance_field(provenance, monkeypatch):
         [f"{_UUID}, 4242, python3, 512 MiB", f"{_UUID}, 9, python3, 1 MiB"],
     )
 
-    block = provenance.start(_stub_torch(), build, run=quiet)
+    root = _sysfs(tmp_path, ["powersave"] * 2)
+    block = provenance.start(_stub_torch(), build, run=quiet, cpu_root=root)
     loaded.extend(
         [
             {"kernel": "segmented_sum", "sha256": "b" * 64, "bytes": 2},
@@ -362,10 +469,13 @@ def test_block_carries_every_provenance_field(provenance, monkeypatch):
         ]
     )
     assert "gpu_state_after" not in block
-    finished = provenance.finish(block, run=shared)
+    finished = provenance.finish(block, run=shared, cpu_root=root)
 
     assert finished is block
-    assert {key: block[key] for key in block if "state" not in key} == {
+    sampled = ("gpu_state", "cpu_frequency")
+    assert {
+        key: block[key] for key in block if not key.startswith(sampled)
+    } == {
         "gpu": "NVIDIA RTX A6000",
         "gpu_uuid": _UUID,
         "cpu_model": "Test CPU",
@@ -381,7 +491,9 @@ def test_block_carries_every_provenance_field(provenance, monkeypatch):
             {"kernel": "segmented_sum", "sha256": "b" * 64, "bytes": 2},
         ],
         "other_compute_process_seen": True,
+        "cpu_governor_unchanged": True,
     }
+    assert block["cpu_frequency_before"] == block["cpu_frequency_after"]
     assert block["gpu_state_before"]["other_compute_processes"] == []
     assert [
         row["pid"]

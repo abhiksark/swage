@@ -60,27 +60,96 @@ one of the fields below only if the harness wrote it at the time.
 The fresh-offsets harness and the comparison harness time these candidates:
 
 - The private planned Swage sum. Fresh offsets times the mixed policy with
-  its preparation. The comparison times the warp, CTA, and mixed policies.
+  its preparation (`swage_mixed`). The private runner has no mixed-only
+  preparation: one call returns the warp, CTA, and mixed policies, and the
+  record says so. The comparison times the warp, CTA, and mixed policies.
+- In fresh offsets only, `swage_cta_call`: the one private call that
+  validates the offsets and launches a single policy, the pure CTA kernel.
+  It does not classify and uploads no task list.
 - `torch.segment_reduce` on the device offsets, with its output allocation.
 - A pad-to-max baseline in pure PyTorch: every segment is padded with zeros
   to the longest one, and the masked matrix is summed per row. Fresh offsets
   times the padding with the sum. The comparison pads outside the timed
   launch.
-- The looped Triton sum: one program per segment that walks the segment in
-  fixed blocks. Every block and warp configuration of the sweep is timed and
-  none is selected.
-- In the comparison only, the fixed Triton sum and the planned Triton sum,
-  which read one block per segment or task.
+- The looped Triton sum (`triton_looped`): one program per segment that
+  walks the segment in fixed blocks. Every block and warp configuration of
+  the sweep is timed and none is selected.
+- The planned Triton sum (`triton_planned`): the segment ids are split at 32
+  elements into two task lists, short tasks are packed four per program,
+  and each longer task reads one block of 4096 elements.
+- The planned Triton sum with looping tasks (`triton_planned_looped`): the
+  same task lists and packed short tasks, but each longer task loops over
+  its segment in fixed blocks, with the block and warp sweep of the looped
+  sum. It is the planned scheduler that does not provision one block for
+  the longest segment.
+- In the comparison only, the fixed Triton sum, which reads one block per
+  segment.
+
+The two harnesses differ in where the planning of a planned candidate
+falls. The comparison builds the Triton task lists and the Swage plan once
+per row, outside the timed launch. Fresh offsets has no plan for a layout
+it has not seen, so the Triton partition (two `torch.nonzero` calls on the
+device and the conversion of the ids to int32) is inside the timed call, as
+the Swage preparation is. The row records the part of each sample spent in
+the partition and in the preparation.
 
 A baseline that cannot produce a correct sum on a row is not timed. The row
-lists it under `skipped` with the reason. The fixed and planned Triton
-baselines are skipped when the longest segment exceeds their block. The
-pad-to-max baseline is skipped when padding does not fit the free device
-memory, and the row then records the bytes it would need.
+lists it under `skipped` with the reason. The fixed Triton sum and the
+one-block planned Triton sum are skipped when the longest segment exceeds
+their block; the looped sum and the planned sum with looping tasks run on
+every row. The pad-to-max baseline is skipped when padding does not fit the
+free device memory, and the row then records the bytes it would need.
 
 Triton is imported only when a harness runs. It is not a dependency of the
-project, and fresh offsets leaves the looped candidates out when Triton is
-not installed.
+project. Fresh offsets leaves the Triton candidates out when Triton is not
+installed, and fails when a Triton candidate was asked for by name.
+
+### Choosing candidates
+
+Both harnesses take `--candidates` and `--exclude-candidates`. A name
+selects one candidate, such as `triton_looped_b256_w4`, or a family, such as
+`triton_looped`. A name that matches nothing is rejected. In the comparison
+the filter applies to the segmented-sum suite.
+
+A candidate that the filter leaves out is not set up, launched, or checked.
+A row states what happened to every candidate:
+
+- `candidates` in fresh offsets and `candidate_order` in the comparison
+  list what was timed. Fresh offsets also records the order of every
+  iteration.
+- `excluded` lists what the filter left out.
+- `skipped` lists what the filter kept and the row could not run.
+
+The filter matters for more than run time. The pad-to-max candidate
+allocates and frees a large device buffer on every call, and the samples of
+the candidates that run after it carry part of that cost. A run that is not
+about padding should leave it out.
+
+### Warm step in fresh offsets
+
+Fresh offsets times its candidates in a new random order every iteration,
+so the candidate that ran before a sample changes from sample to sample.
+What that candidate leaves behind, in the host caches and in the idle state
+of the device, is paid by the next sample. The harness therefore precedes
+every sample with untimed calls of the same candidate on one warm layout:
+
+- The warm layout has its own seed, is distinct from every timed layout,
+  and is never timed or checked.
+- The warm calls write to their own output buffer, so a timed call that
+  writes nothing still fails the check.
+- The step is the same for every candidate: `--warm-calls` calls, each
+  followed by a synchronize. The default is 2, and 0 removes the step.
+
+The timed call still sees a layout that no earlier call used. With the
+step, every sample follows a call of its own candidate, which is the state
+of a loop that uses one method on a stream of new layouts. A step that does
+not depend on the candidate, a busy wait or a small fixed routine, was
+tried and did not remove the effect, which is why the step is a call of the
+candidate itself. The record states the number of warm calls and the seed
+of the warm layout.
+
+The step does not remove the need for the candidate filter: with the
+pad-to-max candidate in a run, the other candidates keep a wider spread.
 
 ### Options
 
@@ -95,6 +164,8 @@ device or a target: they run on the current CUDA device, which
 | `--seed`, `--seeds` | `--seed` seeds the first layout, the values, and the candidate orders. Layout `i` of a row uses `seed + i`. | `--seeds` runs one row per distribution and seed. |
 | `--values` | `quarters` (default) or `normal`. | `ones` (default), `quarters`, or `normal`. |
 | `--samples`, `--warmups` | Timed and untimed fresh layouts per row. | Timed samples and warmup launches per candidate and method. |
+| `--candidates`, `--exclude-candidates` | Candidates or families to time or to leave out. | The same, for the segmented-sum suite. |
+| `--warm-calls` | Untimed calls of a candidate before each of its samples. The default is 2. | Not offered: each candidate is warmed up and timed to completion. |
 
 A segment count is accepted when the largest total the distribution can
 reach fits signed 32-bit offsets. One million segments fit `bimodal`,
@@ -157,8 +228,9 @@ records `launches_per_sample`, `timer_tick_us`, and
 The other harnesses report the resolution and do not batch for it:
 
 - A fresh-offsets sample is one call on one fresh layout, because a second
-  call on the same layout would not be fresh. The row records the tick
-  fraction of each candidate.
+  call on the same layout would not be fresh. The warm calls before it run
+  on another layout and are not part of the sample. The row records the
+  tick fraction of each candidate.
 - A gate sample is one launch, as the gate declares. The record gives each
   median in ticks.
 - A composable-reductions graph sample is a fixed batch of 32 launches. Each
@@ -182,6 +254,8 @@ Every harness writes a `provenance` block:
 | `loaded_ptx` | Kernel name, SHA-256, and size of every PTX module the process loaded, taken when the module was loaded. |
 | `gpu_state_before`, `gpu_state_after` | `nvidia-smi` samples around the measurement: NVIDIA driver version, compute mode, performance state, temperature, power draw and limit, clocks, utilization, and the other compute processes on the device. |
 | `other_compute_process_seen` | True when a sample lists another compute process, false when both samples are empty, null when a sample could not be read. |
+| `cpu_frequency_before`, `cpu_frequency_after` | The number of CPUs under each frequency governor, read from `cpufreq/scaling_governor` of every CPU, with the scaling driver and the energy performance preference of the first CPU. A CPU whose file cannot be read counts under `unknown`. |
+| `cpu_governor_unchanged` | True when both samples read every CPU and agree, false when they differ, null when a CPU could not be read. The governor is read at the two ends of the run, not watched in between. |
 
 A fact that cannot be read is recorded as null with the reason and never
 fails the run, so an unreadable GPU is not reported as an exclusive one.
@@ -213,15 +287,47 @@ method, and candidate:
 
 - the median of each process,
 - the median, minimum, and maximum of those per-process medians,
-- the same three for the ratio to the reference candidate (`--reference`,
-  default `torch`), formed inside each process from its two medians,
+- the same three for the ratio to each reference candidate, formed inside
+  each process from its two medians,
 - the same three for the effective rate.
+
+`--reference` names the reference candidates, each by its full name. The
+default is `torch`. Naming a Triton configuration gives the ratio of every
+other candidate, Swage included, to that configuration:
+
+```bash
+python benchmarks/benchmark_processes.py \
+  --output-dir "$OUT/fresh-offsets-power-law" \
+  --reference torch triton_looped_b256_w4 \
+  -- benchmarks/benchmark_fresh_offsets.py --distributions power-law
+```
+
+A reference is never replaced by another one. A reference that no row
+timed is an error, raised after the first process so that the rest of the
+run is not spent. A row in which a reference was not timed, for example a
+row that skipped it, has no ratio against it and is listed under
+`reference_missing`.
+
+The references of interest are often known only after a run. `--summarize`
+reads the process records that a finished run left in a directory and
+writes a further summary against other references, without running
+anything:
+
+```bash
+python benchmarks/benchmark_processes.py \
+  --summarize "$OUT/fresh-offsets-power-law" \
+  --reference triton_planned_looped_b256_w4
+```
+
+The file is named `summary-<references>.json`, and an existing summary is
+never replaced.
 
 Every candidate is reported and none is selected. A candidate that only
 some processes timed is listed under `incomplete` and is not combined. The
 driver refuses to summarize processes that differ in revision, device,
-library versions, native library hashes, or loaded PTX hashes. It reads the
-records of the fresh-offsets and comparison harnesses.
+library versions, native library hashes, or loaded PTX hashes. It lists the
+GPU state and the CPU governor of every process. It reads the records of
+the fresh-offsets and comparison harnesses.
 
 Several seeds are several configurations: run the driver once per `--seed`
 for fresh offsets, or pass `--seeds` to the comparison.
