@@ -70,15 +70,18 @@ bindings are enabled against an incompatible install.
 - Documentation: fix incorrect boundaries before improving presentation. Run
   `make docs`, which checks the diagrams and figures, builds the site
   strictly, and checks its links, and `ruff check .`.
-- Public Python frontend: work under `python/swage/`. The accepted AST and API
-  are narrow fixed-vector-add contracts. Run the Python tier and native
-  binding integration when emission changes.
+- Public Python frontend: work under `python/swage/`. The accepted AST is a
+  narrow fixed-vector-add contract, and the public API adds two segmented
+  calls with fixed programs. Run the Python tier and native binding
+  integration when emission changes.
 - Native dialects and lowering: work under `include/swage/`, `lib/`, and
   `test/`. Run `ninja -C build check-swage`; run C++ or binding targets when
   their code changes.
-- Runtime: public execution remains canonical fixed vector add.
-  Segmented helpers are private qualification. Runtime changes require the
-  hosted tests and, where CUDA behavior changes, trusted GPU evidence.
+- Runtime: public execution is canonical fixed vector add and the two
+  segmented calls, `swage.segment_reduce` and `swage.segment_softmax`. The
+  helpers behind those calls are private qualification. Runtime changes
+  require the hosted tests and, where CUDA behavior changes, trusted GPU
+  evidence.
 - Benchmarks: preserve frozen inputs and gates, and never overwrite a record
   under `benchmarks/results/`. Prepare outside timing, except in a benchmark
   that deliberately times preparation to measure per-layout cost

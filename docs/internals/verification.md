@@ -4,7 +4,9 @@
 
 Status claims are grounded in executable tests and committed artifacts. This
 matrix identifies the smallest evidence source for each current boundary and
-does not turn private qualification into public API.
+does not turn private qualification into public API. The two public
+segmented calls have rows of their own; the private rows below them cover
+the paths the calls run through.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -23,6 +25,9 @@ does not turn private qualification into public API.
 | Native `swage` dialect parsing, verification, and declared segment-read effects | Public today, compile-only | `test/Dialect/Swage`, including `effects.mlir` | `ninja -C build check-swage` |
 | Fixed vector-add lowering and CUDA launch | Public today | `test/Conversion/SwageToGPU`, `python/tests/mlir/test_runtime.py`, `python/tests/mlir/test_cache_process_reuse.py` | `ninja -C build check-swage`; trusted GPU workflow |
 | Launch validation, the PyTorch floor, and the cache bound, read-only mode, and no-compile mode | Public today | `tests/python/test_runtime.py`, `python/tests/mlir/test_runtime.py` | `python -m pytest tests/python/test_runtime.py -q`; trusted GPU workflow |
+| Public segmented calls: names and signatures, the checks that need no native build, the PyTorch floor, and the wheel-only error | Public today | `tests/python/test_segments.py` | `python -m pytest tests/python/test_segments.py -q` |
+| Public segmented calls: argument and offsets validation on host tensors | Public today | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU | `ninja -C build check-swage-python` |
+| Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, and special values; the schedule of a public sum; `out`; graph capture, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
 | Compile-only PTX emission for every admitted processor, public and private kernels | Public today, compile-only; private qualification | `python/tests/mlir/test_target_compile.py` | `ninja -C build check-swage-python` |
 | Loaded-module lifetime, in-process cache bounds, cold-path locking, and the context and overlap guards of prepared launches | Public today; private qualification | `python/tests/mlir/test_module_lifetime.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | C API contract: code generation entry points, failure reporting, and dialect handles | Compiler-facing, not public API | `unittests/CodegenCAPITest.cpp`, `unittests/DialectsCAPITest.cpp` | `ninja -C build check-swage-unit` |
@@ -36,7 +41,7 @@ does not turn private qualification into public API.
 | Composable split sum/max, ordering, failures, and f32 parity | Private qualification | `unittests/TaskClassifierTest.cpp`, `test/Conversion/SwageToGPU/split-partial.mlir`, `split-merge.mlir`, and `invalid-split.mlir`, `python/tests/mlir/test_segmented_runtime.py` | `ninja -C build check-swage`; `ninja -C build check-swage-unit`; trusted GPU workflow |
 | Persistent claims, fenced split completion, poisoned scratch, graph replay, randomized plans, and failure paths | Experimental; predeclared performance gate failed | `test/Conversion/SwageToGPU/persistent.mlir` and `invalid-persistent.mlir`, `python/tests/mlir/test_segmented_codegen.py`, `python/tests/mlir/test_segmented_runtime.py`, `python/tests/mlir/test_persistent_runtime.py`, `benchmarks/results/persistent-sum-a6000-sm86.json` | `ninja -C build check-swage`; `ninja -C build check-swage-python`; trusted GPU workflow after merge |
 | Recorded RTX 5090 performance snapshot | Recorded evidence | `benchmarks/results/perf-5090-sm120.json` | Not re-executable in CI |
-| Public segmented syntax and execution | Planned | No executable public contract | No passing gate yet |
+| Public segment syntax, and public launch of a segment program that the caller writes | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |
 
 The sequential CPU oracle transports each f32 result as its exact bit
@@ -69,6 +74,24 @@ trees, the bound, and how to pin a schedule.
 [Ragged Softmax](ragged-softmax.md#accuracy) states the softmax bound and
 the measured errors. All device measurements are from the RTX A6000
 (`sm_86`); no other GPU has run them.
+
+The public segmented calls have these checks in
+`python/tests/mlir/test_public_segments.py`, on the RTX A6000 (`sm_86`):
+
+- Differential results: sums stay within `k * eps32 * sum(|x|)` of a
+  float64 reference and maxima equal `torch.segment_reduce` exactly, on
+  seeded batches with the length shape of each of the nine benchmark
+  distributions, and on single segments of 100,003 and 1,048,577 elements.
+  Softmax outputs stay within the relative bound of
+  [Ragged Softmax](ragged-softmax.md#accuracy) against float64
+  `torch.softmax`.
+- Schedule: a public sum equals the private `mixed` launch with default
+  limits and automatic selection bit for bit, and its bits change between
+  two batch sizes around the SM count of the device.
+- Resource use: 300 calls with offsets not seen before load no module,
+  unload none, never synchronize the context, compile nothing, create and
+  destroy one CUDA event per reduction, leave device memory where it was,
+  and leave nothing for the cycle collector.
 
 The trusted GPU workflow runs only on `main` through the self-hosted
 `swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every

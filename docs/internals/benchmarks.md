@@ -61,6 +61,10 @@ The fresh-offsets harness and the comparison harness time these candidates:
 
 - The private planned Swage sum. Fresh offsets times the mixed policy with
   its preparation. The comparison times the warp, CTA, and mixed policies.
+  The public `swage.segment_reduce` prepares and launches the mixed policy
+  on every call, with automatic schedule selection, which the fresh-offsets
+  candidate disables. No harness times the public call itself, and no
+  committed record holds a fresh-offsets result.
 - `torch.segment_reduce` on the device offsets, with its output allocation.
 - A pad-to-max baseline in pure PyTorch: every segment is padded with zeros
   to the longest one, and the masked matrix is summed per row. Fresh offsets

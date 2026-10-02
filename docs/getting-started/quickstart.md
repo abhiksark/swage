@@ -3,15 +3,17 @@
 # Quickstart
 
 This tutorial takes the canonical fixed vector-add kernel from source
-capture to a verified CUDA result. Capture and the kernel-language check
-work on a wheel-only install, emitting MLIR requires the native build, and
-the launch at the end requires a CUDA GPU. Two committed scripts follow the
-same steps.
+capture to a verified CUDA result, and then reduces a ragged batch with the
+two segmented calls. Capture and the kernel-language check work on a
+wheel-only install, emitting MLIR requires the native build, and the launch
+and the segmented calls require a CUDA GPU. Three committed scripts follow
+the same steps.
 `examples/emit_fixed_vector_add.py` stops after emission, so it runs with
 the native build alone and needs no GPU and no PyTorch.
 [`examples/fixed_vector_add.py`](https://github.com/abhiksark/swage/blob/main/examples/fixed_vector_add.py)
-runs the whole walkthrough, using metadata inference in place of the
-explicit signature, and needs a CUDA GPU.
+runs the kernel walkthrough, using metadata inference in place of the
+explicit signature, and needs a CUDA GPU. `examples/segment_reduce.py` runs
+the segmented calls and needs a CUDA GPU.
 
 Python source crosses a restricted AST validation boundary before becoming
 verified semantic MLIR. From that point, `emit_mlir()` stops with a
@@ -134,6 +136,45 @@ The launch validates its complete host-visible boundary first, compiles
 in process, and enqueues asynchronously on the current PyTorch stream.
 The exact rules live in
 [Runtime and Environment](../reference/runtime-environment.md).
+
+## Reduce segments on CUDA
+
+Ragged data needs no kernel of your own. Two functions run fixed programs
+over a values tensor and the offsets that divide it into segments (CUDA GPU
+tier):
+
+```python
+import swage
+
+# Six values in four segments: [1, 2], [], [3, 4, 5], and [6].
+values = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], device="cuda")
+offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
+
+totals = swage.segment_reduce(values, offsets, "sum")
+maxima = swage.segment_reduce(values, offsets, "max")
+weights = swage.segment_softmax(values, offsets)
+
+print(totals.tolist())  # [3.0, 0.0, 12.0, 6.0]
+print(maxima.tolist())  # [2.0, -inf, 5.0, 6.0]
+```
+
+`weights` holds the softmax of each segment at the positions of its
+values. The empty second segment sums to `0.0`, has a maximum of negative
+infinity, and has no softmax element.
+
+Each call validates and classifies its offsets on the host before it
+launches, every time, so it costs more than its kernels. With offsets that
+change on every call, expect it to be slower than `torch.segment_reduce`.
+The values are rank-one `torch.float32`, the offsets are `torch.int32`, and
+the calls record no gradient.
+[Segmented Calls](../user-guide/segmented-calls.md) states the whole
+contract, including the cost and the cases a call refuses.
+
+The committed example runs the same calls and compares them with PyTorch:
+
+```bash
+PYTHONPATH=build/python_packages python examples/segment_reduce.py
+```
 
 ## Inspect compiler artifacts
 

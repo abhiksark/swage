@@ -30,8 +30,15 @@ M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 The private static paths now also support capture-free, single-stage f32
 sum/max element programs and map chains across warp, CTA, mixed, and split
 execution (ADR-0019). This composition extension leaves the historical gates
-and frozen benchmark unchanged. Captured stages, split softmax, general cost
-inference, and public segmented execution remain follow-up work.
+and frozen benchmark unchanged.
+
+The phrase "no public segmented launch" in the M7 and M8 rows records the
+boundary at those gates. Since then two public calls, `swage.segment_reduce`
+for sum and max and `swage.segment_softmax`, run fixed f32 programs through
+the M4 to M8 paths with default limits. They belong to no phase gate above
+and are not part of a release yet. Captured stages, split softmax, general
+cost inference, public segment syntax, and public execution of
+caller-written segment programs remain follow-up work.
 
 Tracked as GitHub milestones; per-phase issues carry the detailed
 acceptance criteria.

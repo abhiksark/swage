@@ -3,15 +3,17 @@
 # swage
 
 The public API is intentionally small. The `swage` package exports `jit`,
-`CompilationError`, and `__version__`; captured kernels expose
-`emit_mlir()` and `launch()`; `swage.env` reports the environment.
-Segmented Python syntax and segmented launch are not public.
+`CompilationError`, `segment_reduce`, `segment_softmax`, and `__version__`;
+captured kernels expose `emit_mlir()` and `launch()`; `swage.env` reports
+the environment. The two segmented calls run fixed programs. Segmented
+Python syntax is not public, and neither are the prepared launches, the
+scheduling policies, and the planning limits of the runner behind the calls.
 
 Compile-only emission and execution require the build-tree `mlir_swage`
 package from [Installation](../getting-started/installation.md). On its own
 the pure Python package captures kernels, checks a kernel against the kernel
 language, and reports the environment. That page lists what the released
-`0.5.1` wheel lacks.
+`0.5.1` wheel lacks, which includes the two segmented calls.
 
 ## swage.jit
 
@@ -173,8 +175,117 @@ The PyTorch check runs first and validation second, both before any kernel
 is compiled or enqueued. Validation, target admission, zero-work, cache,
 stream, retention, and module-lifetime rules are normative in
 [Runtime and Environment](runtime-environment.md). There is no public
-`emit_ptx()` method, no CPU execution fallback, and no public segmented
-launch.
+`emit_ptx()` method and no CPU execution fallback, and `launch()` runs no
+segmented kernel.
+
+## swage.segment_reduce
+
+```python
+swage.segment_reduce(values, offsets, kind, *, out=None)
+```
+
+Reduce every segment of `values` to one f32 result on the GPU. Segment `i`
+is `values[offsets[i]:offsets[i + 1]]`. The call validates its tensors,
+copies the offsets to the host to validate and classify them, enqueues its
+kernels on the current PyTorch CUDA stream, and returns without waiting for
+them. Every call repeats the host work.
+
+Parameters
+:   `values`: a contiguous rank-one `torch.float32` CUDA tensor on the
+    current device. It must not require grad and must not be a lazy
+    negation or conjugate view.
+:   `offsets`: a contiguous rank-one `torch.int32` tensor on the same
+    device with one entry more than there are segments. It starts at zero,
+    never decreases, and ends at or below the number of values. Values past
+    the final offset belong to no segment. It must not be an inference
+    tensor.
+:   `kind`: `"sum"` or `"max"`. The sum of an empty segment is `0.0` and
+    its maximum is negative infinity. A maximum over a NaN is NaN. A sum
+    follows IEEE-754 addition, and its rounding depends on the schedule the
+    call selects. No argument pins the schedule.
+:   `out`: an optional result tensor, keyword-only. A contiguous rank-one
+    `torch.float32` tensor on the device of `values` with exactly one
+    element per segment, which shares no memory with `values` or `offsets`,
+    does not require grad, and is not a lazy view. It is never resized.
+
+Returns
+:   `out`, or a new `torch.float32` tensor on the device of `values` when
+    `out` is `None`, with one element per segment. The kernels that write
+    it are enqueued and may not have finished. Submitted tensors are
+    retained through `record_stream()`, and the version counter of the
+    result is advanced.
+
+Raises
+:   `TypeError`: an argument is not a tensor, or a tensor has the wrong
+    dtype, rank, or device type.
+:   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
+    is a lazy view, requires grad, or is on another device; offsets that
+    are an inference tensor or break the offsets contract; an `out` of the
+    wrong size or one that overlaps an input.
+:   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
+    native bindings, unavailable CUDA, a current stream that is capturing a
+    CUDA graph, a kernel that the process does not hold while
+    `SWAGE_NO_COMPILE=1` is set, or a runtime driver failure.
+
+The checks run in this order: the PyTorch check, `kind`, the tensor type of
+`values` and `offsets` and the grad state of `values`, `out`, the native
+bindings, CUDA graph capture, the inference state of `offsets`, and then
+the shared validation of dtype, rank, layout, offsets, and device. All of
+them precede the first enqueue.
+
+Example
+
+```python
+values = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], device="cuda")
+offsets = torch.tensor([0, 2, 2, 5, 6], dtype=torch.int32, device="cuda")
+
+totals = swage.segment_reduce(values, offsets, "sum")  # [3, 0, 12, 6]
+maxima = swage.segment_reduce(values, offsets, "max")  # [2, -inf, 5, 6]
+```
+
+Related: [Segmented Calls](../user-guide/segmented-calls.md),
+[Ragged Data](../user-guide/ragged-data.md#the-offsets-contract),
+[Runtime and Environment](runtime-environment.md#segmented-calls).
+
+## swage.segment_softmax
+
+```python
+swage.segment_softmax(values, offsets, *, out=None)
+```
+
+Apply a softmax within every segment of `values` on the GPU. The result
+holds the softmax of each segment at the positions of its values. The call
+validates its tensors, copies the offsets to the host to validate them,
+enqueues one kernel on the current PyTorch CUDA stream, and returns without
+waiting for it.
+
+Parameters
+:   `values`: as for `segment_reduce`.
+:   `offsets`: as for `segment_reduce`, with two differences. The final
+    offset must equal the number of values, so that every value belongs to
+    a segment. An inference tensor is accepted.
+:   `out`: as for `segment_reduce`, with exactly one element per value.
+
+Returns
+:   `out`, or a new `torch.float32` tensor on the device of `values` when
+    `out` is `None`, with one element per value. An empty segment has no
+    result element. A segment that holds a NaN or a positive infinity, or
+    only negative infinities, gives NaN for each of its elements. The
+    version counter of the result is advanced when a kernel is enqueued.
+
+Raises
+:   The exceptions of `segment_reduce`, without the `kind` and the
+    inference-tensor errors. Offsets that end below the number of values
+    raise a `ValueError`.
+
+Example
+
+```python
+weights = swage.segment_softmax(values, offsets)
+```
+
+Related: [Segmented Calls](../user-guide/segmented-calls.md),
+[Ragged Softmax](../internals/ragged-softmax.md#accuracy).
 
 ## swage.CompilationError
 
@@ -192,15 +303,17 @@ The public surface uses four exception classes:
 
 - `CompilationError` reports a source-located failure at capture, in the
   inputs of `emit_mlir()`, or in a kernel outside the kernel language.
-- `TypeError` reports launch inputs with the wrong container, tensor,
-  dtype, rank, or ABI category.
+- `TypeError` reports launch and segmented-call inputs with the wrong
+  container, tensor, dtype, rank, or ABI category.
 - `ValueError` reports invalid launch values, geometry, device placement,
   lazy views, tensors that require grad, overlapping buffers, native
-  compiler admission, or a cache variable with an undocumented value.
+  compiler admission, a cache variable with an undocumented value, an
+  unsupported reduction kind, and offsets outside the offsets contract.
 - `RuntimeError` reports direct kernel calls, symbolic language calls
   outside a captured kernel, missing native bindings, a missing or
   unsupported PyTorch for launch, unavailable CUDA, a refused compile under
-  `SWAGE_NO_COMPILE=1`, and runtime driver or cache failures.
+  `SWAGE_NO_COMPILE=1`, a segmented call under CUDA graph capture, and
+  runtime driver or cache failures.
 
 ## swage.\_\_version\_\_
 

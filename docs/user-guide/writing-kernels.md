@@ -2,9 +2,9 @@
 
 # Writing Kernels
 
-[Ragged Data](ragged-data.md) described segments, which only private
-qualification executes. This page leaves them aside: the public kernel
-language has no segment syntax, and the one kernel that can be launched is a
+[Segmented Calls](segmented-calls.md) ran two fixed programs over segments.
+This page leaves segments aside: the public kernel language has no segment
+syntax, and the one kernel that can be written and launched is a
 fixed-block vector add.
 
 A Swage kernel is ordinary-looking Python that is captured, never

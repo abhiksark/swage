@@ -65,6 +65,7 @@ nav:
   - User guide:
       - user-guide/index.md
       - Ragged Data: user-guide/ragged-data.md
+      - Segmented Calls: user-guide/segmented-calls.md
       - Writing Kernels: user-guide/writing-kernels.md
       - Launching Kernels: user-guide/launching.md
       - Execution Model: user-guide/execution-model.md
