@@ -101,20 +101,43 @@ def _llvm_pin() -> str | None:
 
 
 def _native_info() -> dict:
-    """Probe the build-tree bindings, degrading gracefully without them.
+    """Probe the native bindings, degrading gracefully without them.
 
     The probe runs only when a report is requested, never when `swage` is
     imported, so the pure-Python package keeps working without `mlir_swage`.
+
+    Returns:
+        `available`, whether the bindings load and match this `swage`;
+        `problem`, why bindings that load are refused, or None; `version`
+        and `revision`, the `swage` version and source revision the
+        bindings were built from; `llvm_linked`; and `file`, the path of
+        the loaded extension. Unknown values are None.
     """
+    missing = {
+        "available": False,
+        "problem": None,
+        "version": None,
+        "revision": None,
+        "llvm_linked": None,
+        "file": None,
+    }
+    from . import _runtime
+
     try:
+        native_swage = _runtime._native_bindings()
         extension = importlib.import_module(_NATIVE_EXTENSION)
-        native_swage = extension.swage
+    except _runtime._BindingsMismatch as error:
+        return {**missing, "problem": str(error)}
     except Exception:
-        # Any failure to load the bindings, not only a missing package, is
-        # an unavailable backend; the report must describe it, not raise.
-        return {"available": False, "llvm_linked": None, "file": None}
+        # Any other failure to load the bindings, not only a missing
+        # package, is an unavailable backend; the report must describe it,
+        # not raise.
+        return missing
     return {
         "available": True,
+        "problem": None,
+        "version": getattr(native_swage, "__version__", None),
+        "revision": getattr(native_swage, "__source_revision__", None),
         "llvm_linked": getattr(native_swage, "__llvm_version__", None),
         # `mlir_swage` is a namespace package with no file of its own, so
         # the loaded extension is what identifies the build.
@@ -124,8 +147,10 @@ def _native_info() -> dict:
 
 def _mlir_backend(native: dict) -> str:
     """Describe the MLIR backend from the native binding probe."""
+    if native["problem"] is not None:
+        return f"rejected ({native['problem']})"
     if not native["available"]:
-        return "unavailable (build-tree mlir_swage bindings not importable)"
+        return "unavailable (mlir_swage bindings not importable)"
     return f"available (linked LLVM {native['llvm_linked'] or 'unknown'})"
 
 
@@ -211,6 +236,8 @@ def report() -> dict:
         "target": info["target"],
         "llvm_pin": _llvm_pin(),
         "llvm_linked": native["llvm_linked"],
+        "native_version": native["version"],
+        "native_revision": native["revision"],
         "mlir_swage_file": native["file"],
         "backends": {"mlir": _mlir_backend(native)},
         **_cache_info(),

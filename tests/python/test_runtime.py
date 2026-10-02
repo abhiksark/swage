@@ -3,6 +3,7 @@
 
 import ctypes
 import gc
+import hashlib
 import json
 import multiprocessing
 import os
@@ -2213,7 +2214,6 @@ def test_compiler_key_contains_every_specialization_input(monkeypatch):
         "frontend": "f" * 64,
         "native": [["_swageDialectsNanobind.so", 1, 2]],
         "dialect_version": 1,
-        "llvm_version": "llvmorg-test",
     }
     assert len(data["source"]) == 64
     assert _runtime._cache_key(data) == _runtime._cache_key(data)
@@ -2844,7 +2844,7 @@ def test_identity_changed_during_a_compile_is_not_published(
         if changed == "frontend":
             (package / "_frontend.py").write_text("LOWERING = 2\n")
         else:
-            os.utime(versioned, ns=(1_000, 3_000))
+            versioned.write_bytes(b"another library")
         return "lowered", "ptx from the compiler that was loaded"
 
     monkeypatch.setattr(
@@ -2905,7 +2905,7 @@ def _fake_bindings(tmp_path, monkeypatch):
 def test_native_identity_describes_the_compiler_libraries(
     tmp_path, monkeypatch
 ):
-    """Identify the native compiler by name, size, and modification time."""
+    """Identify the native compiler by the contents of its libraries."""
     from swage import _runtime
 
     extension, versioned, names = _fake_bindings(tmp_path, monkeypatch)
@@ -2913,22 +2913,26 @@ def test_native_identity_describes_the_compiler_libraries(
     identity = _runtime._native_identity()
 
     assert names == ["mlir_swage._mlir_libs"]
+    # The symlink counts once, as the library it leads to.
     assert identity == [
-        [extension.name, 9, 2_000],
-        ["libSwagePythonCAPI.so", 16, 2_000],
-        [versioned.name, 16, 2_000],
+        [extension.name, f"sha256:{_sha256(b'extension')}"],
+        [versioned.name, f"sha256:{_sha256(b'compiler library')}"],
     ]
     os.utime(versioned, ns=(1_000, 3_000))
-    relinked = _runtime._native_identity()
-    assert relinked != identity
-    assert relinked[0] == identity[0]
-    os.utime(versioned, ns=(1_000, 2_000))
-    extension.write_bytes(b"new extension")
+    assert _runtime._native_identity() == identity
+    extension.write_bytes(b"EXTENSION")
     os.utime(extension, ns=(1_000, 2_000))
-    assert _runtime._native_identity()[0] == [extension.name, 13, 2_000]
+    relinked = _runtime._native_identity()
+    assert relinked[0] == [extension.name, f"sha256:{_sha256(b'EXTENSION')}"]
+    assert relinked[1] == identity[1]
 
     extension.unlink()
     assert _runtime._native_identity() is None
+
+
+def _sha256(contents):
+    """Return the SHA-256 hex digest of `contents`."""
+    return hashlib.sha256(contents).hexdigest()
 
 
 @pytest.mark.parametrize("fake", [None, types.ModuleType("mlir_swage")])
@@ -3386,8 +3390,11 @@ def test_driver_prefers_the_native_launcher_when_available(monkeypatch):
     calls = []
     native = types.ModuleType("_swageDialectsNanobind")
     native.swage = types.SimpleNamespace(
-        _launch_kernel=lambda *arguments: calls.append(arguments)
+        __version__=sw.__version__,
+        __source_revision__="unknown",
+        _launch_kernel=lambda *arguments: calls.append(arguments),
     )
+    monkeypatch.setattr(_runtime, "_verified_bindings", None)
     libs = types.ModuleType("mlir_swage._mlir_libs")
     libs._swageDialectsNanobind = native
     monkeypatch.setitem(sys.modules, "mlir_swage._mlir_libs", libs)

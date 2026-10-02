@@ -50,9 +50,30 @@ def _subprocess_environment(tmp_path, **overrides):
 
 
 def _install_fake_bindings(monkeypatch, **native_attributes):
-    """Place a fake build-tree `mlir_swage` package in `sys.modules`."""
+    """Place a fake `mlir_swage` package built for this `swage` in place.
+
+    Args:
+        monkeypatch: The pytest fixture that undoes the installation.
+        **native_attributes: Attributes of the native `swage` module. They
+            replace the build identity the fake records by default; a value
+            of None leaves the attribute out.
+    """
+    from swage import _runtime
+
+    attributes = {
+        "__version__": swage.__version__,
+        "__source_revision__": "unknown",
+        **native_attributes,
+    }
     package, libs, native = (types.ModuleType(name) for name in _NATIVE_MODULES)
-    native.swage = types.SimpleNamespace(**native_attributes)
+    native.swage = types.SimpleNamespace(
+        **{
+            name: value
+            for name, value in attributes.items()
+            if value is not None
+        }
+    )
+    monkeypatch.setattr(_runtime, "_verified_bindings", None)
     libs._swageDialectsNanobind = native
     package._mlir_libs = libs
     for name, module in zip(_NATIVE_MODULES, (package, libs, native)):
@@ -126,6 +147,8 @@ def test_report_keys():
         "gpu",
         "llvm_pin",
         "llvm_linked",
+        "native_version",
+        "native_revision",
         "revision",
         "backends",
         "swage_file",
@@ -364,9 +387,11 @@ def test_report_says_unavailable_without_the_bindings(monkeypatch):
     result = env.report()
 
     assert result["backends"]["mlir"] == (
-        "unavailable (build-tree mlir_swage bindings not importable)"
+        "unavailable (mlir_swage bindings not importable)"
     )
     assert result["llvm_linked"] is None
+    assert result["native_version"] is None
+    assert result["native_revision"] is None
 
 
 def test_report_says_unavailable_when_the_bindings_fail_to_load(monkeypatch):
@@ -387,17 +412,45 @@ def test_report_says_unavailable_when_the_bindings_fail_to_load(monkeypatch):
 
 
 def test_report_says_available_with_the_bindings(monkeypatch):
-    """An importable `mlir_swage` reports the LLVM it was linked against."""
-    _install_fake_bindings(monkeypatch, __llvm_version__="22.1.8")
+    """Matching bindings report what they were built from and linked."""
+    _install_fake_bindings(
+        monkeypatch,
+        __llvm_version__="22.1.8",
+        __source_revision__=f"{_REVISION}-dirty",
+    )
 
     result = env.report()
 
     assert result["backends"]["mlir"] == "available (linked LLVM 22.1.8)"
+    assert result["native_version"] == swage.__version__
+    assert result["native_revision"] == f"{_REVISION}-dirty"
     assert result["llvm_linked"] == "22.1.8"
 
 
+@pytest.mark.parametrize(
+    ("built_for", "reason"),
+    [("0.0.1", "were built for swage 0.0.1"), (None, "record no swage")],
+)
+def test_report_names_bindings_built_for_another_swage(
+    monkeypatch, built_for, reason
+):
+    """Bindings that `swage` refuses are reported as rejected, not raised."""
+    _install_fake_bindings(
+        monkeypatch, __version__=built_for, __llvm_version__="22.1.8"
+    )
+
+    result = env.report()
+
+    assert result["backends"]["mlir"].startswith("rejected (")
+    assert reason in result["backends"]["mlir"]
+    assert swage.__version__ in result["backends"]["mlir"]
+    assert result["native_version"] is None
+    assert result["llvm_linked"] is None
+    assert result["mlir_swage_file"] is None
+
+
 def test_report_does_not_guess_the_llvm_of_unversioned_bindings(monkeypatch):
-    """Bindings built before the version attribute report no linked LLVM."""
+    """Bindings that record no LLVM version report no linked LLVM."""
     _install_fake_bindings(monkeypatch)
 
     result = env.report()
@@ -520,6 +573,6 @@ def test_module_entrypoint_without_optional_components(tmp_path):
         proc.stdout
     )
     assert (
-        "backends: {'mlir': 'unavailable (build-tree mlir_swage bindings "
-        "not importable)'}"
+        "backends: {'mlir': 'unavailable (mlir_swage bindings not "
+        "importable)'}"
     ) in proc.stdout
