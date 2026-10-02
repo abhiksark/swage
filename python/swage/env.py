@@ -135,7 +135,8 @@ def _revision() -> str | None:
     Returns:
         The abbreviated commit hash, with `-dirty` appended when tracked
         files differ from it, or `None` when the package is not running
-        from an identifiable git checkout.
+        from an identifiable Swage git checkout. A copy of the package
+        inside another repository has no revision.
     """
     try:
         from . import _runtime

@@ -3188,6 +3188,114 @@ def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
     assert _runtime._cached_identity() == fake
 
 
+def _git(root, *arguments):
+    """Run git in `root` with an identity that needs no user configuration."""
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Swage Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            *arguments,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _committed_package(repository, package, *, pin):
+    """Commit a `swage` package at `package` inside a new git repository.
+
+    Args:
+        repository: Directory that becomes the root of the repository.
+        package: Path of the package below `repository`.
+        pin: Directory below `repository` that receives
+            `cmake/llvm-version.txt`, or None for no pin file.
+
+    Returns:
+        The package directory and the HEAD of the repository.
+    """
+    directory = repository / package
+    directory.mkdir(parents=True)
+    (directory / "__init__.py").write_text("VERSION = 1\n")
+    if pin is not None:
+        (repository / pin / "cmake").mkdir(parents=True)
+        (repository / pin / "cmake" / "llvm-version.txt").write_text(
+            "llvmorg-test\n"
+        )
+    _git(repository, "init", "--quiet")
+    _git(repository, "add", "--all")
+    _git(repository, "commit", "--quiet", "--message", "initial")
+    return directory, _git(repository, "rev-parse", "HEAD")
+
+
+def _identity_of(monkeypatch, package):
+    """Return the compiler identity of a package at `package`."""
+    from swage import _runtime
+
+    monkeypatch.setattr(_runtime, "_package_dir", lambda: package)
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: None)
+    return _runtime._compiler_identity()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_revision_names_the_swage_checkout_of_the_package(
+    tmp_path, monkeypatch
+):
+    """Report HEAD for `python/swage` of a checkout that holds the pin."""
+    package, head = _committed_package(
+        tmp_path, pathlib.Path("python", "swage"), pin="."
+    )
+
+    clean = _identity_of(monkeypatch, package)
+    (package / "__init__.py").write_text("VERSION = 2\n")
+    dirty = _identity_of(monkeypatch, package)
+
+    assert (clean["revision"], clean["clean"]) == (head, True)
+    assert (dirty["revision"], dirty["clean"]) == (head, False)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+@pytest.mark.parametrize(
+    ("package", "pin"),
+    [
+        pytest.param(("src", "swage"), None, id="vendored-under-src"),
+        pytest.param(("src", "swage"), ".", id="vendored-beside-a-pin"),
+        pytest.param(("python", "swage"), None, id="layout-without-pin"),
+        pytest.param(("python", "other"), ".", id="another-package-name"),
+        pytest.param(
+            ("vendor", "swage", "python", "swage"),
+            "vendor/swage",
+            id="whole-tree-vendored",
+        ),
+    ],
+)
+def test_revision_is_absent_for_a_package_in_another_repository(
+    tmp_path, monkeypatch, package, pin
+):
+    """Do not report the HEAD of a repository that is not Swage's own.
+
+    A copy of the package vendored into an application repository sits
+    under that repository's root. Its HEAD is the application's commit and
+    would name the wrong project in a bug report.
+    """
+    directory, head = _committed_package(
+        tmp_path, pathlib.Path(*package), pin=pin
+    )
+
+    identity = _identity_of(monkeypatch, directory)
+
+    assert len(head) == 40
+    assert (identity["revision"], identity["clean"]) == (None, False)
+
+
 def test_warm_launch_emits_mlir_only_once(monkeypatch):
     """Skip AST-to-MLIR emission entirely on a specialization-cache hit."""
     from swage import _runtime

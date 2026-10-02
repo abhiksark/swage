@@ -827,14 +827,29 @@ def _git_identity(root):
     return revision, not dirty
 
 
+def _is_swage_checkout(root, package):
+    """Return whether `root` is a Swage source tree that owns `package`.
+
+    The package two directories below a git root is Swage's own copy only
+    when it is `python/swage` and the root also holds the LLVM pin. A copy
+    vendored into another repository, for example at `src/swage`, sits
+    under a root whose HEAD is a commit of that repository, not of Swage.
+    """
+    return (
+        package == root / "python" / "swage"
+        and (root / "cmake" / "llvm-version.txt").is_file()
+    )
+
+
 def _compiler_identity():
     """Identify the compiler files this process finds on disk.
 
     `frontend` and `native` identify the code that produces PTX and are the
     compiler fields of the cache key. They describe the files as they are
     now; `_stale_identity` decides whether that is the code this process
-    loaded. `revision` and `clean` describe the surrounding git checkout
-    for diagnostics; they do not gate the cache.
+    loaded. `revision` and `clean` describe the Swage git checkout that the
+    package belongs to, for diagnostics; they do not gate the cache, and
+    they are unavailable for a package inside any other repository.
 
     Returns:
         A dict with the keys `revision`, `clean`, `llvm`, `frontend`, and
@@ -843,7 +858,9 @@ def _compiler_identity():
     package = _package_dir()
     root = package.parents[1]
     pin = root / "cmake" / "llvm-version.txt"
-    revision, clean = _git_identity(root)
+    revision, clean = None, False
+    if _is_swage_checkout(root, package):
+        revision, clean = _git_identity(root)
     return {
         "revision": revision,
         "clean": clean,

@@ -477,9 +477,12 @@ compile_on_miss: allowed
 
 Five fields identify the code and the native build:
 
-- `revision` is the abbreviated git HEAD of the checkout that `swage` was
-  imported from, with `-dirty` appended when tracked files are modified. It
-  is `None` outside a git checkout, for example in a wheel install.
+- `revision` is the abbreviated git HEAD of the Swage checkout that `swage`
+  was imported from, with `-dirty` appended when tracked files are
+  modified. It is reported only when the package is the `python/swage`
+  directory of a git checkout that also holds `cmake/llvm-version.txt`.
+  Otherwise it is `None`: in a wheel install, and for a copy of the package
+  vendored inside another repository, whose HEAD is not a Swage commit.
 - `swage_file` is the `__init__.py` that `swage` was imported from. It
   tells two checkouts, or a checkout and a wheel install, apart.
 - `llvm_linked` is the LLVM version compiled into the `mlir_swage` extension.
