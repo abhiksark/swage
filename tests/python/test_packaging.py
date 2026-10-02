@@ -32,6 +32,7 @@ _PACKAGE_FILES = {
     "swage/_frontend.py",
     "swage/_runtime.py",
     "swage/_segmented_qualification.py",
+    "swage/_segments.py",
     "swage/env.py",
     "swage/language.py",
 }
