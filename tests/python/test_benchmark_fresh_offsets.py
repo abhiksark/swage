@@ -1416,6 +1416,24 @@ def test_without_warm_calls_every_call_is_a_timed_call(fresh_offsets):
     ]
 
 
+def test_the_warm_layout_exists_only_with_a_warm_step(fresh_offsets):
+    """Size pad-to-max by the layouts a run really uses."""
+    torch = pytest.importorskip("torch")
+    # At seed 6 the fourth bimodal layout has the longest segment.
+    pool = fresh_offsets._layout_pool("bimodal", 64, 4, 6)
+    timed_longest = max(max(layout.lengths) for layout in pool[:3])
+    warm_longest = max(pool[3].lengths)
+    assert warm_longest > timed_longest
+
+    options = {"seed": 6, "only": ["torch", "torch_pad_to_max"]}
+    without = _run(fresh_offsets, torch, "bimodal", warm_calls=0, **options)
+    warmed = _run(fresh_offsets, torch, "bimodal", warm_calls=1, **options)
+
+    assert without["pad_to_max"]["longest_segment"] == timed_longest
+    assert warmed["pad_to_max"]["longest_segment"] == warm_longest
+    assert warmed["warm_layout_seed"] == 6 + 3
+
+
 def test_a_warm_call_cannot_stand_in_for_an_unwritten_timed_result(
     fresh_offsets,
 ):
@@ -1535,6 +1553,8 @@ def test_one_block_planned_triton_is_skipped_by_the_longest_pool_segment(
 
     assert row["candidates"] == ["torch", "triton_planned_looped_b256_w4"]
     assert set(row["skipped"]) == {"triton_planned"}
+    # Skipped, not excluded: the filter asked for it.
+    assert "triton_planned_w1" not in row["excluded"]
     assert "4096" in row["skipped"]["triton_planned"]
     assert str(row["pad_to_max"]["longest_segment"]) in (
         row["skipped"]["triton_planned"]

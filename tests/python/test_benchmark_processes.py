@@ -401,6 +401,30 @@ def test_a_reference_missing_from_a_row_is_listed_not_defaulted(processes):
     assert missing == {"torch_pad_to_max": {"power-law": ["end_to_end"]}}
 
 
+def test_a_reference_that_one_process_did_not_time_gives_no_ratio(
+    processes,
+):
+    """Pair a ratio inside every process or not at all."""
+    records = [
+        _fresh_record(100.0, 10.0, pad=400.0),
+        _fresh_record(100.0, 10.0),
+        _fresh_record(100.0, 10.0, pad=500.0),
+    ]
+
+    rows, incomplete, missing = processes._summarize(
+        [processes._series(record) for record in records],
+        ["torch_pad_to_max"],
+    )
+
+    assert "ratio_to_torch_pad_to_max" not in (
+        rows["power-law"]["end_to_end"]["swage_mixed"]
+    )
+    assert missing == {"torch_pad_to_max": {"power-law": ["end_to_end"]}}
+    assert incomplete == {
+        "power-law": {"end_to_end": {"torch_pad_to_max": [1, 3]}}
+    }
+
+
 def test_a_reference_that_no_row_timed_is_an_error(processes):
     """Refuse a reference name that matches nothing in the records."""
     series = processes._series(_fresh_record(100.0, 10.0, looped=50.0))
