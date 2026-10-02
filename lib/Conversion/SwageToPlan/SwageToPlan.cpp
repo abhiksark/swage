@@ -255,11 +255,8 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SwageToPlanPass)
 
   SwageToPlanPass() = default;
-  SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {
-    schedules = other.schedules;
-    blockThreads = other.blockThreads.getValue();
-    selectedFunction = other.selectedFunction.getValue();
-  }
+  // Pass::clone copies the option values after it copies the pass.
+  SwageToPlanPass(const SwageToPlanPass &other) : PassWrapper(other) {}
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
