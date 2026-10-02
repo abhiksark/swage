@@ -4,10 +4,11 @@
 Each call validates its tensors, classifies the offsets on the host, and
 enqueues the kernels on the current PyTorch CUDA stream. The scheduling, the
 kernels, and their caches belong to the private runner; this module adds the
-public argument contract and nothing else.
+public argument contract and nothing else. The kernels are compiled in the
+process, or taken from the artifact that `SWAGE_ARTIFACT_DIR` selects.
 """
 
-from . import _runtime
+from . import _artifact, _runtime
 from . import _segmented_qualification as _qualification
 from ._frontend import _INSTALLATION
 
@@ -24,7 +25,9 @@ def segment_reduce(values, offsets, kind, *, out=None):
 
     Every call repeats the host work, also when the offsets are the ones of
     the call before, so a call costs more than its kernels. Compiled kernels
-    are kept in the process and reused by later calls.
+    are kept in the process and reused by later calls. When
+    `SWAGE_ARTIFACT_DIR` names an artifact that `python -m swage.compile`
+    wrote, the kernels come from it and nothing is compiled.
 
     Args:
         values: Contiguous rank-one `torch.float32` CUDA tensor on the
@@ -59,9 +62,12 @@ def segment_reduce(values, offsets, kind, *, out=None):
             device; `out` has the wrong size or overlaps an input; or the
             offsets break their contract.
         RuntimeError: PyTorch is missing or older than the supported
-            release; the native bindings are missing; CUDA is unavailable;
-            the current stream is capturing a CUDA graph; or a kernel would
-            have to be compiled while `SWAGE_NO_COMPILE=1` is set.
+            release; the native bindings are missing and no artifact is
+            selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
+            be used or does not hold the kernels of the call; CUDA is
+            unavailable; the current stream is capturing a CUDA graph; or
+            a kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
+            is set.
     """
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
@@ -124,9 +130,11 @@ def segment_softmax(values, offsets, *, out=None):
             grad, or is on another device; `out` has the wrong size or
             overlaps an input; or the offsets break their contract.
         RuntimeError: PyTorch is missing or older than the supported
-            release; the native bindings are missing; CUDA is unavailable;
-            the current stream is capturing a CUDA graph; or the kernel
-            would have to be compiled while `SWAGE_NO_COMPILE=1` is set.
+            release; the native bindings are missing and no artifact is
+            selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
+            be used or does not hold the kernel; CUDA is unavailable; the
+            current stream is capturing a CUDA graph; or the kernel would
+            have to be compiled while `SWAGE_NO_COMPILE=1` is set.
     """
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
@@ -224,7 +232,18 @@ def _share_memory(buffer, out):
 
 
 def _require_bindings(call):
-    """Raise the missing-bindings error of a wheel-only install."""
+    """Require what compiles or holds the kernels of a call.
+
+    A selected artifact is read and verified here, once per process, and
+    the native bindings are then not needed. Without one, a wheel-only
+    install raises the missing-bindings error.
+
+    Raises:
+        RuntimeError: `SWAGE_ARTIFACT_DIR` names an artifact that cannot be
+            used, or no artifact is selected and the bindings are missing.
+    """
+    if _artifact.selected() is not None:
+        return
     try:
         from mlir_swage._mlir_libs._swageDialectsNanobind import (  # noqa: F401
             swage,
