@@ -931,8 +931,6 @@ def _prepare_planned_reduction(
         cta_chunk_elements=cta_chunk_elements,
     )
     direct_count = direct_warp_count + direct_cta_count
-    partial_records = records[direct_count:direct_count + 2 * partial_count]
-    merge_records = records[direct_count + 2 * partial_count:]
     # ponytail: a measured two-chunk rule, not a general cost model.
     # Retain splitting for sparse batches, larger tails, or mixed lengths.
     # Every segment is split when the merge count equals the segment count,
@@ -1017,24 +1015,22 @@ def _prepare_planned_reduction(
     device = offsets.device
     device_index = device.index
     all_tasks = torch.arange(segment_count, dtype=torch.int32, device=device)
-    mixed_tasks = None
-    if direct_count:
-        mixed_tasks = torch.tensor(
-            records[:direct_count], dtype=torch.int32, device=device
-        )
-    partial_ranges = None
-    merge_ranges = None
-    scratch = None
-    if partial_count and not use_direct_cta:
-        partial_ranges = torch.tensor(
-            partial_records, dtype=torch.int32, device=device
-        )
-        merge_ranges = torch.tensor(
-            merge_records, dtype=torch.int32, device=device
-        )
-        scratch = torch.empty(
-            partial_count, dtype=torch.float32, device=device
-        )
+    # One upload carries every record the mixed policy launches. The fused
+    # kernel reads the warp ids and then the CTA ids at the start of the
+    # buffer; the partial ranges and the merge records follow them. The
+    # direct-CTA selection launches none of them: every segment is split
+    # then, so there is no direct id either.
+    task_records = None
+    mixed_pointer = partial_pointer = merge_pointer = scratch = None
+    if len(records) and not use_direct_cta:
+        task_records = torch.tensor(records, dtype=torch.int32, device=device)
+        mixed_pointer = task_records.data_ptr()
+        partial_pointer = mixed_pointer + 4 * direct_count
+        merge_pointer = partial_pointer + 8 * partial_count
+        if partial_count:
+            scratch = torch.empty(
+                partial_count, dtype=torch.float32, device=device
+            )
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream())
 
@@ -1148,14 +1144,14 @@ def _prepare_planned_reduction(
                     values_pointer,
                     offsets_pointer,
                     output_pointer,
-                    mixed_tasks.data_ptr(),
+                    mixed_pointer,
                     value_count,
                     direct_warp_count,
                     direct_cta_count,
                     segment_count,
                 ),
             )
-            for tensor in (values, offsets, output, mixed_tasks):
+            for tensor in (values, offsets, output, task_records):
                 tensor.record_stream(stream)
         if partial_count:
             driver.launch_segmented(
@@ -1165,13 +1161,13 @@ def _prepare_planned_reduction(
                 stream.cuda_stream,
                 (
                     values_pointer,
-                    partial_ranges.data_ptr(),
+                    partial_pointer,
                     scratch.data_ptr(),
                     value_count,
                     partial_count,
                 ),
             )
-            for tensor in (values, offsets, partial_ranges, scratch):
+            for tensor in (values, offsets, task_records, scratch):
                 tensor.record_stream(stream)
             driver.launch_segmented(
                 merge_function,
@@ -1181,13 +1177,13 @@ def _prepare_planned_reduction(
                 (
                     scratch.data_ptr(),
                     output_pointer,
-                    merge_ranges.data_ptr(),
+                    merge_pointer,
                     partial_count,
                     merge_count,
                     segment_count,
                 ),
             )
-            for tensor in (offsets, output, merge_ranges, scratch):
+            for tensor in (offsets, output, task_records, scratch):
                 tensor.record_stream(stream)
         return None
 
@@ -1250,11 +1246,7 @@ def _prepare_persistent_sum(
             cta_chunk_elements=cta_chunk_elements,
         )
     )
-    direct_count = warp_count + cta_count
-    warp_ids = records[:warp_count]
-    cta_ids = records[warp_count:direct_count]
-    partial_records = records[direct_count:direct_count + 2 * partial_count]
-    merge_records = records[direct_count + 2 * partial_count:]
+    merge_records = records[len(records) - 3 * merge_count:]
     if segment_count == 0:
 
         def no_launch():
@@ -1274,8 +1266,7 @@ def _prepare_persistent_sum(
 
     warp_slots = _PERSISTENT_BLOCK // _WARP_BLOCK
     work_groups = (
-        len(cta_ids) + partial_count + (len(warp_ids) + warp_slots - 1)
-        // warp_slots
+        cta_count + partial_count + (warp_count + warp_slots - 1) // warp_slots
     )
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if _PERSISTENT_BLOCK > properties.max_threads_per_block:
@@ -1306,17 +1297,18 @@ def _prepare_persistent_sum(
     _, function = _load_once(driver, ptx, kernel_name)
     device = offsets.device
     device_index = device.index
-    warp_tasks = torch.tensor(warp_ids, dtype=torch.int32, device=device)
-    cta_tasks = torch.tensor(cta_ids, dtype=torch.int32, device=device)
-    partial_ranges = torch.tensor(
-        partial_records, dtype=torch.int32, device=device
+    # One upload carries the classification records and, behind them, the
+    # merge of every partial task. The kernel takes one pointer per list.
+    task_records = torch.tensor(
+        numpy.concatenate((records, partial_merge_ids)),
+        dtype=torch.int32,
+        device=device,
     )
-    partial_merges = torch.tensor(
-        partial_merge_ids, dtype=torch.int32, device=device
-    )
-    merge_ranges = torch.tensor(
-        merge_records, dtype=torch.int32, device=device
-    )
+    warp_pointer = task_records.data_ptr()
+    cta_pointer = warp_pointer + 4 * warp_count
+    partial_pointer = cta_pointer + 4 * cta_count
+    merge_pointer = partial_pointer + 8 * partial_count
+    partial_merges_pointer = merge_pointer + 12 * merge_count
     scratch = torch.empty(partial_count, dtype=torch.float32, device=device)
     counters = torch.zeros(3 + merge_count, dtype=torch.int32, device=device)
     tasks_ready = torch.cuda.Event()
@@ -1412,16 +1404,16 @@ def _prepare_persistent_sum(
                     values_pointer,
                     offsets_pointer,
                     output_pointer,
-                    warp_tasks.data_ptr(),
-                    cta_tasks.data_ptr(),
-                    partial_ranges.data_ptr(),
-                    partial_merges.data_ptr(),
-                    merge_ranges.data_ptr(),
+                    warp_pointer,
+                    cta_pointer,
+                    partial_pointer,
+                    partial_merges_pointer,
+                    merge_pointer,
                     scratch.data_ptr(),
                     counters.data_ptr(),
                     value_count,
-                    len(warp_ids),
-                    len(cta_ids),
+                    warp_count,
+                    cta_count,
                     partial_count,
                     merge_count,
                     segment_count,
@@ -1431,11 +1423,7 @@ def _prepare_persistent_sum(
                 values,
                 offsets,
                 output,
-                warp_tasks,
-                cta_tasks,
-                partial_ranges,
-                partial_merges,
-                merge_ranges,
+                task_records,
                 scratch,
                 counters,
             ):
@@ -1450,8 +1438,8 @@ def _prepare_persistent_sum(
     return _PreparedPersistentSum(
         launch,
         active_blocks,
-        len(warp_ids),
-        len(cta_ids),
+        warp_count,
+        cta_count,
         partial_count,
         merge_count,
     )

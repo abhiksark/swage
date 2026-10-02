@@ -1836,14 +1836,19 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     assert partial[5][3:] == (offsets[-1], 4)
     assert merge[2:4] == ((2,), 512)
     assert merge[5][3:5] == (4, 2)
+    # One upload holds the direct ids, then the partial ranges, then the
+    # merge records, and each phase reads its list at its place in it.
     assert [data for data, _ in descriptor_tensors] == [
-        [0, 4, 1],
-        [34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],
-        [2, 0, 2, 3, 2, 4],
+        [
+            *[0, 4, 1],
+            *[34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],
+            *[2, 0, 2, 3, 2, 4],
+        ]
     ]
-    assert direct[5][3] == descriptor_tensors[0][1].data_ptr()
-    assert partial[5][1] == descriptor_tensors[1][1].data_ptr()
-    assert merge[5][2] == descriptor_tensors[2][1].data_ptr()
+    records = descriptor_tensors[0][1].data_ptr()
+    assert direct[5][3] == records
+    assert partial[5][1] == records + 4 * 3
+    assert merge[5][2] == records + 4 * (3 + 8)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")

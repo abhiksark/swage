@@ -553,7 +553,7 @@ def _integer_case(lengths, seed=0):
 
 @requires_cuda
 @pytest.mark.parametrize("seed", range(5))
-def test_planned_preparation_uploads_the_reference_plan_as_arrays(
+def test_planned_preparation_uploads_the_reference_plan_in_one_array(
     monkeypatch, seed
 ):
     """Prepare from buffers alone and launch every policy exactly."""
@@ -572,9 +572,7 @@ def test_planned_preparation_uploads_the_reference_plan_as_arrays(
     assert all(isinstance(data, numpy.ndarray) for data in uploads)
     assert all(data.dtype == numpy.int32 for data in uploads)
     assert [data.tolist() for data in uploads] == [
-        [*warp, *cta],
-        partial,
-        merge,
+        [*warp, *cta, *partial, *merge]
     ]
     monkeypatch.undo()
     for launch in prepared:
@@ -585,7 +583,7 @@ def test_planned_preparation_uploads_the_reference_plan_as_arrays(
 
 @requires_cuda
 @pytest.mark.parametrize("seed", range(5))
-def test_persistent_preparation_uploads_the_reference_plan_as_arrays(
+def test_persistent_preparation_uploads_the_reference_plan_in_one_array(
     monkeypatch, seed
 ):
     """Derive the merge of every partial task without a Python loop."""
@@ -605,11 +603,7 @@ def test_persistent_preparation_uploads_the_reference_plan_as_arrays(
     assert all(isinstance(data, numpy.ndarray) for data in uploads)
     assert all(data.dtype == numpy.int32 for data in uploads)
     assert [data.tolist() for data in uploads] == [
-        warp,
-        cta,
-        partial,
-        partial_merges,
-        merge,
+        [*warp, *cta, *partial, *merge, *partial_merges]
     ]
     assert (prepared.warp_tasks, prepared.cta_tasks) == (len(warp), len(cta))
     assert prepared.partial_tasks == len(partial) // 2
@@ -619,6 +613,66 @@ def test_persistent_preparation_uploads_the_reference_plan_as_arrays(
         output.fill_(float("nan"))
         prepared.launch()
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@requires_cuda
+def test_persistent_launch_reads_each_list_at_its_place_in_the_upload(
+    monkeypatch,
+):
+    """Pass one pointer per record list into the single uploaded buffer."""
+    from swage import _runtime
+
+    class _Driver:
+        def __init__(self):
+            self.arguments = None
+
+        def load(self, _ptx, _kernel_name):
+            return 1, 1
+
+        def launch_persistent(self, _function, _grid, _block, _stream, args):
+            self.arguments = args
+
+    lengths = [1, 33, 4097, 8192, 0]
+    values, offsets, _ = _integer_case(lengths)
+    warp, cta, partial, merge = _reference_plan(offsets.tolist())
+    driver = _Driver()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    original = torch.tensor
+    uploads = []
+
+    def capture(data, *args, **kwargs):
+        tensor = original(data, *args, **kwargs)
+        uploads.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(torch, "tensor", capture)
+    prepared = qualification._prepare_persistent_sum(
+        values.cuda(), offsets.cuda(), torch.empty(5, device="cuda")
+    )
+    monkeypatch.undo()
+    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+
+    prepared.launch()
+
+    assert len(uploads) == 1
+    records = uploads[0].data_ptr()
+    counts = (len(warp), len(cta), len(partial) // 2, len(merge) // 3)
+    assert counts == (2, 1, 4, 2)
+    assert driver.arguments[3:8] == (
+        records,
+        records + 4 * 2,
+        records + 4 * (2 + 1),
+        records + 4 * (2 + 1 + 8 + 6),
+        records + 4 * (2 + 1 + 8),
+    )
+    assert driver.arguments[11:15] == counts
+    assert uploads[0].tolist() == [
+        *warp,
+        *cta,
+        *partial,
+        *merge,
+        *_reference_partial_merges(merge, 4),
+    ]
 
 
 @requires_cuda
