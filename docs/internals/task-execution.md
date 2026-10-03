@@ -38,7 +38,7 @@ tasks follow at one segment per block. An empty task set enqueues no kernel.
 Static execution admits capture-free, single-stage f32 sum/max programs,
 including fused map chains. Each schedule evaluates the same element program
 only on valid input elements. See
-[ADR-0020](../adr/ADR-0020-composable-private-reductions.md).
+[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).
 
 <div class="doc-figure" tabindex="0" markdown="1">
 

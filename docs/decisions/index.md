@@ -32,11 +32,11 @@ gates belong in the roadmap.
 - [ADR-0016: Fused mixed-policy schedule](../adr/ADR-0016-fused-mixed-policy-schedule.md)
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
 - [ADR-0018: Private persistent task queue](../adr/ADR-0018-private-persistent-task-queue.md)
-- [ADR-0020: Composable private segmented reductions](../adr/ADR-0020-composable-private-reductions.md)
+- [ADR-0019: Composable private segmented reductions](../adr/ADR-0019-composable-private-reductions.md)
 
 ## Runtime and lowered ABI
 
-- [ADR-0019: Compiler-generated kernel launch contracts](../adr/ADR-0019-compiler-generated-kernel-contracts.md)
+- [ADR-0025: Compiler-generated kernel launch contracts](../adr/ADR-0025-compiler-generated-kernel-contracts.md)
 
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the

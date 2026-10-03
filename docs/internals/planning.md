@@ -8,7 +8,7 @@ exact internal contracts; none of them is a public API.
 
 *Qualified through compile-only compiler and classifier tests; see
 [Verification](verification.md) and
-[ADR-0020](../adr/ADR-0020-composable-private-reductions.md).*
+[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
 `--swage-to-plan` admits a capture-free, single-stage f32 sum or max with
 optional single-consumer map chains and a scalar output per segment. Element

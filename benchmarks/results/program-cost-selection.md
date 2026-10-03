@@ -155,7 +155,7 @@ existing LLVM 22.1.8 builds. Full environment and source provenance remain
 inside each run; old evidence files are unchanged.
 
 Changed files: the private preparation helper, semantic program fixtures,
-codegen/runtime tests, benchmark suites, planning documentation and ADR-0020,
+codegen/runtime tests, benchmark suites, planning documentation and ADR-0019,
 plus this report and two raw records. Scheduling behavior changes for expensive
 programs; accepted mathematical semantics, public APIs, native descriptors,
 LLVM pin, and compiler lowering are unchanged. No commits or publication were

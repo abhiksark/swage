@@ -1,5 +1,5 @@
-<!-- docs/adr/ADR-0020-composable-private-reductions.md -->
-# ADR-0020: Composable private segmented reductions
+<!-- docs/adr/ADR-0019-composable-private-reductions.md -->
+# ADR-0019: Composable private segmented reductions
 
 - Status: accepted
 - Date: 2026-09-13

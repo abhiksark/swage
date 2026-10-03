@@ -42,7 +42,7 @@ fixed vector-add ABI. That path lowers through the Native LLVM target and runs
 synchronously through a process-local execution engine; it does not inherit
 CUDA stream, context, module-cache, or tensor-retention behavior. The
 backend-neutral generated contract and fail-closed backend selection are
-recorded in [ADR-0019](ADR-0019-compiler-generated-kernel-contracts.md).
+recorded in [ADR-0025](ADR-0025-compiler-generated-kernel-contracts.md).
 
 ## Consequences
 

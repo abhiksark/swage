@@ -29,7 +29,7 @@ M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 
 The private static paths now also support capture-free, single-stage f32
 sum/max element programs and map chains across warp, CTA, mixed, and split
-execution (ADR-0020). This composition extension leaves the historical gates
+execution (ADR-0019). This composition extension leaves the historical gates
 and frozen benchmark unchanged. Captured stages, split softmax, general cost
 inference, and public segmented execution remain follow-up work.
 

@@ -9,7 +9,7 @@ contracts; none of them is a public API.
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) and
 [ADR-0017](../adr/ADR-0017-private-split-cta-reductions.md) and
-[ADR-0020](../adr/ADR-0020-composable-private-reductions.md).*
+[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
 Segments of at most 32 elements receive one direct warp descriptor. Segments
 from 33 through 4096 elements receive one direct CTA descriptor. A longer
