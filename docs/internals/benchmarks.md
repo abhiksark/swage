@@ -337,6 +337,80 @@ Triton is imported only when a harness runs. It is not a dependency of the
 project. Fresh offsets leaves the Triton candidates out when Triton is not
 installed, and fails when a Triton candidate was asked for by name.
 
+Every fresh-offsets record holds a `candidate_descriptions` block that
+names the surface each candidate times: `public` for the call a user makes,
+`private` for the qualification runner that no user calls, and `baseline`
+for PyTorch and Triton, with the entry point it calls and the kinds, ranks,
+and types it covers. The two `swage_public_call` candidates are the only
+public ones; `swage_mixed` and `swage_cta_call` time private calls.
+
+### Kinds, `[N, D]` values, and float64 in fresh offsets
+
+Without further options a fresh-offsets row is a float32 sum of rank-one
+values, and the candidates are those above. Three options produce other
+rows; every row records its `kind`, `rank`, `features`, and `dtype`:
+
+- `--kinds` takes `sum`, `max`, `min`, and `mean`, one row each.
+- `--features` takes one or more widths `D` and times `[N, D]` values, one
+  row for each `D`, instead of rank-one values.
+- `--dtype float64` times float64 values and results.
+
+A row of another kind or of float64 values times `swage_public_call`,
+`swage_public_call_int64`, and `torch.segment_reduce`. The candidates that
+time a float32 sum of rank-one values only are listed under `skipped` with
+that reason. Pad-to-max also times a float64 sum, and its memory bound then
+counts 29 bytes per padded element instead of 17.
+
+An `[N, D]` row times these candidates:
+
+- `swage_public_call` and `swage_public_call_int64` on `[N, D]` values into
+  a caller's `[S, D]` buffer.
+- `torch.segment_reduce` along axis 0.
+- `triton_rows_looped`, a looped Triton reduction written for this harness:
+  one program per segment and block of columns walks the rows of its
+  segment in fixed blocks of rows, for every kind. The column block is the
+  power of two from 4 to 64 that covers `D`, and each row records it with
+  the number of blocks. Five configurations of rows per step and warps are
+  timed. Its mean divides once, rounded to nearest, and its maximum and
+  minimum do not propagate NaN; the timed values hold none.
+
+The values of an `[N, D]` row may be large, so a row is admitted only when
+the largest total its distribution can reach, times `D`, is at most 2^28
+values. With 64 features at 32,768 segments that admits `power-law`,
+`many-tiny`, `one-outlier`, and `alternating-empty`; at 8,192 segments it
+also admits `bimodal` and `few-huge`. `uniform`, `log-normal`, and
+`zipf-like` are refused at 64 features at every size the record uses. A
+command that names such a row is refused before anything runs.
+
+### Pipelined calls in fresh offsets
+
+A fresh-offsets sample starts from an idle device. That is the best case
+for a call that waits for the stream, and not what a serving loop sees,
+where the host enqueues work ahead of the device. `--pipeline-depth K`
+times K calls in flight instead:
+
+- A sample is K steps, each on its own fresh layout. A step launches two
+  `torch.cumsum` kernels that write the int32 and the int64 offsets of its
+  layout again on the device from its uploaded lengths, then calls the
+  candidate on that layout. The offsets equal the uploaded ones; they are
+  produced again so that every call depends on work in the stream, as
+  offsets that a previous step of a model produces on the device would.
+- No synchronize runs between the steps. A candidate whose call copies the
+  offsets to the host waits there for every earlier step.
+- The timer runs from a synchronize before the first step to a
+  synchronize after the last. The sample is that span divided by K: the
+  time per step at that depth.
+- `pipeline_enqueue_samples_us` is the host time from the first step until
+  the last call returned, divided by K. It approaches the time per step
+  when the calls wait for the device.
+- Every step writes its own outputs, and the result of every step is
+  checked after the closing synchronize. A pipelined row records no
+  preparation or partition samples. The warm calls are single calls on
+  the warm layout.
+
+A pipelined row needs K layouts per iteration, so its pool is K times the
+pool of a row without the option.
+
 ### Choosing candidates
 
 Both harnesses take `--candidates` and `--exclude-candidates`. A name
@@ -399,6 +473,13 @@ device or a target: they run on the current CUDA device, which
 | `--samples`, `--warmups` | Timed and untimed fresh layouts per row. | Timed samples and warmup launches per candidate and method. |
 | `--candidates`, `--exclude-candidates` | Candidates or families to time or to leave out. | The same, for the segmented-sum suite. |
 | `--warm-calls` | Untimed calls of a candidate before each of its samples. The default is 2. | Not offered: each candidate is warmed up and timed to completion. |
+| `--kinds` | `sum` (default), `max`, `min`, `mean`, one row each. | Not offered. |
+| `--features` | Widths `D` of `[N, D]` rows, one row each. Without it, rank-one rows. | Not offered. |
+| `--dtype` | `float32` (default) or `float64`. | Not offered. |
+| `--pipeline-depth` | Calls in flight per sample; 0 (default) times one call from an idle device. | Not offered. |
+
+A fresh-offsets record keeps every option of its command under
+`configuration.options`, beside the revision in `source`.
 
 A segment count is accepted when the largest total the distribution can
 reach fits signed 32-bit offsets. One million segments fit `bimodal`,
@@ -434,6 +515,25 @@ With `normal` values the bound grows with the square of the segment length,
 so the check detects a misplaced element in short segments and loses that
 power in long ones. `quarters` keeps the exact check for every segment of up
 to 2.3 million elements.
+
+Fresh offsets checks the other kinds, `[N, D]` values, and float64 by the
+same reference along axis 0, with one rule per kind:
+
+- A maximum and a minimum must equal the reference.
+- A sum has the bound above, in the unit of the type: `2^-24` for float32
+  and `2^-53` for float64, where the bound is doubled because the float64
+  reference rounds as well.
+- A mean has the bound of its sum divided by the segment length, plus two
+  units of its own magnitude for the division.
+- An empty segment must give the reference value: infinite for a maximum or
+  a minimum, and NaN for a mean.
+
+Outputs start as NaN, except those of a mean, which start as `1e30`
+because an empty mean is NaN; an output that still holds its start value
+fails, also where the bound says nothing. For `[N, D]` values a result is
+one column of one segment, and `check` counts results. The reference of an
+`[N, D]` row stays on the host, and each result is copied there to be
+checked, outside the timer.
 
 ### Effective rate and timer resolution
 
