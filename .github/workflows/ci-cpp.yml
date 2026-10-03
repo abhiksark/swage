@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Native cp313 + CodeQL C/C++
+    name: build-and-test
     runs-on: ubuntu-latest
     # First run on a new LLVM pin builds LLVM from source (~3h); afterwards
     # the install tree is cached and the job takes minutes.

@@ -242,7 +242,7 @@ been published or production-qualified. Complete these steps in order:
 
 1. **Operator setup, separately authorized:** protect `main` and require
    `test (3.10)`, `test (3.11)`, `test (3.12)`, `test (3.13)`, `docs`,
-   `CodeQL Python (3.13)`, `Native cp313 + CodeQL C/C++`,
+   `CodeQL Python (3.13)`, `build-and-test`,
    `Native ASan + UBSan`, and `dependency-review`.
    Protect `v*` tags and require signed tags. Configure the `pypi`
    environment with a required reviewer and the PyPI OIDC trusted publisher

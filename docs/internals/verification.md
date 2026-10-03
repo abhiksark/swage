@@ -34,7 +34,7 @@ evidence.
 | Installed native CPU wheel on every ABI | Implemented v0.5.2 gate; hosted release jobs | `publish-pypi.yml`, `scripts/smoke_installed_wheel.py` | CPU health and smoke outside checkout with `PYTHONPATH` unset; `torch==2.6.0+cpu` on cp310/cp311/cp312/cp313 |
 | Current-PyTorch native CPU, lit, C++ units, and bindings | Implemented hosted gate | `ci-cpp.yml`, fixed native integration suites | `SWAGE_BUILD_TYPE=Release ./scripts/build_swage.sh`; `ninja -C build check-swage-unit check-swage-python`; installed cp313 CPU health/smoke with `torch==2.13.0+cpu` |
 | Native ASan + UBSan | Implemented hosted gate; Swage and a separately cached, sanitizer-matched LLVM build at the unchanged pin | `ci-cpp.yml`, `SWAGE_LLVM_SANITIZERS`, `SWAGE_ENABLE_SANITIZERS` | `SWAGE_LLVM_SANITIZERS='Address;Undefined' ./scripts/build_llvm.sh`; separate bindings-off Swage build; `ninja -C <sanitizer-build> check-swage check-swage-unit` |
-| CodeQL Python/C++ and dependency vulnerabilities/licenses | Implemented hosted security gates | `ci-python.yml`, `ci-cpp.yml`, `dependency-review.yml` | `CodeQL Python (3.13)`, `Native cp313 + CodeQL C/C++`, `dependency-review`; dependency review rejects newly introduced high/critical vulnerabilities and reports license changes |
+| CodeQL Python/C++ and dependency vulnerabilities/licenses | Implemented hosted security gates | `ci-python.yml`, `ci-cpp.yml`, `dependency-review.yml` | `CodeQL Python (3.13)`, `build-and-test`, `dependency-review`; dependency review rejects newly introduced high/critical vulnerabilities and reports license changes |
 | Self-contained repaired manylinux wheel, ABI, size, licenses, and provenance | Implemented v0.5.2 release gate; hosted artifact checks | `scripts/check_native_wheel.py`, `scripts/repair_native_wheel.py`, `publish-pypi.yml` | Shared repair/check scripts with `--expected-revision` and all source/build roots as `--forbid-prefix`; each wheel strictly below 95,000,000 bytes |
 | Exact distribution set and source-tree/sdist wheel reproducibility | Implemented v0.5.2 release gate; hosted aggregation | `publish-pypi.yml`, repair JSON | Exactly four cp310–cp313 wheels plus one sdist; cp313 `--rebuild-sdist` SHA-256 equality; `SHA256SUMS` |
 | SPDX SBOM, build provenance, and publication authorization | Implemented release gates; not yet a published attestation | `publish-pypi.yml` | One aggregate SPDX JSON SBOM; signed protected tag only for build/SBOM attestation and reviewed `pypi` OIDC publication; manual runs never attest or publish |
@@ -79,7 +79,7 @@ block release, with no waiver.
 
 The required main checks are `test (3.10)`, `test (3.11)`, `test (3.12)`,
 `test (3.13)`, `docs`, `CodeQL Python (3.13)`,
-`Native cp313 + CodeQL C/C++`, `Native ASan + UBSan`, and
+`build-and-test`, `Native ASan + UBSan`, and
 `dependency-review`. Operator configuration of those requirements, protected
 `main` and `v*` tags, signed tags, and the `pypi` reviewer/trusted publisher
 requires separate authorization; this page is not evidence of that setup.
