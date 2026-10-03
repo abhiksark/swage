@@ -201,6 +201,22 @@ def _record_paths(directory):
     return paths
 
 
+def _fresh_label(row):
+    """Label a fresh-offsets row: its distribution, then what is not default.
+
+    A float32 sum of rank-one values keeps the bare distribution name, as
+    the rows of the recorded campaign do.
+    """
+    parts = [row["distribution"]]
+    if row.get("features") is not None:
+        parts.append(f"D={row['features']}")
+    if row.get("kind", "sum") != "sum":
+        parts.append(row["kind"])
+    if row.get("dtype", "float32") != "float32":
+        parts.append(row["dtype"])
+    return " ".join(parts)
+
+
 def _series(record):
     """Return each candidate's median and rate from one process record.
 
@@ -214,8 +230,8 @@ def _series(record):
     benchmark = record.get("benchmark")
     if benchmark == "fresh-offsets-segmented-sum":
         return {
-            row["distribution"]: {
-                "end_to_end": {
+            _fresh_label(row): {
+                "pipelined" if row.get("pipeline_depth") else "end_to_end": {
                     candidate: {
                         "median_us": summary["median"],
                         "gb_per_s": row["effective_gb_per_s"][candidate][
