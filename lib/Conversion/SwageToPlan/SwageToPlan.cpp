@@ -259,13 +259,16 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   // segment, which it reads from the range records of the partial tasks.
   bool mergeExtent =
       schedule == PlanSchedule::SplitMerge && !analysis.epilogue.empty();
-  // The direct kernel of rank-two values reduces one column per thread and
-  // takes the number of columns.
+  // A kernel of rank-two values takes the number of columns: the direct
+  // kernel reduces one column per thread, and the task-id kernel is the
+  // row-stripe tile.
   bool columns = static_cast<bool>(analysis.abi.featureCount);
-  const KernelLayout layout =
-      swage_plan::kernelLayout(mergeExtent ? KernelKind::SplitMergeExtent
-                               : columns   ? KernelKind::DirectColumns
-                                           : kernel.kind);
+  KernelKind kind = mergeExtent ? KernelKind::SplitMergeExtent : kernel.kind;
+  if (columns && kind == KernelKind::Direct)
+    kind = KernelKind::DirectColumns;
+  else if (columns && kind == KernelKind::TaskIds)
+    kind = KernelKind::TaskIdsColumns;
+  const KernelLayout layout = swage_plan::kernelLayout(kind);
   SmallVector<Type> inputs;
   for (KernelArgument argument : layout.arguments())
     inputs.push_back(
@@ -338,12 +341,14 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   } else {
     bool useTaskIds = schedule == PlanSchedule::TaskIds;
     // The task-id kernel reduces within one subgroup exactly when a block is
-    // one subgroup. The direct kernel always reduces across the block.
+    // one subgroup. The direct kernel always reduces across the block. Over
+    // rank-two values the direct kernel is the column tile, and the task-id
+    // kernel the row-stripe tile, whose block combines per column.
     TaskPolicy policy = useTaskIds && blockThreads == target.subgroupWidth
                             ? TaskPolicy::Warp
                             : TaskPolicy::CTA;
     if (columns)
-      policy = TaskPolicy::Column;
+      policy = useTaskIds ? TaskPolicy::CTA : TaskPolicy::Column;
     output = argument(KernelArgument::Output);
     task = swage_plan::TasksOp::create(
         builder, loc, argument(KernelArgument::Values),
@@ -506,6 +511,33 @@ LogicalResult verifySchedules(ModuleOp module, const PlanOptions &options,
   return success();
 }
 
+/// Require schedules that plan a kernel of rank-two values. The direct
+/// schedule plans the column tile and the task-id schedule the row-stripe
+/// tile, whose block is a whole number of subgroups: every lane then owns
+/// one row stripe of one column. No other kernel schedule plans rows yet.
+LogicalResult verifyRowSchedules(func::FuncOp function,
+                                 SegmentProgramAnalysis &analysis,
+                                 const PlanOptions &options,
+                                 const TargetDescription &target) {
+  for (PlanSchedule schedule : options.schedules) {
+    if (schedule == PlanSchedule::Direct)
+      continue;
+    if (schedule != PlanSchedule::TaskIds)
+      return analysis.segments.front().emitError()
+             << kernelSchedule(schedule)->name
+             << " planning requires rank-one values: a function over "
+                "rank-two values runs on the direct and task-ids schedules";
+    if (options.blockThreads % target.subgroupWidth != 0)
+      return function.emitError()
+             << "the task-ids kernel of rank-two values runs whole subgroups "
+                "of "
+             << target.subgroupWidth
+             << " threads, so block-threads must be a multiple of "
+             << target.subgroupWidth << ", got " << options.blockThreads;
+  }
+  return success();
+}
+
 } // namespace
 
 LogicalResult planSegmentFunctions(ModuleOp module, const PlanOptions &options,
@@ -526,9 +558,16 @@ LogicalResult planSegmentFunctions(ModuleOp module, const PlanOptions &options,
       return failure();
     if (sequential)
       continue;
+    bool rows = static_cast<bool>(analysis.abi.featureCount);
+    if (rows && failed(verifyRowSchedules(function, analysis, options, target)))
+      return failure();
+    // Host classification feeds the kernels of these schedules. The
+    // task-id kernel of rank-two values takes ids that only name segments,
+    // which a launch with one task per segment gives for any program.
     if (llvm::any_of(schedules,
-                     [](PlanSchedule schedule) {
-                       return kernelSchedule(schedule)->needsTaskProgram;
+                     [&](PlanSchedule schedule) {
+                       return kernelSchedule(schedule)->needsTaskProgram &&
+                              !(rows && schedule == PlanSchedule::TaskIds);
                      }) &&
         failed(verifyPlanningProgram(analysis)))
       return failure();

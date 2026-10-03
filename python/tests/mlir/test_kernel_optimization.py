@@ -71,6 +71,10 @@ _TWO_BLOCK_REDUCTIONS = _counts(barriers=4, shuffles=40)
 # protocol: two fences and four atomic updates.
 _PERSISTENT = _counts(barriers=12, shuffles=66, fences=2, atomics=4)
 _NONE = _counts(barriers=0, shuffles=0)
+# The row-stripe tile of rank-two values combines per column: five shuffles
+# within a warp, then one exchange through shared memory between two
+# barriers, for each reduction stage, at every block width.
+_ROW_STRIPES = _counts(barriers=2, shuffles=5)
 
 
 def _for_element(counts, element):
@@ -174,6 +178,27 @@ def _segmented_kernels():
             {"block_size": block_size}, _NONE,
             id=f"columns-softmax-{block_size}",
         )
+    # The row-stripe tile, the task-ids kernel of rank-two values, combines
+    # each reduction stage once per item, whatever the block width.
+    for kind, element in (
+        ("sum", "f32"), ("max", "f32"), ("mean", "f32"), ("min", "f64"),
+        ("mean", "f64"),
+    ):
+        for block_size in (32, 128, 1024):
+            yield pytest.param(
+                _semantic_module(kind, element, 2), _DIRECT,
+                _reduction_kernel(kind, element, 2),
+                {"block_size": block_size, "use_task_ids": True},
+                _for_element(_ROW_STRIPES, element),
+                id=f"rows-{kind}-{element}-{block_size}",
+            )
+    for block_size in (32, 128, 1024):
+        yield pytest.param(
+            _softmax_text(2), _DIRECT, "ragged_softmax_r2",
+            {"block_size": block_size, "use_task_ids": True},
+            _counts(barriers=4, shuffles=10),
+            id=f"rows-softmax-{block_size}",
+        )
     for block_size in (32, 128, 512):
         yield pytest.param(
             _SOFTMAX_MODULE, _DIRECT, "ragged_softmax",
@@ -186,11 +211,15 @@ def _segmented_kernels():
 # The persistent kernel is left out: its queue loops hold barriers and
 # shuffles, and those keep the shape the lowering gave them. The column
 # kernels are left out too: their row loop is nested in a column loop, and
-# test_the_row_loop_of_a_column_kernel_is_rotated covers its shape.
+# test_the_row_loop_of_a_column_kernel_is_rotated covers its shape. So are
+# the row-stripe kernels, whose row loops are nested in the item loop of a
+# block, and test_the_row_loops_of_a_row_stripe_kernel_are_rotated covers
+# theirs.
 _REDUCTION_LOOP_KERNELS = [
     parameter
     for parameter in _segmented_kernels()
-    if parameter.id != "persistent" and not parameter.id.startswith("columns")
+    if parameter.id != "persistent"
+    and not parameter.id.startswith(("columns", "rows"))
 ]
 
 
@@ -333,17 +362,20 @@ def test_the_row_loop_of_a_column_kernel_is_rotated(kind, element):
     assert _backward_branches(ptx)[0] == 1
 
 
-def _assert_one_rotated_loop(ptx, instruction):
+def _assert_one_rotated_loop(ptx, instruction, loads=False):
     """Require one block with `instruction`, closed by a branch to itself.
 
     The first branch of the block is conditional and goes back to its own
-    label: the loop tests its bound at the bottom, once per iteration.
+    label: the loop tests its bound at the bottom, once per iteration. With
+    `loads`, only blocks that also load from global memory count, which
+    tells a loop over elements from a combination of its results.
     """
     blocks = re.split(r"^(\$L__\w+):\n", ptx, flags=re.MULTILINE)
     rows = [
         (label, body)
         for label, body in zip(blocks[1::2], blocks[2::2])
         if re.search(rf"^\s*{instruction}\s", body, re.M)
+        and (not loads or re.search(r"^\s*ld\.global\.", body, re.M))
     ]
 
     assert len(rows) == 1
@@ -372,6 +404,47 @@ def test_the_three_row_loops_of_a_softmax_column_are_rotated():
     for instruction in (r"max\.NaN\.f32", r"add\.rn\.f32", r"div\.rn\.f32"):
         _assert_one_rotated_loop(ptx, instruction)
     assert _backward_branches(ptx) == (1, 4)
+
+
+@pytest.mark.parametrize(
+    ("text", "kernel_name", "instructions", "conditional"),
+    [
+        pytest.param(
+            _semantic_module("sum", "f32", 2), "segmented_sum_r2",
+            (r"add\.rn\.f32",), 2, id="sum",
+        ),
+        pytest.param(
+            _semantic_module("max", "f64", 2), "segmented_max_f64_r2",
+            (r"max\.f64",), 2, id="max-f64",
+        ),
+        pytest.param(
+            _softmax_text(2), "ragged_softmax_r2",
+            (r"max\.NaN\.f32", r"add\.rn\.f32", r"div\.rn\.f32"), 4,
+            id="softmax",
+        ),
+    ],
+)
+def test_the_row_loops_of_a_row_stripe_kernel_are_rotated(
+    text, kernel_name, instructions, conditional
+):
+    """Close each row loop of a stripe with one conditional branch.
+
+    A thread of the row-stripe tile walks the rows of its stripe once per
+    stage, in a loop nested in the item loop of its block. Each row loop
+    tests its bound at the bottom. The end of the item loop is placed before
+    its body, so two more branches go back to it once per item: the
+    unconditional one after the store, and the conditional one that skips
+    the store, which for a softmax is the store loop of a stripe without
+    rows.
+    """
+    ptx = _compile(
+        text, _DIRECT, kernel_name, {"block_size": 128, "use_task_ids": True},
+        "sm_86",
+    )
+
+    for instruction in instructions:
+        _assert_one_rotated_loop(ptx, instruction, loads=True)
+    assert _backward_branches(ptx) == (1, conditional)
 
 
 @pytest.mark.parametrize("target", _TARGETS)

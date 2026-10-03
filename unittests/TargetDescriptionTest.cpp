@@ -54,6 +54,30 @@ module {
 }
 )mlir";
 
+constexpr const char *rowSum = R"mlir(
+module {
+  func.func @segmented_sum_r2(
+      %values: memref<?x?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?x?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>},
+      %feature_count: i32 {swage.role = #swage.role<feature_count>}) {
+    %sid = swage.segment_id 0
+    %col = swage.segment_id 1
+    %segment = swage.make_segment %values, %offsets, %sid column(%col)
+        : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %output[%sid, %col] : memref<?x?xf32>
+    return
+  }
+}
+)mlir";
+
 /// The block sizes the lowering admitted before the description existed: a
 /// positive size up to 1024 whose warp count, with a partly filled last warp
 /// counted as one, is a power of two.
@@ -63,14 +87,17 @@ bool hasPowerOfTwoWarpCount(int64_t blockSize) {
 }
 
 /// The width and offset of every XOR shuffle a task-ID kernel of
-/// `blockThreads` threads holds when it is lowered for `target`.
+/// `blockThreads` threads holds when it is lowered for `target`, from the
+/// program `source`. With `widths`, also the largest column-group width the
+/// kernel can choose: the largest index constant a select of its width
+/// chain takes.
 std::vector<std::pair<int64_t, int64_t>>
-shufflesOf(const TargetDescription &target, int64_t blockThreads) {
+shufflesOf(const TargetDescription &target, int64_t blockThreads,
+           const char *source = segmentedSum, int64_t *widths = nullptr) {
   MLIRContext context;
   context.loadDialect<SwageDialect, func::FuncDialect, arith::ArithDialect,
                       memref::MemRefDialect>();
-  OwningOpRef<ModuleOp> module =
-      parseSourceString<ModuleOp>(segmentedSum, &context);
+  OwningOpRef<ModuleOp> module = parseSourceString<ModuleOp>(source, &context);
   EXPECT_TRUE(static_cast<bool>(module));
   PassManager manager(&context);
   PlanOptions options;
@@ -89,6 +116,15 @@ shufflesOf(const TargetDescription &target, int64_t blockThreads) {
     EXPECT_TRUE(matchPattern(shuffle.getOffset(), m_ConstantInt(&offset)));
     shuffles.emplace_back(width.getSExtValue(), offset.getSExtValue());
   });
+  if (widths) {
+    *widths = 0;
+    module->walk([&](arith::SelectOp select) {
+      llvm::APInt chosen;
+      if (select.getType().isIndex() &&
+          matchPattern(select.getTrueValue(), m_ConstantInt(&chosen)))
+        *widths = std::max(*widths, chosen.getSExtValue());
+    });
+  }
   return shuffles;
 }
 
@@ -145,6 +181,27 @@ TEST(TargetDescriptionTest, TheWarpReductionReadsTheSubgroupWidth) {
   narrow.subgroupWidth = 16;
   EXPECT_EQ(shufflesOf(narrow, 16),
             (Shuffles{{16, 1}, {16, 2}, {16, 4}, {16, 8}}));
+}
+
+TEST(TargetDescriptionTest, TheRowStripeTileReadsTheSubgroupWidth) {
+  using Shuffles = std::vector<std::pair<int64_t, int64_t>>;
+
+  // The butterfly of the row-stripe tile has one step per bit of a lane
+  // index, and a column group is at most one subgroup wide.
+  int64_t widest = 0;
+  EXPECT_EQ(shufflesOf(nvidiaTarget(), 128, rowSum, &widest),
+            (Shuffles{{32, 1}, {32, 2}, {32, 4}, {32, 8}, {32, 16}}));
+  EXPECT_EQ(widest, 32);
+  EXPECT_EQ(nvidiaTarget().columnGroupWidth(1000), 32);
+
+  // With half the subgroup width the butterfly has four steps of width 16,
+  // and no group is wider than 16 columns.
+  TargetDescription narrow = nvidiaTarget();
+  narrow.subgroupWidth = 16;
+  EXPECT_EQ(shufflesOf(narrow, 64, rowSum, &widest),
+            (Shuffles{{16, 1}, {16, 2}, {16, 4}, {16, 8}}));
+  EXPECT_EQ(widest, 16);
+  EXPECT_EQ(narrow.columnGroupWidth(1000), 16);
 }
 
 TEST(TargetDescriptionTest, TheCRecordHoldsTheSameValues) {

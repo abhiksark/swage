@@ -408,8 +408,13 @@ scalar is stored at `output[s, c]`, and `output` is rank-two as well.
 `i + block_threads`, and so on, one after the other. Each thread reduces
 its columns alone and stores its own results, so no thread combines
 with another and a thread holds one scalar per reduction, whatever the
-number of columns. The policy takes no `ids`. `policy<sequential>`
-visits the columns of each segment in order.
+number of columns. The policy takes no `ids`. `policy<cta>` over
+rank-two values is the row-stripe tile, with or without `ids`: a block
+runs one task and one group of adjacent columns at a time, its threads
+split into row stripes of each column of the group, and the stripes of
+one column combine across the block, so a thread still holds one scalar
+per reduction. `policy<sequential>` visits the columns of each segment
+in order. `policy<warp>` takes rank-one values only.
 
 Example:
 

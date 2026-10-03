@@ -174,13 +174,11 @@ LogicalResult TasksOp::verify() {
   }
   if (failed(requireWord("feature_count", getFeatureCount().getType())))
     return failure();
-  if (!column && getPolicy() != TaskPolicy::Sequential)
-    return emitOpError()
-           << "rank-two values take policy<column> or policy<sequential>, "
-              "got policy<"
-           << stringifyTaskPolicy(getPolicy()) << ">";
-  if (getIds())
-    return emitOpError("a task of rank-two values is one segment, in order, "
+  if (getPolicy() == TaskPolicy::Warp)
+    return emitOpError("rank-two values take policy<column>, policy<cta>, or "
+                       "policy<sequential>, got policy<warp>");
+  if (column && getIds())
+    return emitOpError("policy<column> runs one task per segment, in order, "
                        "and takes no ids");
   if (getOutput() && cast<MemRefType>(getOutput().getType()).getRank() != 2)
     return emitOpError() << "into must have rank two for rank-two values, got "

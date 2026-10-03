@@ -1,0 +1,141 @@
+<!-- docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md -->
+# ADR-0023: Row-stripe tile for rank-two values
+
+- Status: accepted; step 1 of the migration sequence is implemented
+- Date: 2026-10-03
+- Accepted: 2026-10-03, with the recommended answer to every open question
+- Supersedes in part:
+  [ADR-0022](ADR-0022-wider-data-model-for-segmented-reductions.md), whose
+  rank-two decision was one column tile per segment with no split
+
+## Context
+
+ADR-0022 gave rank-two values, `[N, D]` rows of `D` features, one kernel:
+the column tile. One block runs one segment, and thread `t` reduces the
+columns `t`, `t + 128`, and so on, each alone in row order. Nothing is
+combined across threads and no segment is split.
+
+That tile is bound by the longest segment of a batch. A column of `n` rows
+is `n` dependent loads in one thread, so a batch with a long segment waits
+for that chain, and a long segment with few columns keeps few threads of
+one block busy. Measurements of the public call on such batches were up to
+17 times slower than `torch.segment_reduce` along axis 0, and looped Triton
+row kernels were much faster than both.
+
+## Decision
+
+Rank-two values get a second tile, the row-stripe tile, reached through the
+existing task-ids and split schedules. The column tile stays in the
+compiler as the direct schedule of a rank-two function and as a private
+launch path.
+
+### The tile
+
+- For `D` columns, the column-group width `W` is the smallest power of two
+  that is at least `D`, capped at the subgroup width, and 1 for `D` of 1 or
+  less. There are `ceil(D / W)` column groups.
+- A work item is a task and a column group. A kernel loops over the items
+  from its block index to `task_count * groups` by the grid size, and
+  decodes the task and the group from the item index. The loop bounds are
+  the same in every thread of a block, so the barriers of an item are
+  legal, and a launch of one block per item runs one item per block.
+- In a block of `T` threads, `T` a multiple of the subgroup width `S`,
+  thread `t` owns column `(t mod S) mod W` of the group and is row stripe
+  `(t / S) * (S / W) + (t mod S) / W`. There are `R = T / W` stripes.
+- A stripe folds rows `s`, `s + R`, and so on of its column in row order
+  into one scalar per reduction stage. A lane whose column is at or beyond
+  `D` binds no element. Validity acts on addresses and on the final store,
+  never on control flow.
+- The stripes of one column combine in two steps: an XOR butterfly of five
+  shuffles, each kept by a select only for an offset of at least `W`, and
+  an exchange of one element per thread through a workgroup buffer of `T`
+  elements between two barriers, after which every thread combines the
+  results of its column from each subgroup as a pairwise tree. Every thread
+  of a column ends with the same bits, which a later stage can capture.
+- The thread of stripe zero stores the result of its column at
+  `output[segment * D + column]`.
+
+`W` is computed in the kernel from the feature count and on the host from
+the same rule, `TargetDescription::columnGroupWidth`. It is not a
+compile-time parameter: five kernels per program and role would multiply
+the PTX, the digests, and the artifact.
+
+### Schedules and plan IR
+
+- No new plan operation and no new policy. `swage_plan.tasks policy<cta>`
+  takes `feature_count`, with or without `ids`. `policy<warp>` stays
+  rank-one.
+- The task-ids schedule plans the row-stripe tile for every admitted
+  rank-two program, including the softmax, whose ids then only name
+  segments and which a launch runs with one task per segment. Over
+  rank-one values the task-ids schedule still requires the one
+  capture-free reduction that host classification describes.
+- The fused-mixed and persistent schedules refuse rank-two values by name.
+- A task-ids block of rank-two values is a whole number of subgroups.
+
+### Kernel layouts and records
+
+A new layout appends `feature_count` to the task-id layout:
+
+```text
+values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
+segment_count:i32, feature_count:i32
+```
+
+Task records, the classifier, the C runtime, and its ABI version do not
+change: the column group is the low part of the item index, and the host
+and the kernel both derive the group count from the feature count.
+
+### Numerics
+
+A column sum adds within a stripe in row order, then over the stripe bits
+of a subgroup, then over the subgroups as a tree, so its longest chain has
+`k = ceil(n / R) - 1 + log2(R)` additions. Its bits depend on the values of
+the column, on `n`, and on `D` through `W`, and not on the batch, the grid,
+the device model, or the offset width. A maximum and a minimum are
+order-free and keep their bits. A sum, a mean, and a softmax change bits
+relative to the column tile.
+
+## Consequences
+
+- The digest matrix gains the task-ids kernel of every rank-two program on
+  `sm_80` and `sm_86`. The 836 pairs before it do not move, which includes
+  the 18 pairs of the column tile.
+- The column tile keeps its bit equality with the CPU oracle, which adds
+  in row order. The row-stripe tile does not have it; its tests compare
+  bits with a host model of its order of additions instead.
+
+## Migration sequence
+
+Step 1. The block tile through task-ids, including the softmax. Implemented.
+
+- `swage_plan.tasks policy<cta>` over rank-two values, the planner rules,
+  the `TaskIdsColumns` layout, the column-group combination in
+  `Emission.cpp`, the item loop and the exchange buffer in
+  `SwagePlanToGPU.cpp`, and the width rule of the conversion's pre-check.
+- `test/Conversion/SwagePlanToGPU/column-groups.mlir` pins the kernel;
+  `python/tests/mlir/test_segmented_bounds.py` launches it below the Python
+  validation and compares its bits with
+  `python/tests/mlir/row_tile_model.py`; the racecheck runs it.
+- The digest matrix gains 18 pairs.
+
+Step 2. The split. Not implemented.
+
+Step 3. The public reductions. Not implemented.
+
+Step 4. The public softmax. Not implemented.
+
+Steps 5 and 6, a packed warp tile for very small `D` and a grid cap, are
+made only on measurement.
+
+## Rejected alternatives
+
+- A compile-time `W`: more kernels, digests, and artifact entries for a few
+  instructions per stage.
+- A flat mapping, `column = flat index mod D`: for a `D` that is not a power
+  of two the threads of one column are no butterfly.
+- The column group in task records: records `C` times larger and a new
+  classifier and runtime ABI.
+- A two-dimensional grid: the runtime launches with `gridX` only.
+- A new schedule and C API entry point for the softmax: the task-ids
+  schedule with identity ids does the same.

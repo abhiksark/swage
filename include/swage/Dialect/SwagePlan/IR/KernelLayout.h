@@ -31,6 +31,9 @@ enum class KernelKind {
   DirectColumns,
   /// One block per task; the task buffer names the segment.
   TaskIds,
+  /// The row-stripe tile of rank-two values over a task buffer: one block
+  /// per task and group of adjacent columns, which the block index names.
+  TaskIdsColumns,
   /// Warp tasks and block tasks in one launch.
   FusedMixed,
   /// One partial result per chunk of a long segment.
@@ -173,6 +176,11 @@ inline constexpr KernelArgument taskIdArguments[] = {
     KernelArgument::Output,      KernelArgument::TaskIds,
     KernelArgument::ValueCount,  KernelArgument::TaskCount,
     KernelArgument::SegmentCount};
+inline constexpr KernelArgument taskIdColumnsArguments[] = {
+    KernelArgument::Values,       KernelArgument::Offsets,
+    KernelArgument::Output,       KernelArgument::TaskIds,
+    KernelArgument::ValueCount,   KernelArgument::TaskCount,
+    KernelArgument::SegmentCount, KernelArgument::FeatureCount};
 inline constexpr KernelArgument fusedMixedArguments[] = {
     KernelArgument::Values,       KernelArgument::Offsets,
     KernelArgument::Output,       KernelArgument::TaskIds,
@@ -211,6 +219,8 @@ constexpr KernelLayout kernelLayout(KernelKind kind) {
     return KernelLayout(detail::directColumnsArguments);
   case KernelKind::TaskIds:
     return KernelLayout(detail::taskIdArguments);
+  case KernelKind::TaskIdsColumns:
+    return KernelLayout(detail::taskIdColumnsArguments);
   case KernelKind::FusedMixed:
     return KernelLayout(detail::fusedMixedArguments);
   case KernelKind::SplitPartial:

@@ -55,10 +55,22 @@ IntegerAttr blockThreadsOf(Operation *op) {
       SwagePlanDialect::getBlockThreadsAttrName());
 }
 
+/// The element type of the exchange buffer a task operation needs, or a
+/// null type: the threads of a row-stripe tile of rank-two values combine
+/// the results of one column through one element per thread.
+Type exchangeElementOf(Operation *task) {
+  auto tasks = dyn_cast<TasksOp>(task);
+  if (tasks && tasks.getFeatureCount() && tasks.getPolicy() == TaskPolicy::CTA)
+    return cast<MemRefType>(tasks.getValues().getType()).getElementType();
+  return Type();
+}
+
 /// A plan function becomes a `gpu.module` named after it that holds the
 /// kernel: every buffer argument becomes a pointer, every count stays as it
 /// is, and the launch width is pinned through the target. The kernel of a
-/// persistent task operation also gets the two claim slots its blocks share.
+/// persistent task operation also gets the two claim slots its blocks share,
+/// and the kernel of a row-stripe tile its exchange buffer, one element per
+/// thread.
 ///
 /// The body is legalized while the function is still its parent, so the
 /// task pattern reads the launch width from the function it sits in, and
@@ -103,6 +115,13 @@ public:
       kernel.addWorkgroupAttribution(
           MemRefType::get(
               {2}, rewriter.getI32Type(), AffineMap(),
+              gpu::AddressSpaceAttr::get(
+                  context, gpu::GPUDialect::getWorkgroupAddressSpace())),
+          loc);
+    if (Type element = exchangeElementOf(&body.front()))
+      kernel.addWorkgroupAttribution(
+          MemRefType::get(
+              {threads.getInt()}, element, AffineMap(),
               gpu::AddressSpaceAttr::get(
                   context, gpu::GPUDialect::getWorkgroupAddressSpace())),
           loc);
@@ -273,13 +292,191 @@ bool convertColumnTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
   return converted;
 }
 
+/// The geometry of the row-stripe tile of rank-two values, which every item
+/// of a block shares. A block of `T` threads splits into `T / W` row stripes
+/// of each of `W` adjacent columns: thread `t` is lane `t mod S` of subgroup
+/// `t / S`, for the subgroup width `S`, owns column `lane mod W` of a group,
+/// and is stripe `(t / S) * (S / W) + lane / W`. `W` is the column-group
+/// width of the feature count, a power of two that divides `S`, and `T` is
+/// a multiple of `S`, so the lanes of one column within a subgroup are an
+/// XOR butterfly.
+struct RowTile {
+  Value features;  ///< The column count, as an index.
+  Value width;     ///< `W`, the columns of one group.
+  Value groups;    ///< The column groups, `ceil(features / W)`.
+  Value column;    ///< The column of this thread within a group.
+  Value stripe;    ///< The row stripe of this thread.
+  Value rowStride; ///< The elements between two rows of one stripe.
+  Value exchange;  ///< The workgroup buffer of the combination.
+};
+
+RowTile emitRowTile(OpBuilder &builder, Location loc,
+                    const TargetDescription &target, Value featureCount,
+                    Value threadId, int64_t threads, Value exchange) {
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+  Value features = arith::IndexCastOp::create(
+      builder, loc, builder.getIndexType(), featureCount);
+  Value width =
+      emitColumnGroupWidth(builder, loc, features, target.subgroupWidth);
+  // A feature count of zero or below names no column, so the block has no
+  // item and nothing below reads the count.
+  Value hasColumns = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::sgt, features, zero);
+  Value groups = arith::SelectOp::create(
+      builder, loc, hasColumns,
+      arith::DivUIOp::create(
+          builder, loc,
+          arith::AddIOp::create(
+              builder, loc, features,
+              arith::SubIOp::create(builder, loc, width, one)),
+          width),
+      zero);
+  Value subgroupWidth =
+      arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
+  Value lane = arith::RemUIOp::create(builder, loc, threadId, subgroupWidth);
+  Value subgroup =
+      arith::DivUIOp::create(builder, loc, threadId, subgroupWidth);
+  Value column = arith::RemUIOp::create(builder, loc, lane, width);
+  Value stripesPerSubgroup =
+      arith::DivUIOp::create(builder, loc, subgroupWidth, width);
+  Value stripe = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(builder, loc, subgroup, stripesPerSubgroup),
+      arith::DivUIOp::create(builder, loc, lane, width));
+  Value stripes = arith::DivUIOp::create(
+      builder, loc, arith::ConstantIndexOp::create(builder, loc, threads),
+      width);
+  Value rowStride = arith::MulIOp::create(builder, loc, stripes, features);
+  return {features, width, groups, column, stripe, rowStride, exchange};
+}
+
+/// Run `emitItem` for the items of this block at the insertion point of
+/// `builder`: the items `b`, `b + G`, and so on below `taskCount * groups`,
+/// for the block index `b` and the grid size `G`. Item `i` is task
+/// `i / groups` and column group `i mod groups`. The bounds are the same in
+/// every thread of a block, so the barriers of the item stay legal, and a
+/// launch of one block per item runs one item per block.
+void emitItemLoop(
+    OpBuilder &builder, Location loc, Value taskCount, Value groups,
+    function_ref<void(OpBuilder &, Location, Value, Value)> emitItem) {
+  Value blockIndex = gpu::BlockIdOp::create(builder, loc, gpu::Dimension::x);
+  Value gridSize = gpu::GridDimOp::create(builder, loc, gpu::Dimension::x);
+  Value items = arith::MulIOp::create(builder, loc, taskCount, groups);
+  scf::ForOp::create(
+      builder, loc, blockIndex, items, gridSize, ValueRange(),
+      [&](OpBuilder &loop, Location loopLoc, Value item, ValueRange) {
+        Value task = arith::DivUIOp::create(loop, loopLoc, item, groups);
+        Value group = arith::RemUIOp::create(loop, loopLoc, item, groups);
+        emitItem(loop, loopLoc, task, group);
+        scf::YieldOp::create(loop, loopLoc);
+      });
+}
+
+/// The rows `[start, end)` of column group `group` for this thread of a
+/// row-stripe tile: its column of the group and the binding of its stripe,
+/// which reads `(start + stripe) * D + c` and every `rowStride`-th element
+/// after it below `end * D`, for `D` features and the column `c`. A column
+/// at or beyond `D` binds no element: its first element is the end. The
+/// bound is on the address and not on the control flow, so every thread
+/// reaches each shuffle and barrier of the stages that follow.
+struct BoundRows {
+  SegmentBinding binding;
+  Value column;        ///< The column `c` of this thread.
+  Value columnInRange; ///< Whether `c` is below `D`.
+};
+
+BoundRows bindRows(OpBuilder &builder, Location loc, const RowTile &tile,
+                   Value base, Value start, Value end, Value group) {
+  Value column = arith::AddIOp::create(
+      builder, loc, arith::MulIOp::create(builder, loc, group, tile.width),
+      tile.column);
+  Value columnInRange = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::ult, column, tile.features);
+  Value firstRow = arith::AddIOp::create(builder, loc, start, tile.stripe);
+  Value first = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(builder, loc, firstRow, tile.features), column);
+  Value last = arith::MulIOp::create(builder, loc, end, tile.features);
+  first = arith::SelectOp::create(builder, loc, columnInRange, first, last);
+  return {{base, first, last, tile.rowStride, tile.width, tile.exchange},
+          column,
+          columnInRange};
+}
+
+/// Run the consumers of a task region on rows `rows` of one column group of
+/// a row-stripe tile, at the insertion point of `body`, and return the
+/// scalar the region yields, or a null value when the region yields none.
+/// Sets `converted` to false when a consumer could not be legalized.
+///
+/// The region argument is replaced by the six values of the binding, so
+/// each reduction combines per column, and an extent argument by the number
+/// of rows, `rowEnd - rowStart`.
+Value convertRowRegion(ConversionPatternRewriter &rewriter, OpBuilder &body,
+                       Location loc, Region &region, const BoundRows &rows,
+                       Value rowStart, Value rowEnd, bool &converted) {
+  Block &consumersBlock = region.front();
+  const SegmentBinding &binding = rows.binding;
+  rewriter.replaceAllUsesWith(consumersBlock.getArgument(0),
+                              ValueRange{binding.base, binding.first,
+                                         binding.end, binding.stride,
+                                         binding.groupWidth, binding.exchange});
+  if (consumersBlock.getNumArguments() == 2)
+    rewriter.replaceAllUsesWith(
+        consumersBlock.getArgument(1),
+        arith::SubIOp::create(body, loc, rowEnd, rowStart).getResult());
+  auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
+  SmallVector<Operation *> consumers = operationsOf(consumersBlock);
+  consumers.pop_back();
+  if (failed(legalizeInPlace(rewriter, consumers))) {
+    converted = false;
+    return Value();
+  }
+  moveConvertedOperations<ReduceOp, MapStoreOp, swage_plan::YieldOp>(
+      rewriter, consumersBlock, body.getInsertionBlock());
+  if (Value scalar = yield.getValue())
+    return rewriter.getRemappedValue(scalar);
+  return Value();
+}
+
+/// Store the result of one column of a row-stripe tile at
+/// `sink[row * D + column]` from the thread of stripe zero of that column,
+/// and only when the column is one of the features and `rowInRange`, if
+/// given, holds.
+void emitRowStore(OpBuilder &body, Location loc, const RowTile &tile,
+                  const BoundRows &rows, Value total, Value sink, Value row,
+                  Value rowInRange, Value zero) {
+  Value slot = arith::AddIOp::create(
+      body, loc, arith::MulIOp::create(body, loc, row, tile.features),
+      rows.column);
+  Value mayStore = rows.columnInRange;
+  if (rowInRange)
+    mayStore = arith::AndIOp::create(body, loc, mayStore, rowInRange);
+  emitLeaderStore(body, loc, total, sink, slot, tile.stripe, zero, mayStore);
+}
+
+/// The kernel of a row-stripe tile finds its exchange buffer through the
+/// kernel that owns `parameter`, one of its buffer parameters.
+Value exchangeOf(Value parameter) {
+  auto argument = dyn_cast<BlockArgument>(parameter);
+  auto kernel =
+      argument ? dyn_cast<gpu::GPUFuncOp>(argument.getOwner()->getParentOp())
+               : gpu::GPUFuncOp();
+  if (!kernel || kernel.getWorkgroupAttributions().empty())
+    return Value();
+  return kernel.getWorkgroupAttributions().front();
+}
+
 /// One block of threads per task: the kernel prelude, the guard on the task
 /// index, and the segment of the task. The direct kernel uses the block
 /// index as the segment ID; with a task buffer the ID is loaded from it. A
-/// task of `policy<column>` is the column tile of rank-two values.
+/// task of `policy<column>` is the column tile of rank-two values, and a
+/// task of `policy<cta>` over rank-two values the row-stripe tile, which
+/// loops over the items of its block: a task and a group of columns each.
 class TasksPattern : public OpConversionPattern<TasksOp> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  TasksPattern(MLIRContext *context, const TargetDescription &target)
+      : OpConversionPattern(context), target(target) {}
 
   LogicalResult
   matchAndRewrite(TasksOp tasks, OpAdaptor adaptor,
@@ -290,6 +487,8 @@ public:
     Location loc = tasks.getLoc();
     Value ids = adaptor.getIds();
     Value featureCount = adaptor.getFeatureCount();
+    if (featureCount && tasks.getPolicy() == TaskPolicy::CTA)
+      return convertRowTasks(tasks, adaptor, rewriter, threads.getInt());
 
     Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
     Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
@@ -328,6 +527,61 @@ public:
     rewriter.eraseOp(tasks);
     return success();
   }
+
+private:
+  /// The row-stripe tile of rank-two values: for each item of the block,
+  /// the segment of its task, the rows of that segment after their clamp,
+  /// the consumers on the column group of the item, and the store of each
+  /// column of the group. With a task buffer the segment is loaded from it
+  /// and compared with the segment count; without, task `t` is segment `t`.
+  LogicalResult convertRowTasks(TasksOp tasks, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter,
+                                int64_t threads) const {
+    Value exchange = exchangeOf(adaptor.getValues());
+    if (!exchange)
+      return rewriter.notifyMatchFailure(tasks, "kernel has no exchange");
+    Location loc = tasks.getLoc();
+    Value ids = adaptor.getIds();
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    RowTile tile = emitRowTile(rewriter, loc, target, adaptor.getFeatureCount(),
+                               threadId, threads, exchange);
+    Value taskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        ids ? adaptor.getTaskCount() : adaptor.getSegmentCount());
+    bool converted = true;
+    emitItemLoop(
+        rewriter, loc, taskCount, tile.groups,
+        [&](OpBuilder &body, Location bodyLoc, Value task, Value group) {
+          Value segment = task;
+          Value segmentInRange;
+          if (ids) {
+            Value segmentWord = loadTaskWord(body, bodyLoc, ids, task);
+            segmentInRange = isLoadedIndexInRange(body, bodyLoc, segmentWord,
+                                                  adaptor.getSegmentCount());
+            segment = arith::IndexCastOp::create(
+                body, bodyLoc, body.getIndexType(), segmentWord);
+          }
+          SegmentRange range = emitSegmentRange(
+              body, bodyLoc, adaptor.getOffsets(), adaptor.getValueCount(),
+              segment, segmentInRange, zero, one);
+          BoundRows rows = bindRows(body, bodyLoc, tile, adaptor.getValues(),
+                                    range.start, range.end, group);
+          Value total =
+              convertRowRegion(rewriter, body, bodyLoc, tasks.getBody(), rows,
+                               range.start, range.end, converted);
+          if (total)
+            emitRowStore(body, bodyLoc, tile, rows, total, adaptor.getOutput(),
+                         segment, segmentInRange, zero);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
+  }
+
+  const TargetDescription &target;
 };
 
 /// Warp tasks and block tasks in one launch. The first blocks each run one
@@ -1151,6 +1405,13 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
     return tasks.emitError()
            << "policy<warp> requires " << name << " to be the subgroup width, "
            << target.subgroupWidth << ", got " << threads;
+  // Every lane of a row-stripe tile owns one row stripe of one column.
+  if (exchangeElementOf(tasks) && threads % target.subgroupWidth != 0)
+    return tasks.emitError()
+           << "a row-stripe task of rank-two values runs whole subgroups of "
+           << target.subgroupWidth << " threads, so " << name
+           << " must be a multiple of " << target.subgroupWidth << ", got "
+           << threads;
   return verifyKernelSymbols(module, function, "");
 }
 
@@ -1214,11 +1475,10 @@ LogicalResult convertPlanToGPU(ModuleOp module,
   legality.addIllegalDialect<SwageDialect, SwagePlanDialect>();
 
   RewritePatternSet patterns(module.getContext());
-  patterns
-      .add<PlanKernelFuncPattern, FusedTasksPattern, PersistentTasksPattern>(
-          module.getContext(), target);
-  patterns.add<PlanKernelReturnPattern, TasksPattern, PartialTasksPattern,
-               MergeTasksPattern>(module.getContext());
+  patterns.add<PlanKernelFuncPattern, TasksPattern, FusedTasksPattern,
+               PersistentTasksPattern>(module.getContext(), target);
+  patterns.add<PlanKernelReturnPattern, PartialTasksPattern, MergeTasksPattern>(
+      module.getContext());
   populateSegmentConsumerPatterns(patterns, &target);
   return applyFullConversion(module, legality, std::move(patterns));
 }

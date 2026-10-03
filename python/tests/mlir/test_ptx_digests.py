@@ -109,6 +109,16 @@ _REDUCTION_VARIANTS = (
     ("split-partial", "_compile_split_partial_reduction_ptx", {}),
     ("split-merge", "_compile_split_merge_reduction_ptx", {}),
 )
+# The kernels of a program over rank-two values: the column tile of the
+# direct schedule and the row-stripe tile of the task-ids schedule.
+_COLUMN_VARIANTS = (
+    ("direct-128", "_compile_segmented_reduction_ptx", {"block_size": 128}),
+    (
+        "task-ids-128",
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+    ),
+)
 _PERSISTENT_VARIANT = (
     "persistent", "_compile_persistent_segmented_reduction_ptx", {},
 )
@@ -172,21 +182,16 @@ def _programs():
             variants,
             processors,
         )
-    # The reductions over rank-two values. Each has one kernel, the direct
-    # schedule, which the runtime compiles at the CTA block width.
+    # The reductions over rank-two values: the column tile, the direct
+    # schedule, and the row-stripe tile, the task-ids schedule, both at the
+    # CTA block width.
     for element in ("f32", "f64"):
         for kind in ("sum", "max", "min", "mean"):
             suffix = "" if element == "f32" else f"-{element}"
             programs[f"{kind}-columns{suffix}"] = (
                 qualification._semantic_module(kind, element, 2),
                 qualification._reduction_kernel(kind, element, 2),
-                (
-                    (
-                        "direct-128",
-                        "_compile_segmented_reduction_ptx",
-                        {"block_size": 128},
-                    ),
-                ),
+                _COLUMN_VARIANTS,
                 _NEWER_PROCESSORS,
             )
     # The one program with a `map_store` terminal, as the runtime compiles
@@ -208,18 +213,13 @@ def _programs():
         ),
         _PROCESSORS,
     )
-    # The softmax over rank-two values: the three stages of a column in
-    # one thread, in the one kernel of a rank-two program.
+    # The softmax over rank-two values: the three stages of a column in one
+    # thread, in the column tile, and in the stripes of a block, in the
+    # row-stripe tile.
     programs["ragged-softmax-columns"] = (
         qualification._softmax_text(2),
         "ragged_softmax_r2",
-        (
-            (
-                "direct-128",
-                "_compile_segmented_reduction_ptx",
-                {"block_size": 128},
-            ),
-        ),
+        _COLUMN_VARIANTS,
         _NEWER_PROCESSORS,
     )
     return programs

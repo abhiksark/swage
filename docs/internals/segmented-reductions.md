@@ -203,8 +203,53 @@ What follows from the tile:
 
 `swage.segment_reduce` runs this kernel for `[N, D]` values with more than
 one column. `[N, 1]` values take the rank-one schedules through a view, and
-`[N, 0]` values launch nothing. Planning admission refuses a rank-two
-function on every schedule that reads a task buffer.
+`[N, 0]` values launch nothing.
+
+### The row-stripe tile
+
+The task-ids schedule plans a second kernel of a rank-two function, the
+row-stripe tile of
+[ADR-0023](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md). Its
+task operation is `policy<cta>` with `feature_count`, and its kernel takes
+the parameters of the task-id kernel and the number of columns:
+
+```text
+values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
+segment_count:i32, feature_count:i32
+```
+
+- **Column groups.** For `D` columns the group width `W` is the smallest
+  power of two that is at least `D`, capped at 32, and there are
+  `ceil(D / W)` groups. The kernel computes `W` from the feature count.
+- **Items.** A block loops over items from its block index to
+  `task_count * groups` by the grid size. An item is a task, whose segment
+  the task buffer names, and a column group. A launch of one block per
+  item runs one item per block, and a smaller grid runs the same items
+  with the same bits.
+- **Stripes.** Thread `t` of a block of `T` threads owns column
+  `(t mod 32) mod W` of the group and is row stripe
+  `(t / 32) * (32 / W) + (t mod 32) / W`, one of `R = T / W`. It folds the
+  rows `s`, `s + R`, and so on of its column, which are the elements
+  `(start + s) * D + c` and every `R * D`-th one after it below `end * D`.
+  A column at or beyond `D` binds no element. `T` is a multiple of 32.
+- **Combination.** The stripes of a column combine by an XOR butterfly of
+  five shuffles in every lane, each kept by a select only where the offset
+  is at least `W`, then through a workgroup buffer of `T` elements between
+  two barriers, from which every thread combines the results of its column
+  from each subgroup as a pairwise tree in subgroup order. A thread holds
+  one scalar per reduction stage.
+- **Store.** The thread of stripe zero stores the result of its column at
+  `output[segment * D + c]`, when the column is below `D` and the segment
+  ID is below the segment count. A mean divides by the number of rows of
+  its segment.
+
+A column sum then has `ceil(n / R) - 1 + log2(R)` additions on its longest
+path. Its bits depend on `n` and on `D` through `W`, and not on the batch,
+the grid, or the device model. `python/tests/mlir/row_tile_model.py` adds
+in exactly that order, and the driver-level tests of
+`python/tests/mlir/test_segmented_bounds.py` require the bits of the kernel
+to equal it. No public call launches this kernel yet. The fused-mixed,
+split, and persistent schedules refuse a rank-two function by name.
 
 The alternative, a column loop inside the row tiles of rank one, keeps the
 split and the rank-one bound. It was not built: it doubles four schedules,

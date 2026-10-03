@@ -144,3 +144,45 @@ module {
 // WARP-NOT: nvvm.shfl.sync
 // WARP-NOT: nvvm.barrier0
 // CHECK: llvm.return
+
+// -----
+
+module {
+  func.func @segmented_sum_f64_r2(
+      %values: memref<?x?xf64> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?x?xf64> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>},
+      %feature_count: i32 {swage.role = #swage.role<feature_count>}) {
+    %sid = swage.segment_id 0
+    %col = swage.segment_id 1
+    %segment = swage.make_segment %values, %offsets, %sid column(%col)
+        : memref<?x?xf64>, memref<?xi32>, index, index
+          -> !swage.segment<f64>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f64> -> f64 {
+    ^bb0(%value: f64):
+      swage.yield %value : f64
+    }
+    memref.store %sum, %output[%sid, %col] : memref<?x?xf64>
+    return
+  }
+}
+
+// Rank-two values. The direct schedule gives the column tile, which
+// combines nothing across threads. The task-ids schedule gives the
+// row-stripe tile, here at one subgroup: its exchange buffer becomes a
+// shared-memory global of 32 f64 elements, each of its five shuffles moves
+// the two halves of an f64 value, and the exchange sits between two
+// barriers.
+// CHECK-LABEL: gpu.module @segmented_sum_f64_r2_module
+// WARP: llvm.mlir.global internal @__wg_segmented_sum_f64_r2_0() {addr_space = 3 : i32} : !llvm.array<32 x f64>
+// CHECK: llvm.func @segmented_sum_f64_r2(
+// CTA-NOT: nvvm.shfl.sync
+// CTA-NOT: nvvm.barrier0
+// WARP-COUNT-10: nvvm.shfl.sync {{ *}}bfly %{{.*}} : i32 -> i32
+// WARP: nvvm.barrier0
+// WARP: llvm.load %{{.*}} : !llvm.ptr<3> -> f64
+// WARP: nvvm.barrier0
+// CHECK: llvm.return

@@ -16,6 +16,7 @@
 // UNCHANGED: swage_plan.tasks
 // UNCHANGED-LABEL: func.func @too_wide(
 // UNCHANGED-LABEL: func.func @warp_policy_on_a_wide_block(
+// UNCHANGED-LABEL: func.func @rows_on_a_partial_subgroup(
 // UNCHANGED-LABEL: func.func @half_values(
 // UNCHANGED-LABEL: func.func @exponential_double(
 // UNCHANGED-LABEL: func.func @wide_offsets(
@@ -94,6 +95,35 @@ module {
         into(%output : memref<?xf32>) {
     ^bb0(%segment: !swage.segment<f32>):
       %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// Every lane of a row-stripe tile owns one row stripe of one column, so its
+// block is a whole number of subgroups. 48 threads are two subgroups, which
+// a block-wide reduction of scalars admits.
+module {
+  func.func @rows_on_a_partial_subgroup(
+      %values: memref<?x?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?x?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32, %feature_count: i32)
+      attributes {swage_plan.block_threads = 48 : i32} {
+    // expected-error@+1 {{a row-stripe task of rank-two values runs whole subgroups of 32 threads, so swage_plan.block_threads must be a multiple of 32, got 48}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?x?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        feature_count(%feature_count : i32)
+        ids(%ids : memref<?xi32>) task_count(%task_count : i32)
+        into(%output : memref<?x?xf32>) {
+    ^bb0(%column: !swage.segment<f32>):
+      %sum = swage.reduce %column kind<sum> : !swage.segment<f32> -> f32 {
       ^bb0(%value: f32):
         swage.yield %value : f32
       }

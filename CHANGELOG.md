@@ -8,6 +8,13 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- The task-ids schedule plans a second kernel of a rank-two program, the
+  row-stripe tile: `swage_plan.tasks policy<cta>` with `feature_count`, in
+  which the row stripes of a group of up to 32 adjacent columns combine
+  across a block through a butterfly and one shared-memory exchange. It
+  admits the rank-two softmax with identity task ids. The fused-mixed,
+  split, and persistent schedules refuse rank-two values by name. The
+  digest matrix gains 18 pairs; no earlier pair moved (ADR-0023).
 - `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
   segment gives positive infinity for `min` and NaN for `mean`; a NaN
   element gives NaN. A mean is the sum of the same call divided by the

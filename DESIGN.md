@@ -29,7 +29,8 @@ Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
 tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
 steps, and 512-thread split partial and merge steps. Rank-two values use a
 128-thread column step, in which a thread reduces or normalizes one column
-of one segment.
+of one segment, or a row-stripe step, in which the row stripes of a group
+of columns combine across a block.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -112,9 +113,10 @@ scalar partials without reapplying element expressions.
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
-policy. A function over rank-two values has one kernel schedule, the column
-policy: it has no task buffer, nothing classifies its segments, and no
-segment is split.
+policy. A function over rank-two values has two kernel schedules: the
+column policy, with no task buffer, and `policy<cta>` over a task buffer,
+the row-stripe tile of
+[`docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md`](docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md).
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion

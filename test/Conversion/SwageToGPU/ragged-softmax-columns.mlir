@@ -26,6 +26,10 @@
 // RUN:   --pass-pipeline='builtin.module(swage-to-plan{schedule=direct block-threads=128},swage-plan-to-gpu,gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' %s \
 // RUN:   | FileCheck %s --check-prefix=NVVM --implicit-check-not=nvvm.shfl \
 // RUN:       --implicit-check-not=nvvm.barrier
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
+// RUN:   | FileCheck %s --check-prefix=STRIPES --implicit-check-not=swage. \
+// RUN:       --implicit-check-not=gpu.all_reduce
 
 module {
   func.func @ragged_softmax_r2(
@@ -121,3 +125,16 @@ module {
 // NVVM: llvm.func @ragged_softmax_r2(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32)
 // NVVM-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
 // NVVM: llvm.return
+
+// The task-ids schedule gives the row-stripe tile of the same program: the
+// task buffer and the number of columns as parameters, one exchange buffer
+// of 128 elements, the loop over the items of a block, and five shuffles
+// and two barriers per reduction stage, which
+// test/Conversion/SwagePlanToGPU/column-groups.mlir pins in detail.
+// STRIPES: gpu.func @ragged_softmax_r2(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32) workgroup(%{{[^ ]+}} : memref<128xf32, #gpu.address_space<workgroup>>) kernel
+// STRIPES: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} {{[{]$}}
+// STRIPES-COUNT-5: gpu.shuffle xor
+// STRIPES-COUNT-2: gpu.barrier
+// STRIPES-COUNT-5: gpu.shuffle xor
+// STRIPES-COUNT-2: gpu.barrier
+// STRIPES: llvm.store

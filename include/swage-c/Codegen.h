@@ -111,7 +111,10 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFixedBlockToPTX(
 /// block. `blockSize` is the launch width in threads, from 1 to 1024; its
 /// warp count, `blockSize` divided by 32 and rounded up, must be a power of
 /// two. `useTaskIds` selects the launch ABI that reads segment ids from a
-/// task buffer.
+/// task buffer. For a function over rank-two values the kernel without task
+/// ids is the column tile, and the one with task ids is the row-stripe tile,
+/// whose `blockSize` must be a multiple of 32 and which also takes the
+/// feature count.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,

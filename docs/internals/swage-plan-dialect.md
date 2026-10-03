@@ -100,6 +100,15 @@ store, the softmax, takes the column policy unchanged: a thread runs the
 consumers of its column in program order, and the store writes the
 rank-two output at the row and the column it read.
 
+Over rank-two values `policy<cta>` is the row-stripe tile, with or
+without `ids`: a block runs one task and one group of adjacent columns at a
+time, its threads split into row stripes of each column of the group, and
+the stripes of one column combine across the block. The region and its
+consumers are the same; the conversion binds them to six values, the four
+of a strided run, the width of a column group, and the workgroup buffer of
+the combination, which the kernel holds with one element per thread.
+`policy<warp>` takes rank-one values only.
+
 The CPU oracle is planned too. A task operation of `policy<sequential>`
 visits every segment in order on one thread. Its function has no launch
 width, keeps its signature and its callers, and takes no task buffer, and
