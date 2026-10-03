@@ -367,7 +367,15 @@ minimum is one correctly rounded division. A float32 count of more than
 16,777,216 tied elements is rounded. A softmax gradient lies within
 `(k + 3) * eps32 * max|g| * y` of `y * (g - s)` for the `y` the call
 returned, with `max|g|` over the segment, `k` the additions of the sum on
-its schedule, and a factor of the sum of `y` when that exceeds one.
+its schedule, and a factor of the sum of `y` when that exceeds one. The
+product of a softmax second derivative with a vector `v` lies within
+`(7k + 43) * eps32 * max|g| * max|v| * y` of its formula on the same `y`,
+with a factor of the square of the sum of `y` when that exceeds one.
+Against the float64 gradient of `torch.softmax`, the error of the forward,
+at most `b` relative with `b` the bound of
+[Ragged Softmax](../internals/ragged-softmax.md#accuracy), adds at most
+`3 * b * max|g| * y` to a gradient, and `13 * b` times the scale of the
+product bound, `max|g| * max|v| * y` with its factor, to that product.
 
 On PyTorch 2.12, on the CPU and on CUDA, the gradient of
 `torch.segment_reduce` equals this one for a sum, agrees with it to within

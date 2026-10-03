@@ -980,17 +980,44 @@ def test_the_softmax_gradient_follows_pytorch_on_special_values(columns):
     assert (actual[4, 0] == 0.0).all()
 
 
+def _softmax_product(y, g, v):
+    """Return the product of the derivative of a softmax backward with `v`.
+
+    For the backward `y * (g - s)` with `s = sum(g * y)`, the product is
+    `y * (w - sum(y * w))` with `w = v * (g - s) - g * sum(y * v)`, per
+    column. It is evaluated in the precision of its arguments.
+    """
+    s = (g * y).sum(0)
+    w = v * (g - s) - g * (y * v).sum(0)
+    return y * (w - (y * w).sum(0))
+
+
+def _product_scale(y, g, v):
+    """Return `max|g| * max|v| * max(1, sum(y))**2 * y`, per column."""
+    total = y.sum(0).clamp(min=1.0)
+    return g.abs().amax(0) * v.abs().amax(0) * total * total * y
+
+
 @pytest.mark.parametrize("columns", [None, 3])
-def test_the_softmax_second_derivative_agrees_with_float64_pytorch(columns):
-    """Compare a Hessian-vector product with float64 `torch.softmax`.
+@pytest.mark.parametrize("spread", [8, 50])
+def test_the_softmax_second_derivative_is_bounded_by_its_formula(
+    spread, columns
+):
+    """Bound a Hessian-vector product, on its own result and against PyTorch.
 
     There is no float64 softmax, so `gradgradcheck` cannot run. The product
-    of the second derivative with a vector is compared with the float64
-    product instead, within `1e-5` of the largest magnitude of the
-    expected product of each segment.
+    with `v` of the derivative of the backward is formed by the two
+    backward passes: three segment sums of `k` additions each and nine
+    elementwise roundings. For the `y` the call returned, to first order,
+    every element lies within `(7k + 35) * eps32 * scale` of
+    `_softmax_product`, where `scale` is `_product_scale`; the test allows
+    `(7k + 43)` for the higher-order terms. Against float64
+    `torch.softmax`, a relative error of at most `b` in every `y`, the
+    forward bound of "Ragged Softmax", moves the product by at most
+    `13 * b * scale` more.
     """
     lengths = [2, 40, 129, 300]
-    logits, offsets, upstream = _softmax_case(lengths, 8, columns, seed=4)
+    logits, offsets, upstream = _softmax_case(lengths, spread, columns, seed=4)
     generator = torch.Generator().manual_seed(5)
     direction = torch.randn(logits.shape, generator=generator).cuda()
 
@@ -1000,18 +1027,27 @@ def test_the_softmax_second_derivative_agrees_with_float64_pytorch(columns):
     )
     (product,) = torch.autograd.grad(gradient, logits, direction)
 
+    rank_two = columns is not None
     for rows in _segment_slices(offsets):
-        x = logits[rows].detach().double().cpu()
-        g = upstream[rows].double().cpu()
-        v = direction[rows].double().cpu()
-        leaf = x.clone().requires_grad_()
-        (first,) = torch.autograd.grad(
-            torch.softmax(leaf, 0), leaf, g, create_graph=True
+        length = rows.stop - rows.start
+        x, y, g, v, actual = (
+            tensor[rows].detach().double().cpu().view(length, -1)
+            for tensor in (logits, result, upstream, direction, product)
         )
+        depth = length - 1 if rank_two else _public_depth(length)
+        own = (7 * depth + 43) * _EPS32 * _product_scale(y, g, v)
+        assert ((actual - _softmax_product(y, g, v)).abs() <= own).all()
+
+        leaf = x.clone().requires_grad_()
+        reference = torch.softmax(leaf, 0)
+        (first,) = torch.autograd.grad(reference, leaf, g, create_graph=True)
         (expected,) = torch.autograd.grad(first, leaf, v)
-        scale = expected.abs().amax(0).clamp(min=1e-30)
-        actual = product[rows].double().cpu()
-        assert ((actual - expected).abs() <= 1e-5 * scale).all()
+        forward = _softmax_bound(
+            x, reference.detach(), length - 1 if rank_two else None
+        ).amax(0)
+        scale = _product_scale(reference.detach(), g, v)
+        tolerance = 13 * forward * scale + (7 * depth + 43) * _EPS32 * scale
+        assert ((actual - expected).abs() <= tolerance).all()
 
 
 def test_the_softmax_backward_is_refused_under_capture_by_its_name():
