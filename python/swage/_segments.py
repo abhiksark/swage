@@ -52,8 +52,8 @@ def segment_reduce(values, offsets, kind, *, out=None):
     Args:
         values: Contiguous `torch.float32` or `torch.float64` CUDA tensor
             on the current device, of rank one or of rank two, `[N, D]`.
-            When it requires grad and gradient recording is on, a sum or a
-            mean records a gradient; see the user guide. Nothing is cast:
+            When it requires grad and gradient recording is on, the call
+            records a gradient; see the user guide. Nothing is cast:
             float64 values are reduced in float64.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
@@ -91,9 +91,8 @@ def segment_reduce(values, offsets, kind, *, out=None):
         ValueError: `kind` is not a supported kind; a tensor is not
             contiguous, is a lazy view, or is on another device; `out`
             requires grad, has the wrong size, or overlaps an input; `out`
-            is given while the call records a gradient; a kind without a
-            backward is asked to record one; or the offsets break their
-            contract.
+            is given while the call records a gradient; or the offsets
+            break their contract.
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
@@ -131,10 +130,6 @@ def _segment_reduce(values, offsets, kind, *, out=None):
             "values must have dtype torch.float32 or torch.float64"
         )
     if recording:
-        if kind not in _autograd._DIFFERENTIABLE_KINDS:
-            raise ValueError(
-                f"kind {kind!r} has no backward yet; pass values.detach()"
-            )
         return _autograd.functions(torch).SegmentReduce.apply(
             values, offsets, kind
         )

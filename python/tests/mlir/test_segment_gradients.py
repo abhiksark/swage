@@ -41,7 +41,8 @@ _needs_cuda = pytest.mark.skipif(
 )
 pytestmark = _needs_cuda
 
-KINDS = ["sum", "mean"]
+KINDS = ["sum", "mean", "max", "min"]
+EXTREMES = ["max", "min"]
 DTYPES = [torch.float32, torch.float64]
 OFFSET_DTYPES = [torch.int32, torch.int64]
 # None stands for rank-one values; a number is the column count of [N, D].
@@ -53,10 +54,17 @@ _PAST_FINAL = 2
 
 
 def _values(rows, columns, dtype, seed):
-    """Return values on the device that require grad."""
+    """Return values on the device that require grad.
+
+    The values are distinct multiples of 1/64 in a shuffled order, so no
+    two are equal and a maximum or a minimum has no tie, also after a
+    perturbation of `gradcheck`. Every value is exact in float32.
+    """
     generator = torch.Generator().manual_seed(seed)
     shape = (rows,) if columns is None else (rows, columns)
-    values = torch.randn(shape, generator=generator, dtype=torch.float64)
+    count = rows * (1 if columns is None else columns)
+    order = torch.randperm(count, generator=generator).to(torch.float64)
+    values = ((order - count / 2) / 64).reshape(shape)
     return values.to(dtype).cuda().requires_grad_()
 
 
@@ -244,6 +252,157 @@ def test_the_gradient_of_a_mean_is_one_division(dtype, columns, offsets_dtype):
     torch.testing.assert_close(gradient, theirs, rtol=eps, atol=0)
 
 
+@pytest.mark.parametrize("offsets_dtype", OFFSET_DTYPES, ids=["i32", "i64"])
+@pytest.mark.parametrize("columns", COLUMNS, ids=["r1", "c1", "c3", "c64"])
+@pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
+@pytest.mark.parametrize("kind", EXTREMES)
+def test_an_extreme_without_a_tie_sends_the_whole_gradient_to_it(
+    kind, dtype, columns, offsets_dtype
+):
+    """Give the gradient of a segment to its one extreme element.
+
+    Without a tie the gradient equals that of `torch.segment_reduce` bit
+    for bit, for an upstream gradient of either sign.
+    """
+    values, offsets = _batch(
+        [3, 0, 40, 1, 4097],
+        columns=columns,
+        dtype=dtype,
+        offsets_dtype=offsets_dtype,
+        past_final=2,
+        seed=6,
+    )
+    generator = torch.Generator().manual_seed(6)
+    shape = (5,) if columns is None else (5, columns)
+    upstream = torch.randn(shape, generator=generator, dtype=dtype).cuda()
+
+    result, gradient = _gradient(kind, values, offsets, upstream)
+
+    extreme = _broadcast(result.detach(), offsets, values.shape[0])
+    tied = values.detach().cpu() == extreme
+    tied[sum([3, 0, 40, 1, 4097]):] = False
+    expected = torch.where(
+        tied, _broadcast(upstream, offsets, values.shape[0]), 0.0
+    )
+    assert _bits(gradient.cpu()) == _bits(expected)
+    assert _bits(gradient.cpu()) == _bits(
+        _torch_gradient(kind, values, offsets, upstream).cpu()
+    )
+
+
+# One segment per row: values, the result of a maximum, and which elements
+# tie with it.
+_TIES = [
+    ([3.0, 3.0, 1.0], [True, True, False]),
+    ([2.0, 2.0, 2.0], [True, True, True]),
+    ([4.0, float("nan"), float("nan")], [False, True, True]),
+    ([float("-inf")] * 3, [True, True, True]),
+    ([-0.0, 0.0, -1.0], [True, True, False]),
+    ([float("inf"), 1.0, float("inf")], [True, False, True]),
+]
+
+
+def _tie_batch(kind):
+    """Return the tie segments, each of three rows, for one kind.
+
+    For a minimum every value is negated, which keeps the ties of a
+    maximum. One row past the final offset holds zero, which equals the
+    zero row that the gather of the backward pads with.
+    """
+    sign = 1.0 if kind == "max" else -1.0
+    rows = [sign * value for values, _ in _TIES for value in values]
+    values = torch.tensor([*rows, 0.0], dtype=torch.float64)
+    offsets = torch.tensor(_offsets([3] * len(_TIES)), dtype=torch.int32)
+    tied = torch.tensor([flag for _, flags in _TIES for flag in flags])
+    return values.cuda().requires_grad_(), offsets.cuda(), tied
+
+
+@pytest.mark.parametrize(
+    "upstream", [2.0, -3.0, float("nan"), float("inf")], ids=str
+)
+@pytest.mark.parametrize("kind", EXTREMES)
+def test_tied_elements_share_the_gradient_equally(kind, upstream):
+    """Divide the gradient once among the tied elements, for any sign.
+
+    The elements that equal the result tie, `-0.0` and `0.0` included, and
+    the NaN elements tie when the result is NaN. Every other element and
+    the row past the final offset receive exactly `0.0`, also when the
+    gradient is infinite or NaN.
+    """
+    values, offsets, tied = _tie_batch(kind)
+    count = len(_TIES)
+
+    _, gradient = _gradient(
+        kind, values, offsets, torch.full((count,), upstream).double().cuda()
+    )
+
+    shares = tied.view(count, 3).sum(1, keepdim=True).double()
+    expected = torch.where(tied.view(count, 3), upstream / shares, 0.0)
+    expected = torch.cat((expected.view(-1), torch.zeros(1)))
+    assert _bits(gradient.cpu()) == _bits(expected.double())
+
+
+@pytest.mark.parametrize("kind", EXTREMES)
+def test_ties_hold_per_column(kind):
+    """Count the ties of every column of `[N, D]` values on its own.
+
+    Column 0 holds the tie segments, and column 1 holds distinct values,
+    whose extreme is one element per segment.
+    """
+    values, offsets, tied = _tie_batch(kind)
+    rows = values.shape[0]
+    distinct = torch.arange(rows, dtype=torch.float64).cuda()
+    columns = torch.stack((values.detach(), distinct), 1)
+    columns = columns.contiguous().requires_grad_()
+    count = len(_TIES)
+    upstream = torch.full((count, 2), -2.0, dtype=torch.float64).cuda()
+
+    _, gradient = _gradient(kind, columns, offsets, upstream)
+
+    gradient = gradient.cpu()
+    shares = tied.view(count, 3).sum(1, keepdim=True).double()
+    first = torch.where(tied.view(count, 3), -2.0 / shares, 0.0)
+    assert _bits(gradient[: count * 3, 0]) == _bits(first.view(-1))
+    second = torch.zeros(count, 3, dtype=torch.float64)
+    second[:, 2 if kind == "max" else 0] = -2.0
+    assert _bits(gradient[: count * 3, 1]) == _bits(second.view(-1))
+    assert _bits(gradient[-1]) == _bits(torch.zeros(2, dtype=torch.float64))
+
+
+@pytest.mark.parametrize(
+    "upstream", [2.0, -2.0, float("nan")], ids=["positive", "negative", "nan"]
+)
+@pytest.mark.parametrize("kind", EXTREMES)
+def test_pytorch_gives_ties_the_same_gradient_on_cuda_and_on_the_cpu(
+    kind, upstream
+):
+    """Record how `torch.segment_reduce` treats ties on CUDA.
+
+    The documented difference between the two tie rules was found on the
+    CPU. This compares the gradient of `torch.segment_reduce` on CUDA with
+    the one on the CPU for the same tied segments, and the Swage gradient
+    with both where the rules agree: for a positive gradient, PyTorch also
+    divides it equally.
+    """
+    values, offsets, _ = _tie_batch(kind)
+    count = len(_TIES)
+    upstream_cuda = torch.full((count,), upstream).double().cuda()
+
+    cuda = _torch_gradient(kind, values, offsets, upstream_cuda)
+    cpu = _torch_gradient(
+        kind, values.cpu(), offsets.cpu(), upstream_cuda.cpu()
+    )
+    _, ours = _gradient(kind, values, offsets, upstream_cuda)
+
+    assert _bits(cuda.cpu()) == _bits(cpu)
+    # A NaN divided by the tie count is NaN, so only a negative gradient
+    # shows the difference of the two rules.
+    if upstream < 0:
+        assert _bits(ours.cpu()) != _bits(cpu)
+    else:
+        assert _bits(ours.cpu()) == _bits(cpu)
+
+
 @pytest.mark.parametrize("columns", [None, 3])
 @pytest.mark.parametrize("kind", KINDS)
 def test_empty_segments_and_rows_past_the_final_offset_get_nothing(
@@ -355,7 +514,22 @@ def test_an_in_place_change_to_the_offsets_fails_the_backward(kind):
         result.sum().backward()
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", EXTREMES)
+def test_an_in_place_change_to_values_or_result_fails_an_extreme(kind):
+    """Raise when the kept values or the kept result changed in place."""
+    for change in ("values", "result"):
+        values, offsets = _batch([2, 3])
+        result = swage.segment_reduce(values, offsets, kind)
+        with torch.no_grad():
+            (values if change == "values" else result).add_(0.0)
+
+        with pytest.raises(
+            RuntimeError, match="modified by an inplace operation"
+        ):
+            result.sum().backward()
+
+
+@pytest.mark.parametrize("kind", ["sum", "mean"])
 def test_an_in_place_change_to_the_result_keeps_the_backward(kind):
     """A sum or a mean keeps no result, so writing to it is recorded."""
     values, offsets = _batch([2, 3])
@@ -425,7 +599,7 @@ def test_an_expanded_upstream_gradient_reaches_the_sum_kernel(kind, columns):
     (second,) = torch.autograd.grad(gradient.sum(), upstream)
 
     lengths = _lengths(offsets, second)
-    expected = torch.ones_like(lengths) if kind == "mean" else lengths
+    expected = lengths if kind == "sum" else torch.ones_like(lengths)
     expected = expected.expand_as(second).masked_fill(
         _empty(offsets, second).cpu(), 0.0
     )
@@ -625,21 +799,6 @@ def test_calls_with_backward_passes_leave_nothing_behind(
     assert driver_calls["cuModuleUnload"] == 0
     assert driver_calls["cuCtxSynchronize"] == 0
     assert event_counts == {}
-
-
-@pytest.mark.parametrize("kind", ["max", "min"])
-def test_max_and_min_have_no_backward_yet(kind):
-    """Refuse a gradient for the extremes until their tie rule exists."""
-    values, offsets = _batch([2, 3])
-
-    with pytest.raises(
-        ValueError,
-        match=rf"^kind '{kind}' has no backward yet; pass values.detach\(\)$",
-    ):
-        swage.segment_reduce(values, offsets, kind)
-
-    result = swage.segment_reduce(values.detach(), offsets, kind)
-    assert not result.requires_grad
 
 
 def test_segment_softmax_has_no_backward_yet():

@@ -203,7 +203,7 @@ Parameters
 :   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on
     the current device, of rank one or of rank two, `[N, D]`. It must not
     be a lazy negation or conjugate view. When it requires grad and
-    gradient recording is on, a sum or a mean records a gradient; see
+    gradient recording is on, the call records a gradient; see
     [Gradients](../user-guide/segmented-calls.md#gradients). float64
     values run a float64 program; nothing is cast. `[N, D]` values run one
     kernel with one block per segment, in which a thread reduces a column
@@ -250,9 +250,8 @@ Raises
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
     is a lazy view, or is on another device; an `out` that requires grad;
     offsets that break the offsets contract; an `out` of the wrong size or
-    one that overlaps an input; an `out` while the call records a gradient;
-    a maximum or a minimum of values that require grad while gradient
-    recording is on, which have no backward yet. For `[N, D]` values a wrong `out` raises
+    one that overlaps an input; an `out` while the call records a
+    gradient. For `[N, D]` values a wrong `out` raises
     `out must have shape (S, D), one row per segment and one column per
     feature; found (...)`, with the numbers of the call.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing

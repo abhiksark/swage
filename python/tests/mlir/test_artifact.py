@@ -931,6 +931,8 @@ _GRADIENT_CASES = {
     "sum/rank-two/float64": ("sum", 3, torch.float64),
     "mean/rank-one/float64": ("mean", None, torch.float64),
     "mean/rank-two/float32": ("mean", 5, torch.float32),
+    "max/rank-one/float64": ("max", None, torch.float64),
+    "min/rank-two/float32": ("min", 3, torch.float32),
 }
 
 

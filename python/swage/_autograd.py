@@ -25,10 +25,6 @@ from . import _segmented_qualification as _qualification
 # and the dictionary keeps one of them.
 _FUNCTIONS = {}
 
-# The reduction kinds that have a backward.
-_DIFFERENTIABLE_KINDS = ("sum", "mean")
-
-
 def functions(torch):
     """Return the autograd Functions of the segmented calls for `torch`.
 
@@ -80,6 +76,50 @@ def _gather(torch, per_segment, offsets, rows):
 def _per_segment(column, like):
     """View a per-segment column so it broadcasts against `like`."""
     return column.view(-1, *[1] * (like.dim() - 1))
+
+
+def _tie_shares(torch, grad, offsets, values, result, rows):
+    """Return where the elements tie and the share of the gradient each gets.
+
+    The tied elements of a segment are the elements that equal its maximum
+    or minimum, or the NaN elements when that is NaN. `-0.0` and `0.0` are
+    equal. Each tied element of segment `j` gets `grad[j]` divided once by
+    their number. The count is an integer prefix sum, which is exact and
+    deterministic.
+
+    Args:
+        torch: The PyTorch module.
+        grad: The upstream gradient, one row per segment.
+        offsets: The offsets of the call.
+        values: The values of the call, detached.
+        result: The result of the call, detached.
+        rows: The number of rows of the values.
+
+    Returns:
+        A boolean tensor of the shape of the values that marks the tied
+        elements, and the share of each segment, one row per segment. A row
+        past the final offset is never tied.
+    """
+    ids = _segment_ids(torch, offsets, rows)
+    pad = result.new_zeros((1, *result.shape[1:]))
+    extreme = torch.cat((result, pad)).index_select(0, ids)
+    covered = _per_segment(ids < offsets.numel() - 1, values)
+    tied = ((values == extreme) | (values.isnan() & extreme.isnan())) & covered
+    running = torch.cat(
+        (
+            tied.new_zeros((1, *tied.shape[1:]), dtype=torch.int32),
+            tied.to(torch.int32).cumsum(0, dtype=torch.int32),
+        )
+    )
+    # Clamped so that offsets changed without PyTorch counting the write
+    # cannot index outside the prefix sums.
+    bounds = offsets.clamp(0, rows)
+    count = running.index_select(0, bounds[1:]) - running.index_select(
+        0, bounds[:-1]
+    )
+    # A segment with an element always has a tied one; the clamp keeps an
+    # empty segment from dividing by zero.
+    return tied, grad / count.clamp(min=1).to(grad.dtype)
 
 
 def _kept_offsets(offsets):
@@ -191,7 +231,13 @@ def _build(torch):
         @staticmethod
         def setup_context(ctx, inputs, output):
             values, offsets, kind = inputs
-            ctx.save_for_backward(_kept_offsets(offsets))
+            kept = _kept_offsets(offsets)
+            if kind in ("max", "min"):
+                # The tied elements are found again from the values and the
+                # result, which the forward computed exactly.
+                ctx.save_for_backward(kept, values, output)
+            else:
+                ctx.save_for_backward(kept)
             ctx.kind = kind
             ctx.rows = values.shape[0]
 
@@ -199,6 +245,23 @@ def _build(torch):
         def backward(ctx, grad):
             if not ctx.needs_input_grad[0]:
                 return None, None, None
+            call = "a second derivative of segment_reduce"
+            if ctx.kind in ("max", "min"):
+                offsets, values, result = ctx.saved_tensors
+                tied, shares = _tie_shares(
+                    torch,
+                    grad,
+                    offsets,
+                    values.detach(),
+                    result.detach(),
+                    ctx.rows,
+                )
+                spread = _SegmentBroadcast.apply(
+                    shares, offsets, ctx.rows, call
+                )
+                # Selected, never multiplied, so an element that does not
+                # tie gets exactly zero also from an infinite or a NaN share.
+                return torch.where(tied, spread, 0.0), None, None
             (offsets,) = ctx.saved_tensors
             if ctx.kind == "mean":
                 lengths = (offsets[1:] - offsets[:-1]).clamp(min=1)
@@ -206,12 +269,7 @@ def _build(torch):
                 # converted to the dtype as the forward converts it.
                 grad = grad / _per_segment(lengths.to(grad.dtype), grad)
             return (
-                _SegmentBroadcast.apply(
-                    grad,
-                    offsets,
-                    ctx.rows,
-                    "a second derivative of segment_reduce",
-                ),
+                _SegmentBroadcast.apply(grad, offsets, ctx.rows, call),
                 None,
                 None,
             )

@@ -47,9 +47,9 @@ release, except for the items marked as completed after it.
   within every segment. They take int32 or int64 offsets on the current
   CUDA device: f32 or f64 values of rank one or two for a reduction, and
   f32 values of rank one or two for the softmax. Nothing else is admitted: no other
-  dtype, kind, or rank. A sum and a mean record a gradient for values that
-  require grad, with second derivatives; a maximum, a minimum, and the
-  softmax have no backward yet. A call validates and classifies its offsets on the host
+  dtype, kind, or rank. Every reduction kind records a gradient for values
+  that require grad, with second derivatives; the softmax has no backward
+  yet. A call validates and classifies its offsets on the host
   every time, so with offsets that change on every call expect it to be
   slower than `torch.segment_reduce`. No committed record times the call:
   the one record of that regime times a private preparation, at an older

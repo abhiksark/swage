@@ -329,15 +329,20 @@ and receive none. Under `torch.no_grad()` and inside
 `torch.inference_mode()` a call records nothing, also for `values` that
 require grad, and its result does not require grad.
 
-A sum and a mean record a gradient. A maximum, a minimum, and a softmax
-have no backward yet: with `values` that require grad, while gradient
-recording is on, they raise a `ValueError` that names `values.detach()`.
+Every kind of `segment_reduce` records a gradient. The softmax has no
+backward yet: with `values` that require grad, while gradient recording is
+on, it raises a `ValueError` that names `values.detach()`.
 
 The gradient of a reduction, for the gradient `g` of a segment:
 
 - A sum gives every element of the segment `g`, unchanged.
 - A mean gives every element `g` divided once by the length of the
   segment, converted to the dtype of `values` as the mean converts it.
+- A maximum or a minimum gives `g` to the elements of the segment that
+  equal its result, in equal shares: each receives `g` divided once by
+  their number. `-0.0` and `0.0` are equal. When the result is NaN, the NaN
+  elements share `g`. Every other element receives exactly `0.0`, also when
+  `g` is infinite or NaN.
 - An empty segment has no element, and its `g` reaches nothing. A value
   past the final offset receives `0.0`.
 
@@ -345,15 +350,26 @@ For `[N, D]` values this holds per column.
 
 The backward of a reduction runs PyTorch operations: it finds the segment
 of every element from the offsets on the device, copies the gradient of
-that segment to the element, and for a mean divides once. It copies nothing
-to the host and waits for nothing, and its bits do not depend on the other
+that segment to the element, and for a mean, a maximum, or a minimum
+divides once. For a maximum or a minimum it finds the tied elements by
+comparing every element with the result, which the forward computes
+exactly, and counts them with an integer prefix sum. It copies nothing to
+the host and waits for nothing, and its bits do not depend on the other
 segments of the batch. It is not a fallback: the forward always runs Swage
 kernels, and which step of a backward runs where is fixed.
 
-The gradient of a sum is exact, and the gradient of a mean is one correctly
-rounded division. On PyTorch 2.12 the gradient of `torch.segment_reduce`
-equals it for a sum, and agrees with it to within one rounding of the dtype
-for a mean.
+The gradient of a sum is exact, and the gradient of a mean, a maximum, or a
+minimum is one correctly rounded division. A float32 count of more than
+16,777,216 tied elements is rounded.
+
+On PyTorch 2.12 the gradient of `torch.segment_reduce` equals this one for a
+sum, agrees with it to within one rounding of the dtype for a mean, and
+equals it for a maximum and a minimum except on a tie with a negative `g`.
+There `torch.segment_reduce` gives every tied element the whole `g` instead
+of a share; with a NaN `g` both give the tied elements NaN.
+`Tensor.scatter_reduce` with `"amax"` or `"amin"` also shares equally, but
+counts an element of its destination that equals the result, and gives
+NaN to every element of a segment whose result is NaN.
 
 Second derivatives are supported. Each runs the sum kernel of
 `segment_reduce` on the gradient it differentiates, with the rounding and
@@ -362,8 +378,10 @@ raises where a call raises, for example on a stream that is capturing a
 CUDA graph, in a message that names the second derivative, or with
 `SWAGE_NO_COMPILE=1` and the kernel not held.
 
-The backward keeps the offsets of the call. A backward pass raises when
-they were changed in place after the call, as PyTorch does. Offsets created
+The backward keeps the offsets of the call, and for a maximum and a
+minimum also the values and the result, which stay alive until the
+backward runs even when the caller drops them. A backward pass raises when
+one of them was changed in place after the call, as PyTorch does. Offsets created
 inside `torch.inference_mode()` are kept as a copy.
 
 Inside a function compiled by `torch.compile` a call that records a
@@ -440,9 +458,9 @@ Every refusal below raises before anything is enqueued.
   `ValueError`: `out must be None while values require grad: a call that
   records a gradient allocates its result; call without out, or under
   torch.no_grad()`.
-- **A gradient a kind cannot record yet.** A maximum, a minimum, and a
-  softmax of `values` that require grad, while gradient recording is on,
-  raise a `ValueError` that names `values.detach()`.
+- **A gradient the softmax cannot record yet.** A softmax of `values` that
+  require grad, while gradient recording is on, raises a `ValueError` that
+  names `values.detach()`.
 - **CUDA graph capture.** A call on a stream that is capturing a CUDA graph
   raises a `RuntimeError`. Every call copies its offsets to the host, which
   a capturing stream cannot do, and a replay would not repeat the
