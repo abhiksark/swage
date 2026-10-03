@@ -118,6 +118,19 @@ def _torch_gradient(kind, values, offsets, upstream):
     return gradient
 
 
+def _torch_gradients(kind, values, offsets, upstream):
+    """Return the gradients of `torch.segment_reduce` on CUDA and the CPU.
+
+    Both are returned on the host.
+    """
+    return [
+        _torch_gradient(
+            kind, values.to(device), offsets.to(device), upstream.to(device)
+        ).cpu()
+        for device in ("cuda", "cpu")
+    ]
+
+
 def _lengths(offsets, like):
     """Return the segment lengths in float64, broadcast against `like`."""
     lengths = (offsets[1:] - offsets[:-1]).to(torch.float64)
@@ -197,7 +210,7 @@ def test_the_gradient_of_a_sum_is_an_exact_copy(dtype, columns, offsets_dtype):
     Every row of a segment receives the upstream gradient of the segment
     unchanged, signed zeros and NaN included. The rows past the final
     offset receive zero. The gradient equals that of `torch.segment_reduce`
-    bit for bit.
+    on CUDA and on the CPU bit for bit.
     """
     values, offsets = _batch(
         [3, 0, 40, 1],
@@ -216,9 +229,8 @@ def test_the_gradient_of_a_sum_is_an_exact_copy(dtype, columns, offsets_dtype):
 
     expected = _broadcast(upstream, offsets, values.shape[0])
     assert _bits(gradient.cpu()) == _bits(expected)
-    assert _bits(gradient.cpu()) == _bits(
-        _torch_gradient("sum", values, offsets, upstream).cpu()
-    )
+    for theirs in _torch_gradients("sum", values, offsets, upstream):
+        assert _bits(gradient.cpu()) == _bits(theirs)
 
 
 @pytest.mark.parametrize("offsets_dtype", OFFSET_DTYPES, ids=["i32", "i64"])
@@ -229,8 +241,8 @@ def test_the_gradient_of_a_mean_is_one_division(dtype, columns, offsets_dtype):
 
     The expected value is the division in float64 rounded to the dtype,
     which equals the correctly rounded division in the dtype. Against
-    `torch.segment_reduce` the gradient agrees to within one rounding of
-    the dtype.
+    `torch.segment_reduce`, on CUDA and on the CPU, the gradient agrees to
+    within one rounding of the dtype.
     """
     values, offsets = _batch(
         [3, 0, 7, 1, 4097],
@@ -249,9 +261,9 @@ def test_the_gradient_of_a_mean_is_one_division(dtype, columns, offsets_dtype):
     share = (upstream.double() / lengths).to(dtype)
     expected = _broadcast(share, offsets, values.shape[0])
     assert _bits(gradient.cpu()) == _bits(expected)
-    theirs = _torch_gradient("mean", values, offsets, upstream)
     eps = torch.finfo(dtype).eps
-    torch.testing.assert_close(gradient, theirs, rtol=eps, atol=0)
+    for theirs in _torch_gradients("mean", values, offsets, upstream):
+        torch.testing.assert_close(gradient.cpu(), theirs, rtol=eps, atol=0)
 
 
 @pytest.mark.parametrize("offsets_dtype", OFFSET_DTYPES, ids=["i32", "i64"])
@@ -263,8 +275,9 @@ def test_an_extreme_without_a_tie_sends_the_whole_gradient_to_it(
 ):
     """Give the gradient of a segment to its one extreme element.
 
-    Without a tie the gradient equals that of `torch.segment_reduce` bit
-    for bit, for an upstream gradient of either sign.
+    Without a tie the gradient equals that of `torch.segment_reduce`, on
+    CUDA and on the CPU, bit for bit, for an upstream gradient of either
+    sign.
     """
     values, offsets = _batch(
         [3, 0, 40, 1, 4097],
@@ -287,9 +300,8 @@ def test_an_extreme_without_a_tie_sends_the_whole_gradient_to_it(
         tied, _broadcast(upstream, offsets, values.shape[0]), 0.0
     )
     assert _bits(gradient.cpu()) == _bits(expected)
-    assert _bits(gradient.cpu()) == _bits(
-        _torch_gradient(kind, values, offsets, upstream).cpu()
-    )
+    for theirs in _torch_gradients(kind, values, offsets, upstream):
+        assert _bits(gradient.cpu()) == _bits(theirs)
 
 
 # One segment per row: values, the result of a maximum, and which elements
