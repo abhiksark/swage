@@ -12,13 +12,79 @@ import json
 import pathlib
 import platform
 import random
+import statistics
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
-from benchmark_triton_comparison import _call_us, _git_metadata, _graph_us
+from benchmark_triton_comparison import _git_metadata
 from distributions import generate_lengths, summarize_lengths
+
+_BATCHED_LAUNCHES = 32
+
+
+# The recorded composable-reduction results used these sequential timers.
+# They are kept here, unchanged, after the comparison harness moved to
+# interleaved timing, so that this script reproduces its recorded method.
+def _median_iqr(values: Iterable[float]) -> dict[str, float]:
+    """Return median and quartiles for one sample list."""
+    ordered = sorted(values)
+    return {
+        "median": statistics.median(ordered),
+        "q1": statistics.quantiles(ordered, n=4, method="inclusive")[0],
+        "q3": statistics.quantiles(ordered, n=4, method="inclusive")[2],
+    }
+
+
+def _call_us(torch, launch: Callable[[], object], warmups: int,
+             samples: int) -> dict[str, object]:
+    """Measure synchronized Python-call latency in microseconds."""
+    for _ in range(warmups):
+        launch()
+    torch.cuda.synchronize()
+    timings = []
+    for _ in range(samples):
+        start = time.perf_counter_ns()
+        launch()
+        torch.cuda.synchronize()
+        end = time.perf_counter_ns()
+        timings.append((end - start) / 1_000.0)
+    return {"samples_us": timings, "summary_us": _median_iqr(timings)}
+
+
+def _graph_us(torch, launch: Callable[[], object], warmups: int,
+              samples: int) -> dict[str, object]:
+    """Measure one launch through replay of a captured 32-launch graph."""
+    for _ in range(warmups):
+        launch()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    try:
+        with torch.cuda.graph(graph):
+            for _ in range(_BATCHED_LAUNCHES):
+                launch()
+    except RuntimeError as error:
+        torch.cuda.synchronize()
+        return {"available": False, "error": str(error)}
+    for _ in range(warmups):
+        graph.replay()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    timings = []
+    for _ in range(samples):
+        start.record()
+        graph.replay()
+        end.record()
+        end.synchronize()
+        timings.append(start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES)
+    return {
+        "available": True,
+        "samples_us": timings,
+        "summary_us": _median_iqr(timings),
+    }
 
 
 def _workloads():
@@ -121,7 +187,15 @@ def main():
         root / "benchmarks/distributions.py",
         root / "python/tests/mlir/reduction_programs.py",
         root / "python/swage/_segmented_qualification.py",
-        root / "lib/Conversion/SegmentedReduction/SegmentedReduction.cpp",
+        root / "python/swage/_segmented_plan.py",
+        root / "python/swage/_segmented_runtime.py",
+        *(
+            root / "lib/Conversion/SegmentedReduction" / name
+            for name in (
+                "GPU.cpp", "Passes.cpp", "SegmentProgram.cpp",
+                "SegmentProgram.h", "Sequential.cpp", "Split.cpp",
+            )
+        ),
         native_path,
     ]
     telemetry = subprocess.run(
@@ -229,19 +303,24 @@ def main():
                     _transform(values, transform), kind, offsets=offsets
                 )
 
-            launches = dict(zip(prepared._fields, prepared))
-            launches["torch"] = launch_torch
+            launches = {
+                "warp": prepared.launch_warp,
+                "cta": prepared.launch_cta,
+                "mixed": prepared.launch_mixed,
+                "torch": launch_torch,
+            }
             if held_out:
-                launches = {"cta": prepared.cta, "mixed": prepared.mixed}
+                launches = {
+                    "cta": prepared.launch_cta,
+                    "mixed": prepared.launch_mixed,
+                }
             row = {
                 "workload": workload,
                 "lengths": summarize_lengths(lengths),
                 "kind": kind,
                 "transform": transform,
                 "prepare_ms": prepare_ms,
-                "mixed_schedule": (
-                    "cta" if prepared.mixed is prepared.cta else "mixed"
-                ),
+                "mixed_schedule": "cta" if prepared.direct_cta else "mixed",
                 "policies": {},
             }
             names = list(launches)
