@@ -1,7 +1,8 @@
 <!-- docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md -->
 # ADR-0023: Row-stripe tile for rank-two values
 
-- Status: accepted; step 1 of the migration sequence is implemented
+- Status: accepted; steps 1 and 2 of the migration sequence are
+  implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every open question
 - Supersedes in part:
@@ -60,31 +61,54 @@ the same rule, `TargetDescription::columnGroupWidth`. It is not a
 compile-time parameter: five kernels per program and role would multiply
 the PTX, the digests, and the artifact.
 
+### The split
+
+- A segment longer than `floor(4096 / W)` rows is cut into chunks of that
+  many rows, which keeps a stripe of a 512-thread block at eight rows.
+- The partial kernel runs the tile at 512 threads over the rows of each
+  range record and stores the result of column `c` of partial task `p` at
+  `scratch[p * D + c]`. Scratch is `partial_count * D` elements.
+- The merge kernel runs the tile at 512 threads over the scratch rows of
+  each merge record, clamped to the partial count, and stores at
+  `output[segment * D + c]`. The merge of a mean reads the row count of
+  its segment from the range records.
+- The split takes one capture-free reduction, as over rank-one values. The
+  softmax has no split.
+
 ### Schedules and plan IR
 
 - No new plan operation and no new policy. `swage_plan.tasks policy<cta>`
   takes `feature_count`, with or without `ids`. `policy<warp>` stays
-  rank-one.
+  rank-one. `swage_plan.partial_tasks` and `swage_plan.merge_tasks` take an
+  optional `feature_count`, with which their buffers are rank-two.
 - The task-ids schedule plans the row-stripe tile for every admitted
   rank-two program, including the softmax, whose ids then only name
   segments and which a launch runs with one task per segment. Over
   rank-one values the task-ids schedule still requires the one
   capture-free reduction that host classification describes.
+- The split schedules plan the row-stripe tile of the partial and merge
+  kernels for a single reduction.
 - The fused-mixed and persistent schedules refuse rank-two values by name.
 - A task-ids block of rank-two values is a whole number of subgroups.
 
 ### Kernel layouts and records
 
-A new layout appends `feature_count` to the task-id layout:
+Four new layouts append `feature_count` to the task-id and split layouts:
 
-```text
-values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
-segment_count:i32, feature_count:i32
-```
+| Kind | Arguments |
+|---|---|
+| `TaskIdsColumns` | values, offsets, output, task_ids, value_count, task_count, segment_count, feature_count |
+| `SplitPartialColumns` | values, partial_ranges, scratch, value_count, partial_count, feature_count |
+| `SplitMergeColumns` | scratch, output, merge_records, partial_count, merge_count, segment_count, feature_count |
+| `SplitMergeExtentColumns` | scratch, output, merge_records, partial_ranges, partial_count, merge_count, segment_count, feature_count |
+
+A launch of each runs `C` blocks per task, partial, or merge, for the
+`C = ceil(D / W)` column groups.
 
 Task records, the classifier, the C runtime, and its ABI version do not
 change: the column group is the low part of the item index, and the host
-and the kernel both derive the group count from the feature count.
+and the kernel both derive the group count from the feature count. A
+partial range record names rows.
 
 ### Numerics
 
@@ -96,11 +120,19 @@ the device model, or the offset width. A maximum and a minimum are
 order-free and keep their bits. A sum, a mean, and a softmax change bits
 relative to the column tile.
 
+A segment cut into `P` chunks of `4096 / W` rows adds eight rows per
+stripe and combines in the partial kernel, then combines the partials in
+the merge kernel, for `k = 6 + 2 log2(R) + ceil(P / R)` with
+`R = 512 / W`. The merge depth grows with `P / R`, about `n / 2048` at
+`W = 32`; a second merge level is left until a caller needs a tighter
+bound in the millions of rows.
+
 ## Consequences
 
-- The digest matrix gains the task-ids kernel of every rank-two program on
-  `sm_80` and `sm_86`. The 836 pairs before it do not move, which includes
-  the 18 pairs of the column tile.
+- The digest matrix gains the task-ids kernel of every rank-two program,
+  and the partial and merge kernels of every rank-two reduction, on
+  `sm_80` and `sm_86`. The 836 pairs before them do not move, which
+  includes the 18 pairs of the column tile.
 - The column tile keeps its bit equality with the CPU oracle, which adds
   in row order. The row-stripe tile does not have it; its tests compare
   bits with a host model of its order of additions instead.
@@ -119,7 +151,19 @@ Step 1. The block tile through task-ids, including the softmax. Implemented.
   `python/tests/mlir/row_tile_model.py`; the racecheck runs it.
 - The digest matrix gains 18 pairs.
 
-Step 2. The split. Not implemented.
+Step 2. The split. Implemented.
+
+- `feature_count` on `swage_plan.partial_tasks` and
+  `swage_plan.merge_tasks`, the three split layouts, the planner rule, and
+  the row-stripe paths of the partial and merge patterns with the width
+  rule of the pre-check.
+- `test/Conversion/SwagePlanToGPU/column-groups.mlir` pins both kernels;
+  `python/tests/mlir/test_segmented_bounds.py` launches them below the
+  Python validation, with stray merge records and ranges beyond the
+  partial count, requires a mean to equal the merged sum divided by the
+  row count bit for bit, and compares the bits of the split with the tile
+  model; the racecheck runs both.
+- The digest matrix gains 32 pairs.
 
 Step 3. The public reductions. Not implemented.
 

@@ -322,6 +322,114 @@ def _run_row_kernels(results, element, dtype, offsets):
                 )
 
 
+def _split_kernel(compile_name, text, kernel_name, suffix):
+    """Compile and load one split kernel of a rank-two program."""
+    major, minor = torch.cuda.get_device_capability()
+    ptx = qualification._compile_once(
+        getattr(qualification._native_swage(), compile_name),
+        text,
+        kernel_name=kernel_name,
+        target=f"sm_{major}{minor}",
+    )
+    _, function = qualification._load_once(
+        _runtime._get_driver(), ptx, kernel_name + suffix
+    )
+    return function
+
+
+def _launch_row_split(partial, merge, values, output, columns, mean):
+    """Run the partial and merge kernels over every segment of `_LENGTHS`.
+
+    Each segment is cut into chunks of `4096 / W` rows, the chunk size of
+    the public split, and every segment, the empty one too, is merged.
+    """
+    width = 1
+    while width < 32 and width < columns:
+        width <<= 1
+    groups = -(-columns // width)
+    chunk = 4096 // width
+    ranges, records = [], []
+    bounds = list(accumulate(_LENGTHS, initial=0))
+    for segment, (begin, end) in enumerate(pairwise(bounds)):
+        first = len(ranges) // 2
+        for start in range(begin, end, chunk):
+            ranges += [start, min(start + chunk, end)]
+        records += [segment, first, len(ranges) // 2]
+    partial_count = len(ranges) // 2
+    ranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
+    records = torch.tensor(records, dtype=torch.int32, device="cuda")
+    scratch = torch.empty(
+        partial_count, columns, dtype=values.dtype, device="cuda"
+    )
+    driver = _runtime._get_driver()
+    stream = torch.cuda.current_stream().cuda_stream
+    driver.launch_segmented(
+        partial,
+        (partial_count * groups,),
+        512,
+        stream,
+        (
+            values.data_ptr(),
+            ranges.data_ptr(),
+            scratch.data_ptr(),
+            values.shape[0],
+            partial_count,
+            columns,
+        ),
+    )
+    buffers = [scratch.data_ptr(), output.data_ptr(), records.data_ptr()]
+    launch = driver.launch_segmented
+    if mean:
+        buffers.append(ranges.data_ptr())
+        launch = driver.launch_segmented_tasks
+    launch(
+        merge,
+        (len(_LENGTHS) * groups,),
+        512,
+        stream,
+        (*buffers, partial_count, len(_LENGTHS), len(_LENGTHS), columns),
+    )
+
+
+def _run_row_split_kernels(results, element, dtype):
+    """Launch the partial and merge kernels of each kind over rank-two values.
+
+    Both are the row-stripe tile at 512 threads, so their stripes combine
+    through a shared buffer of 512 elements. The values are those of the
+    row-stripe kernels, so every result is exact.
+
+    Args:
+        results: Receives whether each launch was exact, by name.
+        element: The element type, `"f32"` or `"f64"`.
+        dtype: Its tensor dtype.
+    """
+    lengths = torch.tensor(_LENGTHS)
+    row = torch.arange(int(lengths.sum()))[:, None]
+    for columns in (3, 33, 130):
+        column = torch.arange(columns)[None, :]
+        host = ((row * 31 + column * 17) % 127 - 63).to(dtype)
+        values = host.cuda()
+        output = torch.empty(len(_LENGTHS), columns, dtype=dtype, device="cuda")
+        for kind in ("sum", "max", "min", "mean"):
+            expected = torch.segment_reduce(host, kind, lengths=lengths, axis=0)
+            name = _reduction_kernel(kind, element, 2)
+            text = _semantic_module(kind, element, 2)
+            partial = _split_kernel(
+                "_compile_split_partial_reduction_ptx", text, name, "__partial"
+            )
+            merge = _split_kernel(
+                "_compile_split_merge_reduction_ptx", text, name, "__merge"
+            )
+            key = f"split rows {kind} {element} {columns}"
+            results[key] = _exact(
+                lambda: _launch_row_split(
+                    partial, merge, values, output, columns, kind == "mean"
+                ),
+                output,
+                expected,
+            )
+
+
 def _run_softmax_rows(results, offsets):
     """Launch the row-stripe kernel of the softmax over rank-two logits.
 
@@ -414,7 +522,7 @@ def _run_kernels():
       column on its own, and the one in which a thread normalizes it.
     - rows: the row-stripe kernel of rank-two values, in which the threads
       of one column combine through shared memory, for each reduction and
-      for the softmax.
+      for the softmax, and the partial and merge kernels of its split.
 
     The direct, task-id, fused, and split families run once per element
     type. The f64 kernels reduce through shared slots of eight bytes, so
@@ -433,6 +541,7 @@ def _run_kernels():
         )
         _run_column_kernels(results, element, dtype, offsets)
         _run_row_kernels(results, element, dtype, offsets)
+        _run_row_split_kernels(results, element, dtype)
     for name, limits in (("default", {}), ("split", _SPLIT_LIMITS)):
         for resident_blocks in (1, 2, 5):
             persistent = _prepare_persistent_sum(
@@ -545,13 +654,14 @@ def test_segmented_kernels_have_no_shared_memory_hazard(tmp_path):
     results = json.loads(completed.stdout.splitlines()[-1])
     assert len(results) > 120
     # Ten static launches of each of four kinds over f64 values, four
-    # launches of the column kernel of each kind, and six of the row-stripe
-    # kernel of each kind.
-    assert sum(" f64" in name for name in results) == 40 + 16 + 24
+    # launches of the column kernel of each kind, six of the row-stripe
+    # kernel of each kind, and three of its split.
+    assert sum(" f64" in name for name in results) == 40 + 16 + 24 + 12
     assert any(" mean " in name for name in results)
     assert sum(name.startswith("columns ") for name in results) == 32
     assert sum(name.startswith("softmax columns ") for name in results) == 4
     assert sum(name.startswith("rows ") for name in results) == 48
+    assert sum(name.startswith("split rows ") for name in results) == 24
     assert sum(name.startswith("softmax rows ") for name in results) == 4
     assert all(results.values()), results
 

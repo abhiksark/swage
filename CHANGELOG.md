@@ -12,9 +12,12 @@ semantic versioning (`0.x`; anything may change).
   row-stripe tile: `swage_plan.tasks policy<cta>` with `feature_count`, in
   which the row stripes of a group of up to 32 adjacent columns combine
   across a block through a butterfly and one shared-memory exchange. It
-  admits the rank-two softmax with identity task ids. The fused-mixed,
-  split, and persistent schedules refuse rank-two values by name. The
-  digest matrix gains 18 pairs; no earlier pair moved (ADR-0023).
+  admits the rank-two softmax with identity task ids. The split schedules
+  plan the same tile for the partial and merge kernels of a rank-two
+  reduction, with `feature_count` on `swage_plan.partial_tasks` and
+  `swage_plan.merge_tasks` and one scratch row per partial task. The
+  fused-mixed and persistent schedules refuse rank-two values by name. The
+  digest matrix gains 50 pairs; no earlier pair moved (ADR-0023).
 - `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
   segment gives positive infinity for `min` and NaN for `mean`; a NaN
   element gives NaN. A mean is the sum of the same call divided by the

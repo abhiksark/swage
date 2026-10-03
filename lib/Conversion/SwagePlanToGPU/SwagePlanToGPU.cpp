@@ -59,9 +59,18 @@ IntegerAttr blockThreadsOf(Operation *op) {
 /// null type: the threads of a row-stripe tile of rank-two values combine
 /// the results of one column through one element per thread.
 Type exchangeElementOf(Operation *task) {
+  auto elementOf = [](Value buffer) {
+    return cast<MemRefType>(buffer.getType()).getElementType();
+  };
   auto tasks = dyn_cast<TasksOp>(task);
   if (tasks && tasks.getFeatureCount() && tasks.getPolicy() == TaskPolicy::CTA)
-    return cast<MemRefType>(tasks.getValues().getType()).getElementType();
+    return elementOf(tasks.getValues());
+  auto partial = dyn_cast<PartialTasksOp>(task);
+  if (partial && partial.getFeatureCount())
+    return elementOf(partial.getValues());
+  auto merge = dyn_cast<MergeTasksOp>(task);
+  if (merge && merge.getFeatureCount())
+    return elementOf(merge.getScratch());
   return Type();
 }
 
@@ -410,21 +419,19 @@ BoundRows bindRows(OpBuilder &builder, Location loc, const RowTile &tile,
 /// Sets `converted` to false when a consumer could not be legalized.
 ///
 /// The region argument is replaced by the six values of the binding, so
-/// each reduction combines per column, and an extent argument by the number
-/// of rows, `rowEnd - rowStart`.
+/// each reduction combines per column, and an extent argument by `extent`,
+/// a number of rows.
 Value convertRowRegion(ConversionPatternRewriter &rewriter, OpBuilder &body,
-                       Location loc, Region &region, const BoundRows &rows,
-                       Value rowStart, Value rowEnd, bool &converted) {
+                       Region &region, const BoundRows &rows, Value extent,
+                       bool &converted) {
   Block &consumersBlock = region.front();
   const SegmentBinding &binding = rows.binding;
   rewriter.replaceAllUsesWith(consumersBlock.getArgument(0),
                               ValueRange{binding.base, binding.first,
                                          binding.end, binding.stride,
                                          binding.groupWidth, binding.exchange});
-  if (consumersBlock.getNumArguments() == 2)
-    rewriter.replaceAllUsesWith(
-        consumersBlock.getArgument(1),
-        arith::SubIOp::create(body, loc, rowEnd, rowStart).getResult());
+  if (extent)
+    rewriter.replaceAllUsesWith(consumersBlock.getArgument(1), extent);
   auto yield = cast<swage_plan::YieldOp>(consumersBlock.getTerminator());
   SmallVector<Operation *> consumers = operationsOf(consumersBlock);
   consumers.pop_back();
@@ -568,9 +575,13 @@ private:
               segment, segmentInRange, zero, one);
           BoundRows rows = bindRows(body, bodyLoc, tile, adaptor.getValues(),
                                     range.start, range.end, group);
-          Value total =
-              convertRowRegion(rewriter, body, bodyLoc, tasks.getBody(), rows,
-                               range.start, range.end, converted);
+          // The extent of a segment is its number of rows.
+          Value extent;
+          if (tasks.getBody().front().getNumArguments() == 2)
+            extent =
+                arith::SubIOp::create(body, bodyLoc, range.end, range.start);
+          Value total = convertRowRegion(rewriter, body, tasks.getBody(), rows,
+                                         extent, converted);
           if (total)
             emitRowStore(body, bodyLoc, tile, rows, total, adaptor.getOutput(),
                          segment, segmentInRange, zero);
@@ -718,13 +729,31 @@ Value convertRangeTask(ConversionPatternRewriter &rewriter, OpBuilder &body,
   return rewriter.getRemappedValue(yield.getValue());
 }
 
+/// The range of partial task `taskIndex`, loaded from its record in
+/// `ranges` and clamped to `valueCount`, the values it indexes.
+std::pair<Value, Value> loadPartialRange(OpBuilder &builder, Location loc,
+                                         Value ranges, Value taskIndex,
+                                         Value valueCount) {
+  using namespace swage_plan::partial_record;
+  Value fields = arith::ConstantIndexOp::create(builder, loc, Words);
+  Value recordBase = arith::MulIOp::create(builder, loc, taskIndex, fields);
+  Value beginWord = loadRecordField(builder, loc, ranges, recordBase, Begin);
+  Value endWord = loadRecordField(builder, loc, ranges, recordBase, End);
+  return clampRange(builder, loc, beginWord, endWord, valueCount);
+}
+
 /// One block of threads per chunk of a split segment: the kernel prelude,
 /// the guard on the task index, the range of the chunk loaded from its
 /// record and clamped to the value count, the reduction of the region, and
 /// the store of its result in the scratch slot of the task.
+///
+/// Over rank-two values the chunk is a range of rows, the kernel is the
+/// row-stripe tile, and task `p` stores the result of column `c` at
+/// `scratch[p * D + c]`.
 class PartialTasksPattern : public OpConversionPattern<PartialTasksOp> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  PartialTasksPattern(MLIRContext *context, const TargetDescription &target)
+      : OpConversionPattern(context), target(target) {}
 
   LogicalResult
   matchAndRewrite(PartialTasksOp tasks, OpAdaptor adaptor,
@@ -732,6 +761,8 @@ public:
     IntegerAttr threads = blockThreadsOf(tasks->getParentOp());
     if (!threads)
       return rewriter.notifyMatchFailure(tasks, "not in a plan function");
+    if (adaptor.getFeatureCount())
+      return convertRowPartials(tasks, adaptor, rewriter, threads.getInt());
     Location loc = tasks.getLoc();
 
     Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
@@ -747,19 +778,9 @@ public:
     bool converted = true;
     scf::IfOp::create(
         rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-          using namespace swage_plan::partial_record;
-          Value fields = arith::ConstantIndexOp::create(body, bodyLoc, Words);
-          Value recordBase =
-              arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
-          Value beginWord = loadRecordField(body, bodyLoc, adaptor.getRanges(),
-                                            recordBase, Begin);
-          Value endWord = loadRecordField(body, bodyLoc, adaptor.getRanges(),
-                                          recordBase, End);
-          // The range indexes the values, so the value count bounds it.
-          Value begin;
-          Value end;
-          std::tie(begin, end) = clampRange(body, bodyLoc, beginWord, endWord,
-                                            adaptor.getValueCount());
+          auto [begin, end] =
+              loadPartialRange(body, bodyLoc, adaptor.getRanges(), taskIndex,
+                               adaptor.getValueCount());
           Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
           Value total =
               convertRangeTask(rewriter, body, tasks.getBody(),
@@ -775,6 +796,47 @@ public:
     rewriter.eraseOp(tasks);
     return success();
   }
+
+private:
+  /// The row-stripe tile of the partial tasks: for each item of the block,
+  /// the rows of the chunk of its task after their clamp to the row count,
+  /// the consumers on the column group of the item, and the store of each
+  /// column of the group in the scratch row of the task.
+  LogicalResult convertRowPartials(PartialTasksOp tasks, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   int64_t threads) const {
+    Value exchange = exchangeOf(adaptor.getValues());
+    if (!exchange)
+      return rewriter.notifyMatchFailure(tasks, "kernel has no exchange");
+    Location loc = tasks.getLoc();
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    RowTile tile = emitRowTile(rewriter, loc, target, adaptor.getFeatureCount(),
+                               threadId, threads, exchange);
+    Value taskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getPartialCount());
+    bool converted = true;
+    emitItemLoop(
+        rewriter, loc, taskCount, tile.groups,
+        [&](OpBuilder &body, Location bodyLoc, Value task, Value group) {
+          auto [begin, end] =
+              loadPartialRange(body, bodyLoc, adaptor.getRanges(), task,
+                               adaptor.getValueCount());
+          BoundRows rows = bindRows(body, bodyLoc, tile, adaptor.getValues(),
+                                    begin, end, group);
+          Value total = convertRowRegion(rewriter, body, tasks.getBody(), rows,
+                                         Value(), converted);
+          if (total)
+            emitRowStore(body, bodyLoc, tile, rows, total, adaptor.getScratch(),
+                         task, Value(), zero);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
+  }
+
+  const TargetDescription &target;
 };
 
 /// The extent of a split segment, as an index: the end of range record
@@ -809,6 +871,37 @@ Value emitSplitExtent(OpBuilder &builder, Location loc, Value ranges,
   return extent.getResult(0);
 }
 
+/// The merge record of task `taskIndex`: the segment it names, whether
+/// that segment is below `segmentCount`, and its range of partials clamped
+/// to `partialCount`, the scratch slots or rows it indexes.
+struct MergeRecord {
+  Value segment;
+  Value segmentInRange;
+  Value begin;
+  Value end;
+};
+
+MergeRecord loadMergeRecord(OpBuilder &builder, Location loc, Value records,
+                            Value taskIndex, Value segmentCount,
+                            Value partialCount) {
+  using namespace swage_plan::merge_record;
+  Value fields = arith::ConstantIndexOp::create(builder, loc, Words);
+  Value recordBase = arith::MulIOp::create(builder, loc, taskIndex, fields);
+  Value segmentWord =
+      loadRecordField(builder, loc, records, recordBase, Segment);
+  Value segmentInRange =
+      isLoadedIndexInRange(builder, loc, segmentWord, segmentCount);
+  Value segment = arith::IndexCastOp::create(
+      builder, loc, builder.getIndexType(), segmentWord);
+  Value beginWord =
+      loadRecordField(builder, loc, records, recordBase, PartialBegin);
+  Value endWord =
+      loadRecordField(builder, loc, records, recordBase, PartialEnd);
+  auto [begin, end] =
+      clampRange(builder, loc, beginWord, endWord, partialCount);
+  return {segment, segmentInRange, begin, end};
+}
+
 /// One block of threads per split segment: the kernel prelude, the guard on
 /// the task index, the merge record of the segment, the reduction of the
 /// region over the scratch slots the record names, and the store of its
@@ -826,9 +919,15 @@ Value emitSplitExtent(OpBuilder &builder, Location loc, Value ranges,
 /// loads inside the `partial_count` records, and an empty range reads none
 /// and has the extent zero. The words themselves are data: they reach a
 /// division and never an address.
+///
+/// Over rank-two values scratch holds one row per partial task, the record
+/// names rows of scratch and the extent is a number of rows, the kernel is
+/// the row-stripe tile, and the result of column `c` is stored at
+/// `output[segment * D + c]`.
 class MergeTasksPattern : public OpConversionPattern<MergeTasksOp> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  MergeTasksPattern(MLIRContext *context, const TargetDescription &target)
+      : OpConversionPattern(context), target(target) {}
 
   LogicalResult
   matchAndRewrite(MergeTasksOp tasks, OpAdaptor adaptor,
@@ -836,6 +935,8 @@ public:
     IntegerAttr threads = blockThreadsOf(tasks->getParentOp());
     if (!threads)
       return rewriter.notifyMatchFailure(tasks, "not in a plan function");
+    if (adaptor.getFeatureCount())
+      return convertRowMerges(tasks, adaptor, rewriter, threads.getInt());
     Location loc = tasks.getLoc();
 
     Value taskIndex = gpu::BlockIdOp::create(rewriter, loc, gpu::Dimension::x);
@@ -851,37 +952,23 @@ public:
     bool converted = true;
     scf::IfOp::create(
         rewriter, loc, inRange, [&](OpBuilder &body, Location bodyLoc) {
-          using namespace swage_plan::merge_record;
-          Value records = adaptor.getMerges();
-          Value fields = arith::ConstantIndexOp::create(body, bodyLoc, Words);
-          Value recordBase =
-              arith::MulIOp::create(body, bodyLoc, taskIndex, fields);
-          Value segmentWord =
-              loadRecordField(body, bodyLoc, records, recordBase, Segment);
-          Value segmentInRange = isLoadedIndexInRange(
-              body, bodyLoc, segmentWord, adaptor.getSegmentCount());
-          Value segment = arith::IndexCastOp::create(
-              body, bodyLoc, body.getIndexType(), segmentWord);
-          Value beginWord =
-              loadRecordField(body, bodyLoc, records, recordBase, PartialBegin);
-          Value endWord =
-              loadRecordField(body, bodyLoc, records, recordBase, PartialEnd);
-          // The range indexes scratch, so the partial count bounds it.
-          Value begin;
-          Value end;
-          std::tie(begin, end) = clampRange(body, bodyLoc, beginWord, endWord,
-                                            adaptor.getPartialCount());
+          MergeRecord record = loadMergeRecord(
+              body, bodyLoc, adaptor.getMerges(), taskIndex,
+              adaptor.getSegmentCount(), adaptor.getPartialCount());
           Value extent;
           if (Value ranges = adaptor.getRanges())
-            extent = emitSplitExtent(body, bodyLoc, ranges, begin, end, zero);
-          Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
+            extent = emitSplitExtent(body, bodyLoc, ranges, record.begin,
+                                     record.end, zero);
+          Value first =
+              arith::AddIOp::create(body, bodyLoc, record.begin, threadId);
           Value total = convertRangeTask(
               rewriter, body, tasks.getBody(),
-              {adaptor.getScratch(), first, end, block}, extent);
+              {adaptor.getScratch(), first, record.end, block}, extent);
           converted = static_cast<bool>(total);
           if (converted)
-            emitLeaderStore(body, bodyLoc, total, adaptor.getOutput(), segment,
-                            threadId, zero, segmentInRange);
+            emitLeaderStore(body, bodyLoc, total, adaptor.getOutput(),
+                            record.segment, threadId, zero,
+                            record.segmentInRange);
           scf::YieldOp::create(body, bodyLoc);
         });
     if (!converted)
@@ -889,6 +976,52 @@ public:
     rewriter.eraseOp(tasks);
     return success();
   }
+
+private:
+  /// The row-stripe tile of the merge tasks: for each item of the block,
+  /// the merge record of its task, the rows of scratch the record names
+  /// after their clamp to the partial count, the consumers on the column
+  /// group of the item, and the store of each column of the group in the
+  /// row of the segment, when that segment is below the segment count.
+  LogicalResult convertRowMerges(MergeTasksOp tasks, OpAdaptor adaptor,
+                                 ConversionPatternRewriter &rewriter,
+                                 int64_t threads) const {
+    Value exchange = exchangeOf(adaptor.getScratch());
+    if (!exchange)
+      return rewriter.notifyMatchFailure(tasks, "kernel has no exchange");
+    Location loc = tasks.getLoc();
+    Value threadId = gpu::ThreadIdOp::create(rewriter, loc, gpu::Dimension::x);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    RowTile tile = emitRowTile(rewriter, loc, target, adaptor.getFeatureCount(),
+                               threadId, threads, exchange);
+    Value taskCount = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), adaptor.getMergeCount());
+    bool converted = true;
+    emitItemLoop(
+        rewriter, loc, taskCount, tile.groups,
+        [&](OpBuilder &body, Location bodyLoc, Value task, Value group) {
+          MergeRecord record = loadMergeRecord(
+              body, bodyLoc, adaptor.getMerges(), task,
+              adaptor.getSegmentCount(), adaptor.getPartialCount());
+          Value extent;
+          if (Value ranges = adaptor.getRanges())
+            extent = emitSplitExtent(body, bodyLoc, ranges, record.begin,
+                                     record.end, zero);
+          BoundRows rows = bindRows(body, bodyLoc, tile, adaptor.getScratch(),
+                                    record.begin, record.end, group);
+          Value total = convertRowRegion(rewriter, body, tasks.getBody(), rows,
+                                         extent, converted);
+          if (total)
+            emitRowStore(body, bodyLoc, tile, rows, total, adaptor.getOutput(),
+                         record.segment, record.segmentInRange, zero);
+        });
+    if (!converted)
+      return failure();
+    rewriter.eraseOp(tasks);
+    return success();
+  }
+
+  const TargetDescription &target;
 };
 
 /// The persistent queue kernel: resident blocks that drain the block queue,
@@ -1381,17 +1514,29 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
         return failure();
     return verifyKernelSymbols(module, function, "");
   }
+  // Every lane of a row-stripe tile owns one row stripe of one column.
+  auto verifyRowWidth = [&](Operation *rows) -> LogicalResult {
+    if (!exchangeElementOf(rows) || threads % target.subgroupWidth == 0)
+      return success();
+    return rows->emitError()
+           << "a row-stripe task of rank-two values runs whole subgroups of "
+           << target.subgroupWidth << " threads, so " << name
+           << " must be a multiple of " << target.subgroupWidth << ", got "
+           << threads;
+  };
   if (auto merge = dyn_cast<MergeTasksOp>(task)) {
     if (failed(verifyTaskConsumers(merge, merge.getScratch().getType(),
                                    merge.getMerges().getType(),
-                                   merge.getBody().front())))
+                                   merge.getBody().front())) ||
+        failed(verifyRowWidth(merge)))
       return failure();
     return verifyKernelSymbols(module, function, "");
   }
   if (auto partial = dyn_cast<PartialTasksOp>(task)) {
     if (failed(verifyTaskConsumers(partial, partial.getValues().getType(),
                                    partial.getRanges().getType(),
-                                   partial.getBody().front())))
+                                   partial.getBody().front())) ||
+        failed(verifyRowWidth(partial)))
       return failure();
     return verifyKernelSymbols(module, function, "");
   }
@@ -1405,13 +1550,8 @@ LogicalResult verifyPlanFunction(ModuleOp module, func::FuncOp function,
     return tasks.emitError()
            << "policy<warp> requires " << name << " to be the subgroup width, "
            << target.subgroupWidth << ", got " << threads;
-  // Every lane of a row-stripe tile owns one row stripe of one column.
-  if (exchangeElementOf(tasks) && threads % target.subgroupWidth != 0)
-    return tasks.emitError()
-           << "a row-stripe task of rank-two values runs whole subgroups of "
-           << target.subgroupWidth << " threads, so " << name
-           << " must be a multiple of " << target.subgroupWidth << ", got "
-           << threads;
+  if (failed(verifyRowWidth(tasks)))
+    return failure();
   return verifyKernelSymbols(module, function, "");
 }
 
@@ -1476,9 +1616,9 @@ LogicalResult convertPlanToGPU(ModuleOp module,
 
   RewritePatternSet patterns(module.getContext());
   patterns.add<PlanKernelFuncPattern, TasksPattern, FusedTasksPattern,
-               PersistentTasksPattern>(module.getContext(), target);
-  patterns.add<PlanKernelReturnPattern, PartialTasksPattern, MergeTasksPattern>(
-      module.getContext());
+               PartialTasksPattern, MergeTasksPattern, PersistentTasksPattern>(
+      module.getContext(), target);
+  patterns.add<PlanKernelReturnPattern>(module.getContext());
   populateSegmentConsumerPatterns(patterns, &target);
   return applyFullConversion(module, legality, std::move(patterns));
 }

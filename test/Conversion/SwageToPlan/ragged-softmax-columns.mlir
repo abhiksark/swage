@@ -11,9 +11,10 @@
 // schedule admits the captures and the map store of the softmax over
 // rank-two values, which a launch runs with one task per segment. Over
 // rank-one values the same schedule refuses them, because host
-// classification describes one capture-free reduction. The other kernel
-// schedules refuse rank-two values by name before they look at the
-// program.
+// classification describes one capture-free reduction. The split schedules
+// plan rank-two values but refuse the softmax as they do over rank-one
+// values, and the other kernel schedules refuse rank-two values by name
+// before they look at the program.
 //
 // RUN: swage-opt --swage-to-plan='schedule=direct' %s \
 // RUN:   | FileCheck %s --implicit-check-not='swage.map ' \
@@ -23,7 +24,9 @@
 // RUN: not swage-opt --swage-to-plan='schedule=fused-mixed' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=REFUSED
 // RUN: not swage-opt --swage-to-plan='schedule=split-partial' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=REFUSED
+// RUN:   | FileCheck %s --check-prefix=SPLIT
+// RUN: not swage-opt --swage-to-plan='schedule=split-merge' %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=SPLIT
 // RUN: not swage-opt --swage-to-plan='schedule=persistent' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=REFUSED
 
@@ -49,7 +52,8 @@
 // STRIPES: swage.map_store %[[R_SEGMENT]], %[[R_OUTPUT]] captures(%[[R_MAX]], %[[R_TOTAL]] : f32, f32) : !swage.segment<f32>, memref<?x?xf32> {
 // STRIPES: swage_plan.yield{{$}}
 
-// REFUSED: error: {{fused-mixed|split-partial|persistent}} planning requires rank-one values: a function over rank-two values runs on the direct and task-ids schedules
+// REFUSED: error: {{fused-mixed|persistent}} planning requires rank-one values: a function over rank-two values runs on the direct, task-ids, split-partial, and split-merge schedules
+// SPLIT: error: planning requires capture-free maps
 
 module {
   func.func @ragged_softmax_r2(

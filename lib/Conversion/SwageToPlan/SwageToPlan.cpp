@@ -260,14 +260,32 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   bool mergeExtent =
       schedule == PlanSchedule::SplitMerge && !analysis.epilogue.empty();
   // A kernel of rank-two values takes the number of columns: the direct
-  // kernel reduces one column per thread, and the task-id kernel is the
-  // row-stripe tile.
+  // kernel reduces one column per thread, and the task-id and split
+  // kernels are the row-stripe tile.
   bool columns = static_cast<bool>(analysis.abi.featureCount);
   KernelKind kind = mergeExtent ? KernelKind::SplitMergeExtent : kernel.kind;
-  if (columns && kind == KernelKind::Direct)
-    kind = KernelKind::DirectColumns;
-  else if (columns && kind == KernelKind::TaskIds)
-    kind = KernelKind::TaskIdsColumns;
+  if (columns) {
+    switch (kind) {
+    case KernelKind::Direct:
+      kind = KernelKind::DirectColumns;
+      break;
+    case KernelKind::TaskIds:
+      kind = KernelKind::TaskIdsColumns;
+      break;
+    case KernelKind::SplitPartial:
+      kind = KernelKind::SplitPartialColumns;
+      break;
+    case KernelKind::SplitMerge:
+      kind = KernelKind::SplitMergeColumns;
+      break;
+    case KernelKind::SplitMergeExtent:
+      kind = KernelKind::SplitMergeExtentColumns;
+      break;
+    default:
+      llvm_unreachable("the planner refuses rank-two values on this schedule");
+    }
+  }
+  Value features;
   const KernelLayout layout = swage_plan::kernelLayout(kind);
   SmallVector<Type> inputs;
   for (KernelArgument argument : layout.arguments())
@@ -291,6 +309,8 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
   auto argument = [&](KernelArgument parameter) {
     return Value(entry->getArgument(layout.indexOf(parameter)));
   };
+  if (columns)
+    features = argument(KernelArgument::FeatureCount);
 
   builder.setInsertionPointToEnd(entry);
   Operation *task = nullptr;
@@ -329,7 +349,8 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::MergeCount),
         argument(KernelArgument::SegmentCount),
         argument(KernelArgument::Output),
-        mergeExtent ? argument(KernelArgument::PartialRanges) : Value());
+        mergeExtent ? argument(KernelArgument::PartialRanges) : Value(),
+        features);
   } else if (schedule == PlanSchedule::SplitPartial) {
     // A partial task reduces one chunk into its scratch slot.
     task = swage_plan::PartialTasksOp::create(
@@ -337,7 +358,7 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::ValueCount),
         argument(KernelArgument::PartialRanges),
         argument(KernelArgument::PartialCount),
-        argument(KernelArgument::Scratch));
+        argument(KernelArgument::Scratch), features);
   } else {
     bool useTaskIds = schedule == PlanSchedule::TaskIds;
     // The task-id kernel reduces within one subgroup exactly when a block is
@@ -356,8 +377,7 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
         argument(KernelArgument::SegmentCount),
         useTaskIds ? argument(KernelArgument::TaskIds) : Value(),
         useTaskIds ? argument(KernelArgument::TaskCount) : Value(),
-        analysis.mapStores.empty() ? output : Value(),
-        columns ? argument(KernelArgument::FeatureCount) : Value(), policy);
+        analysis.mapStores.empty() ? output : Value(), features, policy);
   }
   func::ReturnOp::create(builder, loc);
   if (schedule == PlanSchedule::SplitMerge) {
@@ -512,21 +532,25 @@ LogicalResult verifySchedules(ModuleOp module, const PlanOptions &options,
 }
 
 /// Require schedules that plan a kernel of rank-two values. The direct
-/// schedule plans the column tile and the task-id schedule the row-stripe
-/// tile, whose block is a whole number of subgroups: every lane then owns
-/// one row stripe of one column. No other kernel schedule plans rows yet.
+/// schedule plans the column tile, and the task-id and split schedules the
+/// row-stripe tile, whose block is a whole number of subgroups: every lane
+/// then owns one row stripe of one column. The target fixes the split
+/// widths, and `block-threads` gives the task-id width.
 LogicalResult verifyRowSchedules(func::FuncOp function,
                                  SegmentProgramAnalysis &analysis,
                                  const PlanOptions &options,
                                  const TargetDescription &target) {
   for (PlanSchedule schedule : options.schedules) {
-    if (schedule == PlanSchedule::Direct)
+    if (schedule == PlanSchedule::Direct ||
+        schedule == PlanSchedule::SplitPartial ||
+        schedule == PlanSchedule::SplitMerge)
       continue;
     if (schedule != PlanSchedule::TaskIds)
       return analysis.segments.front().emitError()
              << kernelSchedule(schedule)->name
              << " planning requires rank-one values: a function over "
-                "rank-two values runs on the direct and task-ids schedules";
+                "rank-two values runs on the direct, task-ids, "
+                "split-partial, and split-merge schedules";
     if (options.blockThreads % target.subgroupWidth != 0)
       return function.emitError()
              << "the task-ids kernel of rank-two values runs whole subgroups "

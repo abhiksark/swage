@@ -113,9 +113,9 @@ scalar partials without reapplying element expressions.
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
-policy. A function over rank-two values has two kernel schedules: the
-column policy, with no task buffer, and `policy<cta>` over a task buffer,
-the row-stripe tile of
+policy. A function over rank-two values has the column policy, with no
+task buffer, and the row-stripe tile of `policy<cta>` over a task buffer
+and of the split partial and merge kernels, described in
 [`docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md`](docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md).
 
 One private experimental identity-sum path now consumes the existing host

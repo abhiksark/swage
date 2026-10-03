@@ -58,6 +58,18 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
   EXPECT_EQ(namesOf(KernelKind::SplitMergeExtent),
             (Names{"scratch", "output", "merge_records", "partial_ranges",
                    "partial_count", "merge_count", "segment_count"}));
+  // The split kernels of rank-two values take the number of columns after
+  // the counts of the rank-one split kernels.
+  EXPECT_EQ(namesOf(KernelKind::SplitPartialColumns),
+            (Names{"values", "partial_ranges", "scratch", "value_count",
+                   "partial_count", "feature_count"}));
+  EXPECT_EQ(namesOf(KernelKind::SplitMergeColumns),
+            (Names{"scratch", "output", "merge_records", "partial_count",
+                   "merge_count", "segment_count", "feature_count"}));
+  EXPECT_EQ(namesOf(KernelKind::SplitMergeExtentColumns),
+            (Names{"scratch", "output", "merge_records", "partial_ranges",
+                   "partial_count", "merge_count", "segment_count",
+                   "feature_count"}));
   EXPECT_EQ(
       namesOf(KernelKind::Persistent),
       (Names{"values", "offsets", "output", "warp_ids", "cta_ids",
@@ -71,7 +83,9 @@ TEST(KernelLayoutTest, EveryKernelTakesItsBuffersBeforeItsCounts) {
        {KernelKind::Direct, KernelKind::DirectColumns, KernelKind::TaskIds,
         KernelKind::TaskIdsColumns, KernelKind::FusedMixed,
         KernelKind::SplitPartial, KernelKind::SplitMerge,
-        KernelKind::SplitMergeExtent, KernelKind::Persistent}) {
+        KernelKind::SplitMergeExtent, KernelKind::SplitPartialColumns,
+        KernelKind::SplitMergeColumns, KernelKind::SplitMergeExtentColumns,
+        KernelKind::Persistent}) {
     SCOPED_TRACE(static_cast<int>(kind));
     bool sawCount = false;
     for (KernelArgument argument : kernelLayout(kind).arguments()) {

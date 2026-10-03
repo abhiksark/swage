@@ -201,14 +201,17 @@ def test_static_schedules_share_reduction_program(kind, transform, element):
 
 
 # The kernel schedules that refuse rank-two values, by name: rank-two values
-# run on the direct schedule, the column tile, and on the task-ids schedule,
-# the row-stripe tile.
+# run on the direct schedule, the column tile, and on the task-ids and split
+# schedules, the row-stripe tile.
 _ROW_REFUSALS = [
     ("_compile_fused_segmented_reduction_ptx", "fused-mixed"),
-    ("_compile_split_partial_reduction_ptx", "split-partial"),
-    ("_compile_split_merge_reduction_ptx", "split-merge"),
     ("_compile_persistent_segmented_reduction_ptx", "persistent"),
 ]
+# Each split compile function with the suffix of the kernel it emits.
+_SPLIT_COMPILERS = (
+    ("_compile_split_partial_reduction_ptx", "__partial"),
+    ("_compile_split_merge_reduction_ptx", "__merge"),
+)
 
 
 def _parameters(ptx, kernel_name):
@@ -233,8 +236,8 @@ def _assert_row_refusals(module, kernel_name):
             ValueError,
             match=(
                 f"{schedule} planning requires rank-one values: a function "
-                "over rank-two values runs on the direct and task-ids "
-                "schedules"
+                "over rank-two values runs on the direct, task-ids, "
+                "split-partial, and split-merge schedules"
             ),
         ):
             getattr(native_swage, name)(
@@ -256,8 +259,11 @@ def test_rank_two_programs_compile_the_column_and_row_stripe_tiles(
     feature count as a fourth count, shuffles, two barriers around one
     exchange in shared memory, and still one accumulator per reduction, at
     one subgroup and at four. A thread never holds one value per column.
-    The other kernel schedules refuse the program by name, and host
-    classification takes its rows.
+    The split kernels are the row-stripe tile too: the partial kernel takes
+    scratch where the output was and the range records where the offsets
+    were, and the merge kernel takes the merge records, with the range
+    records too for a mean, and four counts. The other kernel schedules
+    refuse the program by name, and host classification takes its rows.
     """
     kernel_name = _reduction_kernel(kind, element, 2)
     with ir.Context() as context:
@@ -290,6 +296,22 @@ def test_rank_two_programs_compile_the_column_and_row_stripe_tiles(
             assert ptx.count("bar.sync") == 2
             # The item loop takes no element, and the row loop one.
             assert _accumulators(lowered, element) == [0, 1]
+        merge_buffers = 4 if kind == "mean" else 3
+        for (function, suffix), buffers, counts in zip(
+            _SPLIT_COMPILERS, (3, merge_buffers), (3, 4)
+        ):
+            lowered, ptx = getattr(native_swage, function)(
+                module, kernel_name=kernel_name, target="sm_86"
+            )
+            assert _parameters(ptx, kernel_name + suffix) == (
+                ["pointer"] * buffers + [".u32"] * counts
+            )
+            assert "shfl.sync" in ptx and ".shared" in ptx
+            assert ptx.count("bar.sync") == 2
+            # The row loop takes the one element; the extent of a mean's
+            # merge joins as an index, which takes none.
+            accumulators = _accumulators(lowered, element)
+            assert [count for count in accumulators if count] == [1]
         _assert_row_refusals(module, kernel_name)
         # Rows are classified like scalars: one row is warp work, 33 rows
         # are a block task.
@@ -310,8 +332,8 @@ def test_the_rank_two_softmax_compiles_the_column_and_row_stripe_tiles():
     reduction loops carry one accumulator each, and the store loop and the
     loop around the stages carry none: a thread never holds one value per
     column or per row. The schedules that do not plan rows refuse the
-    program by name, and host classification, which describes one
-    capture-free reduction, refuses it for its captures.
+    program by name, and the split schedules and host classification, which
+    take one capture-free reduction, refuse it for its captures.
     """
     with ir.Context() as context:
         swage.register_dialects(context)
@@ -350,6 +372,13 @@ def test_the_rank_two_softmax_compiles_the_column_and_row_stripe_tiles():
         assert ptx.count("ex2.approx.f32") == 2
         assert _accumulators(lowered, "f32") == [0, 0, 1, 1]
         _assert_row_refusals(module, "ragged_softmax_r2")
+        for function, _ in _SPLIT_COMPILERS:
+            with pytest.raises(
+                ValueError, match="planning requires capture-free maps"
+            ):
+                getattr(native_swage, function)(
+                    module, kernel_name="ragged_softmax_r2", target="sm_86"
+                )
         with pytest.raises(
             ValueError, match="planning requires capture-free maps"
         ):

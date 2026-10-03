@@ -1,6 +1,7 @@
 // test/Conversion/SwagePlanToGPU/column-groups.mlir
 // The row-stripe tile of rank-two values: a task operation of policy<cta>
-// over rows of features. A block runs items, each a task and a group of W
+// over rows of features, and the partial and merge kernels of the split,
+// at the end of the file. A block runs items, each a task and a group of W
 // adjacent columns, in a loop from the block index to task_count * groups
 // by the grid size. W is the smallest power of two that is at least the
 // feature count, capped at the subgroup width. Thread t owns column
@@ -25,6 +26,8 @@
 // RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s --check-prefix=MEAN
 // RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s --check-prefix=SOFTMAX
 // RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s --check-prefix=DIRECT
+// RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s --check-prefix=PARTIAL
+// RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s --check-prefix=MERGE
 
 // CHECK-LABEL: gpu.func @rows_sum(
 // CHECK-SAME: %[[VALUES:[^:]+]]: !llvm.ptr, %[[OFFSETS:[^:]+]]: !llvm.ptr, %[[OUTPUT:[^:]+]]: !llvm.ptr, %[[IDS:[^:]+]]: !llvm.ptr, %[[VALUE_COUNT:[^:]+]]: i32, %[[TASK_COUNT:[^:]+]]: i32, %[[SEGMENT_COUNT:[^:]+]]: i32, %[[FEATURE_COUNT:[^:]+]]: i32) workgroup(%[[EXCHANGE:[^ ]+]] : memref<128xf32, #gpu.address_space<workgroup>>) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>} {
@@ -172,6 +175,75 @@
 // DIRECT: scf.for %{{.*}} = %{{.*}} to %[[DIRECT_ITEMS]] step %{{.*}} {
 // DIRECT-NOT: arith.cmpi ult, %{{.*}}, %[[DIRECT_SEGMENT_COUNT]] : i32
 
+// The partial kernel of the split runs the same tile over the rows of the
+// range record of a task, clamped to the row count, and stores each column
+// at scratch[task * D + column], a row of scratch per task.
+// PARTIAL-LABEL: gpu.func @rows_partial(
+// PARTIAL-SAME: %[[P_VALUES:[^:]+]]: !llvm.ptr, %[[P_RANGES:[^:]+]]: !llvm.ptr, %[[P_SCRATCH:[^:]+]]: !llvm.ptr, %[[P_VALUE_COUNT:[^:]+]]: i32, %[[P_PARTIAL_COUNT:[^:]+]]: i32, %[[P_FEATURE_COUNT:[^:]+]]: i32) workgroup(%[[P_EXCHANGE:[^ ]+]] : memref<512xf32, #gpu.address_space<workgroup>>) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>} {
+// PARTIAL: %[[P_FEATURES:.*]] = arith.index_cast %[[P_FEATURE_COUNT]] : i32 to index
+// PARTIAL: %[[P_TASKS:.*]] = arith.index_cast %[[P_PARTIAL_COUNT]] : i32 to index
+// PARTIAL: %[[P_ITEMS:.*]] = arith.muli %[[P_TASKS]], %[[P_GROUPS:.*]] : index
+// PARTIAL: scf.for %[[P_ITEM:.*]] = %{{.*}} to %[[P_ITEMS]] step %{{.*}} {
+// PARTIAL-NEXT: %[[P_TASK:.*]] = arith.divui %[[P_ITEM]], %[[P_GROUPS]] : index
+// PARTIAL: llvm.getelementptr %[[P_RANGES]][
+// PARTIAL: llvm.getelementptr %[[P_RANGES]][
+// PARTIAL: arith.minsi %{{.*}}, %[[P_VALUE_COUNT]] : i32
+// PARTIAL: arith.minsi %{{.*}}, %[[P_VALUE_COUNT]] : i32
+// PARTIAL: %[[P_COLUMN:.*]] = arith.addi %{{.*}}, %{{.*}} : index
+// PARTIAL-NEXT: %[[P_COLUMN_IN_RANGE:.*]] = arith.cmpi ult, %[[P_COLUMN]], %[[P_FEATURES]] : index
+// PARTIAL: scf.for {{.*}} -> (f32) {
+// PARTIAL: llvm.getelementptr %[[P_VALUES]][
+// PARTIAL-COUNT-5: gpu.shuffle xor
+// PARTIAL: memref.store %{{.*}}, %[[P_EXCHANGE]]
+// PARTIAL-NEXT: gpu.barrier
+// PARTIAL-COUNT-16: memref.load %[[P_EXCHANGE]]
+// PARTIAL: gpu.barrier
+// PARTIAL-NEXT: %[[P_ROW:.*]] = arith.muli %[[P_TASK]], %[[P_FEATURES]] : index
+// PARTIAL-NEXT: %[[P_SLOT:.*]] = arith.addi %[[P_ROW]], %[[P_COLUMN]] : index
+// PARTIAL-NEXT: %[[P_LEADER:.*]] = arith.cmpi eq, %{{.*}}, %{{.*}} : index
+// PARTIAL-NEXT: %[[P_MAY_STORE:.*]] = arith.andi %[[P_LEADER]], %[[P_COLUMN_IN_RANGE]] : i1
+// PARTIAL-NEXT: scf.if %[[P_MAY_STORE]] {
+// PARTIAL-NEXT: %[[P_SLOT64:.*]] = arith.index_cast %[[P_SLOT]] : index to i64
+// PARTIAL-NEXT: llvm.getelementptr %[[P_SCRATCH]][%[[P_SLOT64]]] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+
+// The merge kernel runs the tile over the rows of scratch its merge record
+// names, clamped to the partial count. The extent of a mean is read from
+// the range records, a number of rows, and the result of each column is
+// stored at output[segment * D + column] when the segment of the record is
+// below the segment count.
+// MERGE-LABEL: gpu.func @rows_merge_mean(
+// MERGE-SAME: %[[M_SCRATCH:[^:]+]]: !llvm.ptr, %[[M_OUTPUT:[^:]+]]: !llvm.ptr, %[[M_MERGES:[^:]+]]: !llvm.ptr, %[[M_RANGES:[^:]+]]: !llvm.ptr, %[[M_PARTIAL_COUNT:[^:]+]]: i32, %[[M_MERGE_COUNT:[^:]+]]: i32, %[[M_SEGMENT_COUNT:[^:]+]]: i32, %[[M_FEATURE_COUNT:[^:]+]]: i32) workgroup(%[[M_EXCHANGE:[^ ]+]] : memref<512xf32, #gpu.address_space<workgroup>>)
+// MERGE: %[[M_FEATURES:.*]] = arith.index_cast %[[M_FEATURE_COUNT]] : i32 to index
+// MERGE: %[[M_TASKS:.*]] = arith.index_cast %[[M_MERGE_COUNT]] : i32 to index
+// MERGE: %[[M_ITEMS:.*]] = arith.muli %[[M_TASKS]], %{{.*}} : index
+// MERGE: scf.for %{{.*}} = %{{.*}} to %[[M_ITEMS]] step %{{.*}} {
+// MERGE: llvm.getelementptr %[[M_MERGES]][
+// MERGE-NEXT: %[[M_SEGMENT_WORD:.*]] = llvm.load
+// MERGE-NEXT: %[[M_SEGMENT_IN_RANGE:.*]] = arith.cmpi ult, %[[M_SEGMENT_WORD]], %[[M_SEGMENT_COUNT]] : i32
+// MERGE-NEXT: %[[M_SEGMENT:.*]] = arith.index_cast %[[M_SEGMENT_WORD]] : i32 to index
+// MERGE: arith.minsi %{{.*}}, %[[M_PARTIAL_COUNT]] : i32
+// MERGE: arith.minsi %{{.*}}, %[[M_PARTIAL_COUNT]] : i32
+// MERGE: %[[M_ROWS:.*]] = scf.if %{{.*}} -> (index) {
+// MERGE: llvm.getelementptr %[[M_RANGES]][
+// MERGE: llvm.getelementptr %[[M_RANGES]][
+// MERGE: %[[M_COLUMN:.*]] = arith.addi %{{.*}}, %{{.*}} : index
+// MERGE-NEXT: %[[M_COLUMN_IN_RANGE:.*]] = arith.cmpi ult, %[[M_COLUMN]], %[[M_FEATURES]] : index
+// MERGE: scf.for {{.*}} -> (f32) {
+// MERGE: llvm.getelementptr %[[M_SCRATCH]][
+// MERGE-COUNT-5: gpu.shuffle xor
+// MERGE: memref.store %{{.*}}, %[[M_EXCHANGE]]
+// MERGE-NEXT: gpu.barrier
+// MERGE: gpu.barrier
+// MERGE-NEXT: %[[M_COUNT:.*]] = arith.index_cast %[[M_ROWS]] : index to i32
+// MERGE-NEXT: %[[M_DIVISOR:.*]] = arith.sitofp %[[M_COUNT]] : i32 to f32
+// MERGE-NEXT: %[[M_MEAN:.*]] = arith.divf %{{.*}}, %[[M_DIVISOR]] : f32
+// MERGE-NEXT: %[[M_ROW:.*]] = arith.muli %[[M_SEGMENT]], %[[M_FEATURES]] : index
+// MERGE-NEXT: %[[M_SLOT:.*]] = arith.addi %[[M_ROW]], %[[M_COLUMN]] : index
+// MERGE-NEXT: %[[M_IN_RANGE:.*]] = arith.andi %[[M_COLUMN_IN_RANGE]], %[[M_SEGMENT_IN_RANGE]] : i1
+// MERGE: scf.if
+// MERGE: llvm.getelementptr %[[M_OUTPUT]][
+// MERGE-NEXT: llvm.store %[[M_MEAN]]
+
 module {
   func.func @rows_sum(
       %values: memref<?x?xf32>, %offsets: memref<?xi32>,
@@ -273,6 +345,48 @@ module {
         swage.yield %value : f32
       }
       swage_plan.yield %sum : f32
+    }
+    return
+  }
+
+  func.func @rows_partial(
+      %values: memref<?x?xf32>, %ranges: memref<?xi32>,
+      %scratch: memref<?x?xf32>, %value_count: i32, %partial_count: i32,
+      %feature_count: i32)
+      attributes {swage_plan.block_threads = 512 : i32} {
+    swage_plan.partial_tasks values(%values : memref<?x?xf32>)
+        value_count(%value_count : i32) ranges(%ranges : memref<?xi32>)
+        partial_count(%partial_count : i32)
+        feature_count(%feature_count : i32)
+        into(%scratch : memref<?x?xf32>) {
+    ^bb0(%chunk: !swage.segment<f32>):
+      %total = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+  func.func @rows_merge_mean(
+      %scratch: memref<?x?xf32>, %output: memref<?x?xf32>,
+      %merges: memref<?xi32>, %ranges: memref<?xi32>, %partial_count: i32,
+      %merge_count: i32, %segment_count: i32, %feature_count: i32)
+      attributes {swage_plan.block_threads = 512 : i32} {
+    swage_plan.merge_tasks scratch(%scratch : memref<?x?xf32>)
+        partial_count(%partial_count : i32) merges(%merges : memref<?xi32>)
+        merge_count(%merge_count : i32) segment_count(%segment_count : i32)
+        feature_count(%feature_count : i32) ranges(%ranges : memref<?xi32>)
+        into(%output : memref<?x?xf32>) {
+    ^bb0(%partials: !swage.segment<f32>, %rows: index):
+      %total = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%partial: f32):
+        swage.yield %partial : f32
+      }
+      %count = arith.index_cast %rows : index to i32
+      %divisor = arith.sitofp %count : i32 to f32
+      %mean = arith.divf %total, %divisor : f32
+      swage_plan.yield %mean : f32
     }
     return
   }

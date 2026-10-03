@@ -192,6 +192,14 @@ def _segmented_kernels():
                 _for_element(_ROW_STRIPES, element),
                 id=f"rows-{kind}-{element}-{block_size}",
             )
+        # The partial and merge kernels of the split are the same tile.
+        for compiler, stage in ((_PARTIAL, "partial"), (_MERGE, "merge")):
+            yield pytest.param(
+                _semantic_module(kind, element, 2), compiler,
+                _reduction_kernel(kind, element, 2), {},
+                _for_element(_ROW_STRIPES, element),
+                id=f"rows-split-{stage}-{kind}-{element}",
+            )
     for block_size in (32, 128, 1024):
         yield pytest.param(
             _softmax_text(2), _DIRECT, "ragged_softmax_r2",

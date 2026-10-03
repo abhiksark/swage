@@ -137,7 +137,9 @@ swageCompilePersistentSegmentedReductionToPTX(
 
 /// Compiles the first stage of a split reduction: one partial result per
 /// chunk of a long segment. The launch width is fixed at 512 threads and the
-/// kernel in the PTX is named `<kernelName>__partial`.
+/// kernel in the PTX is named `<kernelName>__partial`. For a function over
+/// rank-two values the kernel is the row-stripe tile, a chunk is a range of
+/// rows, and each task stores one row of scratch.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
@@ -145,7 +147,8 @@ MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitPartialReductionToPTX(
 
 /// Compiles the second stage of a split reduction: one result per segment
 /// from its partial results. The launch width is fixed at 512 threads and the
-/// kernel in the PTX is named `<kernelName>__merge`.
+/// kernel in the PTX is named `<kernelName>__merge`. For a function over
+/// rank-two values the kernel is the row-stripe tile over rows of scratch.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,

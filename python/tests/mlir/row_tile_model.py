@@ -10,6 +10,10 @@ block of `T` threads. The stripes of one subgroup then combine by an XOR
 butterfly over the bits of their stripe index, low to high, and the results
 of the subgroups combine as a pairwise tree in subgroup order.
 
+The split runs the same tile twice at the split width: the partial kernel
+over each chunk of the rows of a segment, and the merge kernel over the
+partial results of the segment, one row per chunk.
+
 This module adds in exactly that order with numpy arithmetic of the element
 type, so a test can require the bits of a kernel and not only a bound.
 """
@@ -98,6 +102,27 @@ def mean_rows(rows, threads=CTA_BLOCK_THREADS, subgroup_width=SUBGROUP_WIDTH):
     total = reduce_rows(rows, "sum", threads, subgroup_width)
     with numpy.errstate(invalid="ignore", divide="ignore"):
         return total / dtype(rows.shape[0])
+
+
+def reduce_split(rows, chunk_rows, kind, threads=SPLIT_BLOCK_THREADS):
+    """Return the `[D]` result of the split of the rows of one segment.
+
+    Args:
+        rows: Array of shape `[n, D]` with `n` of at least one.
+        chunk_rows: The rows of each partial task but the last.
+        kind: `"sum"`, `"max"`, `"min"`, or `"mean"`. The partial tasks of a
+            mean sum, and its merge divides the merged sum once by `n`.
+        threads: The block width of both kernels.
+    """
+    rows = numpy.asarray(rows)
+    dtype = rows.dtype.type
+    combined = "sum" if kind == "mean" else kind
+    partials = numpy.stack([
+        reduce_rows(rows[begin : begin + chunk_rows], combined, threads)
+        for begin in range(0, rows.shape[0], chunk_rows)
+    ])
+    total = reduce_rows(partials, combined, threads)
+    return total / dtype(rows.shape[0]) if kind == "mean" else total
 
 
 def reduce_segments(rows, offsets, kind, threads=CTA_BLOCK_THREADS):

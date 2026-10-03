@@ -110,7 +110,8 @@ _REDUCTION_VARIANTS = (
     ("split-merge", "_compile_split_merge_reduction_ptx", {}),
 )
 # The kernels of a program over rank-two values: the column tile of the
-# direct schedule and the row-stripe tile of the task-ids schedule.
+# direct schedule and the row-stripe tile of the task-ids schedule. A
+# reduction also has the row-stripe tiles of the split schedules.
 _COLUMN_VARIANTS = (
     ("direct-128", "_compile_segmented_reduction_ptx", {"block_size": 128}),
     (
@@ -119,6 +120,7 @@ _COLUMN_VARIANTS = (
         {"block_size": 128, "use_task_ids": True},
     ),
 )
+_COLUMN_REDUCTION_VARIANTS = _COLUMN_VARIANTS + _REDUCTION_VARIANTS[-2:]
 _PERSISTENT_VARIANT = (
     "persistent", "_compile_persistent_segmented_reduction_ptx", {},
 )
@@ -184,14 +186,14 @@ def _programs():
         )
     # The reductions over rank-two values: the column tile, the direct
     # schedule, and the row-stripe tile, the task-ids schedule, both at the
-    # CTA block width.
+    # CTA block width, and the row-stripe tiles of the split.
     for element in ("f32", "f64"):
         for kind in ("sum", "max", "min", "mean"):
             suffix = "" if element == "f32" else f"-{element}"
             programs[f"{kind}-columns{suffix}"] = (
                 qualification._semantic_module(kind, element, 2),
                 qualification._reduction_kernel(kind, element, 2),
-                _COLUMN_VARIANTS,
+                _COLUMN_REDUCTION_VARIANTS,
                 _NEWER_PROCESSORS,
             )
     # The one program with a `map_store` terminal, as the runtime compiles

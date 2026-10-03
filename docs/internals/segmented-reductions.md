@@ -248,8 +248,21 @@ path. Its bits depend on `n` and on `D` through `W`, and not on the batch,
 the grid, or the device model. `python/tests/mlir/row_tile_model.py` adds
 in exactly that order, and the driver-level tests of
 `python/tests/mlir/test_segmented_bounds.py` require the bits of the kernel
-to equal it. No public call launches this kernel yet. The fused-mixed,
-split, and persistent schedules refuse a rank-two function by name.
+to equal it. No public call launches this kernel yet.
+
+The split schedules give the same tile at 512 threads for a single
+reduction. The partial kernel takes the layout of the rank-one partial
+kernel and the number of columns, reduces the rows of each range record,
+and stores the result of column `c` of partial task `p` at
+`scratch[p * D + c]`. The merge kernel reduces the scratch rows of each
+merge record into `output[segment * D + c]`; the merge of a mean reads the
+row count of its segment from the range records, as over rank-one values.
+The planner cuts no segment: host classification does. A column sum of
+a segment cut into `P` chunks of `4096 / W` rows has
+`6 + 2 log2(R) + ceil(P / R)` additions on its longest path, for the
+`R = 512 / W` stripes of a split block: eight rows per stripe and the
+combination in the partial kernel, then the merge. The fused-mixed and persistent
+schedules refuse a rank-two function by name.
 
 The alternative, a column loop inside the row tiles of rank one, keeps the
 split and the rank-one bound. It was not built: it doubles four schedules,

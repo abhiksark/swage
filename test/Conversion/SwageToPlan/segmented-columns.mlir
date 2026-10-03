@@ -8,7 +8,9 @@
 // number of columns after its two other counts. The task-ids schedule plans
 // the row-stripe kernel: policy<cta> with the task buffer, and the number of
 // columns after the counts of the task-id kernel. Its block is a whole
-// number of subgroups. The other kernel schedules refuse rank-two values by
+// number of subgroups. The split schedules plan the row-stripe kernels of
+// the split, which take the number of columns last, with scratch rows of
+// that many columns. The other kernel schedules refuse rank-two values by
 // name.
 //
 // RUN: swage-opt --swage-to-plan='schedule=direct' %s \
@@ -26,9 +28,9 @@
 // RUN:       --implicit-check-not=segment_id --implicit-check-not=make_segment
 // RUN: not swage-opt --swage-to-plan='schedule=fused-mixed' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=FUSED
-// RUN: not swage-opt --swage-to-plan='schedule=split-partial' %s 2>&1 \
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' %s \
 // RUN:   | FileCheck %s --check-prefix=PARTIAL
-// RUN: not swage-opt --swage-to-plan='schedule=split-merge' %s 2>&1 \
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' %s \
 // RUN:   | FileCheck %s --check-prefix=MERGE
 // RUN: not swage-opt --swage-to-plan='schedule=persistent' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=PERSISTENT
@@ -142,7 +144,31 @@ module {
 
 // WIDTH: error: the task-ids kernel of rank-two values runs whole subgroups of 32 threads, so block-threads must be a multiple of 32, got 48
 
-// FUSED: error: fused-mixed planning requires rank-one values: a function over rank-two values runs on the direct and task-ids schedules
-// PARTIAL: error: split-partial planning requires rank-one values: a function over rank-two values runs on the direct and task-ids schedules
-// MERGE: error: split-merge planning requires rank-one values: a function over rank-two values runs on the direct and task-ids schedules
-// PERSISTENT: error: persistent planning requires rank-one values: a function over rank-two values runs on the direct and task-ids schedules
+// A partial task reduces a range of rows into one scratch row of
+// feature_count columns.
+// PARTIAL: func.func @segmented_sum_r2__partial(%[[P_VALUES:.*]]: memref<?x?xf32> {swage.role = #swage.role<values>}, %[[P_RANGES:.*]]: memref<?xi32>, %[[P_SCRATCH:.*]]: memref<?x?xf32>, %[[P_VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>}, %[[P_PARTIAL_COUNT:.*]]: i32, %[[P_FEATURE_COUNT:.*]]: i32 {swage.role = #swage.role<feature_count>}) attributes {swage_plan.block_threads = 512 : i32} {
+// PARTIAL-NEXT: swage_plan.partial_tasks values(%[[P_VALUES]] : memref<?x?xf32>) value_count(%[[P_VALUE_COUNT]] : i32) ranges(%[[P_RANGES]] : memref<?xi32>) partial_count(%[[P_PARTIAL_COUNT]] : i32) feature_count(%[[P_FEATURE_COUNT]] : i32) into(%[[P_SCRATCH]] : memref<?x?xf32>) {
+// PARTIAL: swage.reduce %{{.*}} kind<sum> : !swage.segment<f32> -> f32 {
+// PARTIAL: func.func @segmented_max_r2__partial(
+// PARTIAL: swage.reduce %{{.*}} kind<max> : !swage.segment<f32> -> f32 {
+// The partial task of a mean yields the raw sum; its merge divides.
+// PARTIAL: func.func @segmented_mean_f64_r2__partial(
+// PARTIAL: feature_count(%{{.*}} : i32) into(%{{.*}} : memref<?x?xf64>) {
+// PARTIAL-NEXT: ^bb0(%{{[^,]*}}: !swage.segment<f64>):
+// PARTIAL-NOT: arith.divf
+// PARTIAL: return
+
+// A merge task reduces scratch rows into the row of its segment. The merge
+// of a mean also reads the range records, whose extents are numbers of rows.
+// MERGE: func.func @segmented_sum_r2__merge(%[[M_SCRATCH:.*]]: memref<?x?xf32>, %[[M_OUTPUT:.*]]: memref<?x?xf32> {swage.role = #swage.role<output>}, %[[M_MERGES:.*]]: memref<?xi32>, %[[M_PARTIAL_COUNT:.*]]: i32, %[[M_MERGE_COUNT:.*]]: i32, %[[M_SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>}, %[[M_FEATURE_COUNT:.*]]: i32 {swage.role = #swage.role<feature_count>}) attributes {swage_plan.block_threads = 512 : i32} {
+// MERGE-NEXT: swage_plan.merge_tasks scratch(%[[M_SCRATCH]] : memref<?x?xf32>) partial_count(%[[M_PARTIAL_COUNT]] : i32) merges(%[[M_MERGES]] : memref<?xi32>) merge_count(%[[M_MERGE_COUNT]] : i32) segment_count(%[[M_SEGMENT_COUNT]] : i32) feature_count(%[[M_FEATURE_COUNT]] : i32) into(%[[M_OUTPUT]] : memref<?x?xf32>) {
+// MERGE: func.func @segmented_max_r2__merge(
+// MERGE: swage.reduce %{{.*}} kind<max> : !swage.segment<f32> -> f32 {
+// MERGE: func.func @segmented_mean_f64_r2__merge(%{{.*}}: memref<?x?xf64>, %{{.*}}: memref<?x?xf64> {swage.role = #swage.role<output>}, %{{.*}}: memref<?xi32>, %[[E_RANGES:.*]]: memref<?xi32>, %{{.*}}: i32, %{{.*}}: i32, %{{.*}}: i32 {swage.role = #swage.role<segment_count>}, %[[E_FEATURE_COUNT:.*]]: i32 {swage.role = #swage.role<feature_count>})
+// MERGE-NEXT: swage_plan.merge_tasks {{.*}} feature_count(%[[E_FEATURE_COUNT]] : i32) ranges(%[[E_RANGES]] : memref<?xi32>) into(%{{.*}} : memref<?x?xf64>) {
+// MERGE-NEXT: ^bb0(%{{.*}}: !swage.segment<f64>, %[[E_ROWS:.*]]: index):
+// MERGE: arith.index_cast %[[E_ROWS]] : index to i32
+// MERGE: arith.divf
+
+// FUSED: error: fused-mixed planning requires rank-one values: a function over rank-two values runs on the direct, task-ids, split-partial, and split-merge schedules
+// PERSISTENT: error: persistent planning requires rank-one values: a function over rank-two values runs on the direct, task-ids, split-partial, and split-merge schedules

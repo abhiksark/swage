@@ -126,3 +126,73 @@ module {
     return
   }
 }
+
+// -----
+
+// Rank-two values are rows of feature_count columns, and scratch then holds
+// one row per task.
+
+module {
+  func.func @rows_without_a_feature_count(
+      %values: memref<?x?xf32>, %ranges: memref<?xi32>,
+      %scratch: memref<?x?xf32>, %value_count: i32, %partial_count: i32) {
+    // expected-error@+1 {{'swage_plan.partial_tasks' op values must have rank 1 without a feature_count, got 'memref<?x?xf32>'}}
+    swage_plan.partial_tasks values(%values : memref<?x?xf32>)
+        value_count(%value_count : i32) ranges(%ranges : memref<?xi32>)
+        partial_count(%partial_count : i32) into(%scratch : memref<?x?xf32>) {
+    ^bb0(%chunk: !swage.segment<f32>):
+      %total = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @scalar_scratch_of_rows(
+      %values: memref<?x?xf32>, %ranges: memref<?xi32>,
+      %scratch: memref<?xf32>, %value_count: i32, %partial_count: i32,
+      %feature_count: i32) {
+    // expected-error@+1 {{'swage_plan.partial_tasks' op into must have rank 2 with a feature_count, got 'memref<?xf32>'}}
+    swage_plan.partial_tasks values(%values : memref<?x?xf32>)
+        value_count(%value_count : i32) ranges(%ranges : memref<?xi32>)
+        partial_count(%partial_count : i32)
+        feature_count(%feature_count : i32) into(%scratch : memref<?xf32>) {
+    ^bb0(%chunk: !swage.segment<f32>):
+      %total = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @wide_feature_count(
+      %values: memref<?x?xf32>, %ranges: memref<?xi32>,
+      %scratch: memref<?x?xf32>, %value_count: i32, %partial_count: i32,
+      %feature_count: i64) {
+    // expected-error@+1 {{'swage_plan.partial_tasks' op feature_count must have the element type of the records, 'i32', got 'i64'}}
+    swage_plan.partial_tasks values(%values : memref<?x?xf32>)
+        value_count(%value_count : i32) ranges(%ranges : memref<?xi32>)
+        partial_count(%partial_count : i32)
+        feature_count(%feature_count : i64) into(%scratch : memref<?x?xf32>) {
+    ^bb0(%chunk: !swage.segment<f32>):
+      %total = swage.reduce %chunk kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+}

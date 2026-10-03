@@ -107,7 +107,11 @@ the stripes of one column combine across the block. The region and its
 consumers are the same; the conversion binds them to six values, the four
 of a strided run, the width of a column group, and the workgroup buffer of
 the combination, which the kernel holds with one element per thread.
-`policy<warp>` takes rank-one values only.
+`policy<warp>` takes rank-one values only. `swage_plan.partial_tasks` and
+`swage_plan.merge_tasks` take an optional `feature_count` too, with which
+their buffers are rank-two: a range record names rows, scratch holds one
+row of `feature_count` partial results per partial task, and the output
+one row per segment. Their kernels are the same row-stripe tile.
 
 The CPU oracle is planned too. A task operation of `policy<sequential>`
 visits every segment in order on one thread. Its function has no launch

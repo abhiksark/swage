@@ -34,11 +34,14 @@ A function over rank-two values has two kernels. The direct schedule
 gives the column tile, with the column policy and no task buffer. The
 task-ids schedule gives the row-stripe tile, `policy<cta>` with a task
 buffer of segment ids, for every admitted program, the softmax included,
-because its ids only name segments. Host classification takes the rows of
-a rank-two single reduction like scalars. The fused-mixed, split, and
-persistent schedules refuse a rank-two function by name, and
+because its ids only name segments. The split schedules give the
+row-stripe tile of the partial and merge kernels for a single reduction, as
+over rank-one values: a range record names rows, and scratch holds one row
+of partial results per partial task. Host classification takes the rows of
+a rank-two single reduction like scalars. The fused-mixed and persistent
+schedules refuse a rank-two function by name, and
 [Segmented Reductions](segmented-reductions.md#rank-two-values) describes
-both kernels.
+both tiles.
 
 Two callers run the same admission. `--swage-to-plan` with
 `schedule=task-ids` admits a function and then replaces it by the plan
