@@ -574,15 +574,13 @@ def test_the_row_stripe_launch_follows_the_width_rule_of_the_kernel():
         for features in widths
     } == widths
     assert qualification._column_group_width(33, 16) == 16
-    # The default limits divided by the width: 4096 / W rows per task and
-    # chunk, eight rows per stripe of a CTA block.
-    target = types.SimpleNamespace(
-        default_warp_max_elements=32, default_cta_chunk_elements=4096
-    )
+    # The default chunk limit divided by the width: 4096 / W rows per task
+    # and chunk, eight rows per stripe of a CTA block.
+    target = types.SimpleNamespace(default_cta_chunk_elements=4096)
     assert [
-        qualification._row_limits(width, target)
+        qualification._row_chunk(width, target)
         for width in (1, 2, 4, 8, 16, 32)
-    ] == [(32, 4096), (16, 2048), (8, 1024), (4, 512), (2, 256), (1, 128)]
+    ] == [4096, 2048, 1024, 512, 256, 128]
     # One block per task and column group, up to the largest grid.
     assert qualification._row_grid(5, 3, 4) == 5
     assert qualification._row_grid(5, 33, 32) == 10

@@ -304,11 +304,11 @@ That schedule has these consequences:
   through `W`. They do not depend on the other segments of the batch or on
   the GPU model: the kernels of a segment follow from its row count and
   `D` alone.
-- **Host work.** A reduction of rows validates its offsets and finds its
-  longest segment. Only when a segment needs a split does it classify its
-  segments, upload its task records, and allocate one scratch row per
-  chunk; otherwise it launches one task per segment. A softmax of rows
-  launches one task per segment and classifies nothing.
+- **Host work.** A reduction of rows validates and classifies its
+  offsets in one pass. When a segment is split, it uploads its task
+  records and allocates one scratch row per chunk; otherwise it launches
+  one task per segment. A softmax of rows launches one task per segment
+  and classifies nothing.
 - **One column and no column.** `[N, 1]` values are a run of scalars. They
   are reduced by the schedules of rank-one values, with their rounding and
   their selection, and the result is `[S, 1]`. A softmax of `[N, 1]`

@@ -78,18 +78,20 @@ the PTX, the digests, and the artifact.
 ### The public calls
 
 - `swage.segment_reduce` on `[N, D]` values with `D > 1` admits its program
-  under the default planning limits, the ones an artifact records, and
-  classifies the rows of each segment under the limits
-  `(floor(32 / W), floor(4096 / W))`, which follow from the feature count.
-- Both direct classes run on the task-id kernel at the CTA width: the warp
-  ids and the CTA ids lie together at the start of the records. There is
-  no warp tile of rank-two values.
-- A longer segment runs the split. A batch without one is not classified:
-  it uploads no record and launches the task-id kernel with the identity
-  task list, which gives every segment the task and the bits that
-  classification gives it. At 32,768 segments of up to 32 rows,
-  classification under the row limits was the larger part of the host
-  work of a call.
+  under the default planning limits, the ones an artifact records. The
+  classifier then validates the offsets and classifies the rows of each
+  segment in one walk, with the chunk limit `floor(4096 / W)`, which
+  follows from the feature count, as both of its limits.
+- The warp class of `floor(32 / W)` rows belongs to the warp tile of step
+  5, which does not exist. Without it both direct classes would run on
+  the task-id kernel at the CTA width, so the call classifies with one
+  direct class. A second class costs the classifier its unpredictable
+  class boundary: at 32,768 segments of up to 32 rows, two classes took
+  70 us of host time and one takes 26 us. The task list and the bits are
+  the same.
+- A longer segment runs the split. A batch without one uploads no record
+  and launches the task-id kernel with the identity task list, which gives
+  every segment the task and the bits that the classified list gives it.
 - `swage.segment_softmax` launches the task-id kernel of its program with
   the identity task list, one task per segment, and splits nothing.
 - A launch runs one block per task and column group, up to `2**31 - 1`
@@ -198,7 +200,7 @@ Step 2. The split. Implemented.
 
 Step 3. The public reductions. Implemented.
 
-- `_launch_planned_rows`, `_column_group_width`, `_row_limits`, and
+- `_launch_planned_rows`, `_column_group_width`, `_row_chunk`, and
   `_row_grid` in `python/swage/_segmented_qualification.py`; the call in
   `python/swage/_segments.py`; the roles in `python/swage/_artifact.py`;
   and `python/swage/compile.py`, which now admits the rank-two reductions.

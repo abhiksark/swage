@@ -918,27 +918,22 @@ def _column_group_width(features, subgroup_width):
     return width
 
 
-def _row_limits(width, target):
-    """Return the planning limits of rank-two values for a group width.
+def _row_chunk(width, target):
+    """Return the chunk limit of rank-two values for a group width.
 
-    They are the default limits divided by the column-group width `W`. A
+    It is the default chunk limit divided by the column-group width `W`. A
     segment of at most `floor(4096 / W)` rows is one task of the task-id
     kernel, at most eight rows per stripe of a CTA block, and a longer
-    segment is cut into chunks of that many rows. The warp limit,
-    `floor(32 / W)` rows, names the segments of the warp class, which run
-    on the task-id kernel as well.
+    segment is cut into chunks of that many rows.
 
     Args:
         width: The column-group width `W`.
         target: The target description, as `_target_description` returns.
 
     Returns:
-        The warp limit and the chunk limit, in rows.
+        The chunk limit, in rows.
     """
-    return (
-        target.default_warp_max_elements // width,
-        target.default_cta_chunk_elements // width,
-    )
+    return target.default_cta_chunk_elements // width
 
 
 def _row_grid(count, features, width):
@@ -2188,30 +2183,28 @@ def _launch_planned_rows(
 
     This is the counterpart of `_launch_planned_reduction` for a program
     over `[rows, columns]` values, with the same validation and the same
-    guards left out. The rows of each segment are classified under the
-    limits of `_row_limits` for the column-group width `W` of the feature
-    count:
+    guards left out. The classifier validates the host offsets and
+    classifies the rows of each segment in one walk, under the chunk limit
+    of `_row_chunk` for the column-group width `W` of the feature count:
 
     - A segment of at most `floor(4096 / W)` rows is one task of the
-      task-id kernel at the CTA width. The warp ids and the CTA ids of the
-      classification lie together at the start of the records, and the
-      kernel reads them as one task list.
+      task-id kernel at the CTA width. The warp limit equals the chunk
+      limit, so every such segment is in the warp class: rank two has no
+      warp tile, so a second class would run on the same kernel, and its
+      unpredictable boundary is what makes the classifier slow.
     - A longer segment is cut into chunks of that many rows. The partial
       kernel reduces each chunk into one row of a `[P, D]` scratch, and the
       merge kernel reduces the partials of each segment into its row of
       the output.
 
-    A batch whose longest segment is within the chunk limit is not
-    classified: every segment is one task either way, so the call launches
-    the identity task list, which stays on the device, and uploads no
-    record. A task reads its own segment only, so neither the order of the
-    tasks nor the shortcut changes a bit. Classification is the larger part
-    of the host work of a batch of many short segments.
+    A batch without a split launches the identity task list, which stays
+    on the device, and uploads no record. A task reads its own segment
+    only, so neither the order of the tasks nor the list changes a bit.
 
     Every launch runs one block per task and column group, up to the
     largest grid. The program is admitted under the default planning
     limits, the ones an artifact records, and its rows are classified under
-    the row limits, which follow from the feature count. The kernels of a
+    the chunk limit, which follows from the feature count. The kernels of a
     segment, and so the bits of its result, therefore depend on its row
     count and on the feature count, and not on the rest of the batch.
 
@@ -2236,12 +2229,13 @@ def _launch_planned_rows(
     if isinstance(values, torch.Tensor) and values.dim() == 2:
         features = values.shape[1]
     width = _column_group_width(features, blocks.subgroup_width)
-    warp_max_elements, cta_chunk_elements = _row_limits(width, blocks)
+    chunk = _row_chunk(width, blocks)
+    validate, classification = _classifying_validator(chunk, chunk)
     value_count, segment_count, host_offsets = _validate_shapes(
         values,
         offsets,
         output,
-        _validate_offsets,
+        validate,
         int64_offsets=True,
         element=_program_element(module_text),
         rank=2,
@@ -2250,25 +2244,29 @@ def _launch_planned_rows(
     device = offsets.device
     target = _target(torch, device.index)
     _admit_program(module_text, kernel_name, *_planning_limits(None, None))
+    if not classification:
+        # The classifier refused offsets that are valid. The program is
+        # admitted, so this raises its reason.
+        classification.append(
+            native_swage._classify_segments(
+                host_offsets,
+                value_count=value_count,
+                segment_count=segment_count,
+                warp_max_elements=chunk,
+                cta_chunk_elements=chunk,
+            )
+        )
+    (
+        records,
+        direct_warp_count,
+        direct_cta_count,
+        partial_count,
+        merge_count,
+    ) = classification[0]
     if segment_count == 0 or features == 0:
         return None
-    direct_count, partial_count = segment_count, 0
-    if int((host_offsets[1:] - host_offsets[:-1]).max()) > cta_chunk_elements:
-        (
-            records,
-            direct_warp_count,
-            direct_cta_count,
-            partial_count,
-            merge_count,
-        ) = native_swage._classify_segments(
-            host_offsets,
-            value_count=value_count,
-            segment_count=segment_count,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
-        )
-        direct_count = direct_warp_count + direct_cta_count
     driver = _runtime._get_driver()
+    direct_count = direct_warp_count + direct_cta_count
     # Every kernel is held before anything is uploaded or enqueued, so a
     # refused compile leaves the device untouched.
     task_function = partial_function = merge_function = None

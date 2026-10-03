@@ -553,19 +553,28 @@ def _spy_on_classification(monkeypatch):
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_batch_without_a_split_skips_classification_and_keeps_its_bits(
+def test_a_batch_without_a_split_launches_the_identity_list_with_its_bits(
     kind, dtype, monkeypatch
 ):
     """Launch the identity task list when no segment needs a split.
 
     Four columns are one group of four, so the chunk limit is 1,024 rows. A
-    batch whose longest segment has exactly 1,024 rows is not classified:
-    every segment is one task of the task-id kernel either way. One more
-    segment of 1,025 rows makes the call classify, split that segment, and
-    run the others from the classified task list. The segments both batches
-    share have the same bits in both, and the bits of the tile model.
+    batch whose longest segment has exactly 1,024 rows is classified and
+    split nowhere, so it reads the identity task list and uploads no
+    record. One more segment of 1,025 rows makes the call split that
+    segment and run the others from the classified task list. The
+    segments both batches share have the same bits in both, and the bits
+    of the tile model.
     """
     limits = _spy_on_classification(monkeypatch)
+    identity = []
+    identity_ids = qualification._identity_ids
+
+    def spy(*arguments):
+        identity.append(arguments[2])
+        return identity_ids(*arguments)
+
+    monkeypatch.setattr(qualification, "_identity_ids", spy)
     lengths = [0, 3, 1024, 7, 33]
     host_values, host_offsets = _rows([*lengths, 1025], 4, 41, dtype)
     shared = int(host_offsets[len(lengths)])
@@ -573,24 +582,25 @@ def test_a_batch_without_a_split_skips_classification_and_keeps_its_bits(
     unsplit = _reduce(
         kind, host_values[:shared], host_offsets[: len(lengths) + 1]
     )
-    assert limits == []
+    assert (limits, identity) == ([(1024, 1024)], [len(lengths)])
     split = _reduce(kind, host_values, host_offsets)
-    assert limits == [(8, 1024)]
+    assert (limits, identity) == ([(1024, 1024)] * 2, [len(lengths)])
 
     _assert_same_results(unsplit, split[: len(lengths)])
     _assert_same_results(split, _tile_model(kind, host_values, host_offsets))
 
 
 @_needs_cuda
-def test_a_rank_two_call_classifies_its_rows_under_the_row_limits(
+def test_a_rank_two_call_classifies_its_rows_with_one_direct_class(
     monkeypatch,
 ):
-    """Classify rows under the default limits divided by the group width.
+    """Classify rows with one direct class and the chunk limit of the width.
 
     Four columns are one group of four: a segment of at most 1,024 rows is
     a task of the task-id kernel, and the segment of 9,000 rows is cut into
-    chunks of 1,024 rows. The program is admitted under the default limits,
-    and the call compiles the three kernels its batch launches.
+    chunks of 1,024 rows. Both limits of the classification are 1,024 rows,
+    so there is no warp class. The program is admitted under the default
+    limits, and the call compiles the three kernels its batch launches.
     """
     limits = _spy_on_classification(monkeypatch)
     admitted = []
@@ -612,7 +622,7 @@ def test_a_rank_two_call_classifies_its_rows_under_the_row_limits(
 
     _assert_columns_match("sum", host_values, host_offsets, actual)
     _assert_same_results(actual, _tile_model("sum", host_values, host_offsets))
-    assert limits == [(8, 1024)]
+    assert limits == [(1024, 1024)]
     assert admitted == [(32, 4096)]
     assert [
         (compile_ptx.__name__, dict(options))
