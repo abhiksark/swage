@@ -289,7 +289,14 @@ checks:
   applies the rule to what a link leads to.
 - It takes only plain file names from the manifest, so a manifest cannot
   name a file outside the directory.
-- It verifies every digest before it loads anything.
+- It verifies every digest before it loads anything, and it loads what it
+  verified: the kernels from the PTX text it read, and the runtime library
+  from a copy of the bytes it read, in an anonymous memory file of the
+  process (`memfd_create`) that the dynamic loader opens through
+  `/proc/self/fd`. A library file that is replaced or rewritten after the
+  check is not the one that is loaded. A Linux kernel whose
+  `vm.memfd_noexec` setting is 1 or 2 does not let a memory file be
+  executed, and the load then fails with the error it reports.
 
 The digests detect damage and a partial copy. They do not authenticate an
 artifact, because the manifest is not signed: whoever can write the

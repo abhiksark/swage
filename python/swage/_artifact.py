@@ -287,6 +287,36 @@ class _CompileFunction:
         self.__name__ = name
 
 
+# The anonymous memory files that hold a loaded runtime library. They stay
+# open for the life of the process, as the library stays loaded: the dynamic
+# loader knows a library by the path it was opened by, and a closed file's
+# number could name another library later.
+_LOADED_LIBRARIES = []
+
+
+def _verified_library_path(contents):
+    """Return a path that opens exactly `contents`, for the dynamic loader.
+
+    The bytes go to an anonymous memory file that nothing else can reach,
+    and the loader opens it through `/proc/self/fd`. So the library that
+    is loaded is the one whose digest was checked, whatever happens to the
+    file of the artifact after that check.
+
+    Raises:
+        OSError: The memory file cannot be created or written.
+    """
+    descriptor = os.memfd_create("libSwageRuntime.so", os.MFD_CLOEXEC)
+    try:
+        view = memoryview(contents)
+        while view:
+            view = view[os.write(descriptor, view) :]
+    except BaseException:
+        os.close(descriptor)
+        raise
+    _LOADED_LIBRARIES.append(descriptor)
+    return f"/proc/self/fd/{descriptor}"
+
+
 class _Artifact:
     """A verified artifact directory, standing in for the native bindings.
 
@@ -631,12 +661,12 @@ class _Artifact:
         calls = f"this swage calls ABI version {_RUNTIME_ABI_VERSION}"
         if version != _RUNTIME_ABI_VERSION:
             raise RuntimeError(f"{subject} has ABI version {version}; {calls}")
-        self._read_verified(entry)
+        contents = self._read_verified(entry)
         try:
             # The functions run for microseconds and never call back into
             # Python, so the GIL stays held, as it is for the launcher of
             # the native bindings.
-            library = ctypes.PyDLL(str(self.directory / entry["file"]))
+            library = ctypes.PyDLL(_verified_library_path(contents))
             reported = library.swageRuntimeAbiVersion
             count = library.swageRuntimeCountTasks
             write = library.swageRuntimeWriteTasks
@@ -644,7 +674,8 @@ class _Artifact:
             describe = library.swageRuntimeDescribe
         except (OSError, AttributeError) as error:
             raise RuntimeError(
-                f"{subject} cannot be loaded: {error}"
+                f"{subject}, {entry['file']}, cannot be loaded from its "
+                f"verified bytes: {error}"
             ) from error
         reported.argtypes = []
         reported.restype = ctypes.c_int32

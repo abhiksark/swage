@@ -990,11 +990,57 @@ def test_a_library_that_does_not_load_is_refused(artifact_dir, monkeypatch):
     with pytest.raises(
         RuntimeError,
         match=(
-            "^the runtime library of the artifact at .* cannot be loaded: "
-            ".*libSwageRuntime.so: invalid ELF header$"
+            "^the runtime library of the artifact at .*, libSwageRuntime.so, "
+            "cannot be loaded from its verified bytes: .*: invalid ELF "
+            "header$"
         ),
     ):
         _artifact.selected()
+
+
+@pytest.mark.parametrize("swap", ["renamed", "rewritten"])
+def test_the_library_loaded_is_the_one_whose_digest_was_verified(
+    swap, artifact_dir, monkeypatch
+):
+    """Load the bytes that matched the manifest, not the path once more.
+
+    The library file changes between the check of its digest and the load:
+    another file is renamed over it, or its own bytes are rewritten. The
+    library that is loaded still holds the verified bytes.
+    """
+    loaded = []
+
+    class _Recording(_FakeLibrary):
+        """Record the bytes behind the path the loader opens."""
+
+        def __init__(self, path):
+            super().__init__(path)
+            loaded.append(pathlib.Path(path).read_bytes())
+
+    monkeypatch.setattr(ctypes, "PyDLL", _Recording)
+    library = artifact_dir / "libSwageRuntime.so"
+    verified = library.read_bytes()
+    read_verified = _artifact._Artifact._read_verified
+
+    def verify_then_change(self, entry):
+        contents = read_verified(self, entry)
+        if entry.get("file") == "libSwageRuntime.so":
+            if swap == "renamed":
+                replacement = artifact_dir / "replacement"
+                replacement.write_bytes(b"another library\n")
+                os.replace(replacement, library)
+            else:
+                library.write_bytes(b"another library\n")
+        return contents
+
+    monkeypatch.setattr(
+        _artifact._Artifact, "_read_verified", verify_then_change
+    )
+
+    _load(monkeypatch, artifact_dir)
+
+    assert loaded == [verified]
+    assert library.read_bytes() == b"another library\n"
 
 
 def test_a_read_only_artifact_loads(artifact_dir, monkeypatch):
@@ -1626,7 +1672,8 @@ def test_the_environment_command_reports_an_artifact_it_cannot_load(
     assert completed.returncode == 0, completed.stderr
     assert (
         f"artifact: rejected (the runtime library of the artifact at "
-        f"{artifact_dir} cannot be loaded: "
+        f"{artifact_dir}, libSwageRuntime.so, cannot be loaded from its "
+        "verified bytes: "
     ) in completed.stdout
 
 

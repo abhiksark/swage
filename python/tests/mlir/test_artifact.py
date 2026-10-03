@@ -936,7 +936,10 @@ def test_the_child_process_held_no_compiler(child, device_artifact):
     names = [os.path.basename(path) for path in mapped]
     assert any(name.startswith("libcuda.so") for name in names)
     assert any("libtorch" in name for name in names)
-    assert str(device_artifact / "libSwageRuntime.so") in mapped
+    # The library was loaded from its verified bytes, in an anonymous
+    # memory file, and not from the file of the artifact.
+    assert "/memfd:libSwageRuntime.so (deleted)" in mapped
+    assert str(device_artifact / "libSwageRuntime.so") not in mapped
     assert report["launches_with_the_runtime_library"] is True
     assert not report["cache"].exists()
 
@@ -1019,7 +1022,7 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
         for path in report["mapped"]
         if COMPILER_LIBRARY.search(os.path.basename(path))
     ]
-    assert str(device_artifact / "libSwageRuntime.so") in report["mapped"]
+    assert "/memfd:libSwageRuntime.so (deleted)" in report["mapped"]
     assert report["launches_with_the_runtime_library"] is True
     for name, (kind, values, offsets) in cases.items():
         if kind == "softmax":
