@@ -84,8 +84,12 @@ the PTX, the digests, and the artifact.
 - Both direct classes run on the task-id kernel at the CTA width: the warp
   ids and the CTA ids lie together at the start of the records. There is
   no warp tile of rank-two values.
-- A longer segment runs the split. A batch without one uploads no record
-  and launches the task-id kernel with the identity task list.
+- A longer segment runs the split. A batch without one is not classified:
+  it uploads no record and launches the task-id kernel with the identity
+  task list, which gives every segment the task and the bits that
+  classification gives it. At 32,768 segments of up to 32 rows,
+  classification under the row limits was the larger part of the host
+  work of a call.
 - `swage.segment_softmax` launches the task-id kernel of its program with
   the identity task list, one task per segment, and splits nothing.
 - A launch runs one block per task and column group, up to `2**31 - 1`

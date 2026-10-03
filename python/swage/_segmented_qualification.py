@@ -2195,12 +2195,18 @@ def _launch_planned_rows(
     - A segment of at most `floor(4096 / W)` rows is one task of the
       task-id kernel at the CTA width. The warp ids and the CTA ids of the
       classification lie together at the start of the records, and the
-      kernel reads them as one task list. A batch without a longer segment
-      uploads no record and reads the identity list instead.
+      kernel reads them as one task list.
     - A longer segment is cut into chunks of that many rows. The partial
       kernel reduces each chunk into one row of a `[P, D]` scratch, and the
       merge kernel reduces the partials of each segment into its row of
       the output.
+
+    A batch whose longest segment is within the chunk limit is not
+    classified: every segment is one task either way, so the call launches
+    the identity task list, which stays on the device, and uploads no
+    record. A task reads its own segment only, so neither the order of the
+    tasks nor the shortcut changes a bit. Classification is the larger part
+    of the host work of a batch of many short segments.
 
     Every launch runs one block per task and column group, up to the
     largest grid. The program is admitted under the default planning
@@ -2231,14 +2237,11 @@ def _launch_planned_rows(
         features = values.shape[1]
     width = _column_group_width(features, blocks.subgroup_width)
     warp_max_elements, cta_chunk_elements = _row_limits(width, blocks)
-    validate, classification = _classifying_validator(
-        warp_max_elements, cta_chunk_elements
-    )
     value_count, segment_count, host_offsets = _validate_shapes(
         values,
         offsets,
         output,
-        validate,
+        _validate_offsets,
         int64_offsets=True,
         element=_program_element(module_text),
         rank=2,
@@ -2247,29 +2250,25 @@ def _launch_planned_rows(
     device = offsets.device
     target = _target(torch, device.index)
     _admit_program(module_text, kernel_name, *_planning_limits(None, None))
-    if not classification:
-        # The classifier refused offsets that are valid. The program is
-        # admitted, so this raises its reason.
-        classification.append(
-            native_swage._classify_segments(
-                host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
-        )
-    (
-        records,
-        direct_warp_count,
-        direct_cta_count,
-        partial_count,
-        merge_count,
-    ) = classification[0]
     if segment_count == 0 or features == 0:
         return None
+    direct_count, partial_count = segment_count, 0
+    if int((host_offsets[1:] - host_offsets[:-1]).max()) > cta_chunk_elements:
+        (
+            records,
+            direct_warp_count,
+            direct_cta_count,
+            partial_count,
+            merge_count,
+        ) = native_swage._classify_segments(
+            host_offsets,
+            value_count=value_count,
+            segment_count=segment_count,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
+        )
+        direct_count = direct_warp_count + direct_cta_count
     driver = _runtime._get_driver()
-    direct_count = direct_warp_count + direct_cta_count
     # Every kernel is held before anything is uploaded or enqueued, so a
     # refused compile leaves the device untouched.
     task_function = partial_function = merge_function = None
@@ -2304,9 +2303,7 @@ def _launch_planned_rows(
         )
     narrowed = offsets.dtype != torch.int32
     if not partial_count:
-        # Every segment is one task. The identity list, which stays on the
-        # device, names them in segment order and needs no upload; a task
-        # reads its own segment only, so the order changes no bit.
+        # Every segment is one task, in segment order.
         task_ids = _identity_ids(torch, device, segment_count)
         kernel_offsets = _kernel_offsets(torch, offsets, host_offsets)
         tasks_pointer = task_ids.data_ptr()

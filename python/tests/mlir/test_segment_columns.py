@@ -534,6 +534,53 @@ def test_a_batch_of_rows_without_a_segment_returns_no_row(columns):
     assert result.shape == (0, columns)
 
 
+def _spy_on_classification(monkeypatch):
+    """Record the limits of every classification a call makes."""
+    native = qualification._native_swage()
+    classify = native._classify_segments
+    limits = []
+
+    def spy(*arguments, **keywords):
+        limits.append(
+            (keywords["warp_max_elements"], keywords["cta_chunk_elements"])
+        )
+        return classify(*arguments, **keywords)
+
+    monkeypatch.setattr(native, "_classify_segments", spy)
+    return limits
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_batch_without_a_split_skips_classification_and_keeps_its_bits(
+    kind, dtype, monkeypatch
+):
+    """Launch the identity task list when no segment needs a split.
+
+    Four columns are one group of four, so the chunk limit is 1,024 rows. A
+    batch whose longest segment has exactly 1,024 rows is not classified:
+    every segment is one task of the task-id kernel either way. One more
+    segment of 1,025 rows makes the call classify, split that segment, and
+    run the others from the classified task list. The segments both batches
+    share have the same bits in both, and the bits of the tile model.
+    """
+    limits = _spy_on_classification(monkeypatch)
+    lengths = [0, 3, 1024, 7, 33]
+    host_values, host_offsets = _rows([*lengths, 1025], 4, 41, dtype)
+    shared = int(host_offsets[len(lengths)])
+
+    unsplit = _reduce(
+        kind, host_values[:shared], host_offsets[: len(lengths) + 1]
+    )
+    assert limits == []
+    split = _reduce(kind, host_values, host_offsets)
+    assert limits == [(8, 1024)]
+
+    _assert_same_results(unsplit, split[: len(lengths)])
+    _assert_same_results(split, _tile_model(kind, host_values, host_offsets))
+
+
 @_needs_cuda
 def test_a_rank_two_call_classifies_its_rows_under_the_row_limits(
     monkeypatch,
@@ -545,19 +592,14 @@ def test_a_rank_two_call_classifies_its_rows_under_the_row_limits(
     chunks of 1,024 rows. The program is admitted under the default limits,
     and the call compiles the three kernels its batch launches.
     """
-    limits, admitted = [], []
-    validator = qualification._classifying_validator
+    limits = _spy_on_classification(monkeypatch)
+    admitted = []
     admit = qualification._admit_program
-
-    def classify(*arguments):
-        limits.append(arguments)
-        return validator(*arguments)
 
     def admit_once(*arguments):
         admitted.append(arguments[2:])
         return admit(*arguments)
 
-    monkeypatch.setattr(qualification, "_classifying_validator", classify)
     monkeypatch.setattr(qualification, "_admit_program", admit_once)
     monkeypatch.setattr(
         qualification,

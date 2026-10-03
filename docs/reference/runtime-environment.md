@@ -322,14 +322,15 @@ Preparation and launch follow these rules:
   values have kernels of their own, compiled and loaded like the float32
   ones, and nothing is cast. The schedule does not depend on the dtype.
 - `segment_reduce` on `[N, D]` values with more than one column runs the
-  row-stripe tile of the kind and dtype. It classifies the rows of each
-  segment under the default limits divided by the column-group width `W`
-  of the feature count. A segment of at most `4096 / W` rows is a task of
-  the task-id kernel, with 128-thread blocks, and a longer one is cut into
-  chunks for the partial and merge kernels, with 512-thread blocks. Each
-  launch has one block per task and group of `W` columns. `[N, 1]` values
-  take the rank-one path through a view, and `[N, 0]` values enqueue
-  nothing.
+  row-stripe tile of the kind and dtype. When a segment has more than
+  `4096 / W` rows, for the column-group width `W` of the feature count, it
+  classifies the rows of each segment under the default limits divided by
+  `W`; otherwise it classifies nothing. A segment of at most `4096 / W`
+  rows is a task of the task-id kernel, with 128-thread blocks, and a
+  longer one is cut into chunks for the partial and merge kernels, with
+  512-thread blocks. Each launch has one block per task and group of `W`
+  columns. `[N, 1]` values take the rank-one path through a view, and
+  `[N, 0]` values enqueue nothing.
 - `segment_softmax` on `[N, D]` values with more than one column enqueues
   the task-id kernel of the softmax with one task per segment and one
   128-thread block per segment and group of `W` columns. It classifies
