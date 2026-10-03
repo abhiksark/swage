@@ -273,52 +273,49 @@ result row for an empty segment. The values must be contiguous in row
 order: a transposed tensor and a slice of columns are refused, and nothing
 is copied. Values of rank three or above are refused.
 
-A call on rows runs another kernel than a call on scalars, with one
-schedule:
+A call on rows runs another kernel than a call on scalars, the row-stripe
+tile:
 
-- One block of 128 threads per segment. Thread `t` takes the columns `t`,
-  `t + 128`, and so on, one after the other, each in row order.
-- No split. A segment occupies one block for its whole length, whatever
-  that length is.
-- No thread combines with another, so a column is reduced, or normalized,
-  by one thread. A softmax thread walks the rows of its column three
-  times: for the maximum, for the sum of the exponentials, and for the
-  results it stores.
+- A block of 128 threads takes a group of `W` adjacent columns of one
+  segment, `W` the smallest power of two that is at least `D`, capped at
+  32. Its threads are `128 / W` stripes of rows for each column of the
+  group, and the stripes of one column combine across the block.
+- A reduction classifies the rows of each segment as a call on scalars
+  classifies elements, with limits that follow from `W`. A segment of more
+  than `4096 / W` rows is cut into chunks of that many rows, each reduced
+  by a block of 512 threads, and the chunks of a segment are merged.
+- A softmax splits no segment. Its stripes walk their rows three times:
+  for the maximum, for the sum of the exponentials, and for the results
+  they store.
 
-That schedule has these consequences, which are limits of this call and not
-of the data:
+That schedule has these consequences:
 
-| | Few columns (1 to 8) | Many columns (64 to 1024) |
-|---|---|---|
-| Threads of a block that work | `D` of 128 | 64 to 128 |
-| Additions of one thread per segment | `n` rows | `n * ceil(D / 128)` |
-| Weakness | A long segment is taken by `D` threads: 10,000 rows of three columns are 10,000 additions, one after the other, in each of three threads | A long segment occupies one block for its whole length |
-
-- **Rounding.** A column sum is added in row order, one addition per row.
-  It lies within `(n - 1) * eps * sum(|x|)` of the exact sum of its `n`
-  rows, with the `eps` of the dtype. For a long segment that bound is
-  weaker than the bound of rank-one values, whose trees add in parallel. A
-  column mean divides that sum once and lies within `eps * sum(|x|)` of the
-  exact mean, under the conditions of the rank-one mean. A maximum and a
-  minimum are exact. A softmax of rows has the bound of
-  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) with
-  `k = n - 1`, the additions of its normalizer in row order.
-- **Bits.** The bits of a column do not depend on the other segments of the
-  batch, on the block width, or on the GPU model: a rank-two call has no
-  schedule selection.
-- **Host work.** A call on rows validates its offsets on the host and
-  classifies nothing. It uploads no task record and allocates no scratch.
+- **Rounding.** A column sum of `n` rows in one block has
+  `k = ceil(n / R) - 1 + log2(R)` additions on its longest path, for the
+  `R = 128 / W` stripes of a column. A segment split into `P` chunks has
+  `k = 6 + 2 log2(R) + ceil(P / R)`, for the `R = 512 / W` stripes of a
+  split block. No path has more than `n - 1` additions of nonzero terms.
+  A sum lies within `k * eps * sum(|x|)` of the exact sum of its `n` rows,
+  with the `eps` of the dtype. A column mean divides that sum once and
+  lies within `eps * sum(|x|)` of the exact mean, under the conditions of
+  the rank-one mean. A maximum and a minimum are exact. A softmax of rows
+  has the bound of
+  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) with the `k`
+  of one block.
+- **Bits.** The bits of a column depend on its row count and on `D`
+  through `W`. They do not depend on the other segments of the batch or on
+  the GPU model: the kernels of a segment follow from its row count and
+  `D` alone.
+- **Host work.** A reduction of rows classifies its segments. When one is
+  split, it uploads its task records and allocates one scratch row per
+  chunk. A softmax of rows launches one task per segment and classifies
+  nothing.
 - **One column and no column.** `[N, 1]` values are a run of scalars. They
   are reduced by the schedules of rank-one values, with their rounding and
   their selection, and the result is `[S, 1]`. A softmax of `[N, 1]`
   values runs the kernel of rank-one values and returns `[N, 1]`. `[N, 0]`
   values return an `[S, 0]` result from a reduction and an `[N, 0]` result
   from a softmax, and launch nothing.
-
-The schedules of rank-one values take a long run of scalars in parallel,
-and those of a reduction split it. A caller reaches them for rows by
-passing each column as a contiguous `[N]` or `[N, 1]` tensor, at the price
-of one call per column.
 
 ## Gradients
 
@@ -418,11 +415,10 @@ preparation for the next call:
 
 1. It copies the offsets to the host. The copy waits for the work already
    queued on the current stream.
-2. It validates the offsets on the host and, for `segment_reduce` of
-   rank-one values, classifies every segment into warp, CTA, and split
-   tasks.
-3. For `segment_reduce` of rank-one values, it uploads the task records and
-   allocates scratch for split segments. With int64 offsets it also uploads the narrowed
+2. It validates the offsets on the host and, for `segment_reduce`,
+   classifies every segment into warp, CTA, and split tasks.
+3. For `segment_reduce`, it uploads the task records and allocates scratch
+   for split segments. With int64 offsets it also uploads the narrowed
    int32 copy the kernels read.
 4. It enqueues the kernels.
 
@@ -461,8 +457,9 @@ The first calls of a process cost more:
   kernels per dtype that a batch of rank-one values can need: one for
   segments of up to 4096 elements, two for longer segments, and one for a
   batch that the selection rule of [Sum rounding](#sum-rounding) sends to
-  the 128-lane tree. A reduction kind has one more kernel per dtype for
-  rows of features. The softmax has one kernel for scalars and one for
+  the 128-lane tree. A reduction kind has three more kernels per dtype
+  for rows of features: one for segments of up to `4096 / W` rows and two
+  for longer segments. The softmax has one kernel for scalars and one for
   rows. Kernels stay in the process for later calls and are never written
   to the persistent cache. With an artifact selected, a call
   compiles nothing: the first call reads and verifies the directory, and

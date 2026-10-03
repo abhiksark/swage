@@ -673,10 +673,6 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 
 /// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
-  if (analysis.abi.featureCount)
-    return analysis.segments.front().emitError(
-        "planning requires rank-one values: a function over rank-two values "
-        "has one kernel, the direct schedule, and no task buffer");
   for (MapOp map : analysis.maps)
     if (!map.getCaptures().empty())
       return map.emitError("planning requires capture-free maps");

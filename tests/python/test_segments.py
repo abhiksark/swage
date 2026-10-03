@@ -596,3 +596,46 @@ def test_out_size_names_what_one_element_belongs_to(monkeypatch):
         match="^out must have exactly 6 elements, one per value; found 5$",
     ):
         swage.segment_softmax(values, offsets, out=out)
+
+
+def test_the_row_stripe_launch_follows_the_width_rule_of_the_kernel():
+    """Compute the column-group width, the row limits, and the grid.
+
+    A rank-two call sizes its launches and classifies its rows from the
+    width it computes, and the kernel computes the same width from the
+    feature count. The cases are those of
+    `TheColumnGroupWidthChainFollowsTheTargetRule` in
+    `unittests/EmissionTest.cpp`.
+    """
+    from swage import _segmented_qualification as qualification
+
+    widths = {
+        -1: 1,
+        0: 1,
+        1: 1,
+        2: 2,
+        3: 4,
+        5: 8,
+        17: 32,
+        32: 32,
+        33: 32,
+        2**31 - 1: 32,
+    }
+    assert {
+        features: qualification._column_group_width(features, 32)
+        for features in widths
+    } == widths
+    assert qualification._column_group_width(33, 16) == 16
+    # The default limits divided by the width: 4096 / W rows per task and
+    # chunk, eight rows per stripe of a CTA block.
+    target = types.SimpleNamespace(
+        default_warp_max_elements=32, default_cta_chunk_elements=4096
+    )
+    assert [
+        qualification._row_limits(width, target)
+        for width in (1, 2, 4, 8, 16, 32)
+    ] == [(32, 4096), (16, 2048), (8, 1024), (4, 512), (2, 256), (1, 128)]
+    # One block per task and column group, up to the largest grid.
+    assert qualification._row_grid(5, 3, 4) == 5
+    assert qualification._row_grid(5, 33, 32) == 10
+    assert qualification._row_grid(2**30, 129, 32) == 2**31 - 1

@@ -200,32 +200,70 @@ def test_static_schedules_share_reduction_program(kind, transform, element):
             assert module.operation.get_asm(enable_debug_info=False) == original
 
 
-_RANK_ONE_SCHEDULES = [
-    (
-        "_compile_segmented_reduction_ptx",
-        {"block_size": 32, "use_task_ids": True},
-    ),
-    (
-        "_compile_segmented_reduction_ptx",
-        {"block_size": 128, "use_task_ids": True},
-    ),
-    ("_compile_fused_segmented_reduction_ptx", {}),
-    ("_compile_split_partial_reduction_ptx", {}),
-    ("_compile_split_merge_reduction_ptx", {}),
-    ("_compile_persistent_segmented_reduction_ptx", {}),
+# The kernel schedules that refuse rank-two values, by name: rank-two values
+# run on the direct schedule, the column tile, and on the task-ids and split
+# schedules, the row-stripe tile.
+_ROW_REFUSALS = [
+    ("_compile_fused_segmented_reduction_ptx", "fused-mixed"),
+    ("_compile_persistent_segmented_reduction_ptx", "persistent"),
 ]
+# Each split compile function with the suffix of the kernel it emits.
+_SPLIT_COMPILERS = (
+    ("_compile_split_partial_reduction_ptx", "__partial"),
+    ("_compile_split_merge_reduction_ptx", "__merge"),
+)
+
+
+def _parameters(ptx, kernel_name):
+    """Return the kinds of the parameters of one PTX entry, in order."""
+    declaration = re.search(rf"\.entry {kernel_name}\((.*?)\)", ptx, re.DOTALL)
+    return [
+        "pointer" if ".ptr" in parameter else parameter.split()[1]
+        for parameter in declaration[1].split(",")
+    ]
+
+
+def _accumulators(lowered, element):
+    """Count the elements each block of a lowered kernel takes, sorted."""
+    headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
+    return sorted(header.count(f": {element}") for header in headers)
+
+
+def _assert_row_refusals(module, kernel_name):
+    """Require each schedule that does not plan rows to refuse by name."""
+    for name, schedule in _ROW_REFUSALS:
+        with pytest.raises(
+            ValueError,
+            match=(
+                f"{schedule} planning requires rank-one values: a function "
+                "over rank-two values runs on the direct, task-ids, "
+                "split-partial, and split-merge schedules"
+            ),
+        ):
+            getattr(native_swage, name)(
+                module, kernel_name=kernel_name, target="sm_86"
+            )
 
 
 @pytest.mark.parametrize("element", ["f32", "f64"])
 @pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
-def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
-    """A program over rank-two values compiles on the direct schedule only.
+def test_rank_two_programs_compile_the_column_and_row_stripe_tiles(
+    kind, element
+):
+    """A program over rank-two values has two kernels and one classifier.
 
-    Its kernel takes the three buffers and three counts, the last of which
-    is the feature count, holds nothing that synchronizes threads, and has
-    one loop accumulator per reduction: a thread never holds one value per
-    column. Every schedule that reads a task buffer refuses the program
-    with a diagnostic, and so does host classification.
+    The direct schedule is the column tile: three buffers and three counts,
+    the last of which is the feature count, nothing that synchronizes
+    threads, and one loop accumulator per reduction. The task-ids schedule
+    is the row-stripe tile: the task buffer as a fourth buffer and the
+    feature count as a fourth count, shuffles, two barriers around one
+    exchange in shared memory, and still one accumulator per reduction, at
+    one subgroup and at four. A thread never holds one value per column.
+    The split kernels are the row-stripe tile too: the partial kernel takes
+    scratch where the output was and the range records where the offsets
+    were, and the merge kernel takes the merge records, with the range
+    records too for a mean, and four counts. The other kernel schedules
+    refuse the program by name, and host classification takes its rows.
     """
     kernel_name = _reduction_kernel(kind, element, 2)
     with ir.Context() as context:
@@ -237,48 +275,65 @@ def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
             module, kernel_name=kernel_name, block_size=128, target="sm_86"
         )
 
-        assert f".entry {kernel_name}(" in ptx
-        declaration = re.search(
-            rf"\.entry {kernel_name}\((.*?)\)", ptx, re.DOTALL
-        )
-        parameters = [
-            "pointer" if ".ptr" in parameter else parameter.split()[1]
-            for parameter in declaration[1].split(",")
-        ]
-        assert parameters == ["pointer"] * 3 + [".u32"] * 3
+        assert _parameters(ptx, kernel_name) == ["pointer"] * 3 + [".u32"] * 3
         assert "shfl.sync" not in ptx and "bar.sync" not in ptx
         assert ".shared" not in ptx
         # One accumulator: of the blocks that take arguments, the header of
         # the row loop takes one element and no other block takes any.
-        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
-        assert sorted(header.count(f": {element}") for header in headers) == [
-            0,
-            1,
-        ]
-        for name, arguments in _RANK_ONE_SCHEDULES:
-            with pytest.raises(
-                ValueError, match="planning requires rank-one values"
-            ):
-                getattr(native_swage, name)(
-                    module, kernel_name=kernel_name, target="sm_86", **arguments
-                )
-        with pytest.raises(
-            ValueError, match="planning requires rank-one values"
-        ):
-            _plan(
-                module, kernel_name, [0, 1, 34], value_count=34, segment_count=2
+        assert _accumulators(lowered, element) == [0, 1]
+        for block_size in (32, 128):
+            lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name=kernel_name,
+                block_size=block_size,
+                target="sm_86",
+                use_task_ids=True,
             )
+            assert _parameters(ptx, kernel_name) == (
+                ["pointer"] * 4 + [".u32"] * 4
+            )
+            assert "shfl.sync" in ptx and ".shared" in ptx
+            assert ptx.count("bar.sync") == 2
+            # The item loop takes no element, and the row loop one.
+            assert _accumulators(lowered, element) == [0, 1]
+        merge_buffers = 4 if kind == "mean" else 3
+        for (function, suffix), buffers, counts in zip(
+            _SPLIT_COMPILERS, (3, merge_buffers), (3, 4)
+        ):
+            lowered, ptx = getattr(native_swage, function)(
+                module, kernel_name=kernel_name, target="sm_86"
+            )
+            assert _parameters(ptx, kernel_name + suffix) == (
+                ["pointer"] * buffers + [".u32"] * counts
+            )
+            assert "shfl.sync" in ptx and ".shared" in ptx
+            assert ptx.count("bar.sync") == 2
+            # The row loop takes the one element; the extent of a mean's
+            # merge joins as an index, which takes none.
+            accumulators = _accumulators(lowered, element)
+            assert [count for count in accumulators if count] == [1]
+        _assert_row_refusals(module, kernel_name)
+        # Rows are classified like scalars: one row is warp work, 33 rows
+        # are a block task.
+        assert _plan(
+            module, kernel_name, [0, 1, 34], value_count=34, segment_count=2
+        ) == ([0], [1], [], [])
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
-def test_the_rank_two_softmax_has_one_kernel_and_one_scalar_per_stage():
-    """The softmax over rank-two values compiles on the direct schedule only.
+def test_the_rank_two_softmax_compiles_the_column_and_row_stripe_tiles():
+    """The softmax over rank-two values has the two kernels of rank two.
 
-    A thread runs the three stages of its column one after the other, so
-    the kernel needs none of the workgroup buffers, barriers, and shuffles
-    of the rank-one softmax. The two reduction loops carry one accumulator
-    each, and the store loop and the column loop carry none: a thread
-    never holds one value per column or per row.
+    In the column tile a thread runs the three stages of its column one
+    after the other, so the kernel needs none of the workgroup buffers,
+    barriers, and shuffles of the rank-one softmax. The row-stripe tile
+    runs them in the stripes of a block: each of the two reduction stages
+    exchanges through the one buffer between two barriers. In both, the two
+    reduction loops carry one accumulator each, and the store loop and the
+    loop around the stages carry none: a thread never holds one value per
+    column or per row. The schedules that do not plan rows refuse the
+    program by name, and the split schedules and host classification, which
+    take one capture-free reduction, refuse it for its captures.
     """
     with ir.Context() as context:
         swage.register_dialects(context)
@@ -292,37 +347,40 @@ def test_the_rank_two_softmax_has_one_kernel_and_one_scalar_per_stage():
             target="sm_86",
         )
 
-        declaration = re.search(
-            r"\.entry ragged_softmax_r2\((.*?)\)", ptx, re.DOTALL
+        assert _parameters(ptx, "ragged_softmax_r2") == (
+            ["pointer"] * 3 + [".u32"] * 3
         )
-        parameters = [
-            "pointer" if ".ptr" in parameter else parameter.split()[1]
-            for parameter in declaration[1].split(",")
-        ]
-        assert parameters == ["pointer"] * 3 + [".u32"] * 3
         assert "shfl.sync" not in ptx and "bar.sync" not in ptx
         assert ".shared" not in ptx and "__wg_" not in lowered
         assert ".extern .func" not in ptx
         assert ptx.count("ex2.approx.f32") == 2
-        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
-        assert sorted(header.count(": f32") for header in headers) == [
-            0,
-            0,
-            1,
-            1,
-        ]
-        for name, arguments in _RANK_ONE_SCHEDULES:
+        assert _accumulators(lowered, "f32") == [0, 0, 1, 1]
+
+        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="ragged_softmax_r2",
+            block_size=128,
+            target="sm_86",
+            use_task_ids=True,
+        )
+
+        assert _parameters(ptx, "ragged_softmax_r2") == (
+            ["pointer"] * 4 + [".u32"] * 4
+        )
+        assert ptx.count("bar.sync") == 4
+        assert ".extern .func" not in ptx
+        assert ptx.count("ex2.approx.f32") == 2
+        assert _accumulators(lowered, "f32") == [0, 0, 1, 1]
+        _assert_row_refusals(module, "ragged_softmax_r2")
+        for function, _ in _SPLIT_COMPILERS:
             with pytest.raises(
-                ValueError, match="planning requires rank-one values"
+                ValueError, match="planning requires capture-free maps"
             ):
-                getattr(native_swage, name)(
-                    module,
-                    kernel_name="ragged_softmax_r2",
-                    target="sm_86",
-                    **arguments,
+                getattr(native_swage, function)(
+                    module, kernel_name="ragged_softmax_r2", target="sm_86"
                 )
         with pytest.raises(
-            ValueError, match="planning requires rank-one values"
+            ValueError, match="planning requires capture-free maps"
         ):
             _plan(
                 module,

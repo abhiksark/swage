@@ -31,6 +31,9 @@ enum class KernelKind {
   DirectColumns,
   /// One block per task; the task buffer names the segment.
   TaskIds,
+  /// The row-stripe tile of rank-two values over a task buffer: one block
+  /// per task and group of adjacent columns, which the block index names.
+  TaskIdsColumns,
   /// Warp tasks and block tasks in one launch.
   FusedMixed,
   /// One partial result per chunk of a long segment.
@@ -40,6 +43,12 @@ enum class KernelKind {
   /// The same for a program that needs the extent of the split segment: the
   /// merge also reads the range records of the partial tasks.
   SplitMergeExtent,
+  /// The row-stripe tile of each split kernel over rank-two values: one
+  /// block per task and group of adjacent columns, and one scratch row of
+  /// `feature_count` partial results per partial task.
+  SplitPartialColumns,
+  SplitMergeColumns,
+  SplitMergeExtentColumns,
   /// Resident blocks that claim tasks from queues.
   Persistent,
 };
@@ -62,7 +71,8 @@ enum class KernelArgument {
   PartialMergeIds,
   /// One [segment, partial_begin, partial_end] triple per split segment.
   MergeRecords,
-  /// One f32 slot per partial task.
+  /// One slot per partial task, or one row of `feature_count` slots for
+  /// rank-two values.
   Scratch,
   /// The queue claim counters and the completion counter of every merge.
   Counters,
@@ -173,6 +183,11 @@ inline constexpr KernelArgument taskIdArguments[] = {
     KernelArgument::Output,      KernelArgument::TaskIds,
     KernelArgument::ValueCount,  KernelArgument::TaskCount,
     KernelArgument::SegmentCount};
+inline constexpr KernelArgument taskIdColumnsArguments[] = {
+    KernelArgument::Values,       KernelArgument::Offsets,
+    KernelArgument::Output,       KernelArgument::TaskIds,
+    KernelArgument::ValueCount,   KernelArgument::TaskCount,
+    KernelArgument::SegmentCount, KernelArgument::FeatureCount};
 inline constexpr KernelArgument fusedMixedArguments[] = {
     KernelArgument::Values,       KernelArgument::Offsets,
     KernelArgument::Output,       KernelArgument::TaskIds,
@@ -191,6 +206,20 @@ inline constexpr KernelArgument splitMergeExtentArguments[] = {
     KernelArgument::MergeRecords, KernelArgument::PartialRanges,
     KernelArgument::PartialCount, KernelArgument::MergeCount,
     KernelArgument::SegmentCount};
+inline constexpr KernelArgument splitPartialColumnsArguments[] = {
+    KernelArgument::Values,       KernelArgument::PartialRanges,
+    KernelArgument::Scratch,      KernelArgument::ValueCount,
+    KernelArgument::PartialCount, KernelArgument::FeatureCount};
+inline constexpr KernelArgument splitMergeColumnsArguments[] = {
+    KernelArgument::Scratch,      KernelArgument::Output,
+    KernelArgument::MergeRecords, KernelArgument::PartialCount,
+    KernelArgument::MergeCount,   KernelArgument::SegmentCount,
+    KernelArgument::FeatureCount};
+inline constexpr KernelArgument splitMergeExtentColumnsArguments[] = {
+    KernelArgument::Scratch,      KernelArgument::Output,
+    KernelArgument::MergeRecords, KernelArgument::PartialRanges,
+    KernelArgument::PartialCount, KernelArgument::MergeCount,
+    KernelArgument::SegmentCount, KernelArgument::FeatureCount};
 inline constexpr KernelArgument persistentArguments[] = {
     KernelArgument::Values,          KernelArgument::Offsets,
     KernelArgument::Output,          KernelArgument::WarpIds,
@@ -211,6 +240,8 @@ constexpr KernelLayout kernelLayout(KernelKind kind) {
     return KernelLayout(detail::directColumnsArguments);
   case KernelKind::TaskIds:
     return KernelLayout(detail::taskIdArguments);
+  case KernelKind::TaskIdsColumns:
+    return KernelLayout(detail::taskIdColumnsArguments);
   case KernelKind::FusedMixed:
     return KernelLayout(detail::fusedMixedArguments);
   case KernelKind::SplitPartial:
@@ -219,6 +250,12 @@ constexpr KernelLayout kernelLayout(KernelKind kind) {
     return KernelLayout(detail::splitMergeArguments);
   case KernelKind::SplitMergeExtent:
     return KernelLayout(detail::splitMergeExtentArguments);
+  case KernelKind::SplitPartialColumns:
+    return KernelLayout(detail::splitPartialColumnsArguments);
+  case KernelKind::SplitMergeColumns:
+    return KernelLayout(detail::splitMergeColumnsArguments);
+  case KernelKind::SplitMergeExtentColumns:
+    return KernelLayout(detail::splitMergeExtentColumnsArguments);
   case KernelKind::Persistent:
     return KernelLayout(detail::persistentArguments);
   }

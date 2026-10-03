@@ -205,10 +205,12 @@ Parameters
     be a lazy negation or conjugate view. When it requires grad and
     gradient recording is on, the call records a gradient; see
     [Gradients](../user-guide/segmented-calls.md#gradients). float64
-    values run a float64 program; nothing is cast. `[N, D]` values run one
-    kernel with one block per segment, in which a thread reduces a column
-    in row order: no segment is split, and nothing is classified. `[N, 1]`
-    values are reduced by the schedules of rank-one values.
+    values run a float64 program; nothing is cast. `[N, D]` values run the
+    row-stripe tile: a block reduces a group of up to 32 adjacent columns
+    of one segment with its threads split into stripes of rows, and a
+    segment of more than `4096 / W` rows, for the `W` columns of a group,
+    is split and merged. `[N, 1]` values are reduced by the schedules of
+    rank-one values.
 :   `offsets`: a contiguous rank-one `torch.int32` or `torch.int64` tensor
     on the same device with one entry more than there are segments. It
     starts at zero, never decreases, and ends at or below the number of
@@ -305,9 +307,9 @@ Parameters
 :   `values`: as for `segment_reduce`, with one difference. The values are
     `torch.float32`. float64 values raise a `TypeError`, because the
     device has no 64-bit `exp2` instruction for the exponential of the
-    kernel. `[N, D]` values run one kernel with one block per segment, in
-    which a thread normalizes a column in row order, and `[N, 1]` values
-    run the kernel of rank-one values.
+    kernel. `[N, D]` values run the row-stripe tile with one task per
+    segment, and no segment is split; `[N, 1]` values run the kernel of
+    rank-one values.
 :   `offsets`: as for `segment_reduce`, with one difference. The final
     offset must equal the number of values, or of rows for `[N, D]`
     values, so that every value belongs to a segment.

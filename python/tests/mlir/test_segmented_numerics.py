@@ -1086,34 +1086,51 @@ def test_mean_kernels_divide_once_per_task_and_never_per_chunk(
 
 
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])
+@pytest.mark.parametrize(
+    "tile", ["columns", "rows", "split-partial", "split-merge"]
+)
 @pytest.mark.parametrize("element", ["f32", "f64"])
 @pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
 def test_column_kernels_hold_arithmetic_of_their_element_type(
-    kind, element, target
+    kind, element, tile, target
 ):
-    """The kernel of rank-two values rounds to nearest in one width.
+    """The kernels of rank-two values round to nearest in one width.
 
-    A column sum is one `add.rn` per row and a mean adds one conversion of
-    the row count and one division. Nothing is contracted, flushed, or of
-    the other width. The address arithmetic of a column, the row times the
-    number of columns, is integer arithmetic and no float instruction.
+    In the column tile a column sum is one `add.rn` per row. In the
+    row-stripe tile it is one per row of a stripe, five more in the butterfly
+    of a warp, and three in the tree over the four warps of a block, or 15
+    over the 16 warps of a split kernel. A mean adds one conversion of the
+    row count and one division, in the merge of a split and not in its
+    partial kernel. Nothing is contracted, flushed, or of the other width.
+    The address arithmetic of a column, the row times the number of
+    columns, is integer arithmetic and no float instruction.
     """
+    compile_ptx, options = {
+        "columns": ("_compile_segmented_reduction_ptx", {"block_size": 128}),
+        "rows": (
+            "_compile_segmented_reduction_ptx",
+            {"block_size": 128, "use_task_ids": True},
+        ),
+        "split-partial": ("_compile_split_partial_reduction_ptx", {}),
+        "split-merge": ("_compile_split_merge_reduction_ptx", {}),
+    }[tile]
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
         module = ir.Module.parse(_semantic_module(kind, element, 2))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx = getattr(native_swage, compile_ptx)(
             module,
             kernel_name=_reduction_kernel(kind, element, 2),
-            block_size=128,
             target=target,
+            **options,
         )
 
     violations, counts = _float_arithmetic(ptx, element)
 
     assert not violations
+    combines = {"columns": 1, "rows": 1 + 5 + 3}.get(tile, 1 + 5 + 15)
     adds = counts.get(f"add.rn.{element}", 0)
-    assert adds == (1 if kind in ("sum", "mean") else 0)
-    mean = 1 if kind == "mean" else 0
+    assert adds == (combines if kind in ("sum", "mean") else 0)
+    mean = 1 if kind == "mean" and tile != "split-partial" else 0
     assert counts.get(f"div.rn.{element}", 0) == mean
     assert counts.get(f"cvt.rn.{element}.s32", 0) == mean
     if kind in ("max", "min"):

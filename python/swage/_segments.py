@@ -34,12 +34,12 @@ def segment_reduce(values, offsets, kind, *, out=None):
 
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is reduced on its own, as
-    `torch.segment_reduce` does along axis 0. Such a call runs one kernel
-    with one block per segment, in which a thread reduces a column in row
-    order. It classifies nothing and splits no segment, so a long segment
-    occupies one block for its whole length, and with few columns few
-    threads reduce it. `[N, 1]` values are reduced by the schedules of
-    rank-one values.
+    `torch.segment_reduce` does along axis 0. A block reduces a group of
+    `W` adjacent columns of one segment, `W` the smallest power of two that
+    is at least `D`, capped at 32, with its threads split into stripes of
+    rows. A segment of more than `4096 / W` rows is cut into chunks of that
+    many rows, reduced by one block each and merged. `[N, 1]` values are
+    reduced by the schedules of rank-one values.
 
     Every call repeats the host work, also when the offsets are the ones of
     the call before, so a call costs more than its kernels. A call keeps no
@@ -141,10 +141,10 @@ def _segment_reduce(values, offsets, kind, *, out=None):
 def _launch_reduction(values, offsets, kind, output, element):
     """Validate and enqueue one reduction of `values` into `output`.
 
-    `[N, D]` values with more than one column run the column kernel of the
-    program. `[N, 1]` values are viewed as rank one and run the planned
-    path, as rank-one values do. Neither the values nor the output may
-    require grad: the shared validation refuses them.
+    `[N, D]` values with more than one column run the row-stripe tile of
+    the program (ADR-0023). `[N, 1]` values are viewed as rank one and run
+    the planned path, as rank-one values do. Neither the values nor the
+    output may require grad: the shared validation refuses them.
 
     Args:
         values: The values, of rank one or two.
@@ -154,14 +154,12 @@ def _launch_reduction(values, offsets, kind, output, element):
         element: The element type of the values, `"f32"` or `"f64"`.
     """
     if values.dim() == 2 and values.shape[1] != 1:
-        _qualification._launch_columns(
+        _qualification._launch_planned_rows(
             values,
             offsets,
             output,
             module_text=_qualification._semantic_module(kind, element, 2),
             kernel_name=_qualification._reduction_kernel(kind, element, 2),
-            validate_offsets=_qualification._validate_offsets,
-            int64_offsets=True,
         )
         return
     kernel_values, kernel_output = values, output
@@ -189,9 +187,10 @@ def segment_softmax(values, offsets, *, out=None):
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is normalized on its own
     over the rows of that segment, as `torch.softmax(values[a:b], dim=0)`
-    does. Such a call runs one kernel with one block per segment, in which
-    a thread normalizes a column in row order. `[N, 1]` values are
-    normalized by the kernel of rank-one values.
+    does. A block normalizes a group of `W` adjacent columns of one
+    segment, `W` the smallest power of two that is at least `D`, capped at
+    32, with its threads split into stripes of rows; no segment is split.
+    `[N, 1]` values are normalized by the kernel of rank-one values.
 
     Args:
         values: Contiguous `torch.float32` CUDA tensor on the current
@@ -266,9 +265,9 @@ def _segment_softmax(values, offsets, *, out=None):
 def _launch_softmax(torch, values, offsets, output):
     """Validate and enqueue one softmax of `values` into `output`.
 
-    `[N, D]` values with more than one column run the column kernel.
-    `[N, 1]` values are viewed as rank one and run the kernel of rank-one
-    values. Neither the values nor the output may require grad: the shared
+    `[N, D]` values with more than one column run the row-stripe tile
+    (ADR-0023). `[N, 1]` values are viewed as rank one and run the kernel
+    of rank-one values. Neither the values nor the output may require grad: the shared
     validation refuses them.
 
     Args:
@@ -288,6 +287,7 @@ def _launch_softmax(torch, values, offsets, output):
             validate_offsets=_validate_covering_offsets,
             int64_offsets=True,
             clamp_rows_to_output=True,
+            row_stripes=True,
         )
         return
     kernel_values, kernel_output = values, output

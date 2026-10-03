@@ -91,8 +91,8 @@ _PROGRAM_NAMES = (
     "ragged_softmax",
     "ragged_softmax_r2",
 )
-# The reductions over rank-one values, which the planned path runs.
-_PLANNED = _PROGRAM_NAMES[:8]
+# The reductions, which the planned path runs.
+_PLANNED = _PROGRAM_NAMES[:16]
 
 
 def _run(*arguments):
@@ -161,7 +161,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 42
+    assert len(_kernel_ids()) == 58
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -225,7 +225,6 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
         "mixed": description["cta_block_threads"],
         "partial": description["split_block_threads"],
         "merge": description["split_block_threads"],
-        "column": description["cta_block_threads"],
     }
 
     for kernels in _artifact._PROGRAMS.values():
@@ -236,8 +235,8 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
 def test_the_manifest_identifies_each_program(manifest):
     """Record the text digest and the planning admission of each program."""
     assert tuple(_PROGRAMS) == _PROGRAM_NAMES
-    # A program over rank-two values and the softmax have one kernel and
-    # are not planned, so the manifest records no admission for them.
+    # The softmax programs are not planned, so the manifest records no
+    # admission for them.
     assert manifest["programs"] == [
         {
             "name": name,
@@ -375,7 +374,7 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         "format_version: 2",
         "target: sm_86",
         "programs: " + ", ".join(_PROGRAM_NAMES),
-        "kernels: 42",
+        "kernels: 58",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -843,15 +842,16 @@ def _cases():
     for kind in _KINDS:
         cases[f"{kind}/float64"] = (kind, values, offsets)
         cases[f"{kind}/float64-direct-cta"] = (kind, wide, wide_offsets)
-    # Rank-two values, which run the column kernel of each kind: more
-    # columns than a block has threads, and a segment of many rows.
+    # Rank-two values, which run the row-stripe kernels of each kind: five
+    # groups of columns, and a segment of 700 rows, which both widths
+    # split.
     lengths = [0, 3, 40, 0, 700, 1]
     rows, row_offsets = _rows(lengths, 130, 3, torch.float32)
     wide_rows, _ = _rows(lengths, 5, 4, torch.float64)
     for kind in _KINDS:
         cases[f"{kind}/rank-two"] = (kind, rows, row_offsets)
         cases[f"{kind}/rank-two-float64"] = (kind, wide_rows, row_offsets)
-    # Rank-two logits, which run the column kernel of the softmax.
+    # Rank-two logits, which run the row-stripe kernel of the softmax.
     cases["softmax/rank-two"] = ("softmax", *_logits(lengths, 130, 5))
     return cases
 
@@ -1281,8 +1281,9 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     """Launch every kernel with the pointers and counts of its manifest.
 
     The batches reach the fused, partial, and merge kernels, the task-ID
-    CTA kernel through the direct-CTA selection, and the softmax kernel.
-    A public call never requests the pure warp kernel.
+    CTA kernel through the direct-CTA selection, the softmax kernel, and
+    the task-id, partial, and merge kernels of rank-two values. A public
+    call never requests the pure warp kernel.
     """
     _select(monkeypatch, device_artifact)
     artifact = _artifact.selected()
@@ -1304,8 +1305,10 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     selected = torch.tensor(_offsets(lengths), dtype=torch.int32).cuda()
     swage.segment_reduce(torch.ones(sum(lengths)).cuda(), selected, "max")
     swage.segment_reduce(values, offsets, "mean")
-    rows = torch.ones(6, 5, device="cuda")
-    row_offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    # Five columns are one group of eight, so the segment of 598 rows is
+    # split into chunks of 512 rows.
+    rows = torch.ones(600, 5, device="cuda")
+    row_offsets = torch.tensor([0, 2, 600], dtype=torch.int32, device="cuda")
     swage.segment_reduce(rows, row_offsets, "min")
     swage.segment_softmax(rows, row_offsets)
     torch.cuda.synchronize()
@@ -1334,12 +1337,16 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
         stated("segmented_mean", "mixed"),
         stated("segmented_mean", "partial"),
         stated("segmented_mean", "merge"),
-        stated("segmented_min_r2", "column"),
-        stated("ragged_softmax_r2", "column"),
+        stated("segmented_min_r2", "cta"),
+        stated("segmented_min_r2", "partial"),
+        stated("segmented_min_r2", "merge"),
+        stated("ragged_softmax_r2", "cta"),
     ]
-    # A column kernel takes the feature count as its third count.
-    assert stated("segmented_min_r2", "column") == (128, 3, 3)
-    assert stated("ragged_softmax_r2", "column") == (128, 3, 3)
+    # A kernel of rank-two values takes the feature count after its counts.
+    assert stated("segmented_min_r2", "cta") == (128, 4, 4)
+    assert stated("segmented_min_r2", "partial") == (512, 3, 3)
+    assert stated("segmented_min_r2", "merge") == (512, 3, 4)
+    assert stated("ragged_softmax_r2", "cta") == (128, 4, 4)
     # The merge of a mean takes one pointer more than the merge of a sum.
     assert stated("segmented_mean", "merge")[1:] == (4, 3)
     assert stated("segmented_sum", "merge")[1:] == (3, 3)

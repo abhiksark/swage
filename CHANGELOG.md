@@ -26,6 +26,16 @@ semantic versioning (`0.x`; anything may change).
   `segment_reduce`, so a backward that needs one is refused under CUDA
   graph capture with a message that names it. The user guide states the
   error bounds of the gradient and of the second derivative.
+- The task-ids schedule plans a second kernel of a rank-two program, the
+  row-stripe tile: `swage_plan.tasks policy<cta>` with `feature_count`, in
+  which the row stripes of a group of up to 32 adjacent columns combine
+  across a block through a butterfly and one shared-memory exchange. It
+  admits the rank-two softmax with identity task ids. The split schedules
+  plan the same tile for the partial and merge kernels of a rank-two
+  reduction, with `feature_count` on `swage_plan.partial_tasks` and
+  `swage_plan.merge_tasks` and one scratch row per partial task. The
+  fused-mixed and persistent schedules refuse rank-two values by name. The
+  digest matrix gains 50 pairs; no earlier pair moved (ADR-0023).
 - `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
   segment gives positive infinity for `min` and NaN for `mean`; a NaN
   element gives NaN. A mean is the sum of the same call divided by the
@@ -37,8 +47,7 @@ semantic versioning (`0.x`; anything may change).
 - Both public calls take `torch.int64` offsets, validated by their 64-bit
   values and narrowed on the host; the cap of `2**31 - 1` rows and segments
   stays.
-- `swage.segment_reduce` takes `[N, D]` values and returns `[S, D]` through
-  one column kernel with one block per segment and no split;
+- `swage.segment_reduce` takes `[N, D]` values and returns `[S, D]`;
   `swage.segment_softmax` takes `[N, D]` float32 values and normalizes per
   column. ADR-0022 records the wider data model.
 - `swage.segment_reduce(values, offsets, kind, *, out=None)` for `"sum"` and
@@ -151,6 +160,16 @@ semantic versioning (`0.x`; anything may change).
   a `ValueError`; under `torch.no_grad()` and inside
   `torch.inference_mode()` a call records nothing and takes `out`. An `out`
   that requires grad stays refused.
+- `swage.segment_reduce` and `swage.segment_softmax` on `[N, D]` values run
+  the row-stripe tile in place of the column tile. A reduction classifies
+  the rows of each segment under the default limits divided by the
+  column-group width, and splits a segment of more than `4096 / W` rows; a
+  softmax launches one task per segment. The bits of a rank-two sum, mean,
+  and softmax change, and a sum lies within the `k` of the tile; a maximum
+  and a minimum keep their bits. An artifact holds the `cta`, `partial`,
+  and `merge` roles of the rank-two programs in place of `column`, so an
+  artifact written before is refused (ADR-0021 amended, ADR-0022
+  superseded in part by ADR-0023).
 - Inside `torch.compile`, each public segmented call is a graph break and
   runs eagerly. Before, rank-two calls with int64 offsets raised
   `AttributeError`, and parts of the host preparation were traced into

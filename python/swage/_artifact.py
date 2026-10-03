@@ -164,37 +164,27 @@ _MEAN_KERNELS = _reduction_kernels("float", reads_extent=True)
 _MEAN_KERNELS_F64 = _reduction_kernels("double", reads_extent=True)
 
 
-def _column_kernels(scalar):
-    """Return the one kernel of a program over rank-two values.
+def _row_kernels(scalar, reads_extent=False):
+    """Return the kernels `segment_reduce` can request for rank-two values.
 
-    The kernel is the direct schedule of the program: one block per
-    segment, in which a thread takes a column. It takes the number of
-    columns after the counts of the direct kernel.
+    They are the row-stripe tiles of the task-id, partial, and merge
+    schedules: the kernels of `_reduction_kernels` without the fused one,
+    each of which takes the number of columns after its counts.
 
     Args:
-        scalar: The C type of one element of the values and the output.
+        scalar: The C type of one element of the values, the scratch, and
+            the output.
+        reads_extent: Whether the program divides by the extent of its
+            segment, as a mean does.
     """
-    return (
-        _Kernel(
-            "column",
-            _SEGMENTED,
-            (("block_size", _CTA_BLOCK),),
-            _CTA_BLOCK,
-            "",
-            (
-                ("values", f"const {scalar}*"),
-                _OFFSETS,
-                ("output", f"{scalar}*"),
-                _VALUE_COUNT,
-                _SEGMENT_COUNT,
-                ("feature_count", "int32_t"),
-            ),
-        ),
+    return tuple(
+        kernel._replace(
+            arguments=(*kernel.arguments, ("feature_count", "int32_t"))
+        )
+        for kernel in _reduction_kernels(scalar, reads_extent)
+        if kernel.role != "mixed"
     )
 
-
-_COLUMN_KERNELS = _column_kernels("float")
-_COLUMN_KERNELS_F64 = _column_kernels("double")
 # The one kernel `segment_softmax` launches for rank-one values. Its value
 # count is the length of the shorter of the values and output buffers.
 _SOFTMAX_KERNELS = (
@@ -220,15 +210,14 @@ _PROGRAMS = {
     "segmented_min_f64": _REDUCTION_KERNELS_F64,
     "segmented_mean_f64": _MEAN_KERNELS_F64,
     **{
-        f"segmented_{kind}{element}_r2": kernels
-        for element, kernels in (
-            ("", _COLUMN_KERNELS),
-            ("_f64", _COLUMN_KERNELS_F64),
-        )
+        f"segmented_{kind}{element}_r2": _row_kernels(scalar, kind == "mean")
+        for element, scalar in (("", "float"), ("_f64", "double"))
         for kind in ("sum", "max", "min", "mean")
     },
     "ragged_softmax": _SOFTMAX_KERNELS,
-    "ragged_softmax_r2": _COLUMN_KERNELS,
+    # `segment_softmax` launches the task-id kernel of rank-two values with
+    # one task per segment.
+    "ragged_softmax_r2": _row_kernels("float")[:1],
 }
 
 # The directory `SWAGE_ARTIFACT_DIR` named when an artifact was last loaded,

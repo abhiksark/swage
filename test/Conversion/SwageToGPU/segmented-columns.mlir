@@ -1,7 +1,8 @@
 // test/Conversion/SwageToGPU/segmented-columns.mlir
 // The column kernel of rank-two values: one block per segment, and thread t
 // reduces the columns t, t + 128, and so on of the rows of its segment, one
-// after the other.
+// after the other. The task-ids and split schedules give the row-stripe
+// tile instead, at the end of the file.
 //
 // - The rows of the segment are clamped to the row count, and the column
 //   loop is bounded by the feature count, so every load stays inside the
@@ -25,6 +26,15 @@
 // RUN:   --pass-pipeline='builtin.module(swage-to-plan{schedule=direct block-threads=128},swage-plan-to-gpu,gpu.module(convert-scf-to-cf,convert-gpu-to-nvvm{index-bitwidth=64}))' %s \
 // RUN:   | FileCheck %s --check-prefix=NVVM --implicit-check-not=nvvm.shfl \
 // RUN:       --implicit-check-not=nvvm.barrier
+// RUN: swage-opt --swage-to-plan='schedule=task-ids block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
+// RUN:   | FileCheck %s --check-prefix=STRIPES --implicit-check-not=swage. \
+// RUN:       --implicit-check-not=gpu.all_reduce
+// RUN: swage-opt --swage-to-plan='schedule=split-partial' --swage-plan-to-gpu \
+// RUN:   %s | FileCheck %s --check-prefix=ROW-PARTIAL \
+// RUN:       --implicit-check-not=swage. --implicit-check-not=arith.divf
+// RUN: swage-opt --swage-to-plan='schedule=split-merge' --swage-plan-to-gpu \
+// RUN:   %s | FileCheck %s --check-prefix=ROW-MERGE --implicit-check-not=swage.
 
 module {
   func.func @segmented_sum_r2(
@@ -153,3 +163,41 @@ module {
 // NVVM: llvm.func @segmented_sum_r2(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32)
 // NVVM-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
 // NVVM: llvm.return
+
+// The task-ids schedule gives the row-stripe tile of the same program: the
+// task buffer and the number of columns as parameters, one exchange buffer
+// of 128 elements, the loop over the items of a block, and five shuffles
+// and two barriers per reduction stage, which
+// test/Conversion/SwagePlanToGPU/column-groups.mlir pins in detail.
+// STRIPES: gpu.func @segmented_sum_r2(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32) workgroup(%{{[^ ]+}} : memref<128xf32, #gpu.address_space<workgroup>>) kernel
+// STRIPES: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} {{[{]$}}
+// STRIPES-COUNT-5: gpu.shuffle xor
+// STRIPES-COUNT-2: gpu.barrier
+// STRIPES: llvm.store
+
+// The split schedules give the same tile at the split width of 512 threads.
+// A partial task stores the raw reduction of each column in its scratch
+// row, so the partial kernel of the mean divides nothing.
+// ROW-PARTIAL: gpu.func @segmented_sum_r2__partial(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %[[SCRATCH:[^:]+]]: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32) workgroup(%{{[^ ]+}} : memref<512xf32, #gpu.address_space<workgroup>>) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>}
+// ROW-PARTIAL-COUNT-5: gpu.shuffle xor
+// ROW-PARTIAL-COUNT-2: gpu.barrier
+// ROW-PARTIAL: llvm.getelementptr %[[SCRATCH]][
+// ROW-PARTIAL-NEXT: llvm.store
+// ROW-PARTIAL: gpu.func @segmented_mean_f64_r2__partial(
+// ROW-PARTIAL-SAME: workgroup(%{{[^ ]+}} : memref<512xf64, #gpu.address_space<workgroup>>)
+
+// The merge of a mean reads the extent of each split segment from the range
+// records, a number of rows, and divides once per column after the
+// combination.
+// ROW-MERGE: gpu.func @segmented_sum_r2__merge(
+// ROW-MERGE-SAME: workgroup(%{{[^ ]+}} : memref<512xf32, #gpu.address_space<workgroup>>)
+// ROW-MERGE-NOT: arith.divf
+// ROW-MERGE: gpu.func @segmented_mean_f64_r2__merge(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %[[RANGES:[^:]+]]: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32) workgroup(%{{[^ ]+}} : memref<512xf64, #gpu.address_space<workgroup>>)
+// ROW-MERGE: %[[ROWS:.*]] = scf.if %{{.*}} -> (index) {
+// ROW-MERGE: llvm.getelementptr %[[RANGES]][
+// ROW-MERGE: llvm.getelementptr %[[RANGES]][
+// ROW-MERGE-COUNT-5: gpu.shuffle xor
+// ROW-MERGE-COUNT-2: gpu.barrier
+// ROW-MERGE-NEXT: %[[COUNT:.*]] = arith.index_cast %[[ROWS]] : index to i32
+// ROW-MERGE-NEXT: %[[DIVISOR:.*]] = arith.sitofp %[[COUNT]] : i32 to f64
+// ROW-MERGE-NEXT: arith.divf %{{.*}}, %[[DIVISOR]] : f64

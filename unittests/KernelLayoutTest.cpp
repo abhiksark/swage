@@ -39,6 +39,11 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
   EXPECT_EQ(namesOf(KernelKind::TaskIds),
             (Names{"values", "offsets", "output", "task_ids", "value_count",
                    "task_count", "segment_count"}));
+  // The row-stripe tile takes the number of columns after the counts of
+  // the task-id kernel.
+  EXPECT_EQ(namesOf(KernelKind::TaskIdsColumns),
+            (Names{"values", "offsets", "output", "task_ids", "value_count",
+                   "task_count", "segment_count", "feature_count"}));
   EXPECT_EQ(namesOf(KernelKind::FusedMixed),
             (Names{"values", "offsets", "output", "task_ids", "value_count",
                    "warp_task_count", "cta_task_count", "segment_count"}));
@@ -53,6 +58,18 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
   EXPECT_EQ(namesOf(KernelKind::SplitMergeExtent),
             (Names{"scratch", "output", "merge_records", "partial_ranges",
                    "partial_count", "merge_count", "segment_count"}));
+  // The split kernels of rank-two values take the number of columns after
+  // the counts of the rank-one split kernels.
+  EXPECT_EQ(namesOf(KernelKind::SplitPartialColumns),
+            (Names{"values", "partial_ranges", "scratch", "value_count",
+                   "partial_count", "feature_count"}));
+  EXPECT_EQ(namesOf(KernelKind::SplitMergeColumns),
+            (Names{"scratch", "output", "merge_records", "partial_count",
+                   "merge_count", "segment_count", "feature_count"}));
+  EXPECT_EQ(namesOf(KernelKind::SplitMergeExtentColumns),
+            (Names{"scratch", "output", "merge_records", "partial_ranges",
+                   "partial_count", "merge_count", "segment_count",
+                   "feature_count"}));
   EXPECT_EQ(
       namesOf(KernelKind::Persistent),
       (Names{"values", "offsets", "output", "warp_ids", "cta_ids",
@@ -64,8 +81,10 @@ TEST(KernelLayoutTest, EachKernelTakesItsDocumentedParameters) {
 TEST(KernelLayoutTest, EveryKernelTakesItsBuffersBeforeItsCounts) {
   for (KernelKind kind :
        {KernelKind::Direct, KernelKind::DirectColumns, KernelKind::TaskIds,
-        KernelKind::FusedMixed, KernelKind::SplitPartial,
-        KernelKind::SplitMerge, KernelKind::SplitMergeExtent,
+        KernelKind::TaskIdsColumns, KernelKind::FusedMixed,
+        KernelKind::SplitPartial, KernelKind::SplitMerge,
+        KernelKind::SplitMergeExtent, KernelKind::SplitPartialColumns,
+        KernelKind::SplitMergeColumns, KernelKind::SplitMergeExtentColumns,
         KernelKind::Persistent}) {
     SCOPED_TRACE(static_cast<int>(kind));
     bool sawCount = false;

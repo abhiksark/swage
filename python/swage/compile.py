@@ -77,8 +77,8 @@ def _program(name):
 
     Returns:
         The name of the kernel function, the semantic module text, and
-        whether the program runs through the planned path. A program over
-        rank-two values has one kernel and is not planned.
+        whether the program runs through the planned path, as every
+        reduction does and no softmax.
     """
     kind, *suffixes = name.split("_")
     rank = 2 if "r2" in suffixes else 1
@@ -89,7 +89,7 @@ def _program(name):
     return (
         _qualification._reduction_kernel(kind, element, rank),
         _qualification._semantic_module(kind, element, rank),
-        rank == 1,
+        True,
     )
 
 
