@@ -267,8 +267,8 @@ def _launch_softmax(torch, values, offsets, output):
 
     `[N, D]` values with more than one column run the row-stripe tile
     (ADR-0023). `[N, 1]` values are viewed as rank one and run the kernel
-    of rank-one values. Neither the values nor the output may require grad: the shared
-    validation refuses them.
+    of rank-one values. Neither the values nor the output may require
+    grad: the shared validation refuses them.
 
     Args:
         torch: The PyTorch module.
