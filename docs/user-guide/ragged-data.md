@@ -52,7 +52,9 @@ For `N` segments over one values buffer:
   number of values.
 - The number of values and the number of segments are each below `2**31`,
   for both offset widths.
-- `values` does not require grad.
+- `values` does not require grad for the private helpers. The public calls
+  record a gradient for `values` that require grad, as
+  [Segmented Calls](segmented-calls.md#gradients) states.
 - For a GPU launch, both tensors are CUDA tensors on the current device.
 
 The result tensor has the same basic rules on both surfaces: it is a

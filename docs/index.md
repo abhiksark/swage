@@ -39,8 +39,8 @@ qualification machinery or planned work.
   one or of rank two, `[N, D]` rows that are reduced or normalized per
   column. A reduction takes f32 or f64 values, and the softmax takes f32
   values. The calls admit
-  no other dtype, kind, or rank, record no gradient, and prepare their
-  offsets on the host at every call.
+  no other dtype, kind, or rank, and prepare their offsets on the host at
+  every call. Both record a gradient for values that require grad.
   [Segmented Calls](user-guide/segmented-calls.md) states the contract and
   the cost.
 - `python -m swage.compile`, which writes the kernels of those two calls

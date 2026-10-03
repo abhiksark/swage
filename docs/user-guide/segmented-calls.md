@@ -15,7 +15,8 @@ Two functions run a fixed program over every segment of a ragged batch:
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
 reduction kind, a dtype outside the admitted ones, and values of rank three
-or above cannot be written. The calls record no gradient.
+or above cannot be written. A call records a gradient for `values` that
+require grad; [Gradients](#gradients) states which.
 [Ragged Data](ragged-data.md) defines the storage they read. This page
 shows a call, states what it returns and what it costs, and lists where it
 is refused.
@@ -105,6 +106,7 @@ returns the same tensor. It must meet all of these rules:
   resized.
 - It shares no memory with `values` or `offsets`.
 - It does not require grad, and it is not a lazy negation or conjugate view.
+  A call that records a gradient takes no `out`.
 
 Without `out`, the call allocates the result on the device of `values`.
 
@@ -318,6 +320,97 @@ and those of a reduction split it. A caller reaches them for rows by
 passing each column as a contiguous `[N]` or `[N, 1]` tensor, at the price
 of one call per column.
 
+## Gradients
+
+A call records a gradient when `values` require grad and gradient
+recording is on, as a PyTorch operation does: the result has a `grad_fn`,
+and a backward pass sends a gradient to `values`. The offsets are integers
+and receive none. Under `torch.no_grad()` and inside
+`torch.inference_mode()` a call records nothing, also for `values` that
+require grad, and its result does not require grad.
+
+Every kind of `segment_reduce` and the softmax record a gradient. The
+gradient of a reduction, for the gradient `g` of a segment:
+
+- A sum gives every element of the segment `g`, unchanged.
+- A mean gives every element `g` divided once by the length of the
+  segment, converted to the dtype of `values` as the mean converts it.
+- A maximum or a minimum gives `g` to the elements of the segment that
+  equal its result, in equal shares: each receives `g` divided once by
+  their number. `-0.0` and `0.0` are equal. When the result is NaN, the NaN
+  elements share `g`. Every other element receives exactly `0.0`, also when
+  `g` is infinite or NaN.
+- An empty segment has no element, and its `g` reaches nothing. A value
+  past the final offset receives `0.0`.
+
+A softmax gives an element with result `y` and gradient `g` the value
+`y * (g - s)`, where `s` is the sum of `g * y` over its segment. A segment
+whose result is NaN gives NaN to each of its elements, as the gradient of
+`torch.softmax` does. For `[N, D]` values all of this holds per column.
+
+The backward of a reduction runs PyTorch operations: it finds the segment
+of every element from the offsets on the device, copies the gradient of
+that segment to the element, and for a mean, a maximum, or a minimum
+divides once. For a maximum or a minimum it finds the tied elements by
+comparing every element with the result, which the forward computes
+exactly, and counts them with an integer prefix sum. It copies nothing to
+the host and waits for nothing, and its bits do not depend on the other
+segments of the batch. The backward of a softmax sums `g * y` with the sum
+kernel of `segment_reduce`, with the rounding and the host work of a call:
+[Sum rounding](#sum-rounding) holds for that sum, and it raises where a
+call raises. Neither is a fallback: the forward always runs Swage kernels,
+which step of a backward runs where is fixed, and a backward that cannot
+run its sum kernel raises.
+
+The gradient of a sum is exact, and the gradient of a mean, a maximum, or a
+minimum is one correctly rounded division. A float32 count of more than
+16,777,216 tied elements is rounded. A softmax gradient lies within
+`(k + 3) * eps32 * max|g| * y` of `y * (g - s)` for the `y` the call
+returned, with `max|g|` over the segment, `k` the additions of the sum on
+its schedule, and a factor of the sum of `y` when that exceeds one. The
+product of a softmax second derivative with a vector `v` lies within
+`(7k + 43) * eps32 * max|g| * max|v| * y` of its formula on the same `y`,
+with a factor of the square of the sum of `y` when that exceeds one.
+Against the float64 gradient of `torch.softmax`, the error of the forward,
+at most `b` relative with `b` the bound of
+[Ragged Softmax](../internals/ragged-softmax.md#accuracy), adds at most
+`3 * b * max|g| * y` to a gradient, and `13 * b` times the scale of the
+product bound, `max|g| * max|v| * y` with its factor, to that product.
+
+On PyTorch 2.12, on the CPU and on CUDA, the gradient of
+`torch.segment_reduce` equals this one for a sum, agrees with it to within
+one rounding of the dtype for a mean, and equals it for a maximum and a
+minimum except on a tie with a negative `g`. There `torch.segment_reduce`
+gives every tied element the whole `g` instead of a share; with a NaN `g`
+both give the tied elements NaN. On ties its gradient on CUDA has the bits
+of its gradient on the CPU.
+`Tensor.scatter_reduce` with `"amax"` or `"amin"` also shares equally, but
+counts an element of its destination that equals the result, and gives
+NaN to every element of a segment whose result is NaN.
+
+Second derivatives are supported for every call. Each runs the sum kernel
+of `segment_reduce` on the gradient it differentiates, with the rounding
+and the host work of a call.
+
+A backward of a softmax, and every second derivative, raise where a call
+raises: on a stream that is capturing a CUDA graph, in a message that names
+the backward or the second derivative, and with `SWAGE_NO_COMPILE=1` when
+the sum kernel is not held. The autograd engine runs a backward on the
+stream on which its call ran.
+
+The backward keeps the offsets of the call, the values and the result for a
+maximum and a minimum, and the result for a softmax. They stay alive until
+the backward runs even when the caller drops them. A backward pass raises
+when one of them was changed in place after the call, as PyTorch does.
+Offsets created inside `torch.inference_mode()` are kept as a copy.
+
+Inside a function compiled by `torch.compile` a call that records a
+gradient is the same graph break, and its backward runs eagerly in the
+autograd engine. Not supported: an `out` while recording, forward-mode
+differentiation, `torch.func` transforms, and compiled autograd.
+[ADR-0024](../adr/ADR-0024-gradients-of-the-segmented-calls.md) records the
+decision.
+
 ## What a call costs
 
 Each call prepares before it launches, and it keeps nothing of that
@@ -382,14 +475,18 @@ The first calls of a process cost more:
 
 Every refusal below raises before anything is enqueued.
 
-- **Gradients.** `values` that require grad raise a `ValueError` that names
-  `values.detach()`. The calls have no backward function, and a result is
-  never part of an autograd graph.
+- **`out` while recording a gradient.** `out` with `values` that require
+  grad, outside `torch.no_grad()` and `torch.inference_mode()`, raises a
+  `ValueError`: `out must be None while values require grad: a call that
+  records a gradient allocates its result; call without out, or under
+  torch.no_grad()`.
 - **CUDA graph capture.** A call on a stream that is capturing a CUDA graph
   raises a `RuntimeError`. Every call copies its offsets to the host, which
   a capturing stream cannot do, and a replay would not repeat the
   preparation. The check comes first, so the capture stays usable for the
-  PyTorch work around the call.
+  PyTorch work around the call. A backward pass of `segment_softmax`, and
+  every second derivative, run a segmented sum and raise the same way,
+  naming the backward.
 - **A missing `numpy`.** A call raises a `RuntimeError` that names `numpy`
   and the installation page. The calls copy the offsets into a `numpy`
   array on the host, with the native build and with an artifact.

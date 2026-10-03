@@ -117,3 +117,4 @@ nav:
       - "ADR-0020: Planned per-function lowering": adr/ADR-0020-planned-per-function-lowering.md
       - "ADR-0021: Artifact format": adr/ADR-0021-ahead-of-time-artifact-format.md
       - "ADR-0022: Wider data model": adr/ADR-0022-wider-data-model-for-segmented-reductions.md
+      - "ADR-0024: Gradients": adr/ADR-0024-gradients-of-the-segmented-calls.md

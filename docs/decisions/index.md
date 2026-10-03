@@ -43,6 +43,9 @@ gates belong in the roadmap.
 - [ADR-0022: Wider data model for the segmented reductions](../adr/ADR-0022-wider-data-model-for-segmented-reductions.md)
   (accepted; implemented step by step, and the record says which steps
   exist)
+- [ADR-0024: Gradients of the segmented calls](../adr/ADR-0024-gradients-of-the-segmented-calls.md)
+  (accepted; implemented step by step, and the record says which steps
+  exist)
 
 ## Deployment
 

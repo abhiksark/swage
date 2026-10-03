@@ -167,8 +167,8 @@ launches, every time, so it costs more than its kernels. With offsets that
 change on every call, expect it to be slower than `torch.segment_reduce`.
 The values are rank-one `torch.float32`. Both calls also take `[N, D]`
 rows of features, which they reduce or normalize per column, and a
-reduction also takes `torch.float64` values. The offsets are `torch.int32` or `torch.int64`, and the calls
-record no gradient.
+reduction also takes `torch.float64` values. The offsets are `torch.int32` or `torch.int64`. Both calls record
+a gradient for values that require grad.
 [Segmented Calls](../user-guide/segmented-calls.md) states the whole
 contract, including the cost and the cases a call refuses.
 

@@ -924,6 +924,117 @@ def child(device_artifact, tmp_path_factory):
     return cases, report
 
 
+# The derivatives that a process run from an artifact records, by name: the
+# kind, the column count (None for rank one), and the dtype.
+_GRADIENT_CASES = {
+    "sum/rank-one/float32": ("sum", None, torch.float32),
+    "sum/rank-two/float64": ("sum", 3, torch.float64),
+    "mean/rank-one/float64": ("mean", None, torch.float64),
+    "mean/rank-two/float32": ("mean", 5, torch.float32),
+    "max/rank-one/float64": ("max", None, torch.float64),
+    "min/rank-two/float32": ("min", 3, torch.float32),
+    "softmax/rank-one/float32": ("softmax", None, torch.float32),
+    "softmax/rank-two/float32": ("softmax", 4, torch.float32),
+}
+
+
+def _gradient_cases():
+    """Return the gradient cases the child process runs, by name.
+
+    Each batch has an empty segment and a split segment for rank one, and a
+    reduction has a row past the final offset. The second derivatives, and
+    the first derivative of a softmax, run the sum kernels of the artifact
+    on every schedule a batch reaches.
+    """
+    cases = {}
+    lengths = [3, 0, 40, 4100, 1]
+    offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    for index, (name, (kind, columns, dtype)) in enumerate(
+        _GRADIENT_CASES.items()
+    ):
+        generator = torch.Generator().manual_seed(index)
+        # A softmax covers every row; a reduction has one past the end.
+        rows = sum(lengths) + (kind != "softmax")
+        shape = (rows,) if columns is None else (rows, columns)
+        values = torch.randn(shape, generator=generator).to(dtype)
+        upstream_shape = shape if kind == "softmax" else (
+            len(lengths),
+            *shape[1:],
+        )
+        upstream = torch.randn(upstream_shape, generator=generator).to(dtype)
+        cases[name] = (kind, values, offsets, upstream)
+    return cases
+
+
+@pytest.fixture(scope="module")
+def gradient_child(device_artifact, tmp_path_factory):
+    """Record derivatives in a process that cannot import `mlir_swage`.
+
+    Returns:
+        The cases and the report the process saved.
+    """
+    root = tmp_path_factory.mktemp("gradient-child")
+    shutil.copytree(
+        pathlib.Path(swage.__file__).parent,
+        root / "site" / "swage",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    cases = _gradient_cases()
+    torch.save(cases, root / "cases.pt")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("SWAGE_NO_COMPILE", "SWAGE_CACHE_DIR")
+    }
+    environment["PYTHONPATH"] = str(root / "site")
+    environment["SWAGE_ARTIFACT_DIR"] = str(device_artifact)
+    environment["SWAGE_CACHE_DIR"] = str(root / "cache")
+    completed = subprocess.run(
+        [sys.executable, str(_CHILD), "cases.pt", "report.pt"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return cases, torch.load(root / "report.pt")
+
+
+@_needs_cuda
+@pytest.mark.parametrize("name", list(_GRADIENT_CASES))
+def test_derivatives_from_an_artifact_equal_the_compiled_path(
+    name, gradient_child
+):
+    """Record first and second derivatives with no compiler in the process.
+
+    The child maps no LLVM or MLIR library. Its second derivatives run the
+    sum kernels of the artifact. The result and both derivatives equal
+    those of the compiled path bit for bit.
+    """
+    cases, report = gradient_child
+    kind, values, offsets, upstream = cases[name]
+    values = values.cuda().requires_grad_()
+    weight = upstream.cuda().requires_grad_()
+
+    if kind == "softmax":
+        result = swage.segment_softmax(values, offsets.cuda())
+    else:
+        result = swage.segment_reduce(values, offsets.cuda(), kind)
+    (first,) = torch.autograd.grad(result, values, weight, create_graph=True)
+    (second,) = torch.autograd.grad((first * first).sum(), weight)
+
+    assert report["modules"] == []
+    assert not [
+        path
+        for path in report["mapped"]
+        if COMPILER_LIBRARY.search(os.path.basename(path))
+    ]
+    theirs = report["results"][name]
+    for ours, recorded in zip((result, first, second), theirs, strict=True):
+        assert _bits(recorded) == _bits(ours.detach().cpu())
+
+
 @_needs_cuda
 def test_the_cases_are_the_ones_the_tests_name(child):
     """Keep the parametrized names equal to the cases the process ran."""

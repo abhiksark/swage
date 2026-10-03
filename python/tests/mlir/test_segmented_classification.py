@@ -14,6 +14,7 @@ seeded layouts and the same refusals hold it to the native one.
 """
 
 import contextlib
+import hashlib
 import io
 import random
 from itertools import accumulate, pairwise
@@ -478,12 +479,18 @@ def test_runtime_library_classification_handles_no_segments(
 
 
 def _classified(classify, offsets, arguments):
-    """Return the records and counts as lists, or the raised error."""
+    """Return a digest of the records and the counts, or the raised error.
+
+    A valid layout that ends at the i32 limit has about 4e8 records. A digest
+    holds one record buffer at a time; a list of them needs more memory than
+    a hosted runner has.
+    """
     try:
         records, *counts = classify(_i32(offsets), **arguments)
     except Exception as error:  # noqa: BLE001 (the comparison needs any type)
         return type(error), str(error)
-    return records.tolist(), counts
+    digest = hashlib.sha256(records).digest()
+    return records.dtype, records.shape, digest, counts
 
 
 @pytest.mark.parametrize("seed", range(300))
