@@ -383,8 +383,8 @@ def test_pytorch_gives_ties_the_same_gradient_on_cuda_and_on_the_cpu(
     The documented difference between the two tie rules was found on the
     CPU. This compares the gradient of `torch.segment_reduce` on CUDA with
     the one on the CPU for the same tied segments, and the Swage gradient
-    with both where the rules agree: for a positive gradient, PyTorch also
-    divides it equally.
+    with both where the rules agree: PyTorch also divides a positive
+    gradient equally, and a NaN gradient gives NaN either way.
     """
     values, offsets, _ = _tie_batch(kind)
     count = len(_TIES)
@@ -603,9 +603,9 @@ def test_an_expanded_upstream_gradient_reaches_the_sum_kernel(kind, columns):
     lengths = _lengths(offsets, second)
     expected = lengths if kind == "sum" else torch.ones_like(lengths)
     expected = expected.expand_as(second).masked_fill(
-        _empty(offsets, second).cpu(), 0.0
+        _empty(offsets, second), 0.0
     )
-    assert _bits(second.cpu()) == _bits(expected.contiguous())
+    assert _bits(second.cpu()) == _bits(expected.contiguous().cpu())
 
 
 @pytest.mark.parametrize("kind", KINDS)

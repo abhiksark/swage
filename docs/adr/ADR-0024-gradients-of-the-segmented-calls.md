@@ -170,8 +170,10 @@ pieces, and no second derivative uses an atomic.
   or the GPU. The backward of a softmax follows the bits of the sum kernel.
 - `max` and `min` keep their values and result alive until the backward
   runs, and the softmax keeps its result.
-- The gradient on a tie with a negative or NaN `g` differs from that of
-  `torch.segment_reduce`. The user guide states the difference.
+- The gradient on a tie with a negative `g` differs from that of
+  `torch.segment_reduce`, whose gradient on ties has the same bits on CUDA
+  as on the CPU. With a NaN `g` both give the tied elements NaN. The user
+  guide states the difference.
 - Not supported: an `out` while recording, forward-mode differentiation,
   `torch.func` transforms, compiled autograd, `fullgraph=True` and
   `torch.export`, gradients under CUDA graph capture, a float64 softmax

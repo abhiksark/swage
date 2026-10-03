@@ -369,11 +369,13 @@ minimum is one correctly rounded division. A float32 count of more than
 returned, with `max|g|` over the segment, `k` the additions of the sum on
 its schedule, and a factor of the sum of `y` when that exceeds one.
 
-On PyTorch 2.12 the gradient of `torch.segment_reduce` equals this one for a
-sum, agrees with it to within one rounding of the dtype for a mean, and
-equals it for a maximum and a minimum except on a tie with a negative `g`.
-There `torch.segment_reduce` gives every tied element the whole `g` instead
-of a share; with a NaN `g` both give the tied elements NaN.
+On PyTorch 2.12, on the CPU and on CUDA, the gradient of
+`torch.segment_reduce` equals this one for a sum, agrees with it to within
+one rounding of the dtype for a mean, and equals it for a maximum and a
+minimum except on a tie with a negative `g`. There `torch.segment_reduce`
+gives every tied element the whole `g` instead of a share; with a NaN `g`
+both give the tied elements NaN. On ties its gradient on CUDA has the bits
+of its gradient on the CPU.
 `Tensor.scatter_reduce` with `"amax"` or `"amin"` also shares equally, but
 counts an element of its destination that equals the result, and gives
 NaN to every element of a segment whose result is NaN.
@@ -390,9 +392,9 @@ stream on which its call ran.
 
 The backward keeps the offsets of the call, the values and the result for a
 maximum and a minimum, and the result for a softmax. They stay alive until
-the backward runs even when the caller drops them. A backward pass raises when
-one of them was changed in place after the call, as PyTorch does. Offsets created
-inside `torch.inference_mode()` are kept as a copy.
+the backward runs even when the caller drops them. A backward pass raises
+when one of them was changed in place after the call, as PyTorch does.
+Offsets created inside `torch.inference_mode()` are kept as a copy.
 
 Inside a function compiled by `torch.compile` a call that records a
 gradient is the same graph break, and its backward runs eagerly in the
