@@ -509,6 +509,23 @@ def test_the_command_refuses_an_existing_directory(tmp_path):
     assert list(output.iterdir()) == []
 
 
+def test_the_shipped_runtime_library_states_its_glibc_requirement(written):
+    """Read the glibc the runtime library needs from the library itself.
+
+    The library calls `dlopen` and `dlsym`, which a library built on glibc
+    2.34 or newer takes from the C library at version 2.34. The loader
+    reads the requirement and compares it with the glibc of the host, which
+    meets it here.
+    """
+    contents = (written / "libSwageRuntime.so").read_bytes()
+
+    needed = _artifact._glibc_requirement(contents)
+
+    assert needed is not None and needed[0] == 2
+    major, minor = os.confstr("CS_GNU_LIBC_VERSION").split()[1].split(".")[:2]
+    assert (int(major), int(minor)) >= needed
+
+
 def test_the_command_refuses_bindings_built_beside_another_frontend(
     tmp_path, monkeypatch
 ):

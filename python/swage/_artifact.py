@@ -19,7 +19,9 @@ import json
 import os
 import pathlib
 import platform
+import re
 import stat
+import struct
 import types
 from typing import NamedTuple
 
@@ -285,6 +287,103 @@ class _CompileFunction:
     def __init__(self, name):
         """Name the native compile function this object stands in for."""
         self.__name__ = name
+
+
+# The ELF section type of the version needs of a shared object.
+_SHT_GNU_VERNEED = 0x6FFFFFFE
+_GLIBC_VERSION = re.compile(r"GLIBC_(\d+)\.(\d+)(?:\.\d+)?")
+
+
+def _glibc_requirement(contents):
+    """Return the newest glibc version a 64-bit ELF library needs, or None.
+
+    The version needs of a library name, for each library it links, the
+    symbol versions it uses. The entries for `libc.so.6` name versions such
+    as `GLIBC_2.34`, which a glibc older than that version does not have,
+    so the library does not load on it.
+
+    Args:
+        contents: The bytes of the library.
+
+    Returns:
+        `(major, minor)` of the newest `GLIBC_` version, or None for a file
+        that is not a little-endian 64-bit ELF file with section headers or
+        that names no such version.
+    """
+    try:
+        if contents[:6] != b"\x7fELF\x02\x01":
+            return None
+        (table,) = struct.unpack_from("<Q", contents, 0x28)
+        size, count = struct.unpack_from("<HH", contents, 0x3A)
+        sections = [
+            struct.unpack_from("<IIQQQQIIQQ", contents, table + index * size)
+            for index in range(count)
+        ]
+
+        def name(strings, at):
+            start = sections[strings][4] + at
+            return contents[start : contents.index(b"\0", start)]
+
+        newest = None
+        for section in sections:
+            _, kind, _, _, entry, _, strings, entries, _, _ = section
+            if kind != _SHT_GNU_VERNEED:
+                continue
+            for _ in range(entries):
+                _, versions, file, auxiliary, following = struct.unpack_from(
+                    "<HHIII", contents, entry
+                )
+                at = entry + auxiliary
+                if name(strings, file) != b"libc.so.6":
+                    versions = 0
+                for _ in range(versions):
+                    _, _, _, version, step = struct.unpack_from(
+                        "<IHHII", contents, at
+                    )
+                    matched = _GLIBC_VERSION.fullmatch(
+                        name(strings, version).decode("ascii", "replace")
+                    )
+                    if matched:
+                        found = (int(matched[1]), int(matched[2]))
+                        newest = max(newest or found, found)
+                    at += step
+                entry += following
+        return newest
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def _host_glibc():
+    """Return the glibc of this process, such as `glibc 2.35`, or None."""
+    try:
+        return os.confstr("CS_GNU_LIBC_VERSION")
+    except (ValueError, OSError):
+        return None
+
+
+def _require_glibc(contents, subject):
+    """Refuse a runtime library that needs a newer glibc than the host has.
+
+    The dynamic loader would refuse it too, with a message about symbol
+    versions. This names the requirement and what to do about it.
+
+    Raises:
+        RuntimeError: The library needs a glibc version the host lacks.
+    """
+    needed = _glibc_requirement(contents)
+    if needed is None:
+        return
+    host = re.fullmatch(r"glibc (\d+)\.(\d+)\b.*", _host_glibc() or "")
+    have = (int(host[1]), int(host[2])) if host else None
+    if have is not None and have >= needed:
+        return
+    found = f"glibc {have[0]}.{have[1]}" if have else "no glibc"
+    raise RuntimeError(
+        f"{subject} needs glibc {needed[0]}.{needed[1]} or newer, and this "
+        f"host has {found}; write the artifact with a runtime library built "
+        "for the glibc of this host, which python -m swage.compile takes "
+        "with --runtime-library"
+    )
 
 
 # The anonymous memory files that hold a loaded runtime library. They stay
@@ -662,6 +761,7 @@ class _Artifact:
         if version != _RUNTIME_ABI_VERSION:
             raise RuntimeError(f"{subject} has ABI version {version}; {calls}")
         contents = self._read_verified(entry)
+        _require_glibc(contents, f"{subject}, {entry['file']},")
         try:
             # The functions run for microseconds and never call back into
             # Python, so the GIL stays held, as it is for the launcher of

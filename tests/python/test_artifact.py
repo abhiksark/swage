@@ -16,6 +16,7 @@ import pathlib
 import platform
 import re
 import stat
+import struct
 import subprocess
 import sys
 import types
@@ -1041,6 +1042,117 @@ def test_the_library_loaded_is_the_one_whose_digest_was_verified(
 
     assert loaded == [verified]
     assert library.read_bytes() == b"another library\n"
+
+
+def _elf_needing(*versions, library=b"libc.so.6"):
+    """Return a 64-bit ELF file that needs `versions` of `library`.
+
+    The file has the three sections the requirement is read from: none, a
+    string table, and a `.gnu.version_r` section with one entry for
+    `library` that names each version.
+    """
+    strings = b"\0" + library + b"\0"
+    names = []
+    for version in versions:
+        names.append(len(strings))
+        strings += version.encode() + b"\0"
+    auxiliary = b"".join(
+        struct.pack("<IHHII", 0, 0, 0, name, 16 * (index + 1 < len(names)))
+        for index, name in enumerate(names)
+    )
+    needed = struct.pack("<HHIII", 1, len(names), 1, 16, 0) + auxiliary
+    section_offset = 64 + len(strings) + len(needed)
+    padding = -section_offset % 8
+    section_offset += padding
+    sections = (
+        bytes(64)
+        + struct.pack(
+            "<IIQQQQIIQQ", 0, 3, 0, 0, 64, len(strings), 0, 0, 1, 0
+        )
+        + struct.pack(
+            "<IIQQQQIIQQ",
+            0,
+            0x6FFFFFFE,
+            0,
+            0,
+            64 + len(strings),
+            len(needed),
+            1,
+            1,
+            8,
+            0,
+        )
+    )
+    header = b"\x7fELF\x02\x01\x01" + bytes(9) + struct.pack(
+        "<HHIQQQIHHHHHH", 3, 62, 1, 0, 0, section_offset, 0, 64, 0, 0, 64, 3, 0
+    )
+    return header + strings + needed + bytes(padding) + sections
+
+
+def test_the_glibc_requirement_is_read_from_the_library():
+    """Read the newest glibc version the library needs, and nothing else.
+
+    The versions of other libraries do not count, and a file that is not
+    a 64-bit ELF file, or has no version needs, needs nothing.
+    """
+    requirement = _artifact._glibc_requirement
+
+    assert requirement(_elf_needing("GLIBC_2.2.5", "GLIBC_2.34")) == (2, 34)
+    assert requirement(_elf_needing("GLIBC_2.4", "GLIBC_2.17")) == (2, 17)
+    assert requirement(_elf_needing("GLIBCXX_3.4.30")) is None
+    assert (
+        requirement(_elf_needing("GLIBC_2.38", library=b"libother.so")) is None
+    )
+    assert requirement(RUNTIME_BYTES) is None
+    assert requirement(_elf_needing()) is None
+
+
+@pytest.mark.parametrize(
+    ("host", "message"),
+    [
+        (
+            "glibc 2.31",
+            "needs glibc 2.34 or newer, and this host has glibc 2.31",
+        ),
+        (None, "needs glibc 2.34 or newer, and this host has no glibc"),
+    ],
+    ids=["older-glibc", "no-glibc"],
+)
+def test_a_library_that_needs_a_newer_glibc_is_refused_before_it_loads(
+    host, message, tmp_path, monkeypatch
+):
+    """Name the glibc the library needs instead of a loader error."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "RUNTIME_BYTES", _elf_needing("GLIBC_2.34")
+    )
+    root = _write(tmp_path / "artifact", _manifest())
+    monkeypatch.setattr(_artifact, "_host_glibc", lambda: host)
+    monkeypatch.setattr(
+        ctypes, "PyDLL", lambda path: pytest.fail("the library was loaded")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "^the runtime library of the artifact at .*, libSwageRuntime.so, "
+            f"{message}; write the artifact with a runtime library built "
+            "for the glibc of this host"
+        ),
+    ):
+        _load(monkeypatch, root)
+
+
+def test_a_library_whose_glibc_the_host_has_loads(tmp_path, monkeypatch):
+    """Load a library whose glibc requirement the host meets."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "RUNTIME_BYTES", _elf_needing("GLIBC_2.34")
+    )
+    root = _write(tmp_path / "artifact", _manifest())
+
+    for host in ("glibc 2.34", "glibc 2.39"):
+        monkeypatch.setattr(_artifact, "_host_glibc", lambda: host)
+        monkeypatch.setattr(_artifact, "_selected", (None, None))
+        assert _load(monkeypatch, root).directory == root
 
 
 def test_a_read_only_artifact_loads(artifact_dir, monkeypatch):

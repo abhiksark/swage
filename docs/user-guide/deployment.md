@@ -320,6 +320,16 @@ runs only on hosts of the machine its library was built for. The manifest
 records that machine, and the loader refuses the artifact on another one.
 Only an x86-64 library has been built and run.
 
+The library also needs a glibc at least as new as the symbol versions it
+was linked against. It calls `dlopen` and `dlsym`, which glibc 2.34 moved
+into the C library, so a library built on glibc 2.34 or newer needs glibc
+2.34 on the serving host; the one built for the tests, on Ubuntu 22.04,
+does. The loader reads the newest `GLIBC_` version the library needs from
+its ELF version needs and, on a host with an older glibc or none, refuses
+the artifact before it loads anything, with an error that names both
+versions. A serving host with an older glibc needs a library built on, or
+for, that glibc, passed to the command with `--runtime-library`.
+
 For a serving host of another machine, such as an AArch64 host with an
 `sm_87` device, two steps are needed, and neither has been tried:
 
