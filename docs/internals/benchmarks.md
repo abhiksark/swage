@@ -4,26 +4,28 @@
 
 !!! warning "Recorded evidence"
 
-    This page reports recorded measurements from three campaigns, each on
+    This page reports recorded measurements from four campaigns, each on
     one machine. None is a continuously enforced gate, and none is a public
     performance contract.
 
 The page reads in the order the records were made. Each section says which
-record it reports, and the last record is the only one that describes the
-kernels the compiler generates now.
+record it reports. Only the last two records time kernels that passed
+through the LLVM pass pipeline.
 
 | Record | Date | GPU | What it measures |
 |---|---|---|---|
 | [`perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json) | 2026-08-27 | RTX 5090 (`sm_120`) | One frozen layout per row against `torch.segment_reduce` and a Triton kernel that reads one block per segment; dispatch cost; vector add |
 | [`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json) | 2026-09-02 | RTX A6000 (`sm_86`) | The predeclared persistent gate against static mixed execution |
 | [`segmented-sum-a6000-sm86-453c56e`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md) | 2026-10-02 | RTX A6000 (`sm_86`) | A new offsets layout on every call, and one frozen layout per row against looped and planned Triton, five processes each |
+| [`segment-reduce-a6000-sm86-c6099ec`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-c6099ec.md) | 2026-10-03 | RTX A6000 (`sm_86`) | The public `swage.segment_reduce` call with a new offsets layout on every call, on rank-one and `[N, D]` values, against torch and looped Triton, five processes each |
 
 The first two records were made before kernels passed through the LLVM pass
 pipeline and with earlier revisions of the harnesses. The third was made at
-revision `453c56e` with the harnesses that
-[Harness methods](#harness-methods) describes. One more record, the first
-Swage and Triton comparison on the A6000 at revision `80f222d`, is reported
-on the [A6000 comparison study](a6000-comparison.md) beside the third.
+revision `453c56e` and the fourth at revision `c6099ec`, with the harnesses
+that [Harness methods](#harness-methods) describes. One more record, the
+first Swage and Triton comparison on the A6000 at revision `80f222d`, is
+reported on the [A6000 comparison study](a6000-comparison.md) beside the
+third.
 
 ## The RTX 5090 snapshot
 
@@ -44,7 +46,7 @@ Every timing describes the PTX that the source revision of its record
 generated. The revisions of this snapshot and of the persistent gate emitted
 PTX without the LLVM pass pipeline that kernels go through now (see
 [Compiler Pipeline](compiler-pipeline.md)), so their numbers do not measure
-currently generated code. The `453c56e` record does.
+currently generated code. The `453c56e` and `c6099ec` records do.
 
 ## Timing methods
 
@@ -149,7 +151,7 @@ qualification.
 
 ## Fresh offsets and the frozen comparison at `453c56e`
 
-The newest record was made on 2026-10-02 on one NVIDIA RTX A6000 (`sm_86`)
+This record was made on 2026-10-02 on one NVIDIA RTX A6000 (`sm_86`)
 at revision `453c56e`, from a clean tree, with five independent processes
 per run. It holds two measurements that the older records lack: a call that
 sees a new offsets layout every time, and a frozen-layout comparison with
@@ -171,7 +173,8 @@ out on a layout that no earlier call used, at 2,048, 8,192, and 32,768
 segments. The Swage candidate is the private preparation with schedule
 selection disabled, followed by the mixed launch. The public
 `swage.segment_reduce` call was not a candidate when these records were
-taken.
+taken; the [`c6099ec` record](#public-segment_reduce-calls-at-c6099ec)
+times it.
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
@@ -238,6 +241,47 @@ The record does not support a statement about another GPU, another seed, or
 a quiet machine, and its Triton columns are optimistic for Triton because
 each is chosen after the run. The summary page lists every limit.
 
+## Public `segment_reduce` calls at `c6099ec`
+
+The newest record was made on 2026-10-03 on one NVIDIA RTX A6000 (`sm_86`)
+at revision `c6099ec`, from a clean tree, with five independent processes
+per run. It times the public `swage.segment_reduce` call, on int32 and on
+int64 offsets, with a new offsets layout on every call, against
+`torch.segment_reduce` and looped Triton kernels. One run uses rank-one
+values at 8,192 segments. Four runs use `[N, D]` values: D of 3 and 64 at
+2,048, 8,192, and 32,768 segments, and D of 768 at 2,048 segments. Its
+[summary page](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-c6099ec.md)
+holds every table, the machine conditions, the commands, and notes on the
+compiled column kernel. Every number in this section and in
+[Where Swage loses](#where-swage-loses) for this record is generated from
+the committed summaries by `benchmarks/public_call_tables.py`.
+
+The record is the baseline for a planned change to the schedule of rank-two
+values. That change is not implemented at this revision. Every `[N, D]` row
+runs the column kernel of the call at `c6099ec`: one block of 128 threads
+per segment, in which each thread reduces whole columns and walks the rows
+of the segment one at a time. The rank-one run also times the private
+`swage_mixed` and `swage_cta_call` candidates, and the rank-one kernels its
+processes loaded have the SHA-256 digests of those of the `453c56e` record.
+
+The machine was not quiet. Builds and tests of another branch ran on the
+CPU during the campaign, GPU work was serialized with them by a file lock,
+and the CPU frequency governor was `powersave`. The summary page states
+these conditions from the records.
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-public-statement.inc"
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-looped-statement.inc"
+
+The range of each ratio over the rows of each run:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-ranges.inc"
+
+The record does not support a statement about the planned schedule, another
+GPU, another seed, another kind or type, or a quiet machine, and its Triton
+columns are optimistic for Triton because each is chosen after the run. The
+summary page lists every limit.
+
 ## Where Swage loses
 
 The losses are listed by record, in the order the records were made.
@@ -264,13 +308,19 @@ On the RTX A6000 at `453c56e`, from the record above:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-losses.inc"
 
+On the RTX A6000 at `c6099ec`, from the record above, with a new offsets
+layout on every call:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-losses.inc"
+
 ## Harness methods
 
 The scripts under `benchmarks/` are research harnesses, not CI gates. This
 section states what they measure and what they write into a record. It
-describes the harnesses as they are now. The `453c56e` record was written by
-these harnesses. The older records come from earlier revisions, so they
-carry one of the fields below only if the harness wrote it at the time.
+describes the harnesses as they are now. The `453c56e` and `c6099ec`
+records were written by these harnesses. The older records come from
+earlier revisions, so they carry one of the fields below only if the
+harness wrote it at the time.
 
 ### What each harness measures
 
@@ -291,11 +341,11 @@ The fresh-offsets harness and the comparison harness time these candidates:
 - In fresh offsets only, `swage_public_call`: one public
   `swage.segment_reduce` call into a caller's buffer. It enqueues the mixed
   policy alone, with automatic schedule selection, which `swage_mixed`
-  disables, so the two can run different kernels on one layout. No
-  committed record holds this candidate.
+  disables, so the two can run different kernels on one layout. The
+  `c6099ec` record holds this candidate.
 - In fresh offsets only, `swage_public_call_int64`: the same call on the
   int64 form of the same offsets, which the call checks and narrows on the
-  host. No committed record holds this candidate.
+  host. The `c6099ec` record holds this candidate.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.

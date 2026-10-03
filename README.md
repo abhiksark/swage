@@ -49,11 +49,11 @@ release, except for the items marked as completed after it.
   f32 values of rank one or two for the softmax. Nothing else is admitted: no other
   dtype, kind, or rank, and no gradient. A call validates and classifies its offsets on the host
   every time, so with offsets that change on every call expect it to be
-  slower than `torch.segment_reduce`. No committed record times the call:
-  the one record of that regime times a private preparation, at an older
-  revision, that prepares more than the call does.
-  [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
-  and the cost.
+  slower than `torch.segment_reduce`. The committed record at `c6099ec`
+  times the call in that regime on one RTX A6000;
+  [Benchmarks](docs/internals/benchmarks.md#public-segment_reduce-calls-at-c6099ec)
+  reports it. [Segmented Calls](docs/user-guide/segmented-calls.md) states
+  the contract and the cost.
 - Not part of `v0.5.1`, completed after that release: ahead-of-time
   artifacts for the two segmented calls. On a host with the native build,
   `python -m swage.compile --target <processor> --output <directory>`

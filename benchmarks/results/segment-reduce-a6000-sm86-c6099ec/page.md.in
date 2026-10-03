@@ -1,0 +1,248 @@
+<!-- benchmarks/results/segment-reduce-a6000-sm86-c6099ec/page.md.in -->
+
+# Public `swage.segment_reduce` on RTX A6000 at `c6099ec`
+
+This record times the public `swage.segment_reduce` call on one {{gpu}}
+(`{{target}}`) at revision `{{revision}}`, with a new offsets layout on every
+call, beside `torch.segment_reduce` and looped Triton kernels. It holds
+five runs, each repeated in five independent processes: one run of
+rank-one values and four runs of `[N, D]` values.
+
+It is the baseline for a planned change to the schedule of rank-two values.
+That change is not part of this revision. Every `[N, D]` row here runs the
+column kernel that the call launches at `c6099ec`, which
+[The column kernel at this revision](#the-column-kernel-at-this-revision)
+describes. A record of the same harness after the change is meant to be
+compared with this one.
+
+These are research measurements, not a performance gate. The machine was not
+idle while they were taken; [Machine and conditions](#machine-and-conditions)
+says what ran.
+
+## What the record holds
+
+The directory
+[`segment-reduce-a6000-sm86-c6099ec/`](segment-reduce-a6000-sm86-c6099ec/)
+holds five runs:
+
+{{runs_table}}
+
+Each run directory holds:
+
+- `summary.json`, written by `benchmarks/benchmark_processes.py`: for every
+  row, timing method, and candidate, the median of each process and the
+  median, minimum, and maximum of those five medians. It is committed as the
+  driver wrote it.
+- `process-1.json.xz` to `process-5.json.xz`: the record of each process
+  with every raw sample, compressed with `xz -9`. Each decompressed file has
+  the SHA-256 that `summary.json` lists for it under `process_records`.
+
+The record directory also holds:
+
+- [`conditions.txt`](segment-reduce-a6000-sm86-c6099ec/conditions.txt): the
+  machine state sampled at the start and at the end of the campaign.
+- [`segmented_sum_r2.ptx`](segment-reduce-a6000-sm86-c6099ec/segmented_sum_r2.ptx):
+  the PTX of the rank-two column kernel that the processes loaded.
+- [`page.md.in`](segment-reduce-a6000-sm86-c6099ec/page.md.in): the template
+  of this page.
+
+To read a process record, or to summarize a run against other reference
+candidates with `benchmark_processes.py --summarize`, decompress it first:
+
+```sh
+cd benchmarks/results/segment-reduce-a6000-sm86-c6099ec/public-r2-2048
+xz -dk process-*.json.xz
+```
+
+`xz -dk` keeps the compressed files. Do not commit the decompressed ones.
+
+## What was measured
+
+`benchmarks/benchmark_fresh_offsets.py` gives every iteration an offsets
+layout that no earlier iteration used. The timed region of every candidate
+runs from offsets in to result out. The runs differ in rank, size, widths,
+and distributions, as their commands above state. Every run shares these
+facts, quoted from the records:
+
+{{facts_table}}
+
+The candidates that the runs timed, as the records describe them:
+
+{{candidates_table}}
+
+What the timed region of each covers:
+
+{{timed_region_table}}
+
+The looped Triton candidates are swept: `triton_looped` over 15 block and
+warp configurations for rank-one values, and `triton_rows_looped` over 5
+configurations of rows per step and warps for `[N, D]` values. The rank-one
+run also timed the private Swage candidates `swage_mixed` and
+`swage_cta_call` and the planned Triton candidates. The tables below list
+the private Swage candidates; the planned Triton candidates are in the
+summaries and are not tabulated here.
+
+## Machine and conditions
+
+{{machine_table}}
+
+The machine was a desktop workstation in use, not a quiet benchmark host.
+Other development work, builds and tests of another branch, ran on the CPU
+during the campaign. GPU work was serialized by a file lock,
+`/tmp/swage-gpu.lock`: every command of the campaign took it with `flock`,
+and so did the GPU work of that other development. The one-minute load average was {{load_start}}
+at the start of the campaign and {{load_end}} at the end.
+
+The process records hold these facts:
+
+{{conditions_list}}
+
+`conditions.txt` holds, for the start and for the end of the campaign, the
+time, the load average, and the GPU utilization, temperature, and memory in
+use, and for the start the revision and the CPU frequency governor:
+
+```text
+{{conditions_file}}
+```
+
+## How the tables are built
+
+- Every process contributes the median of its own samples. A cell in
+  microseconds is the median of the five per-process medians.
+- A ratio is formed inside each process from its two medians. A ratio cell
+  gives the median of the five ratios and, in brackets, their minimum and
+  maximum. Ratios to torch are the ones the summaries hold. The other
+  ratios are formed by the same rule from the per-process medians in the
+  summaries.
+- A range in a statement or in the table of ranges runs from the lowest to
+  the highest median ratio over the rows of a run.
+- Microseconds are rounded to one decimal and ratios to two.
+- A row is named as the summaries name it: the distribution, then `D=`
+  and the width for `[N, D]` values.
+- The best looped Triton configuration is the one with the lowest median
+  in that row. It is chosen after the run from a sweep, separately for
+  every row, so it is an optimistic bound for a Triton user who must pick
+  one configuration in advance.
+
+## Results
+
+{{public_statement}}
+
+{{looped_statement}}
+
+The range of each ratio over the rows of each run:
+
+{{ranges_table}}
+
+## Tables by run
+
+{{run_tables}}
+
+## The column kernel at this revision
+
+Every `[N, D]` row above runs one kernel, `segmented_sum_r2`, for both the
+int32 and the int64 offsets. The processes of the four rank-two runs loaded
+one PTX module of it, which their summaries list under `code.loaded_ptx`:
+
+{{ptx_table}}
+
+`segmented_sum_r2.ptx` in the record directory is that module. It was
+written again from the native build at this revision with
+`python -m swage.compile --target sm_86`, which names it
+`segmented_sum_r2.column.ptx`, and `public_call_tables.py --check` verifies
+that its SHA-256 and size are the ones the summaries list. It was assembled
+and disassembled with the CUDA 12.3 toolkit installed on the measuring
+machine (`ptxas` release 12.3, V12.3.52):
+
+```sh
+cd benchmarks/results/segment-reduce-a6000-sm86-c6099ec
+/usr/local/cuda/bin/ptxas -v -arch=sm_86 -o segmented_sum_r2.cubin segmented_sum_r2.ptx
+/usr/local/cuda/bin/cuobjdump -sass segmented_sum_r2.cubin
+```
+
+The first command writes `segmented_sum_r2.cubin` beside the PTX. Do not
+commit it. `ptxas -v` reported:
+
+```text
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'segmented_sum_r2' for 'sm_86'
+ptxas info    : Function properties for segmented_sum_r2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, 388 bytes cmem[0]
+```
+
+What the PTX and the SASS show:
+
+- Threads per segment. The kernel requires blocks of 128 threads
+  (`.reqntid 128, 1, 1`), and the call launches one block per segment, a
+  grid of the segment count (`_launch_columns` in
+  `python/swage/_segmented_qualification.py`, which `swage.segment_reduce`
+  calls for `[N, D]` values with D other than 1). Each thread reads the two
+  offsets of its segment and clamps them to the row count. Thread `t`
+  reduces column `t`, then column `t + 128`, and so on while the column is
+  below D. A thread with `t` at or above D exits before it reads a value.
+  With D of 3, 3 threads of each block reduce a column; with D of 64, 64
+  threads; with D of 768, all 128 threads, 6 columns each.
+- Loop structure. A thread runs two nested loops. The outer loop steps over
+  its columns by 128 and writes each result with one `STG.E`. The inner
+  loop walks the rows of the segment for one column, one row per
+  iteration, and was not unrolled. In the SASS that the commands above
+  print, it runs from offset `0x02d0` to `0x0370`: eleven instructions.
+  Two moves form the address, one `LDG.E` loads a 32-bit value, four
+  instructions advance the 64-bit row index by D and the address by D
+  times 4 bytes, two compare the index with the end of the segment, one
+  `FADD` adds the value to the accumulator register, and one branch closes
+  the loop. The `FADD` that consumes the load comes before the branch
+  back, so a thread issues the next load of the loop after that `FADD`.
+- Registers and memory. 24 registers per thread, no stack frame, and no
+  spills. 388 bytes of constant bank 0, whose last 36 bytes, from offset
+  0x160, are the six kernel parameters. No shared memory: the PTX declares
+  no `.shared` variable, and the SASS has no shared-memory load or store,
+  no barrier, and no shuffle.
+
+This SASS is the output of `ptxas` 12.3, not the code the device ran. The
+processes loaded the PTX through the CUDA driver, which compiles it for the
+device itself (the machine table gives the driver and its API version).
+That SASS was not dumped, and it can differ from the output above.
+
+## What the record does not support
+
+- A statement about the planned rank-two schedule. It is not part of this
+  revision, and nothing here measures it.
+- A statement about another GPU or architecture. One {{gpu}} (`{{target}}`)
+  ran everything.
+- A statement about other seeds. Every row uses seed {{seed}}; the layouts
+  of a row differ by iteration.
+- A statement about other kinds, types, or rank-one sizes. Every row is a
+  float32 sum, and the rank-one run has one size.
+- A statement about calls in flight. Every sample is one call from an idle
+  device.
+- A statement about a quiet machine. Other development work ran on the CPU,
+  and the CPU frequency governor was `powersave` throughout.
+- A ranking of Triton configurations that a user could pick in advance.
+  Every best configuration is chosen after the run.
+- A gate. No threshold was declared before the run.
+
+## Reproduce
+
+With the native build, CUDA-enabled PyTorch, and Triton available, from a
+clean worktree, and with `OUT` set to a new directory outside the checkout:
+
+```sh
+export PYTHONPATH="$PWD/python:$PWD/build/python_packages"
+export SWAGE_CACHE_DIR="$OUT/cache"
+{{reproduce_commands}}
+```
+
+The campaign ran each command under `flock /tmp/swage-gpu.lock`, with the
+compiled-kernel cache in a new directory. A rerun is a new measurement. Do
+not write it into `benchmarks/results/`.
+
+To regenerate this page and the documentation fragments from the committed
+summaries, and to check them, the digests of the compressed process
+records, and the committed PTX:
+
+```sh
+python benchmarks/public_call_tables.py
+python benchmarks/public_call_tables.py --check
+```

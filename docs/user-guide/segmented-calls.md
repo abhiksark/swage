@@ -349,8 +349,10 @@ mixed launch into a caller's output. `segment_reduce` validates and
 classifies in the same way, prepares only the schedule it launches, selects
 the schedule automatically, and allocates its result when no `out` is
 passed. The harness has since gained a candidate that times the call
-itself, and no committed record holds it. Read the figures as a measurement
-of that private preparation, not of the call.
+itself, and the `c6099ec` record on
+[Benchmarks](../internals/benchmarks.md#public-segment_reduce-calls-at-c6099ec)
+holds it. Read the figures above as a measurement of that private
+preparation, not of the call.
 [Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
 reports the record and its limits: one GPU, one seed per distribution, and a
 machine that was not quiet.
