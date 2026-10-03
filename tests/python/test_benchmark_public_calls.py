@@ -865,3 +865,59 @@ def test_driver_labels_keep_default_rows_and_name_the_new_ones(processes):
     }
     assert set(series["power-law max"]) == {"end_to_end"}
     assert set(series["many-tiny D=3"]) == {"pipelined"}
+
+
+def test_mean_tolerance_is_the_sum_bound_over_the_length(comparison):
+    """Divide the bound of the sum by n, then add the division's rounding."""
+    torch = pytest.importorskip("torch")
+    offsets = _offsets(torch, [40])
+    values = comparison._values(torch, "normal", 40, 7).double()
+
+    _, sum_tolerance = comparison._reduction_reference(
+        torch, values, offsets, "sum", quantum=None, dtype="float32"
+    )
+    reference, mean_tolerance = comparison._reduction_reference(
+        torch, values, offsets, "mean", quantum=None, dtype="float32"
+    )
+
+    assert float(mean_tolerance[0]) == pytest.approx(
+        float(sum_tolerance[0]) / 40 + 2 * _U32 * abs(float(reference[0]))
+    )
+
+
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_an_extreme_is_exact_whatever_the_values(comparison, kind):
+    """Give a maximum and a minimum no tolerance, also on random values."""
+    torch = pytest.importorskip("torch")
+    offsets = _offsets(torch, [40, 0, 7])
+    values = comparison._values(torch, "normal", 47, 7).double()
+
+    _, tolerance = comparison._reduction_reference(
+        torch, values, offsets, kind, quantum=None, dtype="float32"
+    )
+
+    assert tolerance.tolist() == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("features", "columns"),
+    [(1, (4, 1)), (2, (4, 1)), (5, (8, 1)), (64, (64, 1)), (65, (64, 2)),
+     (768, (64, 12))],
+)
+def test_column_blocks_are_floored_and_capped(comparison, features, columns):
+    """Keep the column block between 4 and 64 lanes."""
+    assert comparison._rows_columns(features) == columns
+
+
+def test_a_pipelined_row_records_no_preparation_or_partition(fresh_offsets):
+    """Time no part of a step on its own when the steps overlap."""
+    torch = pytest.importorskip("torch")
+
+    row = _run(
+        fresh_offsets, torch, "bimodal", only=["swage_mixed"],
+        pipeline_depth=2,
+    )
+
+    assert row["candidates"] == ["swage_mixed"]
+    assert row["swage_mixed_prepare_samples_us"] == []
+    assert row["triton_planned_partition_samples_us"] == {}
