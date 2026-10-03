@@ -69,8 +69,10 @@ Emission and launch raise a `RuntimeError` with the same text. Rebuild the
 bindings from the sources of that `swage`, or install the `swage-compiler`
 and `swage-compiler-native` wheels that were built together.
 [Runtime and Environment](../reference/runtime-environment.md#frontend-and-bindings)
-states the rule, and also explains the warning that a checkout prints when
-its native sources differ from the revision the bindings were built from.
+states the rule. In a checkout, bindings whose native sources differ from
+the checkout are refused in the same way, and bindings whose `swage`
+sources alone differ are used with a warning; rebuild the bindings to
+remove either.
 
 ## PyTorch or CUDA is unavailable
 

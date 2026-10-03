@@ -382,9 +382,7 @@ def test_bindings_built_for_this_swage_are_accepted_once(monkeypatch):
     _importable(monkeypatch, native)
     checks = []
     monkeypatch.setattr(
-        _runtime,
-        "_stale_native_sources",
-        lambda revision: checks.append(revision),
+        _runtime, "_pair_problem", lambda bindings: checks.append(bindings)
     )
 
     with warnings.catch_warnings():
@@ -392,7 +390,7 @@ def test_bindings_built_for_this_swage_are_accepted_once(monkeypatch):
         assert _runtime._native_bindings() is native
         assert _runtime._native_bindings() is native
 
-    assert checks == ["unknown"]
+    assert checks == [native]
 
 
 @pytest.mark.parametrize(
@@ -521,31 +519,62 @@ def _checkout(root, monkeypatch):
     return package, native_source, _git(root, "rev-parse", "HEAD")
 
 
-def _problem(monkeypatch, built_from):
+def _problem(monkeypatch, built_from, frontend_digest=None):
     """Compare bindings built from `built_from` with the checkout as it is."""
     monkeypatch.setattr(_runtime, "_identity_cache", None)
-    return _runtime._stale_native_sources(built_from)
+    return _runtime._pair_problem(
+        _bindings(
+            __source_revision__=built_from,
+            __frontend_digest__=frontend_digest,
+        )
+    )
+
+
+def _refused(problem):
+    """Return the description of a problem that refuses the bindings."""
+    assert problem is not None and problem[0] is True, problem
+    return problem[1]
+
+
+def _warned(problem):
+    """Return the description of a problem that only warns."""
+    assert problem is not None and problem[0] is False, problem
+    return problem[1]
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
-def test_another_revision_matters_only_when_native_sources_differ(
+def test_a_checkout_warns_for_a_frontend_move_and_refuses_a_native_one(
     tmp_path, monkeypatch
 ):
-    """Accept a frontend-only change, and name a native one."""
+    """Apply the rule of a development checkout to another revision.
+
+    A change outside the frontend and the native sources is no problem. A
+    frontend that moved while the native sources did not is used with a
+    warning, committed or not. Native sources that moved refuse the
+    bindings, committed or not.
+    """
     package, native_source, built_from = _checkout(tmp_path, monkeypatch)
 
     assert _problem(monkeypatch, built_from) is None
+    (tmp_path / "NOTES.md").write_text("notes\n")
+    _git(tmp_path, "add", "NOTES.md")
+    _git(tmp_path, "commit", "--quiet", "--message", "notes")
+    assert _problem(monkeypatch, built_from) is None
+
     (package / "__init__.py").write_text("VERSION = 2\n")
-    assert _problem(monkeypatch, built_from) is None
+    uncommitted = _warned(_problem(monkeypatch, built_from))
     _git(tmp_path, "commit", "--quiet", "--all", "--message", "frontend")
-    assert _git(tmp_path, "rev-parse", "HEAD") != built_from
-    assert _problem(monkeypatch, built_from) is None
+    committed = _warned(_problem(monkeypatch, built_from))
+    for problem in (uncommitted, committed):
+        assert f"built from revision {built_from}" in problem
+        assert "frontend" in problem
+        assert "native sources" in problem
+        assert "rebuild the bindings" in problem
 
     native_source.write_text("// lowering 2\n")
-    uncommitted = _problem(monkeypatch, built_from)
+    uncommitted = _refused(_problem(monkeypatch, built_from))
     _git(tmp_path, "commit", "--quiet", "--all", "--message", "native")
-    committed = _problem(monkeypatch, built_from)
-
+    committed = _refused(_problem(monkeypatch, built_from))
     for problem in (uncommitted, committed):
         assert f"built from revision {built_from}" in problem
         assert "native sources" in problem
@@ -554,23 +583,47 @@ def test_another_revision_matters_only_when_native_sources_differ(
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
-def test_revision_that_cannot_be_compared_is_reported_or_skipped(
+def test_a_revision_the_checkout_lacks_is_refused(tmp_path, monkeypatch):
+    """Refuse bindings whose revision cannot be compared with the checkout."""
+    _checkout(tmp_path, monkeypatch)
+
+    problem = _refused(_problem(monkeypatch, "f" * 40))
+
+    assert "does not have" in problem
+    assert "f" * 40 in problem
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_a_build_of_a_modified_tree_compares_the_frontend_digest(
     tmp_path, monkeypatch
 ):
-    """Name a revision the checkout lacks; skip one that names no sources."""
-    _, native_source, built_from = _checkout(tmp_path, monkeypatch)
-    native_source.write_text("// lowering 2\n")
+    """Compare only the frontend when the bindings name no exact revision.
 
-    missing = _problem(monkeypatch, "f" * 40)
+    A build of a modified tree, or one that records no revision, cannot be
+    diffed with the checkout. The frontend digest it recorded can be
+    compared: a moved frontend warns. Without the digest nothing is
+    compared.
+    """
+    package, _, built_from = _checkout(tmp_path, monkeypatch)
+    digest = _runtime._frontend_build_digest(package)
 
-    assert "does not have" in missing
-    assert "f" * 40 in missing
-    assert _problem(monkeypatch, "unknown") is None
-    assert _problem(monkeypatch, f"{built_from}-dirty") is None
+    for revision in (f"{built_from}-dirty", "unknown"):
+        assert _problem(monkeypatch, revision) is None
+        assert _problem(monkeypatch, revision, digest) is None
+        (package / "__init__.py").write_text("VERSION = 3\n")
+        problem = _warned(_problem(monkeypatch, revision, digest))
+        assert revision in problem
+        assert "frontend" in problem
+        (package / "__init__.py").write_text("VERSION = 1\n")
 
 
-def test_installed_swage_compares_no_revision(tmp_path, monkeypatch):
-    """Run no comparison for a package that is not in a Swage checkout."""
+def test_installed_swage_compares_the_frontend_digest(tmp_path, monkeypatch):
+    """Compare an installed frontend with the one the bindings were built by.
+
+    Outside a checkout no git runs and no revision is compared: the frontend
+    digest the bindings recorded is the record both sides share. Another
+    digest refuses the bindings; bindings that record none are accepted.
+    """
     package = tmp_path / "site-packages" / "swage"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("VERSION = 1\n")
@@ -582,25 +635,87 @@ def test_installed_swage_compares_no_revision(tmp_path, monkeypatch):
         "run",
         lambda *_args, **_options: pytest.fail("git must not run"),
     )
+    digest = _runtime._frontend_build_digest(package)
 
-    assert _runtime._stale_native_sources("a" * 40) is None
+    assert _problem(monkeypatch, "a" * 40) is None
+    assert _problem(monkeypatch, "a" * 40, digest) is None
+    problem = _refused(_problem(monkeypatch, "a" * 40, "0" * 64))
+    assert str(package) in problem
+    assert "a" * 40 in problem
+    assert "built together" in problem
 
 
-def test_stale_native_sources_warn_once_and_do_not_refuse(monkeypatch):
-    """Warn about bindings behind the checkout, then use them."""
+def test_a_refused_pair_raises_and_a_warned_one_is_used(monkeypatch):
+    """Raise for a refused pair at every use, and warn once otherwise."""
     native = _bindings(__source_revision__="a" * 40)
     _importable(monkeypatch, native)
     monkeypatch.setattr(
         _runtime,
-        "_stale_native_sources",
-        lambda revision: f"built from revision {revision}; rebuild",
+        "_pair_problem",
+        lambda bindings: (True, "native sources differ; rebuild"),
     )
+    for _ in range(2):
+        with pytest.raises(_runtime._BindingsMismatch, match="differ"):
+            _runtime._native_bindings()
 
-    with pytest.warns(RuntimeWarning, match="built from revision a+; rebuild"):
+    monkeypatch.setattr(
+        _runtime,
+        "_pair_problem",
+        lambda bindings: (False, f"built from {bindings.__source_revision__}"),
+    )
+    with pytest.warns(RuntimeWarning, match="built from a+"):
         assert _runtime._native_bindings() is native
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert _runtime._native_bindings() is native
+
+
+@pytest.mark.skipif(shutil.which("cmake") is None, reason="cmake unavailable")
+def test_the_build_records_the_frontend_digest_swage_computes(tmp_path):
+    """Compute the frontend digest in the build and in `swage` alike.
+
+    The build script hashes `python/swage` of the checkout it builds from,
+    and `swage` hashes the package it runs from. Both skip names that start
+    with a dot and files that are not Python sources, and both see a
+    changed source.
+    """
+    package = tmp_path / "python" / "swage"
+    (package / "nested").mkdir(parents=True)
+    (package / ".hidden").mkdir()
+    (package / "__init__.py").write_text('__version__ = "9.9.9"\n')
+    (package / "nested" / "module.py").write_text("VALUE = 1\n")
+    (package / ".hidden" / "skipped.py").write_text("SKIPPED = 1\n")
+    (package / "notes.txt").write_text("not a source\n")
+    header = tmp_path / "BuildIdentity.h"
+    script = pathlib.Path(__file__).parents[2] / "cmake"
+    script = script / "SwageBuildIdentity.cmake"
+
+    def recorded():
+        subprocess.run(
+            [
+                "cmake",
+                f"-DSWAGE_SOURCE_DIR={tmp_path}",
+                f"-DSWAGE_IDENTITY_HEADER={header}",
+                "-P",
+                str(script),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        (line,) = [
+            line
+            for line in header.read_text().splitlines()
+            if line.startswith("#define SWAGE_BUILD_FRONTEND ")
+        ]
+        return line.split('"')[1]
+
+    first = recorded()
+    assert first == _runtime._frontend_build_digest(package)
+    (package / ".hidden" / "skipped.py").write_text("SKIPPED = 2\n")
+    assert recorded() == first
+    (package / "nested" / "module.py").write_text("VALUE = 2\n")
+    assert recorded() != first
+    assert recorded() == _runtime._frontend_build_digest(package)
 
 
 def test_import_of_swage_does_not_load_or_check_the_bindings():
@@ -625,3 +740,43 @@ def test_import_of_swage_does_not_load_or_check_the_bindings():
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "recorded", [None, "0" * 64], ids=["no-digest", "another-frontend"]
+)
+def test_the_compile_command_refuses_bindings_of_another_frontend(
+    tmp_path, monkeypatch, recorded
+):
+    """Write no artifact whose manifest names a revision that is not its own.
+
+    The manifest records the revision of the bindings, and the program texts
+    come from the frontend. Bindings built beside another frontend, or
+    bindings that cannot say which frontend they were built beside, are
+    refused before anything is compiled or written.
+    """
+    from swage import compile
+
+    monkeypatch.delenv("SWAGE_ARTIFACT_DIR", raising=False)
+    output = tmp_path / "artifact"
+    native = _bindings(
+        __source_revision__="a" * 40, __frontend_digest__=recorded
+    )
+    monkeypatch.setattr(_runtime, "_native_bindings", lambda: native)
+
+    with pytest.raises(RuntimeError, match="did not produce the kernels"):
+        compile._write_artifact(output, "sm_86", ["sum"], None)
+    assert list(tmp_path.iterdir()) == []
+
+    # The frontend the bindings were built beside passes the check and
+    # reaches the next requirement, the runtime library.
+    native.__frontend_digest__ = _runtime._frontend_build_digest(
+        _runtime._package_dir()
+    )
+
+    def runtime_library():
+        raise RuntimeError("the runtime library is reached")
+
+    monkeypatch.setattr(compile, "_packaged_runtime", runtime_library)
+    with pytest.raises(RuntimeError, match="runtime library is reached"):
+        compile._write_artifact(output, "sm_86", ["sum"], None)

@@ -776,8 +776,10 @@ Seven fields identify the code and the native build:
 
 The `swage` package and the `mlir_swage` bindings are built from one source
 tree and must match. The bindings record the `swage` version they were
-built for, and `swage` checks it once per process, when the bindings are
-first imported or first used:
+built for, the source revision of the build, and a digest of the `swage`
+sources beside the build: the SHA-256 of one line per Python source of
+`python/swage` that gives its SHA-256 and its name. `swage` checks them
+once per process, when the bindings are first imported or first used:
 
 - Bindings built for another `swage` version are refused with a
   `RuntimeError` that names both versions and both locations. Emission and
@@ -785,16 +787,25 @@ first imported or first used:
   cause.
 - Bindings that record no version are refused in the same way. They come
   from a build that predates this check.
-- The source revision is not compared between two installed packages,
-  because the `swage-compiler` wheel records no revision. Two different
-  revisions that carry the same version number are therefore accepted as a
-  pair. The report shows `revision` and `native_revision` side by side.
-- In a git checkout a different revision is expected: the frontend is
-  edited and committed without a native rebuild. There `swage` compares the
-  native sources of the checkout with the revision the bindings were built
-  from, and warns once with a `RuntimeWarning` when they differ or when the
-  checkout does not have that revision. It does not refuse. Bindings built
-  from a modified tree, whose revision ends in `-dirty`, are not compared.
+- Outside a git checkout, as for two installed packages, `swage` has no
+  revision of its own, because the `swage-compiler` wheel records none. It
+  compares its own sources with the digest the bindings recorded instead,
+  and refuses bindings that were built beside other `swage` sources. The
+  report shows `revision` and `native_revision` side by side.
+- In a git checkout, with bindings built from a commit, `swage` compares
+  the checkout with that commit. Native sources that differ from it refuse
+  the bindings, and so does a commit the checkout does not have. A
+  frontend that differs while the native sources do not is expected, since
+  the frontend is edited and committed without a native rebuild: `swage`
+  warns once with a `RuntimeWarning` and uses the bindings. A change to
+  anything else, such as the documentation, is not reported.
+- In a git checkout, with bindings built from a modified tree, whose
+  revision ends in `-dirty`, or from sources without a revision, there is
+  no commit to compare with. A `swage` source that changed since the build
+  warns once.
+- Bindings that record no digest of the `swage` sources come from a build
+  that predates it. They are compared by revision only, and outside a
+  checkout not at all.
 - A `swage` package from before this check cannot refuse anything. When
   such a package uses bindings that carry the check, the bindings warn once
   that nothing verified the pair.

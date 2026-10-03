@@ -1045,53 +1045,129 @@ _NATIVE_SOURCES = (
 _verified_bindings = None
 
 
-def _stale_native_sources(built_from):
-    """Return why bindings built from `built_from` may not fit a checkout.
+def _frontend_build_digest(package):
+    """Return the digest of the frontend sources that a native build records.
 
-    Only a Swage git checkout has native sources to compare with. Its
-    frontend is edited and committed without a native rebuild, and several
-    working trees may share one build, so another revision alone is not a
-    problem there: the native sources decide.
-
-    Args:
-        built_from: The source revision the bindings recorded.
+    It is the SHA-256 of one line `<SHA-256 of the file>  <name>` per
+    source of `_frontend_sources`, in that order, each line ending in a
+    newline. `cmake/SwageBuildIdentity.cmake` computes it over
+    `python/swage` of the checkout it builds the bindings from, which
+    record it as `__frontend_digest__`.
 
     Returns:
-        A description when the native sources of the checkout differ from
-        that revision or cannot be compared with it. None when they are the
-        same, when the bindings recorded no clean revision to compare with,
-        and when `swage` does not run from a checkout.
+        The SHA-256 hex digest, or None when a source cannot be read.
     """
-    identity = _cached_identity()
-    revision = identity["revision"]
-    if (
-        revision is None
-        or built_from == "unknown"
-        or built_from.endswith("-dirty")
-        or (revision == built_from and identity["clean"])
-    ):
-        return None
-    root = _package_dir().parents[1]
     try:
-        compared = subprocess.run(
-            ["git", "diff", "--quiet", built_from, "--", *_NATIVE_SOURCES],
+        lines = "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n"
+            for name, path in _frontend_sources(package)
+        )
+    except OSError:
+        return None
+    return hashlib.sha256(lines.encode()).hexdigest()
+
+
+def _diff_checkout(root, revision, paths):
+    """Return how `paths` of the checkout compare with `revision`.
+
+    Returns:
+        0 when they are the same, 1 when they differ, another status when
+        git cannot compare them, such as for a revision the checkout does
+        not have, and None when git cannot run.
+    """
+    try:
+        return subprocess.run(
+            ["git", "diff", "--quiet", revision, "--", *paths],
             cwd=root,
             check=False,
             capture_output=True,
         ).returncode
     except OSError:
         return None
-    if compared == 0:
-        return None
+
+
+def _pair_problem(native):
+    """Return why bindings of the right version may not fit this frontend.
+
+    The bindings record the source revision of their build and the digest
+    of the frontend sources beside it (`_frontend_build_digest`). What is
+    compared depends on where `swage` runs:
+
+    - Outside a Swage git checkout no revision is known for the frontend.
+      The frontend digest is the one record both sides share, and another
+      digest refuses the bindings: the frontend is not the one they were
+      built with.
+    - In a checkout, with bindings built from a commit, the checkout is
+      compared with that commit. Native sources that differ, or a commit
+      the checkout does not have, refuse the bindings. A frontend that
+      moved while the native sources did not warns: a checkout edits and
+      commits the frontend without a native rebuild.
+    - In a checkout, with bindings built from a modified tree or with no
+      revision, there is no commit to compare with. A frontend digest that
+      differs warns.
+
+    Bindings that record no frontend digest are compared by revision only,
+    as before the digest was recorded.
+
+    Args:
+        native: The `swage` submodule of the nanobind extension.
+
+    Returns:
+        None when nothing keeps the pair from being used, or `(refuse,
+        description)`, where `refuse` says whether the bindings are refused
+        or only warned about.
+    """
+    built_from = getattr(native, "__source_revision__", "unknown")
+    recorded = getattr(native, "__frontend_digest__", None)
+    package = _package_dir()
+    identity = _cached_identity()
+    revision = identity["revision"]
     built = f"the mlir_swage bindings were built from revision {built_from}"
-    if compared == 1:
-        return (
+
+    def frontend_moved():
+        return recorded is not None and recorded != _frontend_build_digest(
+            package
+        )
+
+    if revision is None:
+        if not frontend_moved():
+            return None
+        return True, (
+            f"{built} beside another swage frontend than the one at "
+            f"{package}; install the swage and mlir_swage packages that "
+            "were built together, or rebuild the bindings from the sources "
+            "of this swage"
+        )
+    root = package.parents[1]
+    if built_from == "unknown" or built_from.endswith("-dirty"):
+        if not frontend_moved():
+            return None
+        return False, (
+            f"{built}, and the swage frontend at {package} changed since "
+            "that build; rebuild the bindings to pair them with it"
+        )
+    if revision == built_from and identity["clean"]:
+        return None
+    native_sources = _diff_checkout(root, built_from, _NATIVE_SOURCES)
+    if native_sources is None:
+        return None
+    if native_sources == 1:
+        return True, (
             f"{built}, and the native sources of the checkout at {root} "
             "differ from that revision; rebuild the bindings"
         )
-    return (
-        f"{built}, which the checkout at {root} does not have, so its "
-        "native sources cannot be compared with the bindings"
+    if native_sources != 0:
+        return True, (
+            f"{built}, which the checkout at {root} does not have, so its "
+            "native sources cannot be compared with the bindings; rebuild "
+            "the bindings"
+        )
+    if _diff_checkout(root, built_from, ("python/swage",)) == 0:
+        return None
+    return False, (
+        f"{built}; the swage frontend of the checkout at {root} differs "
+        "from that revision and its native sources do not, so the bindings "
+        "are used as they are; rebuild the bindings to pair them exactly"
     )
 
 
@@ -1103,17 +1179,17 @@ def _verify_bindings(native):
     before `swage` and for bindings from before the extension made the call.
 
     Bindings built for another `swage` version, and bindings that record no
-    version, are refused. Another source revision is not refused: a wheel
-    of the pure Python package records no revision to compare, and a
-    checkout moves to a new revision with every commit. In a checkout the
-    native sources are compared instead, and a difference warns once.
+    version, are refused. Bindings of the right version are then compared
+    with the frontend as `_pair_problem` describes: a problem it reports
+    either refuses them or warns once.
 
     Args:
         native: The `swage` submodule of the nanobind extension.
 
     Raises:
         _BindingsMismatch: The bindings were built for another version of
-            `swage`, or carry no build identity.
+            `swage`, carry no build identity, or do not fit the frontend
+            or the native sources of the checkout.
     """
     global _verified_bindings
     if native is _verified_bindings:
@@ -1140,9 +1216,12 @@ def _verify_bindings(native):
             "bindings built for this version, or rebuild them from the "
             "sources of this swage"
         )
-    problem = _stale_native_sources(built_from)
+    problem = _pair_problem(native)
     if problem is not None:
-        warnings.warn(problem, RuntimeWarning, stacklevel=2)
+        refuse, description = problem
+        if refuse:
+            raise _BindingsMismatch(description)
+        warnings.warn(description, RuntimeWarning, stacklevel=2)
     _verified_bindings = native
 
 

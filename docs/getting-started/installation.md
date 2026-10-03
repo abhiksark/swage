@@ -208,8 +208,9 @@ python -m swage.env
 The native wheel requires the `swage-compiler` wheel of the same version.
 `--no-index` makes pip take that wheel from `dist/`: the `0.5.1` on PyPI is
 the released package, which carries the same version number as the current
-source tree and older code. PyTorch is installed separately when a launch
-needs it.
+source tree and older code. Beside that package the bindings are refused,
+because its sources are not the ones they were built beside. PyTorch is
+installed separately when a launch needs it.
 
 The native wheel has these properties:
 
@@ -221,8 +222,10 @@ The native wheel has these properties:
   because the libraries contain LLVM, MLIR, and nanobind code.
 - It records the `swage` version, the source revision, and the LLVM version
   it was built from. `python -m swage.env` prints them as `native_version`,
-  `native_revision`, and `llvm_linked`. `swage` refuses bindings that were
-  built for another version or that record none;
+  `native_revision`, and `llvm_linked`. It also records a digest of the
+  `swage` sources it was built beside. `swage` refuses bindings that were
+  built for another version, that record none, or that were built beside
+  other `swage` sources;
   [Runtime and Environment](../reference/runtime-environment.md#frontend-and-bindings)
   states the rule.
 - It contains no link and no library search path into the build tree, the

@@ -90,6 +90,12 @@ These rules hold for every run:
   of the compiler and exit status 1.
 - The command refuses to run while `SWAGE_ARTIFACT_DIR` is set, and with
   `SWAGE_NO_COMPILE=1` it stops at the first kernel it would compile.
+- The manifest names the source revision of the bindings, and the kernels
+  are compiled from the program texts of the `swage` that runs the command.
+  The command therefore refuses bindings that were not built beside that
+  `swage`: bindings whose recorded digest of the `swage` sources differs
+  from the sources that run, as after a frontend edit without a native
+  rebuild, and bindings that record no such digest.
 
 ## Run from an artifact on the serving host
 

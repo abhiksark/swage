@@ -509,6 +509,32 @@ def test_the_command_refuses_an_existing_directory(tmp_path):
     assert list(output.iterdir()) == []
 
 
+def test_the_command_refuses_bindings_built_beside_another_frontend(
+    tmp_path, monkeypatch
+):
+    """Name no revision in a manifest that did not produce its kernels.
+
+    The bindings record the digest of the frontend they were built beside.
+    With another digest the frontend that would supply the program texts
+    is not that of the revision the manifest would name, and nothing is
+    written.
+    """
+    native = _runtime._native_bindings()
+    monkeypatch.setattr(native, "__frontend_digest__", "0" * 64)
+
+    errors = _refused(
+        tmp_path, "--target", "sm_86", "--output", tmp_path / "artifact"
+    )
+
+    assert errors.startswith(
+        f"error: the swage frontend at {_runtime._package_dir()} is not the "
+        "one the mlir_swage bindings were built beside, at revision "
+        f"{native.__source_revision__}, so the manifest would name a "
+        "revision that did not produce the kernels"
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("target", ["sm_72", "sm_85", "cpu"])
 def test_the_command_refuses_a_target_the_compiler_rejects(target, tmp_path):
     """Report the diagnostic of the compiler and write nothing."""

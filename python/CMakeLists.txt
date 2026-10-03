@@ -70,9 +70,10 @@ add_mlir_python_modules(SwagePythonModules
     SwagePythonCAPI
 )
 
-# The extension records the swage version and the source revision it was
-# built from. The header is regenerated on every build, and rewritten only
-# when one of the two changed, so a new commit recompiles one file.
+# The extension records the swage version, the source revision, and the
+# digest of the frontend sources it was built from. The header is
+# regenerated on every build, and rewritten only when one of the three
+# changed, so a new commit or a frontend edit recompiles one file.
 set(SWAGE_IDENTITY_HEADER
   "${SWAGE_BINARY_DIR}/include/swage/Python/BuildIdentity.h")
 add_custom_target(SwageBuildIdentity

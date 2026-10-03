@@ -200,6 +200,39 @@ def _write_file(directory, name, contents):
         file.write(contents)
 
 
+def _require_own_frontend(native):
+    """Refuse bindings that were not built beside this frontend.
+
+    The manifest records the source revision of the bindings, and the
+    kernels are compiled from program texts of the frontend. The revision
+    names the sources of the kernels only when the frontend is the one the
+    bindings were built beside, which the frontend digest they record
+    shows. A checkout whose frontend moved since the native build is
+    refused here although its bindings are otherwise used with a warning.
+
+    Raises:
+        RuntimeError: The bindings record no frontend digest, or another
+            one than the frontend that runs.
+    """
+    built_from = native.__source_revision__
+    recorded = getattr(native, "__frontend_digest__", None)
+    package = _runtime._package_dir()
+    if recorded is None:
+        raise RuntimeError(
+            f"the mlir_swage bindings, built from revision {built_from}, "
+            "record no frontend digest, so the manifest could name a "
+            "revision that did not produce the kernels; rebuild the bindings"
+        )
+    if recorded != _runtime._frontend_build_digest(package):
+        raise RuntimeError(
+            f"the swage frontend at {package} is not the one the mlir_swage "
+            f"bindings were built beside, at revision {built_from}, so the "
+            "manifest would name a revision that did not produce the "
+            "kernels; rebuild the bindings from the sources of this swage, "
+            "or run the swage they were built with"
+        )
+
+
 def _write_artifact(output, target, programs, runtime_library):
     """Compile `programs` for `target` and write the artifact at `output`.
 
@@ -220,8 +253,9 @@ def _write_artifact(output, target, programs, runtime_library):
 
     Raises:
         RuntimeError: The native bindings or the runtime library are
-            missing, an artifact is selected, compiling is switched off,
-            `output` exists, or a kernel does not fit the loader.
+            missing, the bindings were not built beside this frontend, an
+            artifact is selected, compiling is switched off, `output`
+            exists, or a kernel does not fit the loader.
         ValueError: The compiler rejects the target.
         OSError: The artifact cannot be written.
     """
@@ -246,6 +280,7 @@ def _write_artifact(output, target, programs, runtime_library):
             f"the swage-compiler wheel does not include. See {_INSTALLATION} "
             "for the native build"
         ) from error
+    _require_own_frontend(native)
     library = pathlib.Path(runtime_library or _packaged_runtime())
     runtime = library.read_bytes()
     warp_max_elements, cta_chunk_elements = _planning_limits()
