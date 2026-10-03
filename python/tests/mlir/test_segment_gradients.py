@@ -29,12 +29,14 @@ import torch
 from swage import _autograd, _runtime, _segments
 from swage import _segmented_qualification as qualification
 from test_public_segments import (  # noqa: F401 (fixtures)
+    _public_depth,
     _selection_lengths,
     driver_calls,
     empty_kernel_memo,
     event_counts,
 )
-from test_segmented_runtime import _bits, _offsets
+from test_segmented_numerics import _softmax_bound
+from test_segmented_runtime import _EPS32, _bits, _offsets
 
 _needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -801,12 +803,436 @@ def test_calls_with_backward_passes_leave_nothing_behind(
     assert event_counts == {}
 
 
-def test_segment_softmax_has_no_backward_yet():
-    """Refuse a gradient for the softmax until its backward exists."""
-    values, offsets = _batch([2, 3], dtype=torch.float32)
+def _softmax_case(lengths, spread, columns=None, seed=0):
+    """Return float32 logits that require grad, their offsets, and `g`.
 
-    with pytest.raises(
-        ValueError,
-        match=r"^segment_softmax has no backward yet; pass values.detach\(\)$",
-    ):
-        swage.segment_softmax(values, offsets)
+    The logits of a segment lie in `[top - spread, top]`, with both ends
+    planted in every column, and the upstream gradient is standard normal.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    width = 1 if columns is None else columns
+    segments = []
+    for index, length in enumerate(lengths):
+        top = float(index % 5) - 2.0
+        block = top - spread * torch.rand(length, width, generator=generator)
+        if length >= 2:
+            block[0], block[-1] = top, top - spread
+        segments.append(block)
+    logits = torch.cat(segments)
+    if columns is None:
+        logits = logits.view(-1)
+    upstream = torch.randn(logits.shape, generator=generator)
+    offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    return (
+        logits.cuda().requires_grad_(),
+        offsets.cuda(),
+        upstream.cuda(),
+    )
+
+
+def _softmax_gradient(logits, offsets, upstream):
+    """Return the softmax and its gradient for one upstream gradient."""
+    result = swage.segment_softmax(logits, offsets)
+    (gradient,) = torch.autograd.grad(result, logits, upstream)
+    return result.detach(), gradient
+
+
+def _segment_slices(offsets):
+    """Return the row slice of every non-empty segment."""
+    host = offsets.cpu().tolist()
+    return [slice(a, b) for a, b in zip(host, host[1:]) if b > a]
+
+
+def _backward_bound(result, upstream, depth):
+    """Bound the backward of one segment against the formula on its `y`.
+
+    For the returned `y`, the exact gradient is `y * (g - s)` with
+    `s = sum(g * y)`. The backward forms `g * y` with one rounding, sums it
+    with `k` rounding additions, subtracts once, and multiplies once. To
+    first order the error of an element is at most
+    `(k + 3) * eps32 * max|g| * y * max(1, sum(y))`, per column.
+    """
+    scale = upstream.abs().amax(0) * result.sum(0).clamp(min=1.0)
+    return (depth + 3) * _EPS32 * scale * result
+
+
+@pytest.mark.parametrize("columns", COLUMNS, ids=["r1", "c1", "c3", "c64"])
+@pytest.mark.parametrize("spread", [8, 20, 50, 80])
+def test_the_softmax_backward_is_the_formula_on_its_own_result(spread, columns):
+    """Bound the backward against `y * (g - s)` evaluated on the returned y.
+
+    The sum of the backward is the sum kernel of `segment_reduce`, whose
+    rounding depends on its schedule, so the bound uses `k` of that
+    schedule: the rank-one bound of "Sum rounding" for scalars and
+    `[N, 1]` values, and `n - 1`, which bounds every tree, for rows.
+    """
+    lengths = [2, 129, 1024, 4096, 1, 300]
+    logits, offsets, upstream = _softmax_case(lengths, spread, columns)
+
+    result, gradient = _softmax_gradient(logits, offsets, upstream)
+
+    for rows in _segment_slices(offsets):
+        y = result[rows].double().cpu()
+        g = upstream[rows].double().cpu()
+        if y.dim() == 1:
+            y, g = y.view(-1, 1), g.view(-1, 1)
+        exact = y * (g - (g * y).sum(0))
+        length = rows.stop - rows.start
+        depth = length - 1 if columns not in (None, 1) else _public_depth(
+            length
+        )
+        actual = gradient[rows].double().cpu().view_as(exact)
+        error = (actual - exact).abs()
+        assert (error <= _backward_bound(y, g, depth)).all(), (
+            f"rows {rows}: largest error {error.max().item():.3e}"
+        )
+
+
+@pytest.mark.parametrize("columns", [None, 3])
+def test_the_softmax_backward_of_one_long_segment(columns):
+    """Bound the backward of a segment of 100,003 rows the same way."""
+    logits, offsets, upstream = _softmax_case([100_003], 20, columns, seed=3)
+
+    result, gradient = _softmax_gradient(logits, offsets, upstream)
+
+    y = result.double().cpu()
+    g = upstream.double().cpu()
+    if y.dim() == 1:
+        y, g = y.view(-1, 1), g.view(-1, 1)
+    exact = y * (g - (g * y).sum(0))
+    depth = 100_002 if columns else _public_depth(100_003)
+    error = (gradient.double().cpu().view_as(exact) - exact).abs()
+    assert (error <= _backward_bound(y, g, depth)).all()
+
+
+@pytest.mark.parametrize("columns", [None, 3])
+@pytest.mark.parametrize("spread", [8, 50])
+def test_the_softmax_gradient_agrees_with_float64_pytorch(spread, columns):
+    """Compare end to end with the float64 gradient of `torch.softmax`.
+
+    The tolerance is the error the forward may carry into the formula,
+    three times the forward bound of "Ragged Softmax" times `max|g| * y`,
+    plus the bound of the backward on its own result.
+    """
+    lengths = [2, 129, 1024, 300]
+    logits, offsets, upstream = _softmax_case(lengths, spread, columns, seed=1)
+
+    result, gradient = _softmax_gradient(logits, offsets, upstream)
+
+    for rows in _segment_slices(offsets):
+        x = logits[rows].detach().double().cpu()
+        g = upstream[rows].double().cpu()
+        if x.dim() == 1:
+            x, g = x.view(-1, 1), g.view(-1, 1)
+        leaf = x.clone().requires_grad_()
+        reference = torch.softmax(leaf, 0)
+        (expected,) = torch.autograd.grad(reference, leaf, g)
+        length = rows.stop - rows.start
+        rank_two = columns is not None
+        forward = _softmax_bound(
+            x, reference.detach(), length - 1 if rank_two else None
+        ).amax(0)
+        depth = length - 1 if rank_two else _public_depth(length)
+        y = reference.detach()
+        tolerance = 3 * forward * g.abs().amax(0) * y + _backward_bound(
+            y, g, depth
+        )
+        actual = gradient[rows].double().cpu().view_as(expected)
+        assert ((actual - expected).abs() <= tolerance).all()
+
+
+@pytest.mark.parametrize("columns", [None, 3])
+def test_the_softmax_gradient_follows_pytorch_on_special_values(columns):
+    """Give NaN to a NaN segment only, and zero to a logit of probability 0.
+
+    A segment that holds a NaN or a positive infinity, or only negative
+    infinities, has NaN results, and its gradient is NaN, as the float64
+    gradient of `torch.softmax` is. A negative infinity beside a finite
+    maximum has the result `0.0` and a zero gradient. The other segments
+    keep finite gradients.
+    """
+    length = 33
+    ramp = torch.linspace(-2.0, 2.0, length)
+    segments = [ramp.clone() for _ in range(5)]
+    segments[1][length // 2] = float("nan")
+    segments[2][-1] = float("inf")
+    segments[3] = torch.full((length,), float("-inf"))
+    segments[4][0] = float("-inf")
+    logits = torch.cat(segments)
+    if columns is not None:
+        logits = torch.stack([logits] * columns, 1)
+    offsets = torch.tensor(_offsets([length] * 5), dtype=torch.int32)
+    generator = torch.Generator().manual_seed(2)
+    upstream = torch.randn(logits.shape, generator=generator)
+    values = logits.cuda().requires_grad_()
+
+    _, gradient = _softmax_gradient(values, offsets.cuda(), upstream.cuda())
+
+    leaf = logits.double().view(5, length, -1).clone().requires_grad_()
+    reference = torch.softmax(leaf, 1)
+    (expected,) = torch.autograd.grad(
+        reference, leaf, upstream.double().view(5, length, -1)
+    )
+    actual = gradient.cpu().view(5, length, -1)
+    assert torch.equal(actual.isnan(), expected.isnan())
+    assert actual[1:4].isnan().all()
+    assert actual[[0, 4]].isfinite().all()
+    assert (actual[4, 0] == 0.0).all()
+
+
+@pytest.mark.parametrize("columns", [None, 3])
+def test_the_softmax_second_derivative_agrees_with_float64_pytorch(columns):
+    """Compare a Hessian-vector product with float64 `torch.softmax`.
+
+    There is no float64 softmax, so `gradgradcheck` cannot run. The product
+    of the second derivative with a vector is compared with the float64
+    product instead, within `1e-5` of the largest magnitude of the
+    expected product of each segment.
+    """
+    lengths = [2, 40, 129, 300]
+    logits, offsets, upstream = _softmax_case(lengths, 8, columns, seed=4)
+    generator = torch.Generator().manual_seed(5)
+    direction = torch.randn(logits.shape, generator=generator).cuda()
+
+    result = swage.segment_softmax(logits, offsets)
+    (gradient,) = torch.autograd.grad(
+        result, logits, upstream, create_graph=True
+    )
+    (product,) = torch.autograd.grad(gradient, logits, direction)
+
+    for rows in _segment_slices(offsets):
+        x = logits[rows].detach().double().cpu()
+        g = upstream[rows].double().cpu()
+        v = direction[rows].double().cpu()
+        leaf = x.clone().requires_grad_()
+        (first,) = torch.autograd.grad(
+            torch.softmax(leaf, 0), leaf, g, create_graph=True
+        )
+        (expected,) = torch.autograd.grad(first, leaf, v)
+        scale = expected.abs().amax(0).clamp(min=1e-30)
+        actual = product[rows].double().cpu()
+        assert ((actual - expected).abs() <= 1e-5 * scale).all()
+
+
+def test_the_softmax_backward_is_refused_under_capture_by_its_name():
+    """Refuse the sum of a softmax backward on a capturing stream.
+
+    The autograd engine runs the backward on the stream of its forward, so
+    a forward on a side stream and a capture on that stream put the
+    backward under capture. It raises before its host copy, in a message
+    that names the backward, and the capture stays usable.
+    """
+    logits, offsets, upstream = _softmax_case([3, 40], 8, seed=6)
+    torch.cuda.synchronize()
+    side = torch.cuda.Stream()
+    with torch.cuda.stream(side):
+        result = swage.segment_softmax(logits, offsets)
+        doubled = torch.zeros_like(upstream)
+    side.synchronize()
+    graph = torch.cuda.CUDAGraph()
+
+    with torch.cuda.graph(graph, stream=side):
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^the backward of segment_softmax cannot run while the "
+                "current stream captures a CUDA graph"
+            ),
+        ):
+            torch.autograd.grad(result, logits, upstream)
+        torch.mul(upstream, 2.0, out=doubled)
+
+    doubled.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(doubled, 2 * upstream)
+
+
+def test_the_softmax_backward_runs_on_the_stream_of_its_forward(monkeypatch):
+    """Enqueue the sum of the softmax backward on the forward stream."""
+    logits, offsets, upstream = _softmax_case([3, 40, 300], 8, columns=3)
+    torch.cuda.synchronize()
+    side = torch.cuda.Stream()
+    with torch.cuda.stream(side):
+        result = swage.segment_softmax(logits, offsets)
+    side.synchronize()
+    driver = _runtime._get_driver()
+    streams = []
+
+    def recording(original):
+        def launch(function, grid, block, stream, arguments):
+            streams.append(stream)
+            return original(function, grid, block, stream, arguments)
+
+        return launch
+
+    for name in ("launch_segmented", "launch_segmented_tasks"):
+        monkeypatch.setattr(driver, name, recording(getattr(driver, name)))
+
+    torch.autograd.grad(result, logits, upstream)
+    torch.cuda.synchronize()
+
+    assert streams
+    assert set(streams) == {side.cuda_stream}
+
+
+def test_the_softmax_backward_refuses_a_sum_kernel_not_held(
+    empty_kernel_memo, monkeypatch  # noqa: F811 (fixture)
+):
+    """Raise under `SWAGE_NO_COMPILE=1` when the sum kernel is not held."""
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "0")
+    logits, offsets, upstream = _softmax_case([3, 40], 8)
+    result = swage.segment_softmax(logits, offsets)
+    monkeypatch.setattr(
+        qualification,
+        "_ptx_memo",
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
+    )
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+
+    with pytest.raises(RuntimeError, match="^SWAGE_NO_COMPILE=1 refuses"):
+        torch.autograd.grad(result, logits, upstream)
+
+
+def test_a_softmax_with_values_that_require_grad_records_a_node():
+    """Return a result with a grad_fn, and send a gradient to the values."""
+    logits, offsets, upstream = _softmax_case([2, 0, 5], 8, columns=3)
+
+    result = swage.segment_softmax(logits, offsets)
+    result.backward(upstream)
+
+    assert type(result.grad_fn).__name__ == "SegmentSoftmaxBackward"
+    assert logits.grad.shape == logits.shape
+
+
+def test_the_softmax_records_nothing_without_grad_mode_and_takes_out():
+    """Record no gradient under `no_grad` and `inference_mode`."""
+    logits, offsets, _ = _softmax_case([2, 5], 8)
+    expected = swage.segment_softmax(logits.detach(), offsets)
+
+    with torch.no_grad():
+        out = torch.empty_like(expected)
+        written = swage.segment_softmax(logits, offsets, out=out)
+    with torch.inference_mode():
+        inferred = swage.segment_softmax(logits, offsets)
+
+    assert written is out
+    for result in (written, inferred):
+        assert not result.requires_grad
+        assert _bits(result.cpu()) == _bits(expected.cpu())
+    with pytest.raises(ValueError, match="^out must be None while values"):
+        swage.segment_softmax(logits, offsets, out=torch.empty_like(out))
+
+
+def test_the_softmax_keeps_its_result_and_its_offsets():
+    """Raise when the kept result or the kept offsets changed in place.
+
+    Offsets made inside `torch.inference_mode()` are kept as a copy, and
+    give the gradient of ordinary offsets.
+    """
+    for change in ("result", "offsets"):
+        logits, offsets, upstream = _softmax_case([2, 5], 8)
+        result = swage.segment_softmax(logits, offsets)
+        with torch.no_grad():
+            (result if change == "result" else offsets).add_(0)
+        with pytest.raises(
+            RuntimeError, match="modified by an inplace operation"
+        ):
+            torch.autograd.grad(result, logits, upstream)
+
+    logits, offsets, upstream = _softmax_case([2, 5], 8)
+    with torch.inference_mode():
+        inferred = offsets.clone()
+    _, expected = _softmax_gradient(logits, offsets, upstream)
+    _, gradient = _softmax_gradient(logits, inferred, upstream)
+    assert _bits(gradient.cpu()) == _bits(expected.cpu())
+
+
+@pytest.mark.parametrize("columns", [None, 3])
+def test_the_softmax_takes_an_expanded_upstream_gradient(columns):
+    """Take the stride-0 gradient that `.sum()` sends.
+
+    With `g = 1` the gradient is `y * (1 - sum(y))` for the returned `y`,
+    which is near zero, and it stays within the backward bound of that
+    formula.
+    """
+    lengths = [2, 40, 300]
+    logits, offsets, _ = _softmax_case(lengths, 8, columns)
+
+    result = swage.segment_softmax(logits, offsets)
+    result.sum().backward()
+
+    for rows in _segment_slices(offsets):
+        y = result[rows].detach().double().cpu()
+        y = y.view(-1, 1) if y.dim() == 1 else y
+        g = torch.ones_like(y)
+        exact = y * (g - y.sum(0))
+        length = rows.stop - rows.start
+        depth = length - 1 if columns else _public_depth(length)
+        actual = logits.grad[rows].double().cpu().view_as(exact)
+        assert ((actual - exact).abs() <= _backward_bound(y, g, depth)).all()
+
+
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+def test_softmax_gradients_flow_through_a_compiled_function(
+    backend, monkeypatch
+):
+    """Record the gradient of a softmax that a compiled function makes."""
+    torch._dynamo.reset()
+    monkeypatch.setattr(_segments, "_UNTRACED", {})
+    monkeypatch.setattr(_autograd, "_FUNCTIONS", {})
+    logits, offsets, upstream = _softmax_case([3, 0, 500, 497], 8, columns=8)
+
+    def model(values):
+        return swage.segment_softmax(values * 2.0, offsets) * 3.0
+
+    compiled = torch.compile(model, backend=backend)
+    (ours,) = torch.autograd.grad(compiled(logits), logits, upstream)
+    (eager,) = torch.autograd.grad(model(logits), logits, upstream)
+
+    assert _autograd._FUNCTIONS
+    torch.testing.assert_close(ours, eager, rtol=1e-6, atol=0)
+    if backend == "eager":
+        assert _bits(ours.cpu()) == _bits(eager.cpu())
+
+
+def test_softmax_backward_passes_leave_nothing_behind(
+    driver_calls, event_counts  # noqa: F811 (fixtures)
+):
+    """Run many softmax calls with backward passes and keep resources flat.
+
+    Every iteration takes offsets it has not seen, records a gradient, and
+    runs a backward, whose sum kernel classifies and launches like a call.
+    """
+    calls = 100
+
+    def one_iteration(seed):
+        generator = torch.Generator().manual_seed(seed)
+        lengths = torch.randint(0, 60, (50,), generator=generator).tolist()
+        logits, offsets, upstream = _softmax_case(lengths, 8, 3, seed)
+        result = swage.segment_softmax(logits, offsets)
+        torch.autograd.grad(result, logits, upstream)
+
+    for seed in (0, 1):
+        one_iteration(seed)
+    torch.cuda.synchronize()
+    loads = driver_calls["cuModuleLoadData"]
+    allocated = torch.cuda.memory_allocated()
+    event_counts.clear()
+    gc.collect()
+
+    gc.disable()
+    try:
+        for seed in range(2, calls + 2):
+            one_iteration(seed)
+        torch.cuda.synchronize()
+        unreachable = gc.collect()
+    finally:
+        gc.enable()
+
+    assert unreachable == 0
+    assert torch.cuda.memory_allocated() == allocated
+    assert driver_calls["cuModuleLoadData"] == loads
+    assert driver_calls["cuModuleUnload"] == 0
+    assert driver_calls["cuCtxSynchronize"] == 0
+    assert event_counts == {}

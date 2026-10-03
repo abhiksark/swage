@@ -386,9 +386,8 @@ Three conditions are refused with an error instead of being handled:
   before the host copy, so the capture stays valid. A prepared private
   launch can be captured; a public call cannot, because a replay would not
   repeat its preparation.
-- An `out` while the call records a gradient, and a gradient that a kind
-  cannot record yet, each with a `ValueError`;
-  [Gradients](../user-guide/segmented-calls.md#gradients) states the rules.
+- An `out` while the call records a gradient, with a `ValueError`;
+  [Gradients](../user-guide/segmented-calls.md#gradients) states the rule.
 - `SWAGE_NO_COMPILE=1` with a kernel the process does not hold and no
   artifact selected; [Cache variables](#cache-variables) states the rule.
 

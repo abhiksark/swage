@@ -185,8 +185,6 @@ enqueued in these cases:
   `pytorch` extra of the package, which declares it.
 - `out` is given while the call records a gradient. Call without `out`,
   or under `torch.no_grad()`.
-- A softmax of `values` that require grad, while gradient recording is
-  on. It has no backward yet; pass `values.detach()`.
 
 [Segmented Calls](../user-guide/segmented-calls.md) lists every refusal and
 the reason for it.

@@ -195,11 +195,10 @@ def segment_softmax(values, offsets, *, out=None):
 
     Args:
         values: Contiguous `torch.float32` CUDA tensor on the current
-            device, of rank one or of rank two, `[N, D]`. The softmax has
-            no backward yet, so values that require grad are refused while
-            gradient recording is on. float64 values are refused: the
-            device has no 64-bit exp2, so there is no float64 softmax
-            kernel.
+            device, of rank one or of rank two, `[N, D]`. When it requires
+            grad and gradient recording is on, the call records a gradient;
+            see the user guide. float64 values are refused: the device has
+            no 64-bit exp2, so there is no float64 softmax kernel.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at the
@@ -211,7 +210,7 @@ def segment_softmax(values, offsets, *, out=None):
         out: Optional result tensor: contiguous, `torch.float32`, on the
             device of `values`, with the shape of `values`, sharing no
             memory with `values` or `offsets`, and not requiring grad. It
-            is never resized.
+            is never resized. None when the call records a gradient.
 
     Returns:
         `out`, or a new tensor on the device of `values` when `out` is
@@ -224,9 +223,8 @@ def segment_softmax(values, offsets, *, out=None):
             dtype, rank, or device type.
         ValueError: A tensor is not contiguous, is a lazy view, or is on
             another device; `out` requires grad, has the wrong size, or
-            overlaps an input; `out` is given while values require grad and
-            recording is on; values require grad while recording is on; or
-            the offsets break their contract.
+            overlaps an input; `out` is given while the call records a
+            gradient; or the offsets break their contract.
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
@@ -259,9 +257,7 @@ def _segment_softmax(values, offsets, *, out=None):
             "float64 kernel because the device has no 64-bit exp2"
         )
     if recording:
-        raise ValueError(
-            "segment_softmax has no backward yet; pass values.detach()"
-        )
+        return _autograd.functions(torch).SegmentSoftmax.apply(values, offsets)
     output = _result(torch, out, shape, values, torch.float32)
     _launch_softmax(torch, values.detach(), offsets, output)
     return output

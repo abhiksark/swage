@@ -933,15 +933,18 @@ _GRADIENT_CASES = {
     "mean/rank-two/float32": ("mean", 5, torch.float32),
     "max/rank-one/float64": ("max", None, torch.float64),
     "min/rank-two/float32": ("min", 3, torch.float32),
+    "softmax/rank-one/float32": ("softmax", None, torch.float32),
+    "softmax/rank-two/float32": ("softmax", 4, torch.float32),
 }
 
 
 def _gradient_cases():
     """Return the gradient cases the child process runs, by name.
 
-    Each batch has an empty segment, a split segment for rank one, and a
-    row past the final offset, so the second derivative runs the sum
-    kernels of the artifact on every schedule a batch reaches.
+    Each batch has an empty segment and a split segment for rank one, and a
+    reduction has a row past the final offset. The second derivatives, and
+    the first derivative of a softmax, run the sum kernels of the artifact
+    on every schedule a batch reaches.
     """
     cases = {}
     lengths = [3, 0, 40, 4100, 1]
@@ -950,10 +953,14 @@ def _gradient_cases():
         _GRADIENT_CASES.items()
     ):
         generator = torch.Generator().manual_seed(index)
-        rows = sum(lengths) + 1
+        # A softmax covers every row; a reduction has one past the end.
+        rows = sum(lengths) + (kind != "softmax")
         shape = (rows,) if columns is None else (rows, columns)
         values = torch.randn(shape, generator=generator).to(dtype)
-        upstream_shape = (len(lengths), *shape[1:])
+        upstream_shape = shape if kind == "softmax" else (
+            len(lengths),
+            *shape[1:],
+        )
         upstream = torch.randn(upstream_shape, generator=generator).to(dtype)
         cases[name] = (kind, values, offsets, upstream)
     return cases
@@ -1010,7 +1017,10 @@ def test_derivatives_from_an_artifact_equal_the_compiled_path(
     values = values.cuda().requires_grad_()
     weight = upstream.cuda().requires_grad_()
 
-    result = swage.segment_reduce(values, offsets.cuda(), kind)
+    if kind == "softmax":
+        result = swage.segment_softmax(values, offsets.cuda())
+    else:
+        result = swage.segment_reduce(values, offsets.cuda(), kind)
     (first,) = torch.autograd.grad(result, values, weight, create_graph=True)
     (second,) = torch.autograd.grad((first * first).sum(), weight)
 

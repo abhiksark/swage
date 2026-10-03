@@ -8,7 +8,8 @@ implementations at run time:
 - PyTorch operations find the segment of every row from the offsets on the
   device, copy the gradient of a segment to its rows, and divide.
 - The sum kernel of `segment_reduce` does every floating-point segment sum
-  that a backward needs. Second derivatives need one.
+  that a backward needs: the sum of `g * y` of a softmax, and the sum in
+  every second derivative.
 
 The module loads no PyTorch when it is imported. The Functions are made at
 the first call that records a gradient, after `_runtime._import_torch` has
@@ -32,9 +33,9 @@ def functions(torch):
         torch: The PyTorch module that `_runtime._import_torch` returned.
 
     Returns:
-        A namespace with `SegmentReduce`, the Function of `segment_reduce`,
-        and `_SegmentSum` and `_SegmentBroadcast`, the two Functions each
-        backward is composed of.
+        A namespace with `SegmentReduce` and `SegmentSoftmax`, the Functions
+        of the two calls, and `_SegmentSum` and `_SegmentBroadcast`, the two
+        Functions each backward is composed of.
     """
     built = _FUNCTIONS.get(torch)
     if built is None:
@@ -274,8 +275,51 @@ def _build(torch):
                 None,
             )
 
+    class SegmentSoftmax(torch.autograd.Function):
+        """The Function of `segment_softmax`.
+
+        Its node in a graph is `SegmentSoftmaxBackward`. The backward of an
+        element with result `y` and gradient `g` is `y * (g - s)`, where
+        `s` is the sum of `g * y` over its segment, per column.
+        """
+
+        @staticmethod
+        def forward(values, offsets):
+            output = torch.empty(
+                values.shape, dtype=torch.float32, device=values.device
+            )
+            _segments._launch_softmax(
+                torch, values.detach(), offsets, output
+            )
+            return output
+
+        @staticmethod
+        def setup_context(ctx, inputs, output):
+            values, offsets = inputs
+            # The result is saved as an output, so a second derivative
+            # through it is recorded.
+            ctx.save_for_backward(_kept_offsets(offsets), output)
+            ctx.rows = values.shape[0]
+
+        @staticmethod
+        def backward(ctx, grad):
+            if not ctx.needs_input_grad[0]:
+                return None, None
+            offsets, result = ctx.saved_tensors
+            sums = _SegmentSum.apply(
+                grad * result, offsets, "the backward of segment_softmax"
+            )
+            spread = _SegmentBroadcast.apply(
+                sums,
+                offsets,
+                ctx.rows,
+                "a second derivative of segment_softmax",
+            )
+            return result * (grad - spread), None
+
     return types.SimpleNamespace(
         SegmentReduce=SegmentReduce,
+        SegmentSoftmax=SegmentSoftmax,
         _SegmentSum=_SegmentSum,
         _SegmentBroadcast=_SegmentBroadcast,
     )

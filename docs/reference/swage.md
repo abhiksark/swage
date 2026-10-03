@@ -323,9 +323,7 @@ Returns
 
 Raises
 :   The exceptions of `segment_reduce`, without the `kind` error. Offsets
-    that end below the number of values raise a `ValueError`, and so do
-    values that require grad while gradient recording is on: the softmax
-    has no backward yet. float64
+    that end below the number of values raise a `ValueError`. float64
     values raise the `TypeError`
     `values must have dtype torch.float32; segment_softmax has no float64
     kernel because the device has no 64-bit exp2`. For `[N, D]` values a
