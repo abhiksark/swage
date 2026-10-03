@@ -8,6 +8,24 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- `swage.segment_reduce` records a gradient for `values` that require grad
+  while gradient recording is on, for every kind, both dtypes, and both
+  ranks, with second derivatives. The backward of a reduction runs PyTorch
+  operations on the device and copies nothing to the host: a sum copies the
+  gradient of a segment to its elements, and a mean divides it once by the
+  length. ADR-0024 records the decision.
+- The gradient of a maximum or a minimum goes to the elements that equal
+  the result, in equal shares, with `-0.0` equal to `0.0` and the NaN
+  elements sharing when the result is NaN; every other element receives
+  exactly `0.0`. On the CPU and on CUDA this differs from
+  `torch.segment_reduce` only on a tie with a negative gradient, where
+  PyTorch gives every tied element the whole gradient.
+- `swage.segment_softmax` records a gradient, `y * (g - s)` with `s` the
+  sum of `g * y` over the segment, and second derivatives. That sum, and
+  the sum inside every second derivative, run the sum kernel of
+  `segment_reduce`, so a backward that needs one is refused under CUDA
+  graph capture with a message that names it. The user guide states the
+  error bounds of the gradient and of the second derivative.
 - `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
   segment gives positive infinity for `min` and NaN for `mean`; a NaN
   element gives NaN. A mean is the sum of the same call divided by the
@@ -121,6 +139,11 @@ semantic versioning (`0.x`; anything may change).
 
 ### Changed
 
+- The public segmented calls take `values` that require grad instead of
+  raising a `ValueError`. A call that records a gradient refuses `out` with
+  a `ValueError`; under `torch.no_grad()` and inside
+  `torch.inference_mode()` a call records nothing and takes `out`. An `out`
+  that requires grad stays refused.
 - Inside `torch.compile`, each public segmented call is a graph break and
   runs eagerly. Before, rank-two calls with int64 offsets raised
   `AttributeError`, and parts of the host preparation were traced into
