@@ -411,6 +411,15 @@ mode, and `torch.compile`:
   and `out` may be tensors that were created inside it. A call enqueues
   what it classified before it returns, so it has no need to detect a later
   change to the offsets.
+- The kernels read int32 offsets from the caller's tensor when they
+  execute, which may be after the call has returned. A write to that tensor
+  from another stream before they have run, the race any PyTorch operation
+  has with its inputs, reaches them: they then work from offsets the call
+  never validated, and a reduction mixes them with the task records it
+  classified from the old offsets. Every access stays inside the buffers,
+  and the results match neither layout. int64 offsets are read from the
+  private int32 copy that the call uploads, so a later write to the
+  caller's tensor does not reach the kernels.
 - Under `torch.compile`, Dynamo does not trace into either call. A call is
   a graph break: it runs eagerly between the compiled graphs around it and
   returns the bits of the same call outside `torch.compile`, for values of
