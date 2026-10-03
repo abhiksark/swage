@@ -107,7 +107,7 @@ lit suites were not rerun for this Python-only selection change; the same
 native binaries passed qualification in the preceding benchmark task.
 
 Changed files: the private preparation helper, native runtime tests, the
-composable benchmark harness, planning documentation and ADR-0019, plus this
+composable benchmark harness, planning documentation and ADR-0020, plus this
 report and its two evidence files. Public APIs and native classifier/descriptor
 contracts are unchanged. Schedule choice changes reduction trees within the
 existing floating-point tolerance contract; no new arithmetic rewrites or

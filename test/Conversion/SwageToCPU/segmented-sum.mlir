@@ -3,30 +3,31 @@
 
 module {
   func.func @segmented_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %result: memref<?xf32>, %bounds: memref<?xi32>,
+      %input: memref<?xf32>) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
+    %segment = swage.make_segment %input, %bounds, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %output[%sid] : memref<?xf32>
+    memref.store %sum, %result[%sid] : memref<?xf32>
     return
   }
 }
 
 // CHECK-LABEL: func.func @segmented_sum(
-// CHECK-SAME: %[[VALUES:[^:]+]]: memref<?xf32>
-// CHECK-SAME: %[[OFFSETS:[^:]+]]: memref<?xi32>
 // CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<?xf32>
-// CHECK-SAME: %{{[^:]+}}: i32
-// CHECK-SAME: %[[SEGMENT_COUNT:[^)]+]]: i32
+// CHECK-SAME: %[[OFFSETS:[^:]+]]: memref<?xi32>
+// CHECK-SAME: %[[VALUES:[^)]+]]: memref<?xf32>
+// CHECK-SAME: )
 // CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 // CHECK: %[[ONE:.*]] = arith.constant 1 : index
-// CHECK: %[[SEGMENTS:.*]] = arith.index_cast %[[SEGMENT_COUNT]] : i32 to index
+// CHECK: %[[VALUE_COUNT:.*]] = memref.dim %[[VALUES]], %{{.*}} : memref<?xf32>
+// CHECK: %[[OFFSET_COUNT:.*]] = memref.dim %[[OFFSETS]], %{{.*}} : memref<?xi32>
+// CHECK: %[[SEGMENTS:.*]] = arith.subi %[[OFFSET_COUNT]], %[[ONE]] : index
 // CHECK: scf.for %[[SID:.*]] = %[[ZERO]] to %[[SEGMENTS]] step %[[ONE]] {
 // CHECK:   %[[START_I32:.*]] = memref.load %[[OFFSETS]][%[[SID]]]
 // CHECK:   %[[NEXT:.*]] = arith.addi %[[SID]], %[[ONE]] : index

@@ -4,17 +4,17 @@
 
 module {
   func.func @segmented_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %sink: memref<?xf32>, %data: memref<?xf32>,
+      %bounds: memref<?xi32>) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
+    %segment = swage.make_segment %data, %bounds, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %output[%sid] : memref<?xf32>
+    memref.store %sum, %sink[%sid] : memref<?xf32>
     return
   }
 }
@@ -23,6 +23,7 @@ module {
 // CHECK: gpu.module @segmented_sum_module
 // CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 0 : i64}, {key = "value_count", kind = "i32", origin = "derived"}, {key = "segment_count", kind = "i32", origin = "derived"}], backend = "cuda", entry = "segmented_sum", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: %[[SID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[SEGMENTS:.*]] = arith.index_cast %[[SEGMENT_COUNT]] : i32 to index

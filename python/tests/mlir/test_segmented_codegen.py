@@ -1,6 +1,7 @@
 # python/tests/mlir/test_segmented_codegen.py
 """Native tests for segmented-reduction NVPTX compilation."""
 
+import json
 import re
 
 import pytest
@@ -42,20 +43,58 @@ def test_direct_cta_work_budget_spans_maps_and_reduction():
         swage.register_dialects(context)
         assert not _has_small_element_program(ir.Module.parse(text))
 
+
+def _contract(entry, block, arguments):
+    return json.dumps(
+        {
+            "version": 2,
+            "backend": "cuda",
+            "entry": entry,
+            "launch": {
+                "model": "spmd-grid",
+                "block": [block, 1, 1],
+            },
+            "arguments": arguments,
+        },
+        separators=(",", ":"),
+    )
+
+
+_USER_BUFFERS = [
+    {
+        "kind": "ptr",
+        "origin": "user",
+        "source_index": 1,
+        "access": "read",
+    },
+    {
+        "kind": "ptr",
+        "origin": "user",
+        "source_index": 2,
+        "access": "read",
+    },
+    {
+        "kind": "ptr",
+        "origin": "user",
+        "source_index": 0,
+        "access": "write",
+    },
+]
+
 SEGMENTED_SUM = """
 module {
   func.func @segmented_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %destination: memref<?xf32>, %elements: memref<?xf32>,
+      %boundaries: memref<?xi32>) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
+    %segment = swage.make_segment %elements, %boundaries, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %output[%sid] : memref<?xf32>
+    memref.store %sum, %destination[%sid] : memref<?xf32>
     return
   }
 }
@@ -103,7 +142,7 @@ def test_static_schedules_share_reduction_program(kind, transform):
                 target="sm_86",
                 **arguments,
             )
-            lowered, ptx = first
+            lowered, ptx, _ = first
             merge = name == "_compile_split_merge_reduction_ptx"
             assert ("llvm.fmul" in lowered) == (
                 transform != "identity" and not merge
@@ -187,7 +226,7 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, contract = first
         assert "swage." not in lowered
         assert "gpu.all_reduce" not in lowered
         assert "llvm.func @segmented_sum" in lowered
@@ -196,6 +235,21 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
         assert ".entry segmented_sum" in ptx
         assert "ld.global.b32" in ptx
         assert "st.global.b32" in ptx
+        assert contract == _contract(
+            "segmented_sum",
+            128,
+            _USER_BUFFERS
+            + [
+                {"kind": "i32", "origin": "derived", "key": "value_count"},
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "segment_count",
+                },
+            ],
+        )
+        assert ptx.count(".param .u64") == 3
+        assert ptx.count(".param .u32") == 2
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -206,13 +260,23 @@ def test_compiles_identity_sum_with_task_id_indirection():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        first = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=32,
             target="sm_80",
             use_task_ids=True,
         )
+        second = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="segmented_sum",
+            block_size=32,
+            target="sm_80",
+            use_task_ids=True,
+        )
+
+        assert first == second
+        lowered, ptx, contract = first
 
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
@@ -223,6 +287,23 @@ def test_compiles_identity_sum_with_task_id_indirection():
         assert "shfl.sync.bfly" in ptx
         assert ".shared" not in ptx
         assert "bar.sync" not in ptx
+        assert contract == _contract(
+            "segmented_sum",
+            32,
+            _USER_BUFFERS
+            + [
+                {
+                    "kind": "ptr",
+                    "origin": "plan",
+                    "key": "task_ids",
+                    "access": "read",
+                },
+                {"kind": "i32", "origin": "derived", "key": "value_count"},
+                {"kind": "i32", "origin": "derived", "key": "task_count"},
+            ],
+        )
+        assert ptx.count(".param .u64") == 4
+        assert ptx.count(".param .u32") == 2
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -245,7 +326,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, contract = first
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
@@ -262,6 +343,30 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         assert "shfl.sync.bfly" in ptx
         assert "bar.sync" in ptx
         assert ".entry segmented_sum" in ptx
+        assert contract == _contract(
+            "segmented_sum",
+            128,
+            _USER_BUFFERS
+            + [
+                {
+                    "kind": "ptr",
+                    "origin": "plan",
+                    "key": "task_ids",
+                    "access": "read",
+                },
+                {"kind": "i32", "origin": "derived", "key": "value_count"},
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "warp_task_count",
+                },
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "cta_task_count",
+                },
+            ],
+        )
         assert module.operation.get_asm(enable_debug_info=False) == original
 
         definitions = {
@@ -298,14 +403,10 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
             if expression == "llvm.mlir.constant(32 : index) : i64"
         )
         rounded_warp_count = result_of(f"llvm.add {warp_count}, {three} : i64")
-        warp_blocks = result_of(
-            f"llvm.udiv {rounded_warp_count}, {four} : i64"
-        )
+        warp_blocks = result_of(f"llvm.udiv {rounded_warp_count}, {four} : i64")
         result_of(f'llvm.icmp "ult" {block_id}, {warp_blocks} : i64')
 
-        physical_warp = result_of(
-            f"llvm.udiv {thread_id}, {warp_width} : i64"
-        )
+        physical_warp = result_of(f"llvm.udiv {thread_id}, {warp_width} : i64")
         lane = result_of(f"llvm.urem {thread_id}, {warp_width} : i64")
         first_warp_task = result_of(f"llvm.mul {block_id}, {four} : i64")
         warp_task = result_of(
@@ -321,9 +422,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
             for expression in definitions.values()
         )
         assert any(
-            re.fullmatch(
-                rf"llvm.add %\d+, {warp_width} : i64", expression
-            )
+            re.fullmatch(rf"llvm.add %\d+, {warp_width} : i64", expression)
             for expression in definitions.values()
         )
 
@@ -358,7 +457,7 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, contract = first
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 10
@@ -378,6 +477,40 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         assert "shfl.sync.bfly" in ptx
         assert ptx.count("bar.sync") == 12
         assert ".entry segmented_sum" in ptx
+        persistent_pointers = [
+            ("plan", "warp_task_ids", "read"),
+            ("plan", "cta_task_ids", "read"),
+            ("plan", "partial_ranges", "read"),
+            ("plan", "partial_merge_ids", "read"),
+            ("plan", "merge_ranges", "read"),
+            ("scratch", "partials", "readwrite"),
+            ("scratch", "counters", "readwrite"),
+        ]
+        persistent_counts = [
+            "value_count",
+            "warp_task_count",
+            "cta_task_count",
+            "partial_task_count",
+            "merge_task_count",
+        ]
+        assert contract == _contract(
+            "segmented_sum",
+            512,
+            _USER_BUFFERS
+            + [
+                {
+                    "kind": "ptr",
+                    "origin": origin,
+                    "key": key,
+                    "access": access,
+                }
+                for origin, key, access in persistent_pointers
+            ]
+            + [
+                {"kind": "i32", "origin": "derived", "key": key}
+                for key in persistent_counts
+            ],
+        )
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -404,7 +537,7 @@ def test_fused_mixed_lowering_accepts_element_program():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-        lowered, ptx = native_swage._compile_fused_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_fused_segmented_reduction_ptx(
             module, kernel_name="segmented_sum", target="sm_80"
         )
         assert lowered.count("llvm.intr.exp2") == 2
@@ -439,7 +572,7 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, contract = first
         signature = re.search(rf"llvm.func @{entry}\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 3
@@ -450,6 +583,55 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
         assert ptx.count(".param .u32") == 2
         assert f".entry {entry}" in ptx
         assert "bar.sync" in ptx
+        if compiler == "_compile_split_partial_reduction_ptx":
+            arguments = [
+                _USER_BUFFERS[0],
+                {
+                    "kind": "ptr",
+                    "origin": "plan",
+                    "key": "partial_ranges",
+                    "access": "read",
+                },
+                {
+                    "kind": "ptr",
+                    "origin": "scratch",
+                    "key": "partials",
+                    "access": "write",
+                },
+                {"kind": "i32", "origin": "derived", "key": "value_count"},
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "partial_task_count",
+                },
+            ]
+        else:
+            arguments = [
+                {
+                    "kind": "ptr",
+                    "origin": "scratch",
+                    "key": "partials",
+                    "access": "read",
+                },
+                _USER_BUFFERS[2],
+                {
+                    "kind": "ptr",
+                    "origin": "plan",
+                    "key": "merge_ranges",
+                    "access": "read",
+                },
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "partial_task_count",
+                },
+                {
+                    "kind": "i32",
+                    "origin": "derived",
+                    "key": "merge_task_count",
+                },
+            ]
+        assert contract == _contract(entry, 512, arguments)
         assert module.operation.get_asm(enable_debug_info=False) == original
 
         definitions = {
@@ -503,7 +685,7 @@ def test_split_lowering_transforms_only_input_elements(compiler):
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-        lowered, ptx = getattr(native_swage, compiler)(
+        lowered, ptx, _ = getattr(native_swage, compiler)(
             module, kernel_name="segmented_sum", target="sm_80"
         )
         partial = compiler == "_compile_split_partial_reduction_ptx"
@@ -571,15 +753,13 @@ def test_materializes_split_ranges_and_compact_merge_records():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta, partial, merge = (
-            native_swage._materialize_segmented_plan(
-                module,
-                offsets=[0, 32, 65, 4162, 12354],
-                value_count=12354,
-                segment_count=4,
-                warp_max_elements=32,
-                cta_chunk_elements=4096,
-            )
+        warp, cta, partial, merge = native_swage._materialize_segmented_plan(
+            module,
+            offsets=[0, 32, 65, 4162, 12354],
+            value_count=12354,
+            segment_count=4,
+            warp_max_elements=32,
+            cta_chunk_elements=4096,
         )
 
         assert warp == [0]
@@ -632,7 +812,7 @@ SEGMENTED_EXPONENTIAL_SUM = """
 module {
   func.func @segmented_sum(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -657,7 +837,7 @@ def test_region_exponential_compiles_without_libdevice():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=128,
@@ -674,7 +854,7 @@ RAGGED_SOFTMAX = """
 module {
   func.func @ragged_softmax(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -717,7 +897,7 @@ def test_ragged_softmax_reductions_use_disjoint_workgroup_buffers():
         swage.register_dialects(context)
         module = ir.Module.parse(RAGGED_SOFTMAX)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="ragged_softmax",
             block_size=128,
@@ -741,7 +921,7 @@ def test_segmented_kernels_pin_their_launch_width_with_reqntid(block_size):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=block_size,
@@ -763,7 +943,7 @@ def test_fixed_width_kernels_carry_their_reqntid(compiler, width):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
-        _, ptx = getattr(native_swage, compiler)(
+        _, ptx, _ = getattr(native_swage, compiler)(
             module,
             kernel_name="segmented_sum",
             target="sm_80",
@@ -771,12 +951,15 @@ def test_fixed_width_kernels_carry_their_reqntid(compiler, width):
         assert f".reqntid {width}, 1, 1" in ptx
 
 
-BYSTANDER_MODULE = SEGMENTED_SUM.rstrip().removesuffix("}") + """
+BYSTANDER_MODULE = (
+    SEGMENTED_SUM.rstrip().removesuffix("}")
+    + """
   func.func @bystander(%x: i32) -> i32 {
     return %x : i32
   }
 }
 """
+)
 
 
 def test_kernel_name_must_match_the_compiled_kernel():
@@ -800,7 +983,7 @@ def test_kernel_name_matching_survives_bystander_functions():
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(BYSTANDER_MODULE)
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=128,
@@ -841,7 +1024,7 @@ def test_rejects_an_unverified_module_with_a_diagnostic():
             offsets_type = ir.MemRefType.get([dynamic], i32)
             function = func_dialect.FuncOp(
                 "segmented_sum",
-                ([values_type, offsets_type, values_type, i32, i32], []),
+                ([values_type, offsets_type, values_type], []),
             )
             with ir.InsertionPoint(function.add_entry_block()):
                 segment_id = swage.SegmentIdOp(ir.IndexType.get(), 0)

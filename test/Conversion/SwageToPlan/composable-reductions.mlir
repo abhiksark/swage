@@ -7,8 +7,7 @@
 // CHECK: swage_plan.classify
 module {
   func.func @maximum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                     %output: memref<?xf32>, %value_count: i32,
-                     %segment_count: i32) {
+                     %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
@@ -28,8 +27,7 @@ module {
 // CHECK: swage_plan.classify
 module {
   func.func @transformed_sum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                             %output: memref<?xf32>, %value_count: i32,
-                             %segment_count: i32) {
+                             %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
@@ -50,8 +48,7 @@ module {
 // CHECK: swage_plan.classify
 module {
   func.func @mapped_sum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                        %output: memref<?xf32>, %value_count: i32,
-                        %segment_count: i32) {
+                        %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %mapped = swage.map %segment : !swage.segment<f32> -> !swage.segment<f32> {

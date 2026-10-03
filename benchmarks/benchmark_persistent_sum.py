@@ -148,7 +148,7 @@ def main():
     """Run the frozen A6000 persistent-scheduling gate."""
     import torch
     from distributions import summarize_lengths
-    from swage import _runtime
+    from swage import _cuda_backend
     from swage._segmented_qualification import (
         _prepare_persistent_sum,
         _prepare_planned_sum,
@@ -205,8 +205,8 @@ def main():
         resident_blocks=_RESIDENT_BLOCKS,
     )
     launches = {
-        "static_mixed": static.mixed,
-        "persistent": persistent.launch,
+        "static_mixed": static.launch_mixed,
+        "persistent": persistent.launch_persistent,
     }
     torch.cuda.synchronize()
     expected = torch.tensor(lengths, dtype=torch.float32)
@@ -226,7 +226,7 @@ def main():
             "python": sys.version,
             "pytorch": torch.__version__,
             "pytorch_cuda": torch.version.cuda,
-            "cuda_driver": _runtime.driver_version(),
+            "cuda_driver": _cuda_backend.driver_version(),
             "gpu": gpu_name,
             "compute_capability": "sm_86",
             "multiprocessors": properties.multi_processor_count,

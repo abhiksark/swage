@@ -10,21 +10,37 @@
 
 **Turn variable-sized dense segments into efficient GPU tile tasks.**
 
-Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It explores
-whether one segment-local program can support different fixed GPU work shapes
-as runtime segment lengths change.
+Swage is a Python-embedded MLIR/LLVM compiler with a deliberately narrow public
+execution contract: canonical fixed vector addition or multiplication on
+explicitly selected
+CPU and CUDA backends. Variable-sized segment execution remains private
+research.
 
-## Current release boundary
+## Current capability boundary
 
-The current pre-alpha release is `v0.5.1`.
+The latest tagged release recorded here is `v0.5.1`. The `v0.5.2` source tree
+implements the native-wheel contract below; publication and production
+qualification remain gated on the installed-artifact workflow. Source changes
+alone are not release qualification.
 
 ### Public today
 
-- The canonical fixed vector-add kernel is the only public execution subset.
-- The restricted Python frontend can emit verified MLIR through build-tree
-  native bindings.
-- The fixed vector add can lower through LLVM NVPTX and launch through the
-  CUDA Driver API on the current PyTorch stream.
+- Canonical fixed vector add and multiply are the only public execution subset.
+  Contiguous rank-one tensors may use `float32`, `float16`,
+  `float8_e4m3fn`, or `float8_e5m2`; both inputs and the output must match.
+  Low-precision arithmetic widens to FP32 and rounds back to the storage
+  dtype. FP8 conversion runs in the compiled kernel, including on `sm_86`.
+  Kernels contain exactly one `x + y` or `x * y` value operation; chains,
+  floating vector/scalar arithmetic, broadcasting, and matrix multiplication remain
+  unsupported.
+- The restricted Python frontend emits verified MLIR through self-contained
+  native bindings, bundled in the v0.5.2 wheel contract.
+- `kernel.launch(..., backend="cuda")` lowers through LLVM NVPTX and enqueues
+  through the CUDA Driver API on the current PyTorch stream.
+- `kernel.launch(..., backend="cpu")` lowers the same admitted program to a
+  synchronous, process-local Native LLVM JIT entry for CPU tensors.
+- Backend selection is explicit and fail-closed; no backend falls back to the
+  other.
 - The `swage` dialect, `swage-opt`, and environment diagnostics are available
   to compiler contributors.
 
@@ -34,46 +50,79 @@ The current pre-alpha release is `v0.5.1`.
   through sequential CPU oracles and one-CTA GPU paths.
 - Capture-free, single-stage f32 sum/max programs, including element
   expressions and map chains, execute through host classification, direct
-  warp and CTA work, a fused mixed kernel, and split partial/merge kernels.
+  warp and CTA work, one fused mixed kernel that privately packs four warp
+  task records per 128-thread block, and split-CTA partial and merge kernels.
 - The frozen NVIDIA RTX A6000 `sm_86` mixed-policy record has a
   mixed-to-best-pure ratio of `0.939394`, below its predeclared `1.05` limit.
 - Exact and nontrivial f32 split sums match PyTorch and the CPU oracle on
   NVIDIA RTX A6000 `sm_86`. Split execution is a correctness result and does
   not retune the frozen benchmark.
+- An experimental private resident identity-sum path has correctness evidence,
+  but its predeclared performance gate failed; it is not qualified or public.
 
 ### Planned
 
 - Public segment syntax and public segmented launch.
-- Packed warps, split softmax, device queues, persistent
-  scheduling, and broader policies.
+- Public/general packed-warp planner policy, split softmax, reusable device
+  queues, qualified persistent scheduling, and broader policies.
 
 Private qualification is not a public segmented runtime. Current status is
 backed by the repository's executable tests and committed benchmark record.
 
-## Package and native build
+## Native wheels and source builds
 
-The `swage-compiler` wheel contains only the pure Python `swage` package. It
-does not contain compiler libraries, build output, or the native
-`mlir_swage` package. Native wheel packaging is deferred.
+The v0.5.2 wheel contains public `swage`, its fixed-contract type stubs, and the
+self-contained private `mlir_swage` compiler package. It does not need an
+external MLIR installation or a CUDA toolkit compiler at runtime. Private
+segmented Python modules are excluded; source distributions retain research
+code.
+
+The release matrix is regular CPython **3.10–3.13**, **Linux x86-64 with glibc
+2.28 or newer**, and optional **PyTorch 2.6–2.x**. CPU execution is gated on every
+wheel ABI. The continuously qualified CUDA configuration is **NVIDIA RTX
+A6000, `sm_86`**; other admitted NVIDIA targets are best-effort, not equivalent
+release evidence. There are no macOS, Windows, musl, other-architecture, or
+free-threaded wheels in this contract.
+
+After v0.5.2 passes publication gates:
 
 ```bash
-python -m pip install swage-compiler
-python -m pip install "swage-compiler[pytorch]"  # optional
+python -m pip install --only-binary=swage-compiler "swage-compiler[pytorch]==0.5.2"
+python -m swage.env --json --check native
+python -m swage.env --json --check cpu
+# With a suitable CUDA-enabled PyTorch installation and NVIDIA driver:
+python -m swage.env --json --check cuda
 ```
 
-Compiler emission and execution require a native build against the pinned
-LLVM/MLIR release:
+Choose the backend explicitly; an unavailable backend raises
+`swage.BackendUnavailableError`, never probes an alternative for execution.
+See [Quickstart](docs/getting-started/quickstart.md) for the canonical kernels
+and the runnable `examples/fixed_vector_add.py` and
+`examples/fixed_vector_multiply.py` scripts. The
+[runtime environment reference](docs/reference/runtime-environment.md)
+defines error codes, build identity, opt-in `swage.runtime` DEBUG logging, and
+wheel checksum/attestation verification.
+
+Native wheels also ship `python -m swage.bench vector-add --output result.json`
+for the frozen CUDA vector-add benchmark. See the
+[benchmark CLI contract](docs/reference/benchmarking.md) for prerequisites,
+raw evidence, and `--enforce`; this command alone does not qualify a release.
+
+Compiler contributors can instead build exactly `llvmorg-22.1.8`:
 
 ```bash
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]" -Cwheel.cmake=false
 ./scripts/fetch_llvm.sh
-./scripts/build_llvm.sh
+SWAGE_PYTHON_EXECUTABLE="$(command -v python)" ./scripts/build_llvm.sh
 ./scripts/build_swage.sh
 ninja -C build check-swage-python
 ```
 
-The native package is imported from `build/python_packages`. The published
-wheel remains useful for package import, source capture, and diagnostics, but
-does not independently emit MLIR or execute kernels.
+Normal source builds retain `build/python_packages/mlir_swage`. The
+frontend-only editable install does not itself provide native execution.
+See [Installation](docs/getting-started/installation.md) for wheel candidates,
+source-build requirements, and health-check interpretation.
 
 ## Documentation
 
@@ -89,4 +138,5 @@ does not independently emit MLIR or execute kernels.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Swage source: [MIT](LICENSE). Native wheels also redistribute LLVM under
+[Apache-2.0 with LLVM exceptions](LICENSES/LLVM.txt).

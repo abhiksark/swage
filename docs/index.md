@@ -11,26 +11,37 @@
 Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
 how one segment-local program can keep its meaning while task derivation
 changes with runtime segment lengths. Its public execution boundary is one
-canonical fixed vector-add kernel; the wider segment compiler exists as
-private qualification machinery or planned work.
+canonical fixed vector add or multiply kernel; the wider segment compiler
+exists as private qualification machinery or planned work.
 
-!!! warning "Pre-alpha boundary"
+!!! warning "Fixed-vector release boundary"
 
-    Read status labels literally. Public today is supported application
-    surface. Private qualification is tested contributor machinery. Planned
-    describes work that has not passed a public gate.
+    These docs describe the implemented v0.5.2 native-wheel contract.
+    Publication and production qualification remain pending; the latest
+    released tag is v0.5.1. Public denotes application API, not evidence that
+    a pending release has passed its gates. The broader segmented compiler
+    remains experimental; private qualification is contributor machinery,
+    and planned work has not passed a public gate.
 
 ## Public today
 
-- The pure Python `swage` package, distributed as `swage-compiler`.
+- Public `swage` and self-contained private `mlir_swage` in the v0.5.2
+  native-wheel implementation, distributed as `swage-compiler`.
 - `@swage.jit` capture and compile-only `emit_mlir()` for the restricted
-  fixed-block vector-add subset, when build-tree native bindings are present.
-- Keyword-only CUDA launch for the canonical fixed vector add.
-- `python -m swage.env` environment diagnostics.
-- Native `swage` MLIR parsing, verification, and registered compiler tools.
+  fixed-block elementwise subset, without a source tree or local LLVM install.
+- Keyword-only launch of canonical fixed vector add or multiply on explicitly
+  selected CUDA or Native CPU backends.
+- `python -m swage.env --json` diagnostics and explicit native/CPU/CUDA health checks.
+- Installed-wheel `python -m swage.bench vector-add --output result.json` for
+  the [frozen CUDA vector-add benchmark](reference/benchmarking.md), not
+  independent release qualification.
+- Native `swage` MLIR parsing and verification; compiler tools through source builds.
 
-The published wheel does not include the native `mlir_swage` package or
-compiler build output. Native wheel packaging remains deferred.
+The fixed kernel's semantics are unchanged. CPU and CUDA selection never falls
+back to the other backend. See the [runtime support matrix](reference/runtime-environment.md#support-matrix)
+for supported wheels, optional PyTorch, and the distinction between admitted
+CUDA targets and the A6000/`sm_86` release gate. Native wheels do not expose the
+private segmented Python surface.
 
 ## Private qualification
 
@@ -44,22 +55,29 @@ compiler build output. Native wheel packaging remains deferred.
 These paths have tests and recorded qualification evidence. They do not
 widen the public Python language or launch contract.
 
+## Experimental
+
+- A private resident identity-sum kernel drains device task queues and
+  publishes split completion correctly, but its predeclared A6000 performance
+  gate failed. It is neither qualified nor public.
+
 ## Planned
 
 - Public segment syntax and public segmented launch.
 - Packing several short segments into one warp allocation.
 - Split max and split softmax.
-- Device queues, persistent scheduling, and broader policy selection.
+- Reusable device queues, qualified persistent scheduling, and broader policy
+  selection.
 
-The three lanes are status boundaries, not fallback paths.
+These capability sections are status boundaries, not fallback paths.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Public, private qualification, and planned capability lanes](assets/diagrams/capability-boundary.svg)
+![Public, private qualification, experimental, and planned capability lanes](assets/diagrams/capability-boundary.svg)
 
 </div>
 
-*Swage capability status at a glance. [Open the full-size figure](assets/diagrams/capability-boundary.svg).*
+*Swage capability status at a glance: public, private qualification, experimental, and planned. [Open the full-size figure](assets/diagrams/capability-boundary.svg).*
 
 ## Choose a path
 
@@ -69,8 +87,8 @@ The three lanes are status boundaries, not fallback paths.
 
     ---
 
-    Install the package, build the pinned toolchain, and run the
-    supported example end to end.
+    Install a native wheel and run the supported example end to end,
+    or build from source against the exact pinned toolchain.
 
     [Installation](getting-started/installation.md)
 

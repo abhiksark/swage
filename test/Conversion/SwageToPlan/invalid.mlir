@@ -13,17 +13,14 @@
 // NO-PLAN: memref.global "private" @companion_collision__swage_plan
 // NO-PLAN-LABEL: func.func @companion_collision(
 // NO-PLAN: swage.reduce
-// NO-PLAN-LABEL: func.func @signed_value_count(
-// NO-PLAN: swage.reduce
-// NO-PLAN-LABEL: func.func @unsigned_segment_count(
+// NO-PLAN-LABEL: func.func @ambiguous_roles(
 // NO-PLAN: swage.reduce
 // NO-PLAN-LABEL: func.func @non_default_memory_space(
 // NO-PLAN: swage.reduce
 
 module {
   func.func @captured_map(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                          %output: memref<?xf32>, %value_count: i32,
-                          %segment_count: i32) {
+                          %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
@@ -49,8 +46,7 @@ module {
 
 module {
   func.func @captured_sum(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                          %output: memref<?xf32>, %value_count: i32,
-                          %segment_count: i32) {
+                          %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %maximum = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {
@@ -71,8 +67,7 @@ module {
 
 module {
   func.func @multi_stage(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                         %output: memref<?xf32>, %value_count: i32,
-                         %segment_count: i32) {
+                         %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %first = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
@@ -93,8 +88,7 @@ module {
 
 module {
   func.func @map_store_terminal(%values: memref<?xf32>, %offsets: memref<?xi32>,
-                                %output: memref<?xf32>, %value_count: i32,
-                                %segment_count: i32) {
+                                %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
@@ -117,7 +111,7 @@ module {
   memref.global "private" @companion_collision__swage_plan : memref<1xi32>
   func.func @companion_collision(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
@@ -132,17 +126,17 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
-  func.func @signed_value_count(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: si32, %segment_count: i32) {
+  func.func @ambiguous_roles(
+      %shared: memref<?xf32>, %bounds: memref<?xi32>,
+      %unused: memref<?xf32>) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %segment = swage.make_segment %shared, %bounds, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
     ^bb0(%element: f32):
       swage.yield %element : f32
     }
-    memref.store %sum, %output[%sid] : memref<?xf32>
+    // expected-error@+1 {{values, offsets, and output roles must resolve to three distinct function arguments}}
+    memref.store %sum, %shared[%sid] : memref<?xf32>
     return
   }
 }
@@ -150,29 +144,10 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
-  func.func @unsigned_segment_count(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>, %value_count: i32, %segment_count: ui32) {
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
-    %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
-    ^bb0(%element: f32):
-      swage.yield %element : f32
-    }
-    memref.store %sum, %output[%sid] : memref<?xf32>
-    return
-  }
-}
-
-// -----
-
-module {
-  // expected-error@+1 {{segmented reduction requires rank-one f32 values, rank-one i32 offsets, rank-one f32 output, i32 value count, and i32 segment count}}
+  // expected-error@+1 {{segmented reduction arguments must be dynamic rank-one identity memrefs}}
   func.func @non_default_memory_space(
       %values: memref<?xf32, #gpu.address_space<workgroup>>,
-      %offsets: memref<?xi32>, %output: memref<?xf32>, %value_count: i32,
-      %segment_count: i32) {
+      %offsets: memref<?xi32>, %output: memref<?xf32>) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid : memref<?xf32, #gpu.address_space<workgroup>>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {

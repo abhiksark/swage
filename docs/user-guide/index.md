@@ -6,21 +6,34 @@ The user guide explains how Swage thinks about ragged data and how to use
 the supported public surface. It reads in order; each page builds on the
 one before it.
 
-Runnable snippets in this guide state one of three requirement tiers:
+This guide describes the v0.5.2 native-wheel contract; publication and release
+qualification are pending, and v0.5.1 remains the latest released tag. See
+[Installation](../getting-started/installation.md) before using version-pinned
+install commands.
 
-- **wheel-only**: the published `swage-compiler` package, no native build.
-  Enough to import `swage`, capture kernels, and run
-  `python -m swage.env`.
-- **native build**: the build-tree `mlir_swage` package from
-  [Installation](../getting-started/installation.md). Enough to emit and
-  inspect MLIR without a GPU.
-- **CUDA GPU**: a CUDA-enabled PyTorch build, an admitted NVIDIA GPU, and
-  the installed driver. Required to launch.
+Runnable snippets state their requirements:
 
-Status labels are load-bearing everywhere in this documentation. Public
-today is supported application surface. Private qualification is tested
-contributor machinery, not public API. Planned work has not passed a
-public gate.
+- **wheel-only**: a v0.5.2 native wheel, including private `mlir_swage`,
+  needs no local compiler build. It can import `swage`, capture kernels,
+  emit MLIR with an explicit signature, and run `python -m swage.env --json`
+  without PyTorch or a GPU.
+- **Native CPU**: that wheel plus PyTorch CPU tensors for explicit
+  `backend="cpu"` launch.
+- **CUDA GPU**: that wheel, a CUDA-enabled PyTorch build, an admitted NVIDIA
+  GPU, and the installed driver for explicit `backend="cuda"` launch.
+
+A [source build](../getting-started/installation.md#build-from-source) can
+supply native bindings instead of a wheel. A frontend-only editable install
+can capture source and report the environment, but cannot emit or launch
+without those bindings. The authoritative
+[support matrix](../reference/runtime-environment.md#support-matrix) defines
+supported ABIs and qualified versus best-effort CUDA targets. CUDA is the
+default selection; neither backend silently falls back.
+
+Status labels are load-bearing everywhere. Public is the application surface,
+not a claim that an unreleased artifact is qualified. Private qualification
+is tested contributor machinery, not public API, and its Python modules are
+excluded from native wheels. Planned work has not passed a public gate.
 
 Read the guide in this order:
 
@@ -28,7 +41,7 @@ Read the guide in this order:
 2. [Writing Kernels](writing-kernels.md): capture, the kernel language,
    and compile-only emission.
 3. [Launching Kernels](launching.md): what happens between `launch()`
-   and the GPU.
+   and the explicitly selected backend.
 4. [Execution Model](execution-model.md): segments, tasks, and tiles,
    and how execution machinery grows from them.
 

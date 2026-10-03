@@ -2,8 +2,8 @@
 
 # swage.language
 
-`swage.language` exports the eight symbols of the restricted kernel
-language, conventionally imported as `sl`. The symbolic functions are
+`swage.language` exports the markers and symbolic operations of the restricted
+kernel language, conventionally imported as `sl`. The symbolic functions are
 valid only inside a captured kernel: outside one they raise
 `RuntimeError` instead of computing. Their exact accepted source forms
 are normative in [Kernel Language](kernel-language.md).
@@ -12,6 +12,9 @@ are normative in [Kernel Language](kernel-language.md).
 arange
 constexpr
 float32
+float16
+float8_e4m3fn
+float8_e5m2
 int32
 load
 pointer
@@ -23,14 +26,18 @@ store
 
 ```python
 sl.float32
+sl.float16
+sl.float8_e4m3fn
+sl.float8_e5m2
 sl.int32
 sl.pointer(element_type)
 sl.constexpr
 ```
 
-`float32` and `int32` are the scalar types accepted by the current
-frontend. `pointer(element_type)` describes a pointer to a scalar
-element type for explicit `emit_mlir(signature=...)` calls.
+Tensor pointer elements may use `float32`, `float16`, `float8_e4m3fn`, or
+`float8_e5m2`. `int32` is the supported runtime scalar parameter type.
+`pointer(element_type)` describes a tensor pointer for explicit
+`emit_mlir(signature=...)` calls; it requires a supported floating element.
 `constexpr` is the exact annotation that marks a compile-time kernel
 parameter; annotated parameters are bound through `constexprs` at
 emission and launch, never passed at run time.
@@ -92,7 +99,7 @@ Store a masked vector inside a compiled kernel.
 
 Parameters
 :   `pointer_value`: a pointer parameter plus an index-offset vector.
-:   `value`: the f32 vector to store.
+:   `value`: a floating vector with the same element dtype as the pointer.
 :   `mask`: required by the accepted grammar; lanes where the mask is
     false write nothing.
 

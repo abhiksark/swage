@@ -1,5 +1,5 @@
 <!-- docs/assets/figures/dispatch-path.svg -->
-<!-- source-sha256: 97f705997149aa54b9da9a69b93821b957ec4000d09929c5e3779a81b9fce566 -->
+<!-- source-sha256: d7f3e1961e585bbb8674266581ca49012abfbed89337ae8443e7207cd256b0a1 -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="410.75" height="234.09" viewBox="0 0 410.75 234.09" role="img" aria-labelledby="dispatch-path-title dispatch-path-description">
 <title id="dispatch-path-title">Launch dispatch lanes</title>
 <desc id="dispatch-path-description">A validated launch enqueues through the compiled nanobind launcher when the bindings import, or through the ctypes fallback otherwise; both submit the same driver call on the current PyTorch stream.</desc>
@@ -327,12 +327,17 @@
 <use data-text="c" xlink:href="#font_4_4" transform="matrix(8.966376,0,0,-8.966376,92.05559,127.90274)" fill="#17212b"/>
 <use data-text="h" xlink:href="#font_4_7" transform="matrix(8.966376,0,0,-8.966376,96.76293,127.90274)" fill="#17212b"/>
 <use data-text="_" xlink:href="#font_4_1" transform="matrix(8.966376,0,0,-8.966376,101.470279,127.90274)" fill="#17212b"/>
-<use data-text="k" xlink:href="#font_4_9" transform="matrix(8.966376,0,0,-8.966376,106.17763,127.90274)" fill="#17212b"/>
-<use data-text="e" xlink:href="#font_4_6" transform="matrix(8.966376,0,0,-8.966376,110.88498,127.90274)" fill="#17212b"/>
-<use data-text="r" xlink:href="#font_4_13" transform="matrix(8.966376,0,0,-8.966376,115.59232,127.90274)" fill="#17212b"/>
-<use data-text="n" xlink:href="#font_4_11" transform="matrix(8.966376,0,0,-8.966376,120.29967,127.90274)" fill="#17212b"/>
-<use data-text="e" xlink:href="#font_4_6" transform="matrix(8.966376,0,0,-8.966376,125.00702,127.90274)" fill="#17212b"/>
-<use data-text="l" xlink:href="#font_4_10" transform="matrix(8.966376,0,0,-8.966376,129.71437,127.90274)" fill="#17212b"/>
+<use data-text="c" xlink:href="#font_4_4" transform="matrix(8.966376,0,0,-8.966376,106.17763,127.90274)" fill="#17212b"/>
+<use data-text="u" xlink:href="#font_4_14" transform="matrix(8.966376,0,0,-8.966376,110.88498,127.90274)" fill="#17212b"/>
+<use data-text="d" xlink:href="#font_4_5" transform="matrix(8.966376,0,0,-8.966376,115.59232,127.90274)" fill="#17212b"/>
+<use data-text="a" xlink:href="#font_4_2" transform="matrix(8.966376,0,0,-8.966376,120.29967,127.90274)" fill="#17212b"/>
+<use data-text="_" xlink:href="#font_4_1" transform="matrix(8.966376,0,0,-8.966376,125.00702,127.90274)" fill="#17212b"/>
+<use data-text="k" xlink:href="#font_4_9" transform="matrix(8.966376,0,0,-8.966376,129.71437,127.90274)" fill="#17212b"/>
+<use data-text="e" xlink:href="#font_4_6" transform="matrix(8.966376,0,0,-8.966376,134.42173,127.90274)" fill="#17212b"/>
+<use data-text="r" xlink:href="#font_4_13" transform="matrix(8.966376,0,0,-8.966376,139.12906,127.90274)" fill="#17212b"/>
+<use data-text="n" xlink:href="#font_4_11" transform="matrix(8.966376,0,0,-8.966376,143.83641,127.90274)" fill="#17212b"/>
+<use data-text="e" xlink:href="#font_4_6" transform="matrix(8.966376,0,0,-8.966376,148.54376,127.90274)" fill="#17212b"/>
+<use data-text="l" xlink:href="#font_4_10" transform="matrix(8.966376,0,0,-8.966376,153.25112,127.90274)" fill="#17212b"/>
 <use data-text="n" xlink:href="#font_5_27" transform="matrix(6.973848,0,0,-6.973848,26.152714,143.19954)" fill="#17212b"/>
 <use data-text="o" xlink:href="#font_5_28" transform="matrix(6.973848,0,0,-6.973848,30.553212,143.19954)" fill="#17212b"/>
 <use data-text="p" xlink:href="#font_5_29" transform="matrix(6.973848,0,0,-6.973848,37.199289,143.19954)" fill="#17212b"/>

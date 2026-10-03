@@ -27,6 +27,10 @@ venv/
 # Docs output
 site/
 
+# Local paper workspace and its artifact tests
+/paper/
+/tests/python/test_paper_artifact.py
+
 # Swage artifacts
 .swage-cache/
 

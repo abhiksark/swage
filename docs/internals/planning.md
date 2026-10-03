@@ -8,7 +8,7 @@ exact internal contracts; none of them is a public API.
 
 *Qualified through compile-only compiler and classifier tests; see
 [Verification](verification.md) and
-[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
+[ADR-0020](../adr/ADR-0020-composable-private-reductions.md).*
 
 `--swage-to-plan` admits a capture-free, single-stage f32 sum or max with
 optional single-consumer map chains and a scalar output per segment. Element
@@ -29,9 +29,10 @@ validated planning-limit invariant.
 The private `_prepare_planned_reduction` helper can select the existing pure
 CTA implementation after validating the native plan. With default 4096-element
 chunks, it avoids splitting when every segment has 4097–8192 elements and the
-batch has at least as many segments as the device has SMs. The selected
-`mixed` callable aliases `cta`, and preparation skips split kernel compilation
-and scratch allocation. Selection does not execute or time the program.
+batch has at least as many segments as the device has SMs. The prepared
+execution then records `direct_cta`, its mixed launch runs the CTA launch, and
+preparation skips split kernel compilation, split records, and scratch
+allocation. Selection does not execute or time the program.
 
 The element program must also fit a 32-unit relative work budget. The helper
 inspects typed operations in the admitted native MLIR: add, subtract, multiply,

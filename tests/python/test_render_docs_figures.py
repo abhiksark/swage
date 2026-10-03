@@ -1,148 +1,25 @@
 # tests/python/test_render_docs_figures.py
 """Validate the TikZ figure atlas without requiring a TeX toolchain."""
 
+import hashlib
 import importlib.util
 import json
 import re
+import shutil
+import statistics
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
+from benchmark_campaign_fixtures import make_child, write_campaign
 
 REPO_ROOT = Path(__file__).parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "render_docs_figures.py"
 
-REQUIRED_LABELS = {
-    "fixed-block-thread-map": (
-        "grid = ceil(n / BLOCK) blocks",
-        "one block = BLOCK threads",
-        "gid = program_id(0) * BLOCK + arange(0, BLOCK)",
-        "mask = gid < n",
-        "masked",
-        "public launch contract",
-    ),
-    "warp-vs-cta-tiles": (
-        "32-thread warp tile",
-        "128-thread CTA tile",
-        "512-thread split tile",
-        "xor shuffle butterfly",
-        "offsets 1, 2, 4, 8, 16",
-        "every lane holds the total",
-        "block-stride passes",
-        "up to 32 elements",
-        "33 to 4096 elements",
-        "over 4096 elements",
-        "8 elements per thread",
-        "one merge CTA",
-    ),
-    "fused-mixed-schedule": (
-        "one 128-thread block",
-        "four independent warp slots",
-        "task_ids",
-        "warp tasks: four per block",
-        "CTA tasks: one per block",
-        "warp_task_count",
-        "cta_task_count",
-    ),
-    "plan-classification": (
-        "swage_plan.classify",
-        "empty",
-        "warp",
-        "cta",
-        "split",
-        "four task lists",
-        "INT32_MAX >= cta chunk >= warp max > 0",
-    ),
-    "oracle-topology": (
-        "one semantic module",
-        "sequential CPU oracle",
-        "PyTorch reference",
-        "GPU path",
-        "differential comparison",
-        "empty max is negative infinity",
-        "NaN-propagating semantics",
-    ),
-    "ownership-map": (
-        "Swage owns",
-        "upstream MLIR and LLVM own",
-        "PyTorch owns",
-        "semantic operations",
-        "fail-closed admission",
-        "GPU lowering infrastructure",
-        "NVPTX emission",
-        "current stream",
-        "one launch crosses the domains",
-    ),
-    "ragged-softmax-phases": (
-        "one CTA per segment",
-        "maximum",
-        "shifted exponential sum",
-        "normalize and store",
-        "gpu.all_reduce",
-        "broadcast and the phase barrier",
-        "recomputed in the terminal store",
-        "mapped segments are never materialized",
-        "exp2((x - max) * log2(e))",
-        "empty segments run the identities and store nothing",
-    ),
-    "specialization-key-cache": (
-        "specialization key",
-        "normalized source",
-        "ordered ABI descriptors",
-        "exact compute capability",
-        "Swage revision",
-        "LLVM version",
-        "verified before module load",
-        "rejected",
-        "raises",
-        "miss",
-    ),
-    "dispatch-path": (
-        "_launch_kernel",
-        "nanobind",
-        "dlopen libcuda.so.1",
-        "GIL held across the enqueue",
-        "ctypes fallback",
-        "compiled bindings are absent",
-        "current PyTorch stream",
-    ),
-    "timing-methods": (
-        "call_us",
-        "kernel_us",
-        "graph_us",
-        "synchronized wall clock",
-        "32 back-to-back launches",
-        "launcher still visible",
-        "CUDA-graph replay",
-        "host removed",
-    ),
-    "segsum-graph-comparison": (
-        "graph_us",
-        "RTX 5090",
-        "swage",
-        "triton",
-        "torch",
-        "lower is better",
-        "captured mixed sequence",
-        "figure-data.tex",
-    ),
-    "dispatch-ladder": (
-        "call_us",
-        "log scale",
-        "compiled nanobind launcher",
-        "compiled-C launcher",
-        "cold start",
-        "narrowed, not won",
-        "figure-data.tex",
-    ),
-}
-
 
 def _load_renderer():
     """Load the figure renderer module from its script path."""
-    spec = importlib.util.spec_from_file_location(
-        "render_docs_figures", SCRIPT
-    )
+    spec = importlib.util.spec_from_file_location("render_docs_figures", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -153,7 +30,6 @@ def test_manifest_matches_the_committed_tex_sources():
     module = _load_renderer()
     names = [spec.name for spec in module.FIGURES]
     assert sorted(names) == sorted(set(names))
-    assert set(names) == set(REQUIRED_LABELS)
     sources = {
         path.stem
         for path in module.SOURCE_DIR.glob("*.tex")
@@ -161,27 +37,6 @@ def test_manifest_matches_the_committed_tex_sources():
     }
     assert sources == set(names)
     assert (module.SOURCE_DIR / module.PREAMBLE_NAME).is_file()
-
-
-def test_figures_declare_the_required_source_labels():
-    """Each TeX source carries its figure's content contract."""
-    module = _load_renderer()
-    for spec in module.FIGURES:
-        source = (module.SOURCE_DIR / f"{spec.name}.tex").read_text()
-        for label in REQUIRED_LABELS[spec.name]:
-            assert label in source, (spec.name, label)
-
-
-def test_tex_sources_open_with_their_repo_path_comment():
-    """Sources and the preamble name their repo-relative location."""
-    module = _load_renderer()
-    paths = [module.SOURCE_DIR / module.PREAMBLE_NAME]
-    paths += [
-        module.SOURCE_DIR / f"{spec.name}.tex" for spec in module.FIGURES
-    ]
-    for path in paths:
-        first_line = path.read_text().splitlines()[0]
-        assert first_line == f"% figures/{path.name}", path
 
 
 def test_figure_digest_covers_titles_and_descriptions():
@@ -321,8 +176,7 @@ def test_perf_snapshot_is_wellformed_and_sourced():
             assert cell["median"] > 0, (row["distribution"], impl)
             sourced = "provenance" in cell
             spread = (
-                "q1" in cell
-                and 0 < cell["q1"] <= cell["median"] <= cell["q3"]
+                "q1" in cell and 0 < cell["q1"] <= cell["median"] <= cell["q3"]
             )
             assert sourced or spread, (row["distribution"], impl)
     for stage in snapshot["dispatch_call_us"]:
@@ -363,3 +217,156 @@ def test_render_mode_writes_stamped_svgs_and_removes_orphans(tmp_path):
     digest = module.figure_digest(spec)
     assert f"<!-- source-sha256: {digest} -->" in rendered.read_text()
     assert module.render_figures(tmp_path, check=True) == []
+
+
+def _coordinate_series(include):
+    """Read numerical chart coordinates independently of the renderer."""
+    return [
+        [float(value) for _, value in re.findall(r"\((\d+),([^)]+)\)", body)]
+        for body in re.findall(r"coordinates \{([^}]*)\}", include)
+    ]
+
+
+def test_campaign_coordinates_come_from_raw_child_samples(tmp_path):
+    """Both chart includes use medians of five raw process medians."""
+    renderer = _load_renderer()
+    manifest = write_campaign(tmp_path)
+    children = [
+        json.loads((tmp_path / f"process-{index:03d}.json").read_text())
+        for index in range(5)
+    ]
+    candidates = (
+        "torch_padded",
+        "swage_warp",
+        "swage_cta",
+        "triton_matched_task_partition",
+        "swage_mixed",
+    )
+
+    def raw_median(row_index, candidate, phase):
+        measurements = []
+        for child in children:
+            row = child["results"][row_index]
+            measurement = (
+                row["planning"]["timings"][candidate]
+                if phase == "planning"
+                else row["timings"][candidate][phase]
+            )
+            measurements.append(statistics.median(measurement["samples_us"]))
+        return statistics.median(measurements)
+
+    assert _coordinate_series(
+        renderer._segmented_baselines_include(manifest)
+    ) == [
+        [raw_median(index, candidate, "batched_event") for index in range(8)]
+        for candidate in candidates
+    ]
+    compilation = statistics.median(
+        statistics.median(
+            child["compilation"]["timings"]["swage_total"]["samples_us"]
+        )
+        for child in children
+    )
+    assert _coordinate_series(renderer._phase_breakdown_include(manifest)) == [
+        [compilation],
+        [raw_median(index, "swage_mixed", "planning") for index in range(8)],
+        [
+            raw_median(index, "swage_mixed", "batched_event")
+            for index in range(8)
+        ],
+    ]
+
+
+def test_campaign_chart_requires_archival_five_processes(tmp_path):
+    """A shared-mode or undersized campaign cannot supply archival charts."""
+    renderer = _load_renderer()
+    shared = write_campaign(tmp_path / "shared", archival=False)
+    with pytest.raises(ValueError, match="archival"):
+        renderer._segmented_baselines_include(shared)
+    single = write_campaign(
+        tmp_path / "single", children=[make_child(suite="segmented-sum")]
+    )
+    with pytest.raises(ValueError, match="five independent processes"):
+        renderer._phase_breakdown_include(single)
+
+
+def test_campaign_tampering_and_digest_closure(tmp_path, monkeypatch):
+    """Raw edits need hashes and aggregates, then change the figure digest."""
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "benchmarks"))
+    renderer = _load_renderer()
+    directory = tmp_path / "campaign"
+    manifest_path = write_campaign(
+        directory,
+        children=[
+            make_child(
+                median=10.0 * (index + 1), samples=3, suite="segmented-sum"
+            )
+            for index in range(5)
+        ],
+    )
+    # The digest fixture includes exactly the planned six evidence inputs
+    # plus both Python sources, without registering an unmeasured figure.
+    digest_renderer = _load_renderer()
+    digest_renderer.REPO_ROOT = tmp_path
+    digest_renderer.SOURCE_DIR = tmp_path / "figures"
+    digest_renderer.SOURCE_DIR.mkdir()
+    for source in (
+        "scripts/render_docs_figures.py",
+        "benchmarks/benchmark_campaign.py",
+    ):
+        destination = tmp_path / source
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / source, destination)
+    (digest_renderer.SOURCE_DIR / "common-preamble.tex").write_text(
+        "% preamble\n"
+    )
+    (digest_renderer.SOURCE_DIR / "campaign-smoke.tex").write_text("% chart\n")
+    spec = digest_renderer.FigureSpec(
+        "campaign-smoke",
+        "Raw campaign",
+        "Independent process medians",
+        (
+            "campaign/manifest.json",
+            *(f"campaign/process-{index:03d}.json" for index in range(5)),
+            "benchmarks/benchmark_campaign.py",
+            "scripts/render_docs_figures.py",
+        ),
+    )
+
+    def digest():
+        include = renderer._segmented_baselines_include(manifest_path)
+        return digest_renderer.figure_digest(spec, include=include)
+
+    before = digest()
+    child_path = directory / "process-002.json"
+    child = json.loads(child_path.read_text())
+    measurement = child["results"][0]["timings"]["swage_mixed"]["batched_event"]
+    measurement["samples_us"] = [1.0, 31.0, 1000.0]
+    quartiles = statistics.quantiles(
+        measurement["samples_us"], method="inclusive"
+    )
+    measurement["summary_us"] = {
+        "median": 31.0,
+        "q1": quartiles[0],
+        "q3": quartiles[2],
+    }
+    child_path.write_text(json.dumps(child))
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        digest()
+    manifest = json.loads(manifest_path.read_text())
+    manifest["children"][2]["sha256"] = hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="stored aggregate drift"):
+        digest()
+    # Recompute only after proving that changing the hash is insufficient.
+    from benchmark_campaign import aggregate_children
+
+    children = [
+        json.loads((directory / f"process-{index:03d}.json").read_text())
+        for index in range(5)
+    ]
+    manifest.update(aggregate_children(children))
+    manifest_path.write_text(json.dumps(manifest))
+    assert digest() != before

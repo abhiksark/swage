@@ -2,7 +2,7 @@
 // RUN: swage-opt %s | swage-opt | FileCheck %s
 
 module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32)
+  func.func private @semantic_sum(memref<?xf32>, memref<?xf32>, memref<?xi32>)
 
   func.func @classify(%offsets: memref<?xi32>, %value_count: i32,
                       %segment_count: i32) -> !swage_plan.task_range {

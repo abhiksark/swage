@@ -80,8 +80,9 @@ allows a future planner to change task structure without changing program
 meaning.
 
 The current public Python path uses a logical fixed-block coordinate for
-canonical vector add. The private segmented path proves selected Segment to
-Task to Tile mappings. It does not yet provide a public general planner.
+canonical vector add or multiply. The private segmented path proves selected
+Segment to Task to Tile mappings. It does not yet provide a public general
+planner.
 
 ## From model to machinery
 

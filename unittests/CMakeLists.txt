@@ -7,9 +7,11 @@ set_target_properties(check-swage-unit PROPERTIES FOLDER "Tests")
 
 add_unittest(check-swage-unit SwageUnitTests
   TaskClassifierTest.cpp
+  KernelContractTest.cpp
 )
 
 target_link_libraries(SwageUnitTests
   PRIVATE
   MLIRSwagePlan
+  MLIRSwageSupport
 )
