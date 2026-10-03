@@ -10,9 +10,10 @@ none of them is a public API.
 [Verification](verification.md) and
 [ADR-0013](../adr/ADR-0013-fusion-and-map-store-abi.md).*
 
-The softmax path retains the five-argument ABI defined in
-[Segmented Reductions](segmented-reductions.md). It admits ordered f32
-reduction captures,
+The softmax path uses the three-buffer semantic ABI defined in
+[Segmented Reductions](segmented-reductions.md). Its generated physical GPU
+contract retains the derived runtime counts. It admits ordered f32 reduction
+captures,
 single-consumer map chains, and exactly one scalar store or map-store
 terminal. The stable softmax module performs maximum, shifted exponential
 sum, and normalize/store phases. Maps are fused into their consumer.

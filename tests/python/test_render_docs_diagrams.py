@@ -19,9 +19,12 @@ REQUIRED_LABELS = {
     "capability-boundary.svg": (
         "PUBLIC TODAY",
         "PRIVATE QUALIFICATION",
-        "not a public API",
+        "tested contributor machinery; not a public API",
+        "EXPERIMENTAL",
+        "correctness passed; performance gate failed",
         "PLANNED",
         "public segmented API",
+        "launch(cpu / cuda)",
     ),
     "frontend-boundary.svg": (
         "restricted AST",
@@ -29,7 +32,8 @@ REQUIRED_LABELS = {
         "emit_mlir()",
         "compile-only",
         "launch()",
-        "sm_80+",
+        "CPU: host-call",
+        "CUDA: sm_80+",
     ),
     "ragged-storage.svg": (
         "offsets = [0, 2, 2, 5, 6]",
@@ -44,14 +48,18 @@ REQUIRED_LABELS = {
     ),
     "compiler-pipeline.svg": (
         "verified semantic MLIR",
-        "fixed-block vector add",
+        "fixed-block add / multiply",
+        "CUDA or Native host",
         "segmented direct",
         "SwagePlan direct + split",
-        "GPU / SCF / NVVM / LLVM",
+        "backend-specific MLIR / LLVM lowering",
+        "Native: SCF / LLVM",
+        "CUDA: GPU / NVVM / LLVM",
+        "Native LLVM JIT",
         "CUDA Driver API",
         "sequential CPU oracle",
         "SCF / memref stop",
-        "GPU: one CTA / segment",
+        "GPU: one CTA",
     ),
     "split-lifecycle.svg": (
         "identity sum only",
@@ -63,6 +71,7 @@ REQUIRED_LABELS = {
         "empty phases skipped",
     ),
     "runtime-lifecycle.svg": (
+        "CUDA runtime lifecycle",
         "VALIDATE",
         "FAIL CLOSED",
         "zero-work no-op",

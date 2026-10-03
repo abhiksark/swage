@@ -136,7 +136,7 @@ def main():
     """Run the fixed A6000 benchmark and commit-ready JSON report."""
     import torch
     from distributions import generate_lengths, summarize_lengths
-    from swage import _runtime
+    from swage import _cuda_backend
     from swage._segmented_qualification import (
         _prepare_planned_sum,
     )
@@ -171,7 +171,11 @@ def main():
         output,
         warp_max_elements=_WARP_MAX_ELEMENTS,
     )
-    launches = prepared._asdict()
+    launches = {
+        "warp": prepared.launch_warp,
+        "cta": prepared.launch_cta,
+        "mixed": prepared.launch_mixed,
+    }
     torch.cuda.synchronize()
     _check_results(launches, output, torch.tensor(lengths, dtype=torch.float32))
     samples = _measure(launches)
@@ -190,7 +194,7 @@ def main():
             "python": sys.version,
             "pytorch": torch.__version__,
             "pytorch_cuda": torch.version.cuda,
-            "cuda_driver": _runtime.driver_version(),
+            "cuda_driver": _cuda_backend.driver_version(),
             "gpu": gpu_name,
             "compute_capability": f"sm_{capability[0]}{capability[1]}",
             "multiprocessors": properties.multi_processor_count,

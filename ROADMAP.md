@@ -27,5 +27,30 @@ M7 was the `v0.5.0` feature gate, and `v0.5.0` was published on 2026-08-24.
 M8 is a post-release internal correctness milestone. The deferred `v0.2.0`,
 `v0.3.0`, and `v0.4.0` versions remain outside this roadmap gate.
 
+### Fixed-vector release hardening: v0.5.2
+
+The source tree implements self-contained native wheels, fixed-contract typing,
+stable backend errors, structured health checks, build provenance, and gated
+artifact/security/SLO workflows. v0.5.2 remains unreleased until the four-ABI
+CPU artifact checks, cp313 reproducibility check, and trusted installed-wheel
+A6000 performance gates pass, followed by the protected signed-tag process.
+No production-ready claim follows from implementation alone.
+
+The source tree extends canonical vector addition and multiplication to matching
+`float16`, `float8_e4m3fn`, and `float8_e5m2` tensors, alongside `float32`.
+The existing CPU and RTX A6000 `sm_86` exhaustive FP8 input-pair checks and
+FP16 rounding/encoding evidence cover addition. Multiplication follows the
+same FP32 arithmetic and rounding contract, but new release artifacts must be
+built and pass the expanded installed-wheel CPU and trusted CUDA checks. The
+historical addition results are not multiplication evidence or low-precision
+performance qualification.
+
+The canonical fixed-vector ABI is unchanged; multiplication adds one alternate
+`x * y` body with the same four runtime parameters and block constexpr. It
+does not admit operation chains, floating vector/scalar arithmetic,
+broadcasting, or matrix multiplication. These additions
+do not complete M9 or add a public segmented API. The v0.6.0 mapping remains
+unchanged, and the failed persistent scheduling performance gate is not waived.
+
 Tracked as GitHub milestones; per-phase issues carry the detailed
 acceptance criteria.

@@ -4,7 +4,8 @@
 .PHONY: setup build test test-cpu lint diagrams figures docs
 
 setup:
-	pip install -e ".[dev]"
+	python -m pip install --upgrade pip
+	python -m pip install -e ".[dev]" -Cwheel.cmake=false
 
 build:
 	./scripts/build_swage.sh

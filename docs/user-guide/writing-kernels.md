@@ -25,7 +25,8 @@ file, line, and column. Nothing partial survives.
 
 ## The canonical kernel, line by line
 
-Capture itself needs only the published wheel (wheel-only tier):
+Capture itself needs only the package (wheel-only tier); a frontend-only
+editable install can also capture source without native bindings.
 
 ```python
 import swage as sw
@@ -42,10 +43,10 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
     sl.store(output_ptr + offsets, x + y, mask=mask)
 ```
 
-- The parameters are the kernel's ABI, in order: three f32 pointers, an
-  i32 count, and the compile-time block width. `BLOCK` is marked with
-  the exact annotation `sl.constexpr`, so it is bound at compile time
-  and never passed at launch.
+- The parameters are the kernel's ABI, in order: three pointers with the
+  same supported floating element dtype, an i32 count, and the compile-time
+  block width. `BLOCK` is marked with the exact annotation `sl.constexpr`,
+  so it is bound at compile time and never passed at launch.
 - `sl.program_id(0)` is the logical block coordinate. It is a semantic
   index, not a GPU thread ID; the lowering decides how it maps to
   hardware.
@@ -55,12 +56,15 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
   loads and the store, so the tail block reads the `other` value and
   writes nothing out of bounds. The launch geometry this implies is
   drawn on [Kernel Language](../reference/kernel-language.md).
+- The same source accepts `float32`, `float16`, `float8_e4m3fn`, and
+  `float8_e5m2` tensors. The input metadata selects a distinct specialization;
+  see [Dtypes and rounding](../reference/runtime-environment.md#dtypes-and-rounding).
 
 ## Emit without a GPU
 
-With the native build present, `emit_mlir()` turns the captured kernel
-into a verified live MLIR module. With an explicit signature it needs
-neither a GPU nor PyTorch (native-build tier):
+With the v0.5.2 native wheel, `emit_mlir()` turns the captured kernel into a
+verified live MLIR module. With an explicit signature it needs neither a GPU
+nor PyTorch (wheel-only tier). Source-built native bindings are an alternative:
 
 ```python
 module = add_kernel.emit_mlir(
@@ -74,6 +78,11 @@ module = add_kernel.emit_mlir(
 )
 ```
 
+Replacing the final `x + y` with `x * y` selects the other public operation.
+The shape and ABI stay identical. Exactly one floating operation is admitted;
+chains, floating vector/scalar arithmetic, broadcasting, and matrix
+multiplication are not.
+
 Passing `arguments=` instead infers the same signature from PyTorch
 tensor metadata without reading values. Exactly one of the two modes is
 required; the full contract lives in [swage](../reference/swage.md).
@@ -81,4 +90,4 @@ The printed module preserves source locations, which is what makes the
 fail-closed errors precise.
 
 Continue with [Launching Kernels](launching.md) for what happens when
-the kernel meets a GPU.
+the kernel meets an explicitly selected backend.

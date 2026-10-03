@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "package_version": "@SWAGE_PACKAGE_VERSION@",
+  "source_revision": "@SWAGE_SOURCE_REVISION@",
+  "source_clean": @SWAGE_SOURCE_CLEAN@,
+  "llvm_version": "@SWAGE_LLVM_TAG@",
+  "build_type": "@CMAKE_BUILD_TYPE@"
+}

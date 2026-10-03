@@ -8,13 +8,16 @@ MLIR and LLVM infrastructure. There is no second production IR between Python
 and MLIR.
 
 Verified semantic MLIR enters one of three admitted branches. The public
-fixed-block branch uses the fixed-block conversion for canonical vector
-add. Private direct segmented branches lower to the sequential CPU oracle
-or the one-CTA GPU path.
-The private SwagePlan branch adds the narrow classification companion for
-direct or split identity-sum lowering. GPU branches rejoin upstream GPU, SCF,
-NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the CUDA Driver API.
-No branch introduces a second production IR or a silent backend fallback.
+fixed-block branch uses one shared canonical vector elementwise admission,
+then emits either a CUDA GPU function or a sequential Native host function. Private
+direct segmented branches lower to the sequential CPU oracle or the one-CTA
+GPU path. The private SwagePlan branch adds the narrow classification
+companion for direct or split identity-sum lowering. GPU branches rejoin
+upstream GPU, SCF, NVVM, and LLVM lowering before LLVM NVPTX emits PTX for the
+CUDA Driver API. The Native fixed branch lowers SCF, control flow, arithmetic,
+index, and function operations to LLVM dialect before creating an
+`ExecutionEngine`. No branch introduces a second production IR or a silent
+backend fallback.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -49,14 +52,41 @@ small private planning surface.
 
 ## Public fixed-block branch
 
-The fixed-block conversion admits only the canonical vector-add form. It maps
-each vector lane to one GPU x-thread, lowers through upstream GPU, SCF, NVVM,
-and LLVM infrastructure, and emits PTX in process with LLVM NVPTX. The public
-runtime launches that result through the CUDA Driver API.
+The fixed-block conversion admits only canonical vector add or multiply. The
+CUDA pass maps each vector lane to one GPU x-thread, lowers through upstream
+GPU, SCF, NVVM, and LLVM infrastructure, and emits PTX in process. The Native
+host pass uses the same admission and emits a sequential pointer loop that is
+lowered to an eagerly initialized process-local LLVM JIT executable. The
+public runtime selects exactly one branch from `backend="cuda"` or
+`backend="cpu"`.
 
-No `nvgpu` dialect conversion is part of this implemented branch. Runtime
-specialization, cache, module loading, stream, and retention behavior live in
-[Runtime and Environment](../reference/runtime-environment.md).
+The three pointer elements must all be `f32`, `f16`, `f8E4M3FN`, or `f8E5M2`.
+Shared scalar emission keeps native FP32 operations, widens FP16 loads for
+FP32 arithmetic before rounding the store, and implements FP8 conversion using
+byte loads/stores and scalar arithmetic. FP8 never reaches LLVM as an
+unsupported floating type and does not require newer FP8 hardware.
+The semantic module still contains a same-element-type vector add or multiply;
+these are physical realizations of its rounding contract.
+
+No `nvgpu` conversion is part of the CUDA branch. Runtime specialization,
+cache, executable ownership, module loading, stream, and retention behavior
+live in [Runtime and Environment](../reference/runtime-environment.md).
+
+## Lowered launch-contract boundary
+
+Each physical branch creates one concrete typed function and a canonical
+version-2 compiler-generated launch contract from an ordered argument
+specification. The contract identifies the backend, entry, argument kinds,
+user/derived/plan/scratch bindings, access, and a launch union: CUDA uses
+`spmd-grid` with three-axis block geometry; CPU uses `host-call` with no
+block. The C API validates the contract against the physical function and,
+for CUDA, `nvvm.reqntid`; removes its temporary MLIR attribute; and returns
+canonical JSON beside the lowered module and executable image. Runtime
+binding uses this metadata and does not infer an ABI from parameter names,
+PTX, or LLVM text.
+
+The contract describes one lowered entry. It is not semantic IR, does not
+widen admission, and does not replace concrete physical parameter types.
 
 ## Private direct segmented branches
 
@@ -96,7 +126,7 @@ and the current stream.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Three ownership lanes with one launch traced across the domains](../assets/figures/ownership-map.svg)
+![Three ownership lanes with one CUDA launch traced across the domains](../assets/figures/ownership-map.svg)
 
 </div>
 

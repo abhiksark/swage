@@ -1,6 +1,6 @@
 # ADR-0003: Two dialects instead of one
 
-- Status: accepted (swage_plan deliberately deferred)
+- Status: accepted
 - Date: 2026-08-18
 
 ## Context
@@ -23,5 +23,12 @@ no empty scaffolding.
 
 - The semantic level stays analyzable and fusible without schedule noise.
 - One extra conversion layer (`SwageToPlan`) once planning lands.
-- Until `swage_plan` exists, simple lowerings (one CTA per segment) go
-  directly from `swage` to standard dialects.
+- Before `swage_plan` existed, simple lowerings such as one CTA per segment
+  went directly from `swage` to standard dialects.
+
+## Implementation note
+
+The narrow `swage_plan` dialect now exists for one admitted identity segmented
+sum. It intentionally contains only warp/CTA policy attributes, one opaque
+task-range type, and one classification operation. The broader policy, queue,
+and dependency surface described above remains deferred.

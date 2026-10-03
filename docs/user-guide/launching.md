@@ -4,18 +4,19 @@
 
 `launch()` validates its entire host-visible boundary before it reads a
 pointer or compiles a line of IR. This page narrates the journey from
-the call to the GPU; every rule it mentions is stated exactly once, in
+the call to the explicitly selected backend; every rule it mentions is
+stated exactly once in
 [Runtime and Environment](../reference/runtime-environment.md), which
 is normative when the two disagree.
 
 ## Fail closed before anything else
 
-The launch checks the canonical parameter names and order, tensor
-dtype, rank, contiguity, and device placement, the `n` bound, the
-`BLOCK` limit, and the required grid before anything else happens. A
-launch that fails validation performs no allocation, no compilation,
-and no driver call. This mirrors capture: the public surface refuses
-early instead of failing late.
+The launch first accepts only `backend="cuda"` or `backend="cpu"`; CUDA
+remains the default for existing calls. It then checks canonical parameter
+order, tensor dtype, rank, contiguity, selected-backend device placement, the
+`n` bound, the `BLOCK` limit, and the required logical grid. A launch that
+fails validation performs no allocation, compilation, or backend call. CPU
+failures never consult CUDA, and CUDA failures never consult CPU.
 
 ## Zero work returns early
 
@@ -25,41 +26,44 @@ Empty work is a contract, not an accident.
 
 ## Specialization and the cache
 
-A launch is compiled per specialization: the normalized source, the
-kernel name, the ABI, the compile-time values, the exact compute
-capability, and the toolchain identity all participate in one key. The
-first launch of a specialization compiles in process through LLVM
-NVPTX; later launches reuse the loaded function. On an identified clean
-checkout the compiled artifact also lands in a verified persistent
-cache, so a fresh process skips compilation entirely. The key
-composition and the verify-or-reject cache path are drawn on the
-runtime page.
+A launch is compiled per specialization: the normalized source, kernel name,
+ABI, compile-time values, backend, artifact format, exact backend target, and
+toolchain identity all participate in one key. CPU uses the literal target
+`native` and reuses its Native LLVM JIT executable only in the current
+process. CUDA uses the device compute capability, reuses loaded functions,
+and, with validated clean packaged build identity (or an identified clean
+source checkout), also stores verified PTX in a persistent cache so a fresh
+process can skip compilation. Malformed packaged metadata disables persistent
+reuse, not process-local compilation; see the normative
+[identity rules](../reference/runtime-environment.md#native-build-identity).
 
-## Asynchronous by design
+## Backend execution semantics
 
-Admitted launches enqueue through the CUDA Driver API on the current
-PyTorch stream and return immediately. Submitted tensors are retained
-through `record_stream()`, storage stays owned by PyTorch, and nothing
-synchronizes, copies, casts, or falls back behind your back. Emitted
-kernels pin their launch width with `.reqntid`, so a geometry mismatch
-fails at the driver instead of running wrong.
+CUDA launches enqueue through the CUDA Driver API on the current PyTorch
+stream and return immediately. Submitted tensors are retained through
+`record_stream()`. CPU launches invoke the already-initialized Native LLVM JIT
+entry synchronously and perform no stream operation. Neither branch copies,
+casts, changes devices, or falls back. CUDA kernels pin their launch width
+with `.reqntid`; CPU executes the admitted element range sequentially.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Fail-closed validation, current-stream launch, and tensor retention](../assets/diagrams/runtime-lifecycle.svg)
+![CUDA fail-closed validation, current-stream launch, and tensor retention](../assets/diagrams/runtime-lifecycle.svg)
 
 </div>
 
-*The journey of one launch: validate, specialize, compile or reuse, and
+*The CUDA branch of one launch: validate, specialize, compile or reuse, and
 enqueue. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
 
 ## Seeing what happened
 
-`python -m swage.env` reports the environment the runtime saw. Setting
-`SWAGE_DUMP_MLIR=1` and `SWAGE_DUMP_PTX=1` writes the lowered MLIR and
-emitted PTX per specialization, and `SWAGE_CACHE_DIR` isolates the
-persistent cache; the [Quickstart](../getting-started/quickstart.md)
-walks these switches end to end.
+`python -m swage.env --json` reports the environment; add `--check cpu` or
+`--check cuda` to fail when the selected prerequisite check is unavailable.
+These probes are not a launch or a release-qualification test.
+`SWAGE_DUMP_MLIR=1` writes lowered MLIR for either backend;
+`SWAGE_DUMP_PTX=1` writes CUDA PTX. `SWAGE_CACHE_DIR` isolates the CUDA-only
+persistent cache. The [Quickstart](../getting-started/quickstart.md) walks
+these switches end to end.
 
 Continue with [Execution Model](execution-model.md) for how segments
 become tasks and tiles, or [Runtime and Environment](../reference/runtime-environment.md)

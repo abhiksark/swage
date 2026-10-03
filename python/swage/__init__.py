@@ -1,8 +1,9 @@
 # python/swage/__init__.py
-"""Swage: turn variable-sized dense segments into GPU tile tasks."""
+"""Swage: compile fixed vector add or multiply for CPU and CUDA execution."""
 
-from ._frontend import CompilationError, jit
+from ._errors import BackendUnavailableError, CompilationError, SwageError
+from ._frontend import jit
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
-__all__ = ["CompilationError", "jit"]
+__all__ = ["BackendUnavailableError", "CompilationError", "SwageError", "jit"]

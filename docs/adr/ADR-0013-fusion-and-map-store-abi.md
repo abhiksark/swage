@@ -7,22 +7,22 @@
 
 Stable ragged softmax needs qualification without introducing the planned
 public segment frontend, a second production IR, or a general scheduler. The
-existing internal segmented runner and five-argument ABI are sufficient if the
-compiler
-can execute ordered reductions, fuse segment maps into their consumers, and
-terminate with either one scalar per segment or one value per segment element.
+internal runner is sufficient if the compiler can execute ordered reductions,
+fuse segment maps into their consumers, and terminate with either one scalar
+per segment or one value per segment element.
 
 ## Decision
 
 The internal segmented lowering admits one fail-closed program shape. A module
-contains exactly one single-block function with Swage segment operations,
-using the existing five-argument ABI: rank-one f32 values, rank-one i32
-offsets, rank-one f32 output, i32 value count, and i32 segment count. It
-contains one axis-zero `segment_id`, one `make_segment`, at least one `reduce`,
-one return, and exactly one output terminal. Segment regions use only the
-admitted f32 arithmetic and `math.exp2` operations. Captures are ordered f32
-results of reductions in the same function. Any other shape, operation, type,
-capture, or terminal fails before lowering.
+contains exactly one single-block function with three user buffers: rank-one
+f32 values, rank-one i32 offsets, and rank-one f32 output. It contains one
+axis-zero `segment_id`, one `make_segment`, at least one `reduce`, one return,
+and exactly one output terminal. Segment regions use only the admitted f32
+arithmetic and `math.exp2` operations. Captures are ordered f32 results of
+reductions in the same function. Any other shape, operation, type, capture, or
+terminal fails before lowering. CPU and planning paths derive value and
+segment counts from memref dimensions; the physical GPU entry retains those
+counts as compiler-derived i32 contract arguments.
 
 Each `swage.map` result has exactly one segment consumer: another map, a
 reduction, or `swage.map_store`. The compiler walks map chains in application
@@ -30,8 +30,8 @@ order and clones their scalar regions into the consumer's element loop. Mapped
 segments are never materialized. Reduction results remain in program order so
 later regions receive captures in operand order.
 
-The terminal determines only the output interpretation, not the five-argument
-ABI:
+The terminal determines only the output interpretation, not the three-buffer
+semantic ABI:
 
 - A scalar `memref.store` writes one reduction result to
   `output[segment_id]`, so output has at least one f32 element per segment.

@@ -2,9 +2,10 @@
 
 # Kernel Language
 
-The current Python frontend accepts one restricted AST shape for fixed-block
-vector add. This page lists that syntax. Anything not listed fails closed with
-a source-located `CompilationError`.
+The current Python frontend accepts a restricted AST for fixed-block kernels.
+This page lists that syntax. Anything not listed fails closed with a
+source-located `CompilationError`. The narrower public execution shape has
+exactly one floating vector addition or multiplication.
 
 ## Function shape
 
@@ -37,8 +38,10 @@ The accepted expression forms are:
 
 - a bound name;
 - an integer literal that fits signed 64-bit;
-- `+` for index arithmetic, pointer plus offset vector, or two f32 vectors;
-- `*` for index arithmetic;
+- `+` for index arithmetic, pointer plus offset vector, or two floating
+  vectors with matching element types;
+- `*` for index arithmetic or two floating vectors with matching element
+  types;
 - one signed less-than comparison between an index-offset vector and an i32
   or index value;
 - one of the symbolic calls below.
@@ -66,10 +69,11 @@ duplicate keyword arguments are rejected.
 `sl.constexpr` values must be signed 64-bit integers. Vector operations
 require `BLOCK`.
 
-These calls compose into one launch geometry. The grid holds
-`ceil(n / BLOCK)` blocks of `BLOCK` threads, each block computes
-`gid = program_id(0) * BLOCK + arange(0, BLOCK)`, and the mask retires
-lanes at or beyond `n`.
+These calls compose into one logical launch geometry. The grid holds
+`ceil(n / BLOCK)` logical programs of `BLOCK` lanes, and each program computes
+`gid = program_id(0) * BLOCK + arange(0, BLOCK)`. The mask retires lanes at or
+beyond `n`. CUDA maps those lanes to threads; Native CPU lowering executes the
+admitted element range sequentially.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -77,14 +81,22 @@ lanes at or beyond `n`.
 
 </div>
 
-*The fixed-block launch contract behind `program_id`, `arange`, and masks. [Open the full-size figure](../assets/figures/fixed-block-thread-map.svg).*
+*The CUDA thread mapping for the fixed-block contract behind `program_id`,
+`arange`, and masks. [Open the full-size figure](../assets/figures/fixed-block-thread-map.svg).*
 
 ## Supported value categories
 
 The emitter tracks only i32 scalar parameters, index scalars, index vectors,
-boolean vectors, f32 vectors, f32 pointer descriptors, and transient pointer
-plus offset addresses. It emits standard `arith`, `func`, `memref`, and
-`vector` operations around the logical `swage.program_id` operation.
+boolean vectors, floating vectors and pointer descriptors with element type
+`f32`, `f16`, `f8E4M3FN`, or `f8E5M2`, and transient pointer-plus-offset
+addresses. Floating addition, multiplication, and stores require matching
+element types. A public launch kernel has exactly one floating `x + y` or
+`x * y`; operation chains, floating vector/scalar arithmetic, broadcasting,
+and matrix multiplication are outside the admitted execution shape.
+It emits standard `arith`, `func`, `memref`, and `vector` operations around
+the logical `swage.program_id` operation. See
+[Dtypes and rounding](runtime-environment.md#dtypes-and-rounding) for the
+numerical contract.
 
 This language is the public fixed-block subset. The segment
 operations present in native MLIR are not exposed as Python language symbols.
