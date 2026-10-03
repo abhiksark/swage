@@ -15,7 +15,8 @@ Two functions run a fixed program over every segment of a ragged batch:
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
 reduction kind, a dtype outside the admitted ones, and values of rank three
-or above cannot be written. The calls record no gradient.
+or above cannot be written. A call records a gradient for `values` that
+require grad; [Gradients](#gradients) states which.
 [Ragged Data](ragged-data.md) defines the storage they read. This page
 shows a call, states what it returns and what it costs, and lists where it
 is refused.
@@ -105,6 +106,7 @@ returns the same tensor. It must meet all of these rules:
   resized.
 - It shares no memory with `values` or `offsets`.
 - It does not require grad, and it is not a lazy negation or conjugate view.
+  A call that records a gradient takes no `out`.
 
 Without `out`, the call allocates the result on the device of `values`.
 
@@ -318,6 +320,59 @@ and those of a reduction split it. A caller reaches them for rows by
 passing each column as a contiguous `[N]` or `[N, 1]` tensor, at the price
 of one call per column.
 
+## Gradients
+
+A call records a gradient when `values` require grad and gradient
+recording is on, as a PyTorch operation does: the result has a `grad_fn`,
+and a backward pass sends a gradient to `values`. The offsets are integers
+and receive none. Under `torch.no_grad()` and inside
+`torch.inference_mode()` a call records nothing, also for `values` that
+require grad, and its result does not require grad.
+
+A sum and a mean record a gradient. A maximum, a minimum, and a softmax
+have no backward yet: with `values` that require grad, while gradient
+recording is on, they raise a `ValueError` that names `values.detach()`.
+
+The gradient of a reduction, for the gradient `g` of a segment:
+
+- A sum gives every element of the segment `g`, unchanged.
+- A mean gives every element `g` divided once by the length of the
+  segment, converted to the dtype of `values` as the mean converts it.
+- An empty segment has no element, and its `g` reaches nothing. A value
+  past the final offset receives `0.0`.
+
+For `[N, D]` values this holds per column.
+
+The backward of a reduction runs PyTorch operations: it finds the segment
+of every element from the offsets on the device, copies the gradient of
+that segment to the element, and for a mean divides once. It copies nothing
+to the host and waits for nothing, and its bits do not depend on the other
+segments of the batch. It is not a fallback: the forward always runs Swage
+kernels, and which step of a backward runs where is fixed.
+
+The gradient of a sum is exact, and the gradient of a mean is one correctly
+rounded division. On PyTorch 2.12 the gradient of `torch.segment_reduce`
+equals it for a sum, and agrees with it to within one rounding of the dtype
+for a mean.
+
+Second derivatives are supported. Each runs the sum kernel of
+`segment_reduce` on the gradient it differentiates, with the rounding and
+the host work of a call: [Sum rounding](#sum-rounding) holds for it, and it
+raises where a call raises, for example on a stream that is capturing a
+CUDA graph, in a message that names the second derivative, or with
+`SWAGE_NO_COMPILE=1` and the kernel not held.
+
+The backward keeps the offsets of the call. A backward pass raises when
+they were changed in place after the call, as PyTorch does. Offsets created
+inside `torch.inference_mode()` are kept as a copy.
+
+Inside a function compiled by `torch.compile` a call that records a
+gradient is the same graph break, and its backward runs eagerly in the
+autograd engine. Not supported: an `out` while recording, forward-mode
+differentiation, `torch.func` transforms, and compiled autograd.
+[ADR-0024](../adr/ADR-0024-gradients-of-the-segmented-calls.md) records the
+decision.
+
 ## What a call costs
 
 Each call prepares before it launches, and it keeps nothing of that
@@ -380,9 +435,14 @@ The first calls of a process cost more:
 
 Every refusal below raises before anything is enqueued.
 
-- **Gradients.** `values` that require grad raise a `ValueError` that names
-  `values.detach()`. The calls have no backward function, and a result is
-  never part of an autograd graph.
+- **`out` while recording a gradient.** `out` with `values` that require
+  grad, outside `torch.no_grad()` and `torch.inference_mode()`, raises a
+  `ValueError`: `out must be None while values require grad: a call that
+  records a gradient allocates its result; call without out, or under
+  torch.no_grad()`.
+- **A gradient a kind cannot record yet.** A maximum, a minimum, and a
+  softmax of `values` that require grad, while gradient recording is on,
+  raise a `ValueError` that names `values.detach()`.
 - **CUDA graph capture.** A call on a stream that is capturing a CUDA graph
   raises a `RuntimeError`. Every call copies its offsets to the host, which
   a capturing stream cannot do, and a replay would not repeat the

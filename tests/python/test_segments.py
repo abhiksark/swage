@@ -92,8 +92,12 @@ class _Dtype:
         return self._name
 
 
-def _fake_torch(monkeypatch, version="2.6.0"):
-    """Install a PyTorch stand-in that passes the launch requirements."""
+def _fake_torch(monkeypatch, version="2.6.0", grad_enabled=True):
+    """Install a PyTorch stand-in that passes the launch requirements.
+
+    `grad_enabled` is what `torch.is_grad_enabled` returns: False stands for
+    `torch.no_grad()` and `torch.inference_mode()`.
+    """
     torch = types.ModuleType("torch")
     torch.__version__ = version
     torch.float32 = _Dtype("torch.float32")
@@ -105,6 +109,7 @@ def _fake_torch(monkeypatch, version="2.6.0"):
     )
     # The calls wrap their bodies against `torch.compile`; nothing compiles.
     torch.compiler = types.SimpleNamespace(disable=lambda function: function)
+    torch.is_grad_enabled = lambda: grad_enabled
     monkeypatch.setitem(sys.modules, "torch", torch)
     return torch
 
@@ -158,9 +163,11 @@ def test_importing_the_segmented_calls_stays_light():
             "-c",
             "import sys\n"
             "import swage\n"
+            "import swage._autograd\n"
             "swage.segment_reduce, swage.segment_softmax\n"
             "for name in ('torch', 'numpy', 'mlir_swage'):\n"
-            "    assert name not in sys.modules, name",
+            "    assert name not in sys.modules, name\n"
+            "assert swage._autograd._FUNCTIONS == {}",
         ],
         capture_output=True,
         text=True,
@@ -320,22 +327,67 @@ def test_segmented_calls_reject_an_input_that_is_not_a_tensor(
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
-def test_segmented_calls_reject_values_that_require_grad(
+def test_values_that_require_grad_reach_the_bindings_check(
     function, monkeypatch
 ):
-    """Refuse a gradient the call cannot record, and name the remedy."""
+    """Take values that require grad: a call records their gradient.
+
+    On a wheel-only install the call then stops where any call stops, at
+    the missing native build.
+    """
     torch = _fake_torch(monkeypatch)
     _, offsets = _inputs(torch)
     values = _Tensor(torch, 6, requires_grad=True)
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            "^values must not require grad; a segmented call records no "
-            r"gradient, so pass values.detach\(\)$"
-        ),
-    ):
+    with pytest.raises(RuntimeError, match="requires the build-tree"):
         _call(function, values, offsets)
+
+
+_OUT_WHILE_RECORDING = (
+    "^out must be None while values require grad: a call that records a "
+    "gradient allocates its result; call without out, or under "
+    r"torch.no_grad\(\)$"
+)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_a_call_that_records_a_gradient_refuses_out(function, monkeypatch):
+    """Refuse `out` before the bindings check when a gradient is recorded."""
+    torch = _fake_torch(monkeypatch)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, requires_grad=True)
+    out = _Tensor(torch, _result_count(function), pointer=0x3000)
+
+    with pytest.raises(ValueError, match=_OUT_WHILE_RECORDING):
+        _call(function, values, offsets, out=out)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_out_is_taken_with_values_that_require_grad_when_not_recording(
+    function, monkeypatch
+):
+    """Write `out` under `torch.no_grad()`, also for values that need grad."""
+    torch = _fake_torch(monkeypatch, grad_enabled=False)
+    _, offsets = _inputs(torch)
+    values = _Tensor(torch, 6, requires_grad=True)
+    out = _Tensor(torch, _result_count(function), pointer=0x3000)
+
+    with pytest.raises(RuntimeError, match="requires the build-tree"):
+        _call(function, values, offsets, out=out)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_recording_reads_the_grad_mode_only_for_values_that_need_grad(
+    function, monkeypatch
+):
+    """Leave `torch.is_grad_enabled` alone for values without a gradient."""
+    torch = _fake_torch(monkeypatch)
+    values, offsets = _inputs(torch)
+    out = _Tensor(torch, _result_count(function), pointer=0x3000)
+    del torch.is_grad_enabled
+
+    with pytest.raises(RuntimeError, match="requires the build-tree"):
+        _call(function, values, offsets, out=out)
 
 
 def _wrong_out(torch, case, count):

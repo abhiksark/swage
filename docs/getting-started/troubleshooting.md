@@ -183,8 +183,11 @@ enqueued in these cases:
   capture.
 - `numpy` cannot be imported. Install it, for example through the
   `pytorch` extra of the package, which declares it.
-- `values` require grad. Pass `values.detach()`; the calls record no
-  gradient.
+- `out` is given while the call records a gradient. Call without `out`,
+  or under `torch.no_grad()`.
+- A maximum, a minimum, or a softmax of `values` that require grad, while
+  gradient recording is on. These have no backward yet; pass
+  `values.detach()`.
 
 [Segmented Calls](../user-guide/segmented-calls.md) lists every refusal and
 the reason for it.

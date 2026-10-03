@@ -202,7 +202,9 @@ record times the call itself.
 Parameters
 :   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on
     the current device, of rank one or of rank two, `[N, D]`. It must not
-    require grad and must not be a lazy negation or conjugate view. float64
+    be a lazy negation or conjugate view. When it requires grad and
+    gradient recording is on, a sum or a mean records a gradient; see
+    [Gradients](../user-guide/segmented-calls.md#gradients). float64
     values run a float64 program; nothing is cast. `[N, D]` values run one
     kernel with one block per segment, in which a thread reduces a column
     in row order: no segment is split, and nothing is classified. `[N, 1]`
@@ -225,7 +227,8 @@ Parameters
     the dtype of `values`, on the device of `values`, with exactly one
     element per segment, or of shape `[S, D]` for `S` segments of `[N, D]`
     values, which shares no memory with `values` or `offsets`, does not
-    require grad, and is not a lazy view. It is never resized.
+    require grad, and is not a lazy view. It is never resized. It must be
+    `None` when the call records a gradient.
 
 Returns
 :   `out`, or a new tensor of the dtype of `values` on the device of
@@ -245,9 +248,11 @@ Raises
     the call. Values of another rank raise
     `values must have rank one or two`.
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
-    is a lazy view, requires grad, or is on another device; offsets that
-    break the offsets contract; an `out` of the wrong size or one that
-    overlaps an input. For `[N, D]` values a wrong `out` raises
+    is a lazy view, or is on another device; an `out` that requires grad;
+    offsets that break the offsets contract; an `out` of the wrong size or
+    one that overlaps an input; an `out` while the call records a gradient;
+    a maximum or a minimum of values that require grad while gradient
+    recording is on, which have no backward yet. For `[N, D]` values a wrong `out` raises
     `out must have shape (S, D), one row per segment and one column per
     feature; found (...)`, with the numbers of the call.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
@@ -319,7 +324,9 @@ Returns
 
 Raises
 :   The exceptions of `segment_reduce`, without the `kind` error. Offsets
-    that end below the number of values raise a `ValueError`. float64
+    that end below the number of values raise a `ValueError`, and so do
+    values that require grad while gradient recording is on: the softmax
+    has no backward yet. float64
     values raise the `TypeError`
     `values must have dtype torch.float32; segment_softmax has no float64
     kernel because the device has no 64-bit exp2`. For `[N, D]` values a

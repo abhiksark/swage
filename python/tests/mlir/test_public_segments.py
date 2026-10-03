@@ -341,26 +341,6 @@ def test_segmented_calls_reject_an_input_that_is_not_a_tensor(function, name):
         _call(function, arguments["values"], arguments["offsets"])
 
 
-@pytest.mark.parametrize("function", FUNCTIONS)
-def test_segmented_calls_reject_values_that_require_grad(function):
-    """Refuse instead of returning a result cut from the autograd graph."""
-    values, offsets = _host_segments()
-    values.requires_grad_()
-
-    with pytest.raises(
-        ValueError,
-        match=(
-            "^values must not require grad; a segmented call records no "
-            r"gradient, so pass values.detach\(\)$"
-        ),
-    ):
-        _call(function, values, offsets)
-
-    # The remedy the message names passes this check and reaches the next.
-    with pytest.raises((TypeError, RuntimeError), match="CUDA"):
-        _call(function, values.detach(), offsets)
-
-
 def _wrong_values(case):
     values, _ = _host_segments()
     return {

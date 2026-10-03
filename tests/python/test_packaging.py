@@ -30,6 +30,7 @@ _VERSION = _source_version()
 _PACKAGE_FILES = {
     "swage/__init__.py",
     "swage/_artifact.py",
+    "swage/_autograd.py",
     "swage/_frontend.py",
     "swage/_runtime.py",
     "swage/_segmented_qualification.py",
