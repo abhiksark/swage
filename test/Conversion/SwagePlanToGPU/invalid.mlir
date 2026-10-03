@@ -25,6 +25,12 @@
 // UNCHANGED: swage_plan.tasks
 // UNCHANGED-LABEL: func.func @called(
 // UNCHANGED: swage_plan.tasks
+// UNCHANGED-LABEL: func.func @nested_warp(
+// UNCHANGED: swage_plan.tasks
+// UNCHANGED-LABEL: func.func @nested_clash(
+// UNCHANGED: swage_plan.tasks
+// UNCHANGED-LABEL: func.func @nested_called(
+// UNCHANGED: swage_plan.tasks
 
 // The launch width is one the target admits.
 module {
@@ -268,5 +274,100 @@ module {
     call @called(%values, %offsets, %output, %value_count, %segment_count)
         : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
     return
+  }
+}
+
+// -----
+
+// A plan function in a nested module is checked as one at the top level is:
+// the conversion rewrites every plan function it reaches.
+module {
+  module @inner {
+    func.func @nested_warp(
+          %values: memref<?xf32>, %offsets: memref<?xi32>,
+          %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+          %task_count: i32, %segment_count: i32)
+          attributes {swage_plan.block_threads = 128 : i32} {
+        // expected-error@+1 {{policy<warp> requires swage_plan.block_threads to be the subgroup width, 32, got 128}}
+        swage_plan.tasks policy<warp>
+            segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+            value_count(%value_count : i32) segment_count(%segment_count : i32)
+            ids(%ids : memref<?xi32>) task_count(%task_count : i32)
+            into(%output : memref<?xf32>) {
+        ^bb0(%segment: !swage.segment<f32>):
+          %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+          ^bb0(%value: f32):
+            swage.yield %value : f32
+          }
+          swage_plan.yield %sum : f32
+        }
+        return
+    }
+  }
+}
+
+// -----
+
+// The kernel module of a nested plan function is created beside it, in the
+// nested module, so its name must be free there.
+module {
+  module @inner {
+    // expected-note@+1 {{defined here}}
+    gpu.module @nested_clash_module {
+    }
+    // expected-error@+1 {{lowering @nested_clash creates @nested_clash_module, which the module already defines}}
+    func.func @nested_clash(
+          %values: memref<?xf32>, %offsets: memref<?xi32>,
+          %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+          attributes {swage_plan.block_threads = 128 : i32} {
+        swage_plan.tasks policy<cta>
+            segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+            value_count(%value_count : i32) segment_count(%segment_count : i32)
+            into(%output : memref<?xf32>) {
+        ^bb0(%segment: !swage.segment<f32>):
+          %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+          ^bb0(%value: f32):
+            swage.yield %value : f32
+          }
+          swage_plan.yield %sum : f32
+        }
+        return
+    }
+  }
+}
+
+// -----
+
+// A nested plan function may not be referenced by a function beside it
+// either.
+module {
+  module @inner {
+    // expected-error@+1 {{segment function @nested_called is referenced 1 times; lowering it to a GPU kernel removes it, so it must have no symbol use}}
+    func.func @nested_called(
+          %values: memref<?xf32>, %offsets: memref<?xi32>,
+          %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+          attributes {swage_plan.block_threads = 128 : i32} {
+        swage_plan.tasks policy<cta>
+            segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+            value_count(%value_count : i32) segment_count(%segment_count : i32)
+            into(%output : memref<?xf32>) {
+        ^bb0(%segment: !swage.segment<f32>):
+          %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+          ^bb0(%value: f32):
+            swage.yield %value : f32
+          }
+          swage_plan.yield %sum : f32
+        }
+        return
+    }
+    func.func @nested_caller(
+        %values: memref<?xf32>, %offsets: memref<?xi32>,
+        %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+      // expected-note@+1 {{referenced here}}
+      call @nested_called(%values, %offsets, %output, %value_count,
+          %segment_count)
+          : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
+      return
+    }
   }
 }

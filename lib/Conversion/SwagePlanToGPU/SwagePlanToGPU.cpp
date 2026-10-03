@@ -1187,10 +1187,16 @@ private:
 
 LogicalResult convertPlanToGPU(ModuleOp module,
                                const TargetDescription &target) {
-  for (func::FuncOp function : module.getOps<func::FuncOp>())
+  // The conversion rewrites every plan function in the module, also one in
+  // a nested module, so every one of them is checked before any is changed.
+  WalkResult checked = module.walk([&](func::FuncOp function) {
     if (blockThreadsOf(function) &&
         failed(verifyPlanFunction(module, function, target)))
-      return failure();
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  if (checked.wasInterrupted())
+    return failure();
 
   auto isPlanFunction = [](Operation *op) {
     return static_cast<bool>(blockThreadsOf(op));
