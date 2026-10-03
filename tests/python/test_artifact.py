@@ -141,11 +141,11 @@ def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
             {
                 "name": program,
                 "sha256": _digest(PROGRAM_TEXTS[program]),
-                # The softmax programs and the reductions over rank-two
-                # values are not planned, so nothing was admitted for them.
+                # The softmax programs are not planned, so nothing was
+                # admitted for them.
                 **(
                     {}
-                    if program == "ragged_softmax" or program.endswith("_r2")
+                    if program.startswith("ragged_softmax")
                     else {"small_element_program": program == "segmented_sum"}
                 ),
             }
@@ -337,23 +337,17 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         ),
     ]
 
-    # A program over rank-two values has one kernel, the direct schedule
-    # of its program, which takes the number of columns as a third count.
-    column = [
-        (
-            "column",
-            segmented,
-            (("block_size", 128),),
-            128,
-            "",
-            (
-                *task[:3],
-                ("value_count", "int32_t"),
-                ("segment_count", "int32_t"),
-                ("feature_count", "int32_t"),
-            ),
-        )
-    ]
+    # A reduction over rank-two values has the task-id, partial, and merge
+    # kernels of the row-stripe tile, which take the number of columns
+    # after their counts, and no fused kernel. The softmax over rank-two
+    # values has the task-id kernel alone.
+    def rows(kernels):
+        """Return the row-stripe kernels of the kernels of rank one."""
+        return [
+            (*kernel[:5], (*kernel[5], ("feature_count", "int32_t")))
+            for kernel in kernels
+            if kernel[0] != "mixed"
+        ]
 
     def typed(kernels):
         """Return the same kernels for f64 values, scratch, and output."""
@@ -381,15 +375,17 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         "segmented_min_f64": typed(reduction),
         "segmented_mean_f64": typed(mean),
         **{
-            f"segmented_{kind}_r2": column
-            for kind in ("sum", "max", "min", "mean")
+            f"segmented_{kind}_r2": rows(reduction)
+            for kind in ("sum", "max", "min")
         },
+        "segmented_mean_r2": rows(mean),
         **{
-            f"segmented_{kind}_f64_r2": typed(column)
-            for kind in ("sum", "max", "min", "mean")
+            f"segmented_{kind}_f64_r2": typed(rows(reduction))
+            for kind in ("sum", "max", "min")
         },
+        "segmented_mean_f64_r2": typed(rows(mean)),
         "ragged_softmax": softmax,
-        "ragged_softmax_r2": column,
+        "ragged_softmax_r2": rows(reduction)[:1],
     }
     assert len(mean[3][5]) == len(reduction[3][5]) + 1
     # An f64 program differs from its f32 program in the element pointers
@@ -425,7 +421,6 @@ def test_the_kernel_table_uses_the_block_sizes_of_the_runner():
         "mixed": description["ctaBlockThreads"],
         "partial": description["splitBlockThreads"],
         "merge": description["splitBlockThreads"],
-        "column": description["ctaBlockThreads"],
     }
     assert set(widths.values()) == {128, 512}
 
@@ -472,7 +467,6 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
         "mixed": "fusedMixed",
         "partial": "splitPartial",
         "merge": "splitMerge",
-        "column": "directColumns",
     }
     # A function over rank-one values declares five roles, and one over
     # rank-two values the feature count as well.
@@ -491,6 +485,9 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
             # The merge of a mean reads the extent of its split segments.
             if program.startswith("segmented_mean") and kernel.role == "merge":
                 layout = "splitMergeExtent"
+            # The kernels of rank-two values take the number of columns.
+            if program.endswith("_r2"):
+                layout += "Columns"
             assert [role for role, _ in kernel.arguments] == layouts[layout]
 
 
@@ -1379,7 +1376,10 @@ def test_admission_refuses_a_program_the_build_host_did_not_plan(
         f"text of this call (SHA-256 {_digest(text)}); it holds the planned "
         "programs segmented_sum, segmented_max, segmented_min, "
         "segmented_mean, segmented_sum_f64, segmented_max_f64, "
-        "segmented_min_f64, segmented_mean_f64. The "
+        "segmented_min_f64, segmented_mean_f64, segmented_sum_r2, "
+        "segmented_max_r2, segmented_min_r2, segmented_mean_r2, "
+        "segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, "
+        "segmented_mean_f64_r2. The "
         "artifact was written without this program, or from another "
         "program text than this swage runs. Nothing was compiled or "
         "launched"
@@ -1745,7 +1745,7 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 42 kernels of "
+        f"{artifact_dir} (format 2, target sm_86, 58 kernels of "
         "segmented_sum, segmented_max, segmented_min, segmented_mean, "
         "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
         "segmented_mean_f64, segmented_sum_r2, segmented_max_r2, "

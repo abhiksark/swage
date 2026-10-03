@@ -321,18 +321,21 @@ Preparation and launch follow these rules:
 - `segment_reduce` runs the program of the dtype of `values`: float64
   values have kernels of their own, compiled and loaded like the float32
   ones, and nothing is cast. The schedule does not depend on the dtype.
-- `segment_reduce` on `[N, D]` values with more than one column takes
-  another path. It validates the offsets and enqueues one kernel, the
-  column kernel of the kind and dtype, with one 128-thread block per
-  segment. It admits no program for planning, classifies no segment,
-  uploads no task record, and allocates no scratch. With int64 offsets it
-  uploads the narrowed copy, as `segment_softmax` does. `[N, 1]` values
+- `segment_reduce` on `[N, D]` values with more than one column runs the
+  row-stripe tile of the kind and dtype. It classifies the rows of each
+  segment under the default limits divided by the column-group width `W`
+  of the feature count. A segment of at most `4096 / W` rows is a task of
+  the task-id kernel, with 128-thread blocks, and a longer one is cut into
+  chunks for the partial and merge kernels, with 512-thread blocks. Each
+  launch has one block per task and group of `W` columns. `[N, 1]` values
   take the rank-one path through a view, and `[N, 0]` values enqueue
   nothing.
 - `segment_softmax` on `[N, D]` values with more than one column enqueues
-  the column kernel of the softmax in the same way: one 128-thread block
-  per segment, and a thread per column. `[N, 1]` values run the rank-one
-  kernel through a view, and `[N, 0]` values enqueue nothing.
+  the task-id kernel of the softmax with one task per segment and one
+  128-thread block per segment and group of `W` columns. It classifies
+  nothing and uploads no task record. With int64 offsets it uploads the
+  narrowed copy. `[N, 1]` values run the rank-one kernel through a view,
+  and `[N, 0]` values enqueue nothing.
 - `segment_reduce` prepares nothing it does not launch. A batch compiles
   and loads the fused kernel when it has segments of up to 4096 elements
   and the partial and merge kernels when it has longer ones. A batch that

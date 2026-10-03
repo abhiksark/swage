@@ -1,7 +1,7 @@
 <!-- docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md -->
 # ADR-0023: Row-stripe tile for rank-two values
 
-- Status: accepted; steps 1 and 2 of the migration sequence are
+- Status: accepted; steps 1 to 4 of the migration sequence are
   implemented
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every open question
@@ -26,9 +26,9 @@ row kernels were much faster than both.
 ## Decision
 
 Rank-two values get a second tile, the row-stripe tile, reached through the
-existing task-ids and split schedules. The column tile stays in the
-compiler as the direct schedule of a rank-two function and as a private
-launch path.
+existing task-ids and split schedules, and the public calls run it. The
+column tile stays in the compiler as the direct schedule of a rank-two
+function and as a private launch path.
 
 ### The tile
 
@@ -74,6 +74,25 @@ the PTX, the digests, and the artifact.
   its segment from the range records.
 - The split takes one capture-free reduction, as over rank-one values. The
   softmax has no split.
+
+### The public calls
+
+- `swage.segment_reduce` on `[N, D]` values with `D > 1` admits its program
+  under the default planning limits, the ones an artifact records, and
+  classifies the rows of each segment under the limits
+  `(floor(32 / W), floor(4096 / W))`, which follow from the feature count.
+- Both direct classes run on the task-id kernel at the CTA width: the warp
+  ids and the CTA ids lie together at the start of the records. There is
+  no warp tile of rank-two values.
+- A longer segment runs the split. A batch without one uploads no record
+  and launches the task-id kernel with the identity task list.
+- `swage.segment_softmax` launches the task-id kernel of its program with
+  the identity task list, one task per segment, and splits nothing.
+- A launch runs one block per task and column group, up to `2**31 - 1`
+  blocks; the item loop covers any items beyond.
+- The kernels of a segment, and so its bits, follow from its row count and
+  the feature count, and not from the rest of the batch.
+- The private `launch_gpu` and `launch_softmax_gpu` keep the column tile.
 
 ### Schedules and plan IR
 
@@ -129,6 +148,14 @@ bound in the millions of rows.
 
 ## Consequences
 
+- The bits of a rank-two sum, mean, and softmax change from those of the
+  column tile; a maximum and a minimum keep theirs. A sum has the `k` of
+  the tile in place of `n - 1`.
+- An artifact holds the `cta`, `partial`, and `merge` roles for each
+  rank-two reduction and the `cta` role for the rank-two softmax, in place
+  of the `column` role. The format version stays 2, and an artifact
+  written before is refused at load time.
+
 - The digest matrix gains the task-ids kernel of every rank-two program,
   and the partial and merge kernels of every rank-two reduction, on
   `sm_80` and `sm_86`. The 836 pairs before them do not move, which
@@ -165,9 +192,26 @@ Step 2. The split. Implemented.
   model; the racecheck runs both.
 - The digest matrix gains 32 pairs.
 
-Step 3. The public reductions. Not implemented.
+Step 3. The public reductions. Implemented.
 
-Step 4. The public softmax. Not implemented.
+- `_launch_planned_rows`, `_column_group_width`, `_row_limits`, and
+  `_row_grid` in `python/swage/_segmented_qualification.py`; the call in
+  `python/swage/_segments.py`; the roles in `python/swage/_artifact.py`;
+  and `python/swage/compile.py`, which now admits the rank-two reductions.
+- `python/tests/mlir/test_segment_columns.py` compares the bits of the call
+  with the tile model through the split, bounds it with the `k` of the
+  tile, and checks the limits it classifies under and the kernels it
+  compiles; the oracle test runs the private column tile;
+  `tests/python/test_segments.py` checks the width rule and the limits on
+  the host; the artifact tests run the new roles.
+
+Step 4. The public softmax. Implemented.
+
+- The `row_stripes` launch of `_launch_columns`, the call in
+  `python/swage/_segments.py`, and the role in `python/swage/_artifact.py`.
+- `python/tests/mlir/test_segment_columns.py` bounds every output with the
+  `k` of one block, and keeps the block-size test on the private column
+  tile.
 
 Steps 5 and 6, a packed warp tile for very small `D` and a grid cap, are
 made only on measurement.

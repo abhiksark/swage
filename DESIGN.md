@@ -27,10 +27,11 @@ Three levels remain distinct:
 
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
 tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
-steps, and 512-thread split partial and merge steps. Rank-two values use a
-128-thread column step, in which a thread reduces or normalizes one column
-of one segment, or a row-stripe step, in which the row stripes of a group
-of columns combine across a block.
+steps, and 512-thread split partial and merge steps. Rank-two values use
+row-stripe steps of the same widths, in which the row stripes of a group
+of columns combine across a block, and, on a private path, a 128-thread
+column step, in which a thread reduces or normalizes one column of one
+segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -47,10 +48,11 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
-        |     (public segment_softmax runs its softmax modules, and both
-        |      public calls run the column kernel of rows of features)
+        |     (public segment_softmax runs its softmax modules, and its
+        |      row-stripe kernel for rows of features)
         +-- private single-stage reduction planning and split execution
-        |     (public segment_reduce runs its sum, max, min, and mean)
+        |     (public segment_reduce runs its sum, max, min, and mean,
+        |      over scalars and over rows of features)
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
