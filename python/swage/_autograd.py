@@ -26,6 +26,7 @@ from . import _segmented_qualification as _qualification
 # and the dictionary keeps one of them.
 _FUNCTIONS = {}
 
+
 def functions(torch):
     """Return the autograd Functions of the segmented calls for `torch`.
 
