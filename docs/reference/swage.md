@@ -193,11 +193,14 @@ values a segment is a run of rows, and each of its `D` columns is reduced
 to one result, as `torch.segment_reduce` does along axis 0. The call validates its tensors,
 copies the offsets to the host to validate and classify them, enqueues its
 kernels on the current PyTorch CUDA stream, and returns without waiting for
-them. Every call repeats the host work, so with offsets that change on every
-call it is slower than `torch.segment_reduce`.
+them. Every call repeats the host work. With offsets that change on every
+call, the committed record at `2cf88ae` finds it slower than
+`torch.segment_reduce` on rank-one values and on `[N, D]` values whose
+segments have at most 32 rows, and faster on most `[N, D]` rows with
+longer segments.
 [Segmented Calls](../user-guide/segmented-calls.md#what-a-call-costs) cites
 the committed record of the private preparation that the call repeats, and
-the record that times the call itself.
+the newest record that times the call itself.
 
 Parameters
 :   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on

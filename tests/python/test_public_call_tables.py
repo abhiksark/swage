@@ -3,10 +3,13 @@
 
 The page beside each record and the fragments that the documentation
 includes are generated from the committed summaries. These tests keep them
-in step with the records, and they pin the rules the generator uses for a
-row, a ratio, and a best looped Triton configuration.
+in step with the records, pin the rules the generator uses for a row, a
+ratio, a best looped Triton configuration, and a change between records,
+and check the sentences that the documentation states about the records
+in prose.
 """
 
+import copy
 import importlib
 import json
 import pathlib
@@ -14,7 +17,9 @@ import pathlib
 import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_RECORD = "segment-reduce-a6000-sm86-c6099ec"
+_BASELINE = "segment-reduce-a6000-sm86-c6099ec"
+_LATEST = "segment-reduce-a6000-sm86-2cf88ae"
+_RECORDS = [_BASELINE, _LATEST]
 _RUNS = [
     "public-r1-8192",
     "public-r2-2048",
@@ -22,6 +27,9 @@ _RUNS = [
     "public-r2-32768",
     "public-r2-768-2048",
 ]
+# The longest segment, in rows, of the layouts that the documentation calls
+# short.
+_SHORT = 32
 
 
 @pytest.fixture
@@ -42,10 +50,20 @@ def _candidate(*process_values):
     }
 
 
-def test_committed_page_fragments_digests_and_ptx_are_current(tables):
-    """The page, every fragment, every process record, and the PTX match."""
-    assert _RECORD in tables.RECORDS
-    assert tables.check(_RECORD) == []
+@pytest.mark.parametrize("name", _RECORDS)
+def test_committed_page_fragments_digests_and_ptx_are_current(tables, name):
+    """The page, every fragment, every process record, and the PTX match.
+
+    For the first record this also shows that rendering the second one left
+    its committed page as it was.
+    """
+    assert name in tables.RECORDS
+    assert tables.check(name) == []
+
+
+def test_the_latest_record_is_compared_with_the_baseline(tables):
+    """The second record names the first as its baseline."""
+    assert tables.BASELINES == {_LATEST: _BASELINE}
 
 
 def test_every_fragment_that_a_page_includes_is_generated(tables):
@@ -61,13 +79,14 @@ def test_every_fragment_that_a_page_includes_is_generated(tables):
             ):
                 included.add(pathlib.Path(line.split('"')[1]).name)
 
-    assert included
+    assert {name for name in included if _LATEST in name}
     assert included <= generated
 
 
-def test_runs_are_ordered_by_rank_width_and_size(tables):
+@pytest.mark.parametrize("name", _RECORDS)
+def test_runs_are_ordered_by_rank_width_and_size(tables, name):
     """The page lists the rank-one run first, then the widest last."""
-    assert list(tables._runs(_RECORD)) == _RUNS
+    assert list(tables._runs(name)) == _RUNS
 
 
 def test_row_labels_follow_the_process_driver(tables):
@@ -96,17 +115,18 @@ def test_ratio_is_formed_inside_each_process(tables):
     assert tables._ratio(numerator, denominator) == (2.0, 1.0, 3.0)
 
 
+@pytest.mark.parametrize("name", _RECORDS)
 @pytest.mark.parametrize("run", _RUNS)
-def test_torch_ratios_equal_the_ones_the_summaries_hold(tables, run):
+def test_torch_ratios_equal_the_ones_the_summaries_hold(tables, name, run):
     """The generator's ratio rule reproduces the driver's ratio to torch."""
     checked = 0
-    for candidates in tables._rows(_RECORD, run).values():
-        for name, candidate in candidates.items():
+    for candidates in tables._rows(name, run).values():
+        for candidate_name, candidate in candidates.items():
             recorded = candidate["ratio_to_torch"]
             median, low, high = tables._ratio(candidate, candidates["torch"])
-            assert median == pytest.approx(recorded["median"]), name
-            assert low == pytest.approx(recorded["min"]), name
-            assert high == pytest.approx(recorded["max"]), name
+            assert median == pytest.approx(recorded["median"]), candidate_name
+            assert low == pytest.approx(recorded["min"]), candidate_name
+            assert high == pytest.approx(recorded["max"]), candidate_name
             checked += 1
 
     assert checked
@@ -149,34 +169,160 @@ def test_record_text_is_escaped_for_markdown(tables):
     )
 
 
-def test_a_ptx_file_that_no_process_loaded_is_reported(tables, monkeypatch):
-    """The committed PTX must be a module that the summaries list."""
-    monkeypatch.setattr(tables, "_loaded_ptx", lambda name: {})
+@pytest.mark.parametrize(
+    ("name", "files"),
+    [
+        (_BASELINE, ["segmented_sum_r2.ptx"]),
+        (
+            _LATEST,
+            [
+                "segmented_sum_r2.cta.ptx",
+                "segmented_sum_r2.merge.ptx",
+                "segmented_sum_r2.partial.ptx",
+            ],
+        ),
+    ],
+)
+def test_a_ptx_file_that_no_process_loaded_is_reported(
+    tables, monkeypatch, name, files
+):
+    """Every committed PTX file must be a module that the summaries list."""
+    monkeypatch.setattr(tables, "_loaded_ptx", lambda record: {})
 
-    errors = tables.check_records(_RECORD)
+    errors = tables.check_records(name)
 
     assert errors == [
-        "no process loaded this PTX: "
-        f"{tables.RESULTS / _RECORD / 'segmented_sum_r2.ptx'}"
+        f"no process loaded this PTX: {tables.RESULTS / name / file}"
+        for file in files
     ]
 
 
-def test_conditions_come_from_the_records(tables):
+@pytest.mark.parametrize(
+    ("name", "loads"),
+    [(_BASELINE, ["1.18", "4.72"]), (_LATEST, ["1.89", "7.25"])],
+)
+def test_conditions_come_from_the_records(tables, name, loads):
     """The conditions and load averages come from the committed files."""
-    text = tables._conditions_text(_RECORD)
+    text = tables._conditions_text(name)
 
     assert "25 of 25 processes saw none" in text
     assert "`powersave`" in text
-    assert tables._load_averages(_RECORD) == ["1.18", "4.72"]
+    assert tables._load_averages(name) == loads
 
 
 def test_public_statement_names_the_extreme_rows(tables):
     """Each run names the rows of its lowest and highest ratio to torch."""
-    text = tables._public_statement(_RECORD)
+    text = tables._public_statement(_BASELINE)
 
     assert "lowest on `uniform`" in text
     assert "highest on `power-law D=768`" in text
+    assert "faster in every process" not in text
     assert text.count("\n- ") == len(_RUNS)
+
+
+def test_losses_name_the_rows_only_when_some_rows_lose(tables):
+    """A loss of every row names none; otherwise the fewer side is named."""
+    items = [{"row": row} for row in ("a", "b", "c")]
+
+    assert tables._named(["a", "b", "c"], items) == ""
+    assert tables._named(["a"], items) == " (`a`)"
+    assert tables._named(["a", "b"], items) == ", all but `c`"
+
+
+@pytest.mark.parametrize(
+    ("late", "change"),
+    [
+        ((8.0, 9.0, 9.5), "faster"),
+        ((10.0, 11.0, 12.0), "within the spread"),
+        ((12.5, 13.0, 14.0), "slower"),
+    ],
+)
+def test_a_change_needs_process_medians_that_do_not_overlap(
+    tables, late, change
+):
+    """Two records differ only when their process medians do not overlap."""
+    before = _candidate(10.0, 11.0, 12.0)
+
+    ratio, found = tables._change(before, _candidate(*late))
+
+    assert found == change
+    assert ratio == pytest.approx(sorted(late)[1] / 11.0)
+
+
+def test_a_comparison_refuses_runs_with_other_commands(tables, monkeypatch):
+    """A run is compared only with the baseline run of the same command."""
+    real = tables._load_summary
+
+    def other_command(name, run):
+        summary = real(name, run)
+        if name != _BASELINE:
+            return summary
+        summary = copy.deepcopy(summary)
+        summary["command"] = [*summary["command"], "--seed", "8"]
+        return summary
+
+    monkeypatch.setattr(tables, "_load_summary", other_command)
+
+    with pytest.raises(ValueError, match="differs from the run"):
+        tables._changes.__wrapped__(_LATEST)
+
+
+def test_rank_one_is_unchanged_within_the_spread_of_the_baseline(tables):
+    """Rank one ran the same kernels, and no row left the process spread."""
+    items = tables._changes(_LATEST)["public-r1-8192"]
+
+    assert {item["change"] for item in items} == {"within the spread"}
+    assert tables._modules(_LATEST, "public-r1-8192") == tables._modules(
+        _BASELINE, "public-r1-8192"
+    )
+    assert "Both runs loaded the same" in tables._comparison_statement(
+        _LATEST
+    )
+
+
+def _longest_segments(tables, name, run):
+    """Return the longest segment of the layouts of every row of a run."""
+    return {
+        tables._label(result): max(
+            iteration["layout_statistics"]["max"]
+            for iteration in result["iterations"]
+        )
+        for result in tables._load_process(name, run)["results"]
+    }
+
+
+def test_documented_claims_about_the_latest_record_hold(tables):
+    """The README, the reference, and the guide state these in prose.
+
+    The call is slower in every process on every rank-one row and on every
+    `[N, D]` row whose segments have at most 32 rows, and its median is
+    below torch on most `[N, D]` rows with longer segments.
+    """
+    by_run = tables._by_run(_LATEST)
+    short, longer = [], []
+    for run, items in by_run.items():
+        if run == "public-r1-8192":
+            assert all(item["public"][1] > 1 for item in items)
+            continue
+        longest = _longest_segments(tables, _LATEST, run)
+        for item in items:
+            group = short if longest[item["row"]] <= _SHORT else longer
+            group.append(item["public"])
+
+    assert short and all(low > 1 for _, low, _ in short)
+    assert sum(1 for median, _, _ in longer if median < 1) * 2 > len(longer)
+    for page in ("README.md", "docs/reference/swage.md"):
+        text = " ".join((_ROOT / page).read_text().split())
+        assert "segments have at most 32 rows, and faster on most" in text
+    guide = (_ROOT / "docs/user-guide/segmented-calls.md").read_text()
+    assert "whose segments have at most 32\nrows" in guide
+
+
+def test_the_load_average_rose_during_the_latest_campaign(tables):
+    """The benchmarks page says the load average rose."""
+    start, end = (float(value) for value in tables._load_averages(_LATEST))
+
+    assert end > start
 
 
 def test_rank_one_kernels_equal_those_of_the_453c56e_record(tables):
@@ -186,7 +332,5 @@ def test_rank_one_kernels_equal_those_of_the_453c56e_record(tables):
         (earlier / "fresh-8192-nopad/summary.json").read_text()
     )
     then = {module["sha256"] for module in summary["code"]["loaded_ptx"]}
-    code = tables._load_summary(_RECORD, "public-r1-8192")["code"]
-    now = {module["sha256"] for module in code["loaded_ptx"]}
 
-    assert now and now == then
+    assert then == tables._modules(_BASELINE, "public-r1-8192")

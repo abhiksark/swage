@@ -1,0 +1,316 @@
+<!-- benchmarks/results/segment-reduce-a6000-sm86-2cf88ae/page.md.in -->
+
+# Public `swage.segment_reduce` on RTX A6000 at `2cf88ae`
+
+This record times the public `swage.segment_reduce` call on one {{gpu}}
+(`{{target}}`) at revision `{{revision}}`, with a new offsets layout on every
+call, beside `torch.segment_reduce` and looped Triton kernels. It holds
+five runs, each repeated in five independent processes: one run of
+rank-one values and four runs of `[N, D]` values.
+
+It repeats the runs of the
+[`{{baseline_revision}}` record](segment-reduce-a6000-sm86-c6099ec.md) with
+the same commands, after two changes: `[N, D]` values run the row-stripe
+tile of ADR-0023, and the segmented calls record gradients (ADR-0024). The
+harness files did not change between the two revisions. Its values do not
+require grad, so no timed call records a gradient. Every `[N, D]` row here
+runs the kernels that
+[The row-stripe kernels at this revision](#the-row-stripe-kernels-at-this-revision)
+describes. [Against the baseline](#against-the-baseline) compares the two
+records.
+
+These are research measurements, not a performance gate. The machine was not
+idle while they were taken; [Machine and conditions](#machine-and-conditions)
+says what ran.
+
+## What the record holds
+
+The directory
+[`segment-reduce-a6000-sm86-2cf88ae/`](segment-reduce-a6000-sm86-2cf88ae/)
+holds five runs:
+
+{{runs_table}}
+
+Each run directory holds:
+
+- `summary.json`, written by `benchmarks/benchmark_processes.py`: for every
+  row, timing method, and candidate, the median of each process and the
+  median, minimum, and maximum of those five medians. It is committed as the
+  driver wrote it.
+- `process-1.json.xz` to `process-5.json.xz`: the record of each process
+  with every raw sample, compressed with `xz -9`. Each decompressed file has
+  the SHA-256 that `summary.json` lists for it under `process_records`.
+
+The record directory also holds:
+
+- [`conditions.txt`](segment-reduce-a6000-sm86-2cf88ae/conditions.txt): the
+  machine state sampled at the start and at the end of the campaign.
+- `segmented_sum_r2.cta.ptx`, `segmented_sum_r2.partial.ptx`, and
+  `segmented_sum_r2.merge.ptx`: the PTX of the three row-stripe kernels that
+  the processes loaded.
+- [`page.md.in`](segment-reduce-a6000-sm86-2cf88ae/page.md.in): the template
+  of this page.
+
+To read a process record, or to summarize a run against other reference
+candidates with `benchmark_processes.py --summarize`, decompress it first:
+
+```sh
+cd benchmarks/results/segment-reduce-a6000-sm86-2cf88ae/public-r2-2048
+xz -dk process-*.json.xz
+```
+
+`xz -dk` keeps the compressed files. Do not commit the decompressed ones.
+
+## What was measured
+
+`benchmarks/benchmark_fresh_offsets.py` gives every iteration an offsets
+layout that no earlier iteration used. The timed region of every candidate
+runs from offsets in to result out. The runs differ in rank, size, widths,
+and distributions, as their commands above state. Every run shares these
+facts, quoted from the records:
+
+{{facts_table}}
+
+The candidates that the runs timed, as the records describe them:
+
+{{candidates_table}}
+
+What the timed region of each covers:
+
+{{timed_region_table}}
+
+The looped Triton candidates are swept: `triton_looped` over 15 block and
+warp configurations for rank-one values, and `triton_rows_looped` over 5
+configurations of rows per step and warps for `[N, D]` values. The rank-one
+run also timed the private Swage candidates `swage_mixed` and
+`swage_cta_call` and the planned Triton candidates. The tables below list
+the private Swage candidates; the planned Triton candidates are in the
+summaries and are not tabulated here.
+
+## Machine and conditions
+
+{{machine_table}}
+
+The machine was a desktop workstation in use, not a quiet benchmark host.
+No build or test that the maintainer started ran during the campaign. The
+record does not identify what else contributed to the load. GPU work was
+serialized by a file lock, `/tmp/swage-gpu.lock`: every command of the
+campaign took it with `flock`. The one-minute load average was
+{{load_start}} at the start of the campaign and {{load_end}} at the end.
+
+The process records hold these facts:
+
+{{conditions_list}}
+
+`conditions.txt` holds, for the start and for the end of the campaign, the
+time, the load average, and the GPU utilization, temperature, and memory in
+use, and for the start the revision and the CPU frequency governor:
+
+```text
+{{conditions_file}}
+```
+
+## How the tables are built
+
+- Every process contributes the median of its own samples. A cell in
+  microseconds is the median of the five per-process medians.
+- A ratio is formed inside each process from its two medians. A ratio cell
+  gives the median of the five ratios and, in brackets, their minimum and
+  maximum. Ratios to torch are the ones the summaries hold. The other
+  ratios are formed by the same rule from the per-process medians in the
+  summaries.
+- A ratio between this record and the baseline cannot be formed inside a
+  process, because the two records are separate campaigns. It is the
+  median of this record divided by the median of the baseline. A row is
+  faster when every process median of this record is below every process
+  median of the baseline, slower when every one is above, and within the
+  spread otherwise.
+- A range in a statement or in a table of ranges runs from the lowest to
+  the highest median ratio over the rows it names.
+- Microseconds are rounded to one decimal and ratios to two.
+- A row is named as the summaries name it: the distribution, then `D=`
+  and the width for `[N, D]` values.
+- The best looped Triton configuration is the one with the lowest median
+  in that row. It is chosen after the run from a sweep, separately for
+  every row, so it is an optimistic bound for a Triton user who must pick
+  one configuration in advance.
+
+## Results
+
+{{public_statement}}
+
+{{looped_statement}}
+
+The range of each ratio over the rows of each run:
+
+{{ranges_table}}
+
+## Against the baseline
+
+{{comparison_statement}}
+
+The rows of each change, per run. A cell gives the number of rows and, in
+parentheses, the range of the ratio of this record to the baseline:
+
+{{comparison_counts}}
+
+Every row, with the ratio of the public call to torch at each revision:
+
+{{comparison_tables}}
+
+## Tables by run
+
+{{run_tables}}
+
+## The row-stripe kernels at this revision
+
+Every `[N, D]` row above runs the row-stripe tile of ADR-0023, for both the
+int32 and the int64 offsets. The processes of the four rank-two runs loaded
+three PTX modules of it, which their summaries list under
+`code.loaded_ptx`:
+
+{{ptx_table}}
+
+The three `.ptx` files in the record directory are those modules. They were
+written again from the native build at this revision with
+`python -m swage.compile --target sm_86`, and `public_call_tables.py
+--check` verifies that their SHA-256 digests and sizes are the ones the
+summaries list.
+
+Which kernel runs is decided on the host (`_launch_planned_rows` and
+`_row_chunk` in `python/swage/_segmented_qualification.py`). The column-group
+width W is the smallest power of two that is at least D, at most 32. A
+segment of at most `floor(4096 / W)` rows is one task of the block kernel
+`segmented_sum_r2`. A longer segment is cut into chunks of that many rows:
+`segmented_sum_r2__partial` reduces each chunk into one row of a scratch
+array, and `segmented_sum_r2__merge` reduces the partial rows of each
+segment into its output row. Each launch runs one block per task and column
+group, up to `2^31 - 1` blocks.
+
+The PTX was assembled and disassembled with the CUDA 12.3 toolkit installed
+on the measuring machine (`ptxas` release 12.3, V12.3.52):
+
+```sh
+cd benchmarks/results/segment-reduce-a6000-sm86-2cf88ae
+for role in cta partial merge; do
+  /usr/local/cuda/bin/ptxas -v -arch=sm_86 \
+    -o segmented_sum_r2.$role.cubin segmented_sum_r2.$role.ptx
+  /usr/local/cuda/bin/cuobjdump -sass segmented_sum_r2.$role.cubin
+done
+```
+
+The loop writes a `.cubin` file beside each PTX file. Do not commit them.
+`ptxas -v` reported:
+
+```text
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'segmented_sum_r2' for 'sm_86'
+ptxas info    : Function properties for segmented_sum_r2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, 512 bytes smem, 400 bytes cmem[0]
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'segmented_sum_r2__partial' for 'sm_86'
+ptxas info    : Function properties for segmented_sum_r2__partial
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 27 registers, 2048 bytes smem, 388 bytes cmem[0]
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'segmented_sum_r2__merge' for 'sm_86'
+ptxas info    : Function properties for segmented_sum_r2__merge
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, 2048 bytes smem, 392 bytes cmem[0]
+```
+
+What the PTX and the SASS show:
+
+- Block size. The block kernel requires blocks of 128 threads
+  (`.reqntid 128, 1, 1`), and the partial and merge kernels blocks of 512
+  threads.
+- Items. Each kernel computes W from D, and the number of column groups as
+  D divided by W, rounded up. A block takes items from its block index
+  upward, stepping by the number of blocks, until the number of tasks times
+  the number of column groups. The task of an item is the item divided by
+  the number of column groups, and its column group is the remainder. The
+  division is 32-bit when both operands fit in 32 bits, and otherwise
+  64-bit, which the SASS reaches through a call to a subroutine.
+- Task records. For an item, the block kernel reads one task id, which is a
+  segment, and the two offsets of that segment, clamped to the row count.
+  The partial kernel reads a record of two 32-bit row bounds, and the merge
+  kernel a record of three: the segment and the bounds of its partial rows.
+- Columns and rows. Within a warp, lane `l` takes column `l mod W` of the
+  column group, so a warp holds 32 / W stripes of rows, a block of 128
+  threads 128 / W stripes, and a block of 512 threads 512 / W. Stripe `s`
+  reads row `s`, then row `s` plus the number of stripes, and so on, of its
+  segment or chunk. A thread whose column is at or above D reads no value
+  and still takes part in the combine. With D of 3, W is 4, so a block of
+  128 threads holds 32 stripes of 4 lanes, 3 of which hold a column. With D
+  of 64 and of 768, W is 32, so a block of 128 threads holds 4 stripes,
+  and a row is 2 or 24 column groups.
+- Row loop. One iteration is one 32-bit global load and one add into the
+  accumulator register. The loop was not unrolled: the SASS has one load in
+  it.
+- Combine within a warp. After the row loop, every warp runs five butterfly
+  shuffles, with lane offsets 1, 2, 4, 8, and 16. The sum of a step is kept
+  only when its offset is at least W, so the stripes of one column are
+  added and different columns stay apart.
+- Combine across warps. Each thread stores its value in a shared buffer of
+  one value per thread: 512 bytes in the block kernel and 2,048 bytes in
+  the partial and merge kernels. A barrier follows. Each thread reads the
+  value of its column from every warp, 4 in the block kernel and 16 in the
+  partial and merge kernels, and a second barrier follows. The thread of
+  stripe 0 of each column adds those values in a pairwise tree and stores
+  the result: the output row of the segment in the block and merge kernels,
+  and the scratch row of the chunk in the partial kernel.
+- Registers and memory. 32 registers per thread in the block kernel, 27 in
+  the partial kernel, and 28 in the merge kernel, with no stack frame and
+  no spills. Constant bank 0 holds 400, 388, and 392 bytes, which end with
+  the kernel parameters.
+
+This SASS is the output of `ptxas` 12.3, not the code the device ran. The
+processes loaded the PTX through the CUDA driver, which compiles it for the
+device itself (the machine table gives the driver and its API version).
+That SASS was not dumped, and it can differ from the output above.
+
+## What the record does not support
+
+- A statement about another GPU or architecture. One {{gpu}} (`{{target}}`)
+  ran everything.
+- A statement about other seeds. Every row uses seed {{seed}}; the layouts
+  of a row differ by iteration.
+- A statement about other kinds, types, or rank-one sizes. Every row is a
+  float32 sum, and the rank-one run has one size.
+- A statement about gradients. No timed call records one.
+- A statement about calls in flight. Every sample is one call from an idle
+  device.
+- A statement about a quiet machine. The load average rose during the
+  campaign, its sources are not recorded, and the CPU frequency governor
+  was `powersave` throughout.
+- A change smaller than the spread between campaigns. Each record was
+  taken once, under different machine load, and a change between them is
+  read from two separate sets of five processes.
+- A ranking of Triton configurations that a user could pick in advance.
+  Every best configuration is chosen after the run.
+- A gate. No threshold was declared before the run.
+
+## Reproduce
+
+With the native build, CUDA-enabled PyTorch, and Triton available, from a
+clean worktree, and with `OUT` set to a new directory outside the checkout:
+
+```sh
+export PYTHONPATH="$PWD/python:$PWD/build/python_packages"
+export SWAGE_CACHE_DIR="$OUT/cache"
+{{reproduce_commands}}
+```
+
+The campaign ran each command under `flock /tmp/swage-gpu.lock`, with the
+compiled-kernel cache in a new directory. A rerun is a new measurement. Do
+not write it into `benchmarks/results/`.
+
+To regenerate this page and the documentation fragments from the committed
+summaries, and to check them, the digests of the compressed process
+records, and the committed PTX:
+
+```sh
+python benchmarks/public_call_tables.py
+python benchmarks/public_call_tables.py --check
+```

@@ -427,9 +427,22 @@ A second call with the same offsets tensor repeats all four steps. The task
 records and the scratch are released when the call returns.
 
 `torch.segment_reduce` does none of the host work. When the offsets change on
-every call, expect `segment_reduce` to be slower than `torch.segment_reduce`.
-One committed record measures that regime, on one NVIDIA RTX A6000 at
-revision `453c56e`:
+every call, expect `segment_reduce` to be slower than `torch.segment_reduce`
+on rank-one values and on `[N, D]` values whose segments have at most 32
+rows. The newest committed record of the call, on one NVIDIA RTX A6000 at
+revision `2cf88ae`, measures that regime for both ranks:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-public-statement.inc"
+
+[Benchmarks](../internals/benchmarks.md#public-segment_reduce-calls-at-2cf88ae)
+reports the record and its limits: one GPU, one seed per distribution, and a
+machine that was not quiet. It also compares the record with the older
+record of the call at `c6099ec`, taken before `[N, D]` values ran the
+row-stripe tile. The `[N, D]` figures of that older record describe the
+kernel that ran before, not the current call.
+
+An older record, at revision `453c56e`, measures a private preparation in
+the same regime:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
@@ -438,14 +451,10 @@ three scheduling policies with schedule selection disabled, followed by the
 mixed launch into a caller's output. `segment_reduce` validates and
 classifies in the same way, prepares only the schedule it launches, selects
 the schedule automatically, and allocates its result when no `out` is
-passed. The harness has since gained a candidate that times the call
-itself, and the `c6099ec` record on
-[Benchmarks](../internals/benchmarks.md#public-segment_reduce-calls-at-c6099ec)
-holds it. Read the figures above as a measurement of that private
+passed. Read the figures above as a measurement of that private
 preparation, not of the call.
 [Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
-reports the record and its limits: one GPU, one seed per distribution, and a
-machine that was not quiet.
+reports the record and its limits.
 
 The other recorded comparisons on that page were taken with a private
 prepared launch, which prepares one layout once and launches it many times.

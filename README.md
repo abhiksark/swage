@@ -49,12 +49,15 @@ release, except for the items marked as completed after it.
   f32 values of rank one or two for the softmax. Nothing else is admitted: no other
   dtype, kind, or rank. Both calls record a gradient for values that
   require grad, with second derivatives. A call validates and classifies its offsets on the host
-  every time, so with offsets that change on every call expect it to be
-  slower than `torch.segment_reduce`. The committed record at `c6099ec`
-  times the call in that regime on one RTX A6000;
-  [Benchmarks](docs/internals/benchmarks.md#public-segment_reduce-calls-at-c6099ec)
-  reports it. [Segmented Calls](docs/user-guide/segmented-calls.md) states
-  the contract and the cost.
+  every time. With offsets that change on every call, the committed record
+  at `2cf88ae` on one RTX A6000 finds it slower than
+  `torch.segment_reduce` on rank-one values and on `[N, D]` values whose
+  segments have at most 32 rows, and faster on most `[N, D]` rows with
+  longer segments;
+  [Benchmarks](docs/internals/benchmarks.md#public-segment_reduce-calls-at-2cf88ae)
+  reports it beside the older record at `c6099ec`.
+  [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
+  and the cost.
 - Not part of `v0.5.1`, completed after that release: ahead-of-time
   artifacts for the two segmented calls. On a host with the native build,
   `python -m swage.compile --target <processor> --output <directory>`

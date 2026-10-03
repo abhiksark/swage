@@ -10,7 +10,9 @@ compressed process record of every run for the facts that a summary does not
 repeat. It fills the tokens of `page.md.in` in the record directory to write
 the Markdown page beside the record, and it writes the fragments that the
 documentation includes, so no measured number in either is typed by hand.
-The ratio rule and the cell formats are those of `campaign_tables.py`.
+A record that `BASELINES` pairs with an earlier record of the same harness
+also gets a comparison of the public call with that record. The ratio rule
+and the cell formats are those of `campaign_tables.py`.
 
 `RECORDS` names every record it renders. Run from the repository root:
 
@@ -33,6 +35,7 @@ from pathlib import Path
 from campaign_tables import (
     _count,
     _fact_table,
+    _listed,
     _median,
     _percent,
     _quote,
@@ -40,6 +43,7 @@ from campaign_tables import (
     _span,
     _spread,
     _table,
+    _times,
     _us,
 )
 
@@ -47,7 +51,16 @@ REPO_ROOT = Path(__file__).parents[1]
 RESULTS = REPO_ROOT / "benchmarks/results"
 FRAGMENTS = REPO_ROOT / "docs/internals/_generated"
 # Every record of the public calls that this script renders.
-RECORDS = ("segment-reduce-a6000-sm86-c6099ec",)
+RECORDS = (
+    "segment-reduce-a6000-sm86-c6099ec",
+    "segment-reduce-a6000-sm86-2cf88ae",
+)
+# The earlier record of the same harness that a record is compared with.
+BASELINES = {
+    "segment-reduce-a6000-sm86-2cf88ae": "segment-reduce-a6000-sm86-c6099ec",
+}
+# How the public call of a row changed against the baseline.
+CHANGES = ("faster", "slower", "within the spread")
 PUBLIC = "swage_public_call"
 PUBLIC_INT64 = "swage_public_call_int64"
 # The looped Triton families: rank-one values, then `[N, D]` values.
@@ -302,12 +315,19 @@ def _public_statement(name):
     for run, items in _by_run(name).items():
         everything.extend(items)
         slower = sum(1 for item in items if item["public"][1] > 1)
+        faster = sum(1 for item in items if item["public"][2] < 1)
         low = min(items, key=lambda item: item["public"][0])["row"]
         high = max(items, key=lambda item: item["public"][0])["row"]
         lines.append(
             f"- {_title(name, run)}: {_span(_medians(items, 'public'))} "
             f"times as long, lowest on `{low}` and highest on `{high}`; "
-            f"slower in every process in {_count(slower, len(items))}."
+            f"slower in every process in {_count(slower, len(items))}"
+            + (
+                f", and faster in every process in {_count(faster, len(items))}"
+                if faster
+                else ""
+            )
+            + "."
         )
     lines += [
         "",
@@ -347,6 +367,21 @@ def _looped_statement(name):
     return "\n".join(lines) + "\n"
 
 
+def _named(losing, items):
+    """Name the rows of a loss that does not hold in every row.
+
+    Returns:
+        Nothing when every row loses, the rows that lose when they are at
+        most half, and otherwise the rows that do not.
+    """
+    if len(losing) == len(items):
+        return ""
+    others = [item["row"] for item in items if item["row"] not in losing]
+    if len(losing) <= len(others):
+        return f" ({_listed(losing)})"
+    return f", all but {_listed(others)}"
+
+
 def _losses(name):
     """List, per run, the rows where the public call is the slower one."""
     lines = []
@@ -356,11 +391,13 @@ def _losses(name):
             ("public", "`torch.segment_reduce`"),
             ("public_looped", "the best looped Triton configuration"),
         ):
-            slower = [value for value in _medians(items, key) if value > 1]
-            if slower:
+            losing = [item["row"] for item in items if item[key][0] > 1]
+            if losing:
+                slower = [item[key][0] for item in items if item[key][0] > 1]
                 clauses.append(
                     f"{_span(slower)} times as long as {label} in "
-                    f"{_count(len(slower), len(items))}"
+                    f"{_count(len(losing), len(items))}"
+                    + _named(losing, items)
                 )
         if clauses:
             lines.append(
@@ -369,6 +406,182 @@ def _losses(name):
                 + "."
             )
     return "\n".join(lines) + "\n"
+
+
+# Comparison with the baseline record.
+
+
+def _revision(name):
+    """Return the short source revision of a record."""
+    return _load_summary(name, _runs(name)[0])["code"]["revision"][:7]
+
+
+def _change(before, after):
+    """Compare one candidate of a row in two records.
+
+    The records come from separate campaigns, so no ratio pairs their
+    processes. The later record is faster when every one of its process
+    medians is below every process median of the earlier one, slower when
+    every one is above, and within the spread otherwise.
+
+    Returns:
+        The ratio of the two medians across processes, later over earlier,
+        and one of `CHANGES`.
+    """
+    early = before["median_us"]["process_values"]
+    late = after["median_us"]["process_values"]
+    if max(late) < min(early):
+        change = "faster"
+    elif min(late) > max(early):
+        change = "slower"
+    else:
+        change = "within the spread"
+    return _median(after) / _median(before), change
+
+
+@functools.cache
+def _changes(name):
+    """Compare the public call of every row with the baseline record.
+
+    Returns:
+        A mapping from run to one mapping per row, which holds the row
+        label, the median of both records, their ratio and change, and the
+        median ratio to torch in each record.
+
+    Raises:
+        ValueError: The two records differ in runs, commands, or rows.
+    """
+    baseline = BASELINES[name]
+    if _runs(baseline) != _runs(name):
+        raise ValueError(f"{name} and {baseline} hold other runs")
+    out = {}
+    for run in _runs(name):
+        command = _load_summary(name, run)["command"]
+        before_rows, after_rows = _rows(baseline, run), _rows(name, run)
+        if _load_summary(baseline, run)["command"] != command or list(
+            before_rows
+        ) != list(after_rows):
+            raise ValueError(f"{run} differs from the run of {baseline}")
+        out[run] = []
+        for label, after in after_rows.items():
+            before = before_rows[label]
+            ratio, change = _change(before[PUBLIC], after[PUBLIC])
+            out[run].append(
+                {
+                    "row": label,
+                    "before": _median(before[PUBLIC]),
+                    "after": _median(after[PUBLIC]),
+                    "ratio": ratio,
+                    "change": change,
+                    "torch_before": _ratio(before[PUBLIC], before["torch"])[0],
+                    "torch_after": _ratio(after[PUBLIC], after["torch"])[0],
+                }
+            )
+    return out
+
+
+def _by_change(items, change):
+    """Return the ratios of the rows with one change."""
+    return [item["ratio"] for item in items if item["change"] == change]
+
+
+def _modules(name, run):
+    """Return the SHA-256 digests of the PTX modules a run loaded."""
+    return {
+        module["sha256"]
+        for module in _load_summary(name, run)["code"]["loaded_ptx"]
+    }
+
+
+def _comparison_statement(name):
+    """State how the public call changed against the baseline record."""
+    baseline = BASELINES[name]
+    before, after = _revision(baseline), _revision(name)
+    lines = [
+        f"`{PUBLIC}` at `{after}` against the `{before}` record. A ratio is "
+        f"the median at `{after}` divided by the median at `{before}`, and "
+        "a range is over the rows it names. The records are separate "
+        "campaigns, so a row is faster or slower only when the process "
+        "medians of the two records do not overlap, and within the spread "
+        "otherwise:",
+        "",
+    ]
+    for run, items in _changes(name).items():
+        parts = [
+            f"{change} in {_count(len(ratios), len(items))} "
+            f"({_span(ratios)})"
+            for change in CHANGES
+            if (ratios := _by_change(items, change))
+        ]
+        early, late = _modules(baseline, run), _modules(name, run)
+        if early == late:
+            kernels = f"Both runs loaded the same {len(late)} PTX modules."
+        else:
+            shared = len(early & late)
+            kernels = (
+                f"This run loaded {len(late)} PTX modules, "
+                f"{shared or 'none'} of which the baseline run loaded."
+            )
+        lines.append(
+            f"- {_title(name, run)}: " + "; ".join(parts) + f". {kernels}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _comparison_counts(name):
+    """Tabulate, per run, the rows of each change and their ratios."""
+    rows = []
+    for run, items in _changes(name).items():
+        row = [_title(name, run), str(len(items))]
+        for change in CHANGES:
+            ratios = _by_change(items, change)
+            row.append(f"{len(ratios)} ({_span(ratios)})" if ratios else "0")
+        rows.append(row)
+    return _table(
+        [
+            "Run",
+            "Rows",
+            "Faster",
+            "Slower",
+            "Within the spread",
+        ],
+        rows,
+    )
+
+
+def _comparison_tables(name):
+    """Tabulate the change of the public call in every row of every run."""
+    before, after = _revision(BASELINES[name]), _revision(name)
+    headers = [
+        "Row",
+        f"`{before}` us",
+        f"`{after}` us",
+        f"`{after}` / `{before}`",
+        "Change",
+        f"`{before}` / torch",
+        f"`{after}` / torch",
+    ]
+    parts = []
+    for run, items in _changes(name).items():
+        parts.append(f"{_title(name, run)}:\n")
+        parts.append(
+            _table(
+                headers,
+                [
+                    [
+                        f"`{item['row']}`",
+                        _us(item["before"]),
+                        _us(item["after"]),
+                        _times(item["ratio"]),
+                        item["change"],
+                        _times(item["torch_before"]),
+                        _times(item["torch_after"]),
+                    ]
+                    for item in items
+                ],
+            )
+        )
+    return "\n".join(parts)
 
 
 # Run facts, conditions, and kernels.
@@ -620,6 +833,19 @@ def _blocks(name):
         "reproduce_commands": "\n".join(
             _command(name, run) for run in _runs(name)
         ),
+        **_comparison_blocks(name),
+    }
+
+
+def _comparison_blocks(name):
+    """Return the comparison blocks of a record, none without a baseline."""
+    if name not in BASELINES:
+        return {}
+    return {
+        "baseline_revision": _revision(BASELINES[name]),
+        "comparison_statement": _comparison_statement(name),
+        "comparison_counts": _comparison_counts(name),
+        "comparison_tables": _comparison_tables(name),
     }
 
 
@@ -648,6 +874,10 @@ def fragments(name):
         "ranges.inc": _ranges_table(name),
         "losses.inc": _losses(name),
     }
+    if name in BASELINES:
+        bodies["comparison-statement.inc"] = _comparison_statement(name)
+        bodies["comparison-counts.inc"] = _comparison_counts(name)
+        bodies["comparison-tables.inc"] = _comparison_tables(name)
     return {
         f"{name}-{part}": (
             f"<!-- docs/internals/_generated/{name}-{part} -->\n"
