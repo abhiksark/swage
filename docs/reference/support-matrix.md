@@ -43,8 +43,10 @@ with `clang-format`, and a `sanitizers` job, which runs the lit suite and
 the C++ unit tests under AddressSanitizer and UndefinedBehaviorSanitizer.
 `ci-cpp` also defines a `native-wheel` job, which builds the
 `swage-compiler-native` wheel, installs it into a fresh virtual environment,
-and runs the checks that need no GPU. These three jobs have not yet run on
-hosted CI, and no row below relies on them.
+and runs the checks that need no GPU. The `format` and `sanitizers` jobs
+ran and passed on hosted CI for the head of pull request #71, `406b725`.
+The `native-wheel` job has not completed on a hosted runner. No row below
+relies on these three jobs.
 
 All tiers run on Linux x86-64. The native build requires Linux x86-64 and
 the exact LLVM release in `cmake/llvm-version.txt`; CMake rejects any other

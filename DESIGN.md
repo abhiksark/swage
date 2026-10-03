@@ -46,9 +46,10 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
-        |     (public segment_softmax runs its softmax module)
+        |     (public segment_softmax runs its softmax modules, and both
+        |      public calls run the column kernel of rows of features)
         +-- private single-stage reduction planning and split execution
-        |     (public segment_reduce runs its identity sum, max, and min)
+        |     (public segment_reduce runs its sum, max, min, and mean)
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -65,7 +66,9 @@ construction path.
 The current fixed-block frontend and public execution subset are deliberately
 narrow. Native segmented modules exercise a separate private qualification
 surface, and two public calls, `swage.segment_reduce` and
-`swage.segment_softmax`, run three fixed modules of it. The canonical
+`swage.segment_softmax`, run eighteen fixed modules of it: a sum, a
+maximum, a minimum, and a mean over f32 and f64 values of rank one and of
+rank two, and a softmax over f32 values of each rank. The canonical
 pipeline and links to exact references live in
 [`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
 
@@ -158,8 +161,10 @@ output and the native `mlir_swage` package.
 
 `mlir_swage` embeds the pinned MLIR Python core and generated Swage bindings
 as a build-tree artifact. It never layers onto an unrelated external `mlir`
-package. Native wheel packaging remains deferred. Asking CMake to enable the
-bindings against an MLIR install without Python bindings is an error.
+package. `scripts/build_native_wheel.sh` builds a native wheel of
+`mlir_swage` from a checkout, and no workflow publishes one. Asking CMake to
+enable the bindings against an MLIR install without Python bindings is an
+error.
 
 ## Verification strategy
 
@@ -171,9 +176,10 @@ bindings against an MLIR install without Python bindings is an error.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add, the public
-  segmented calls, and private segmented runtime qualification on a real
-  NVIDIA device.
+- The trusted GPU workflow runs public fixed vector add and private
+  segmented runtime qualification on a real NVIDIA device, on `main` only.
+  The public segmented calls are not on `main`, so it has not run their
+  tests; they ran on the development machine.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 

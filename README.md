@@ -48,9 +48,10 @@ release, except for the items marked as completed after it.
   CUDA device: f32 or f64 values of rank one or two for a reduction, and
   f32 values of rank one or two for the softmax. Nothing else is admitted: no other
   dtype, kind, or rank, and no gradient. A call validates and classifies its offsets on the host
-  every time, so with offsets that change on every call it is slower than
-  `torch.segment_reduce`. A committed record measures the private
-  preparation that the call repeats, not the call itself.
+  every time, so with offsets that change on every call expect it to be
+  slower than `torch.segment_reduce`. No committed record times the call:
+  the one record of that regime times a private preparation, at an older
+  revision, that prepares more than the call does.
   [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
   and the cost.
 - Not part of `v0.5.1`, completed after that release: ahead-of-time

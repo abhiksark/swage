@@ -335,11 +335,38 @@ For a serving host of another machine, such as an AArch64 host with an
 
 1. Compile `lib/Runtime/SwageRuntime.c`, which needs a C11 compiler for
    that machine and nothing from LLVM, into a shared library. It includes
-   only `include/swage-c/Runtime.h`.
+   only `include/swage-c/Runtime.h`. The in-tree CMake target cannot build
+   it alone, because the project configures only against an LLVM install
+   for the build host. These commands, run from the checkout, are the
+   flags of that target written out. They have not been run for AArch64;
+   the first was run on the x86-64 build host, where it gives a library
+   that exports the five functions of the header:
+
+    ```bash
+    # On the AArch64 host itself:
+    cc -std=c11 -O2 -fPIC -fvisibility=hidden -shared -I include \
+        lib/Runtime/SwageRuntime.c -o libSwageRuntime.so -ldl
+    # Or with a cross compiler on another host:
+    aarch64-linux-gnu-gcc -std=c11 -O2 -fPIC -fvisibility=hidden -shared \
+        -I include lib/Runtime/SwageRuntime.c -o libSwageRuntime.so -ldl
+    ```
+
+   `-ldl` links the dynamic loader library, which holds `dlopen` and
+   `dlsym` on a glibc older than 2.34, such as glibc 2.31 of Ubuntu 20.04.
+   On glibc 2.34 or newer those functions are in the C library and the
+   flag does no harm. A library built against an older glibc runs on that
+   glibc and on newer ones; the loader reads its requirement as
+   [The runtime library](#the-runtime-library) states above.
 2. Pass that library to the command with `--runtime-library`. The command
    reads the machine from the ELF header of the library, records it in the
    manifest, and ships the file. It names `x86_64` and `aarch64` and
    refuses a library of any other machine.
+
+The artifact directory may sit on a file system mounted `noexec`: the
+loader does not execute the library file of the directory but a copy of
+its verified bytes in an anonymous memory file, as [Trust](#trust) states.
+The memory file is subject to the `vm.memfd_noexec` setting of the kernel
+instead.
 
 ## Evidence
 

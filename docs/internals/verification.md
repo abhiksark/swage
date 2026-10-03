@@ -29,7 +29,8 @@ the paths the calls run through.
 | Launch validation, the PyTorch floor, and the cache bound, read-only mode, and no-compile mode | Public today | `tests/python/test_runtime.py`, `python/tests/mlir/test_runtime.py` | `python -m pytest tests/python/test_runtime.py -q`; trusted GPU workflow |
 | Public segmented calls: names and signatures, the checks that need no native build, the PyTorch floor, and the wheel-only error | Public today | `tests/python/test_segments.py` | `python -m pytest tests/python/test_segments.py -q` |
 | Public segmented calls: argument and offsets validation on host tensors | Public today | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU | `ninja -C build check-swage-python` |
-| Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, and special values; the schedule of a public sum; `out`; graph capture, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
+| Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, special values, and signed zeros; the schedule of a public sum; `out`; graph capture, `torch.compile`, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
+| Public segmented calls on `[N, D]` rows: reductions and the softmax per column against `torch.segment_reduce` along axis 0 and `torch.softmax` along the rows, bit equality or agreement with the CPU oracle, values that depend on the row and the column, `[N, 1]` and `[N, 0]`, the refusals of the shape rules; the column kernels below the Python validation; and their plan, oracle, and kernel lowerings | Public today | `python/tests/mlir/test_segment_columns.py`, the column cases of `python/tests/mlir/test_segmented_bounds.py`, the `segmented-columns` and `ragged-softmax-columns` files under `test/Conversion`, `test/Dialect/Swage/columns.mlir`, `test/Dialect/SwagePlan/columns.mlir` | `ninja -C build check-swage`; trusted GPU workflow |
 | Compile-only PTX emission for every admitted processor, public and private kernels | Public today, compile-only; private qualification | `python/tests/mlir/test_target_compile.py` | `ninja -C build check-swage-python` |
 | Loaded-module lifetime, in-process cache bounds, cold-path locking, and the context and overlap guards of prepared launches | Public today; private qualification | `python/tests/mlir/test_module_lifetime.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | C API contract: code generation entry points, failure reporting, and dialect handles | Compiler-facing, not public API | `unittests/CodegenCAPITest.cpp`, `unittests/DialectsCAPITest.cpp` | `ninja -C build check-swage-unit` |
@@ -185,7 +186,9 @@ The hosted `ci-cpp` workflow also defines two jobs that no row above relies
 on: a `clang-format` check of the C and C++ sources, and a job that runs the
 lit suite and the C++ unit tests under AddressSanitizer and
 UndefinedBehaviorSanitizer against the uninstrumented LLVM install. Both
-jobs have not yet run on hosted CI, so this page claims no result for them.
+ran and passed on hosted CI for the head of pull request #71, `406b725`.
+The native sources changed after that commit, and neither job has run on
+a later one, so this page claims no result for the current sources.
 The [Support Matrix](../reference/support-matrix.md) lists the versions each
 workflow runs with.
 

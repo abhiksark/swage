@@ -215,8 +215,9 @@ jobs:
   # and runs the checks that need no GPU against that install. The wheels are
   # uploaded as a workflow artifact. Nothing here publishes them.
   #
-  # This job has never run: it was added on a branch that was not pushed. Its
-  # commands were run by hand on one machine, outside a runner.
+  # This job has not completed on a hosted runner: on the pull request that
+  # added it, it was skipped when build-and-test failed. Its commands were
+  # run by hand on one machine, outside a runner.
   native-wheel:
     needs: build-and-test
     runs-on: ubuntu-latest

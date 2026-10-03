@@ -313,10 +313,21 @@ The evidence supports these propositions:
 2. **The schedule explains the result, not the code generator.** A planned
    Triton scheduler that receives the same task lists matches or beats the
    Swage mixed policy on most rows.
-3. **A per-segment loop is the better shape for CTA-sized segments.** A
+3. **A per-segment loop is the better shape for CTA-sized segments on
+   `log-normal`; on the other mixed rows the cause is not isolated.** A
    looped Triton kernel is faster than the mixed policy on the four rows
-   that mix short segments with segments of up to 4,096 elements, so the
-   CTA task of the mixed policy is its weak part.
+   that mix short segments with segments of up to 4,096 elements. The
+   looping planned scheduler separates the shape of the CTA task from the
+   rest: it keeps the partition into packed short tasks and longer tasks
+   and gives each longer task the looped body. On `log-normal` it is
+   faster than the mixed policy, so there the CTA task of the mixed policy
+   is its weak part. On `bimodal`, `zipf-like`, and `few-huge` its best
+   configuration takes as long as the mixed policy, and the looped kernel
+   is faster than both, as the overview table shows. There the gap goes
+   with the split into short and long task lists rather than with the
+   shape of the CTA task, and the record does not show where its cost
+   lies: in the packed short tasks, in the indirection through a task
+   list, or in the overlap that two phases lose.
 4. **Swage derives the schedule from one segment-local program.** It needs
    no hand-written orchestration. In these records that does not buy speed
    over hand-written Triton.
