@@ -417,10 +417,14 @@ preparation for the next call:
 1. It copies the offsets to the host. The copy waits for the work already
    queued on the current stream.
 2. It validates the offsets on the host and, for `segment_reduce`,
-   classifies every segment into warp, CTA, and split tasks.
+   classifies every segment: rank-one values into warp, CTA, and split
+   tasks, and `[N, D]` values into one-block and split tasks with limits
+   that follow from `W`.
 3. For `segment_reduce`, it uploads the task records and allocates scratch
-   for split segments. With int64 offsets it also uploads the narrowed
-   int32 copy the kernels read.
+   for split segments. An `[N, D]` batch without a split segment uploads
+   no records: it launches one task per segment from a list of task ids
+   already on the device. With int64 offsets a call also uploads the
+   narrowed int32 copy the kernels read.
 4. It enqueues the kernels.
 
 A second call with the same offsets tensor repeats all four steps. The task
