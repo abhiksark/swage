@@ -62,8 +62,9 @@ class _EmulatedRowsKernel:
         self.launches = []
 
     def __getitem__(self, grid):
-        def launch(values, offsets, output, features, *, KIND, BLOCK_ROWS,
-                   BLOCK_COLUMNS, num_warps):
+        def launch(values, offsets, output, features, *, KIND, FLOAT64,
+                   BLOCK_ROWS, BLOCK_COLUMNS, num_warps):
+            assert FLOAT64 is (values.dtype.itemsize == 8)
             import torch
 
             self.launches.append((grid, BLOCK_ROWS, BLOCK_COLUMNS, num_warps))

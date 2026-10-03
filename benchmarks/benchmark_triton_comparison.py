@@ -968,15 +968,17 @@ def _make_triton_rows_looped():
     rows of the segment in fixed blocks and keeps one partial result per
     row slot and column, then combines the row slots. The kind is a
     compile-time constant, and the partial results have the type of the
-    values. A masked load reads the identity of the kind. The maximum and
-    the minimum do not propagate NaN; the timed values hold none.
+    values. A masked load reads the identity of the kind. A mean divides
+    the sum once, rounded to nearest. The maximum and the minimum do not
+    propagate NaN; the timed values hold none.
     """
     import triton
     import triton.language as tl
 
     @triton.jit
     def rows_looped_kernel(values, offsets, output, features,
-                           KIND: tl.constexpr, BLOCK_ROWS: tl.constexpr,
+                           KIND: tl.constexpr, FLOAT64: tl.constexpr,
+                           BLOCK_ROWS: tl.constexpr,
                            BLOCK_COLUMNS: tl.constexpr):
         segment = tl.program_id(0)
         begin = tl.load(offsets + segment).to(tl.int64)
@@ -1015,8 +1017,12 @@ def _make_triton_rows_looped():
             result = tl.min(total, axis=0)
         else:
             result = tl.sum(total, axis=0)
-            if KIND == 3:
+            if KIND == 3 and FLOAT64:
                 result = result / (end - begin).to(element)
+            elif KIND == 3:
+                # Rounded to nearest, as the mean of Swage and of PyTorch;
+                # the default float32 division of Triton is approximate.
+                result = tl.math.div_rn(result, (end - begin).to(element))
         tl.store(
             output + segment * features + columns, result, mask=in_columns
         )
@@ -1042,6 +1048,7 @@ def _launch_triton_rows(kernel, values, offsets, output, segment_count,
         output,
         features,
         KIND=_KIND_CODES[kind],
+        FLOAT64=values.element_size() == 8,
         BLOCK_ROWS=block_rows,
         BLOCK_COLUMNS=block_columns,
         num_warps=warps,
