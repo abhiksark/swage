@@ -400,8 +400,8 @@ Every refusal below raises before anything is enqueued.
 - **PyTorch older than 2.6.** A call raises the `RuntimeError` of
   `launch()`, before it looks at an argument.
 
-Three more rules follow from how PyTorch handles streams, threads, and
-inference mode:
+More rules follow from how PyTorch handles streams, threads, inference
+mode, and `torch.compile`:
 
 - A call enqueues on the stream that is current when it is made. Inputs
   that were produced on another stream must be complete before the call, as
@@ -411,6 +411,13 @@ inference mode:
   and `out` may be tensors that were created inside it. A call enqueues
   what it classified before it returns, so it has no need to detect a later
   change to the offsets.
+- Under `torch.compile`, Dynamo does not trace into either call. A call is
+  a graph break: it runs eagerly between the compiled graphs around it and
+  returns the bits of the same call outside `torch.compile`, for values of
+  rank one and of rank two. `torch.compile(..., fullgraph=True)` refuses a
+  function that makes a call, because it forbids the graph break. Neither
+  call is a PyTorch custom operator, so neither can sit inside a compiled
+  graph.
 
 Continue with [Running Without the Compiler](deployment.md), which compiles
 the kernels of these two calls ahead of time and serves the calls from the

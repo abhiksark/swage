@@ -13,6 +13,9 @@ from . import _segmented_qualification as _qualification
 from ._frontend import _INSTALLATION
 
 _KINDS = ("sum", "max", "min", "mean")
+# The body of each public call, wrapped once so that Dynamo does not trace
+# into it. See `_untraced`.
+_UNTRACED = {}
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
@@ -21,7 +24,8 @@ def segment_reduce(values, offsets, kind, *, out=None):
     Segment `i` is `values[offsets[i]:offsets[i + 1]]`. The call validates
     the tensors, copies the offsets to the host to validate and classify
     them, and enqueues the kernels on the current PyTorch CUDA stream. It
-    returns without waiting for the result.
+    returns without waiting for the result. Inside a function compiled by
+    `torch.compile` the call is a graph break and runs eagerly.
 
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is reduced on its own, as
@@ -89,6 +93,11 @@ def segment_reduce(values, offsets, kind, *, out=None):
             a CUDA graph; or a kernel would have to be compiled while
             `SWAGE_NO_COMPILE=1` is set.
     """
+    return _untraced(_segment_reduce)(values, offsets, kind, out=out)
+
+
+def _segment_reduce(values, offsets, kind, *, out=None):
+    """Run `segment_reduce` outside any trace; see its docstring."""
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
         raise ValueError(
@@ -143,7 +152,8 @@ def segment_softmax(values, offsets, *, out=None):
     the softmax of each segment at the positions of its values. The call
     validates the tensors, copies the offsets to the host to validate them,
     and enqueues one kernel on the current PyTorch CUDA stream. It returns
-    without waiting for the result.
+    without waiting for the result. Inside a function compiled by
+    `torch.compile` the call is a graph break and runs eagerly.
 
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is normalized on its own
@@ -191,6 +201,11 @@ def segment_softmax(values, offsets, *, out=None):
             the kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
             is set.
     """
+    return _untraced(_segment_softmax)(values, offsets, out=out)
+
+
+def _segment_softmax(values, offsets, *, out=None):
+    """Run `segment_softmax` outside any trace; see its docstring."""
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
     rank = values.dim()
@@ -249,6 +264,24 @@ def segment_softmax(values, offsets, *, out=None):
         _qualification._target_description().cta_block_threads,
     )
     return output
+
+
+def _untraced(function):
+    """Return the body of a public call wrapped against `torch.compile`.
+
+    A call copies its offsets to the host and launches through the driver,
+    which Dynamo cannot trace. Wrapped by `torch.compiler.disable`, the call
+    is a graph break inside a compiled function: it runs eagerly between the
+    graphs around it, as it does outside `torch.compile`. The wrapper needs
+    PyTorch, which `import swage` does not load, so it is made at the first
+    call, after `_runtime._import_torch` has refused a missing or an
+    unsupported PyTorch.
+    """
+    wrapped = _UNTRACED.get(function)
+    if wrapped is None:
+        torch = _runtime._import_torch()
+        wrapped = _UNTRACED[function] = torch.compiler.disable(function)
+    return wrapped
 
 
 def _one_column_as_scalars(values, output):

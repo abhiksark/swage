@@ -1464,6 +1464,8 @@ def _fake_torch(monkeypatch):
     torch.autograd = types.SimpleNamespace(
         graph=types.SimpleNamespace(increment_version=lambda tensor: None)
     )
+    # The calls wrap their bodies against `torch.compile`; nothing compiles.
+    torch.compiler = types.SimpleNamespace(disable=lambda function: function)
     torch.cuda = types.SimpleNamespace(
         is_current_stream_capturing=_reached("capture check")
     )

@@ -13,9 +13,9 @@ This file pins what the wrapper adds and what a caller can rely on:
   float64 sum is held to an exactly rounded reference instead.
 - That a sum is the documented schedule of its batch and nothing a caller
   can pin.
-- The behavior under CUDA graph capture, on another stream, on a thread
-  that has not used CUDA, under `torch.inference_mode()`, and with
-  `SWAGE_NO_COMPILE=1`.
+- The behavior under CUDA graph capture, under `torch.compile`, on
+  another stream, on a thread that has not used CUDA, under
+  `torch.inference_mode()`, and with `SWAGE_NO_COMPILE=1`.
 - That calls with fresh offsets leave no task storage, event, or module
   behind.
 """
@@ -34,7 +34,7 @@ from itertools import pairwise
 import pytest
 import swage
 import torch
-from swage import _runtime
+from swage import _runtime, _segments
 from swage import _segmented_qualification as qualification
 from test_segmented_numerics import (
     SPECIAL_CASES,
@@ -1742,6 +1742,72 @@ def test_segmented_calls_take_tensors_made_under_inference_mode(function):
         assert allocated.is_inference()
         assert _bits(allocated.cpu()) == _bits(expected)
         assert _bits(out.cpu()) == _bits(expected)
+
+
+def _compile_case(rank, offsets_dtype):
+    """Return values of one rank and offsets of one dtype, on the device."""
+    generator = torch.Generator().manual_seed(rank)
+    shape = (1000,) if rank == 1 else (1000, 8)
+    values = torch.randn(shape, generator=generator).cuda()
+    offsets = torch.tensor([0, 3, 3, 500, 1000], dtype=offsets_dtype).cuda()
+    return values, offsets
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    "offsets_dtype", [torch.int32, torch.int64], ids=["int32", "int64"]
+)
+@pytest.mark.parametrize("rank", [1, 2])
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_run_eagerly_inside_torch_compile(
+    function, backend, rank, offsets_dtype, monkeypatch
+):
+    """Leave a call out of the compiled graph and run it as an eager call.
+
+    Dynamo does not trace into either call: the call is a graph break,
+    runs eagerly between the compiled graphs around it, and returns the
+    bits of the same call outside `torch.compile`. A second call with
+    other offsets of the same shape follows the new offsets. The wrapper
+    that keeps Dynamo out is made at the first call of a process, which
+    here is inside the trace.
+    """
+    torch._dynamo.reset()
+    monkeypatch.setattr(_segments, "_UNTRACED", {})
+    values, offsets = _compile_case(rank, offsets_dtype)
+
+    def model(values, offsets):
+        return _call(function, values * 2, offsets) + 1
+
+    compiled = torch.compile(model, backend=backend)
+    actual = compiled(values, offsets)
+    other = torch.tensor([0, 10, 990, 990, 1000], dtype=offsets_dtype).cuda()
+    again = compiled(values, other)
+
+    assert _bits(actual.cpu()) == _bits(model(values, offsets).cpu())
+    assert _bits(again.cpu()) == _bits(model(values, other).cpu())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("rank", [1, 2])
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_refuse_a_full_graph(function, rank):
+    """Refuse `fullgraph=True`, which forbids the graph break of a call.
+
+    A call copies its offsets to the host and launches through the driver,
+    which no graph can hold, so a function that makes the call cannot be
+    compiled into one graph.
+    """
+    torch._dynamo.reset()
+    values, offsets = _compile_case(rank, torch.int32)
+    compiled = torch.compile(
+        lambda values, offsets: _call(function, values, offsets) + 1,
+        backend="eager",
+        fullgraph=True,
+    )
+
+    with pytest.raises(torch._dynamo.exc.Unsupported):
+        compiled(values, offsets)
 
 
 @_needs_cuda

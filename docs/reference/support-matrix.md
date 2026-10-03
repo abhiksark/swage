@@ -128,6 +128,7 @@ surface than the tables above suggest for the package as a whole:
 | int32 and int64 offsets | Tested in the GPU tier on `sm_86` | int64 offsets are refused by their 64-bit values, give the bits of int32 offsets on every distribution of the suite, and reach a kernel only as a retained private int32 copy; other offset dtypes raise a `TypeError`; the same file |
 | A second GPU on one host | Unknown | The calls require the current device; the tests run on a host with one GPU |
 | Gradients | Rejected | `values` that require grad raise a `ValueError`; the same files |
+| Calls inside a function compiled by `torch.compile` | Tested in the GPU tier on `sm_86` | Both calls, at rank one and rank two, with int32 and int64 offsets, under the `eager` and `inductor` backends, return the bits of an eager call as a graph break in `python/tests/mlir/test_public_segments.py`; `fullgraph=True` is refused |
 | Tensors created under `torch.inference_mode()` | Tested in the GPU tier on `sm_86` | `values`, `offsets`, and `out` are inference tensors in `python/tests/mlir/test_public_segments.py` |
 | An install without `numpy` | Rejected | A `RuntimeError` that names `numpy`, with the bindings and with an artifact; `tests/python/test_segments.py` and `tests/python/test_artifact.py` block the import |
 
