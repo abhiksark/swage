@@ -1,7 +1,8 @@
 <!-- docs/adr/ADR-0024-gradients-of-the-segmented-calls.md -->
 # ADR-0024: Gradients of the segmented calls
 
-- Status: accepted; steps 1 to 3 of the migration sequence are implemented
+- Status: accepted; implemented, with the recorded run of step 4 on the
+  development GPU
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end, except question 6, which the owner answered differently

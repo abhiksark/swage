@@ -129,14 +129,16 @@ surface than the tables above suggest for the package as a whole:
 | `[N, D]` values of `segment_softmax`, float32 | Tested in the GPU tier on `sm_86` | `python/tests/mlir/test_segment_columns.py`: every column agrees with float64 `torch.softmax` along the rows of its segment inside the bound of the softmax page at `k = n - 1`, at 1, 3, 64, 129, 200, and 1024 columns and for a segment of 100,003 rows, agrees with the CPU oracle within the derived tolerance, and follows `torch.softmax` on NaN and infinities per column; `[N, 1]` runs the rank-one kernel and `[N, 0]` launches nothing; `python/tests/mlir/test_segmented_bounds.py` launches the kernel below the Python validation with row ranges and feature counts that validation rejects and with an output of fewer rows than the values; float64 values and values of rank three or above raise a `TypeError` |
 | int32 and int64 offsets | Tested in the GPU tier on `sm_86` | int64 offsets are refused by their 64-bit values, give the bits of int32 offsets on every distribution of the suite, and reach a kernel only as a retained private int32 copy; other offset dtypes raise a `TypeError`; the same file |
 | A second GPU on one host | Unknown | The calls require the current device; the tests run on a host with one GPU |
-| Gradients of every reduction kind and of the softmax, first and second derivatives | Implemented, not yet qualified on a GPU | `python/tests/mlir/test_segment_gradients.py`: the bound of the softmax backward on its own result and its agreement with float64 `torch.softmax`, the tie rule of a maximum and a minimum, `gradcheck` and `gradgradcheck` in float64 at ranks one and two with both offset widths, comparison with `torch.segment_reduce`, and the interactions of [Gradients](../user-guide/segmented-calls.md#gradients) |
+| Gradients of every reduction kind and of the softmax, first and second derivatives | Tested in the GPU tier on `sm_86` | `python/tests/mlir/test_segment_gradients.py`: `gradcheck` and `gradgradcheck` in float64 at ranks one and two with both offset widths, the tie rule of a maximum and a minimum, comparison with `torch.segment_reduce` on CUDA and on the CPU, the bounds of the softmax backward and of its second derivative on the returned result and against float64 `torch.softmax`, and the interactions of [Gradients](../user-guide/segmented-calls.md#gradients); derivatives of calls run from an artifact have a test in `python/tests/mlir/test_artifact.py` that the recorded run did not execute |
 | Calls inside a function compiled by `torch.compile` | Tested in the GPU tier on `sm_86` | Both calls, at rank one and rank two, with int32 and int64 offsets, under the `eager` and `inductor` backends, return the bits of an eager call as a graph break in `python/tests/mlir/test_public_segments.py`; `fullgraph=True` is refused |
 | Tensors created under `torch.inference_mode()` | Tested in the GPU tier on `sm_86` | `values`, `offsets`, and `out` are inference tensors in `python/tests/mlir/test_public_segments.py` |
 | An install without `numpy` | Rejected | A `RuntimeError` that names `numpy`, with the bindings and with an artifact; `tests/python/test_segments.py` and `tests/python/test_artifact.py` block the import |
 
 The GPU tests of the segmented calls ran on one NVIDIA RTX A6000 with
-PyTorch 2.12.0+cu130 and Python 3.13, on the branch that added the calls.
-They have not run through the `ci-gpu` workflow, which runs on `main` only.
+PyTorch 2.12.0+cu130 and Python 3.13, on the branch that added the calls,
+and the gradient tests on the branch that added gradients, in the recorded
+run that [Verification](../internals/verification.md) states. They have
+not run through the `ci-gpu` workflow, which runs on `main` only.
 
 ## Artifacts
 

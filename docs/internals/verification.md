@@ -31,6 +31,9 @@ the paths the calls run through.
 | Public segmented calls: argument and offsets validation on host tensors | Public today | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU | `ninja -C build check-swage-python` |
 | Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, special values, and signed zeros; the schedule of a public sum; `out`; graph capture, `torch.compile`, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
 | Public segmented calls on `[N, D]` rows: reductions and the softmax per column against `torch.segment_reduce` along axis 0 and `torch.softmax` along the rows, bit equality or agreement with the CPU oracle, values that depend on the row and the column, `[N, 1]` and `[N, 0]`, the refusals of the shape rules; the column kernels below the Python validation; and their plan, oracle, and kernel lowerings | Public today | `python/tests/mlir/test_segment_columns.py`, the column cases of `python/tests/mlir/test_segmented_bounds.py`, the `segmented-columns` and `ragged-softmax-columns` files under `test/Conversion`, `test/Dialect/Swage/columns.mlir`, `test/Dialect/SwagePlan/columns.mlir` | `ninja -C build check-swage`; trusted GPU workflow |
+| Gradients of the public segmented calls: when a call records one, the `out` refusal while recording, and an import of `swage` that loads no PyTorch | Public today | `tests/python/test_segments.py`, with a stand-in for PyTorch | `python -m pytest tests/python/test_segments.py -q` |
+| Gradients of the public segmented calls on the GPU: first and second derivatives of every kind and of the softmax, the tie rule, comparison with `torch.segment_reduce` and float64 `torch.softmax`, and the interactions with `out`, grad mode, in-place changes, streams, graph capture, no-compile mode, `torch.compile`, and resource use | Public today; recorded run on the development GPU | `python/tests/mlir/test_segment_gradients.py` | `python -m pytest python/tests/mlir/test_segment_gradients.py -q`; trusted GPU workflow after merge |
+| Derivatives of calls that run from an artifact, against the compiled path bit for bit | Not executed yet | The gradient cases of `python/tests/mlir/test_artifact.py` | Bindings built beside the frontend of the commit; trusted GPU workflow after merge |
 | Compile-only PTX emission for every admitted processor, public and private kernels | Public today, compile-only; private qualification | `python/tests/mlir/test_target_compile.py` | `ninja -C build check-swage-python` |
 | Loaded-module lifetime, in-process cache bounds, cold-path locking, and the context and overlap guards of prepared launches | Public today; private qualification | `python/tests/mlir/test_module_lifetime.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | C API contract: code generation entry points, failure reporting, and dialect handles | Compiler-facing, not public API | `unittests/CodegenCAPITest.cpp`, `unittests/DialectsCAPITest.cpp` | `ninja -C build check-swage-unit` |
@@ -161,6 +164,64 @@ these checks:
 
 These checks were executed from the branch that added artifacts. The
 trusted GPU workflow has not executed them yet.
+
+The gradients of the two calls, which
+[Gradients](../user-guide/segmented-calls.md#gradients) describes, have
+these checks in `python/tests/mlir/test_segment_gradients.py`:
+
+- Derivatives: `gradcheck` and `gradgradcheck` in float64 pass for every
+  kind at rank one and at 1, 3, and 64 columns, with int32 and int64
+  offsets, empty segments, and rows past the final offset, and on batches
+  that reach every schedule of rank one.
+- Reductions: the gradient of a sum is an exact copy, that of a mean one
+  correctly rounded division, and that of a maximum or a minimum without a
+  tie the whole gradient, in both dtypes. Each equals the gradient of
+  `torch.segment_reduce` on CUDA and on the CPU bit for bit, the mean to
+  within one rounding. Tied elements share a positive, negative, infinite,
+  or NaN gradient equally, per column, and every other element receives
+  `0.0`.
+- PyTorch on ties: the gradient of `torch.segment_reduce` on tied elements
+  has the same bits on CUDA as on the CPU, and differs from the Swage
+  gradient only for a negative gradient.
+- Softmax: the backward lies within its bound of `y * (g - s)` on the
+  returned `y` at logit spreads 8, 20, 50, and 80, at rank one and at 1, 3,
+  and 64 columns, and on one segment of 100,003 rows, and agrees with the
+  float64 gradient of `torch.softmax` within the error the forward carries.
+  A product of the second derivative with a vector lies within its bound
+  of its formula and of float64 `torch.softmax`. NaN and infinities give
+  the NaN of `torch.softmax`.
+- Interactions: grad mode, the `out` refusal, in-place changes after a
+  call, offsets made under inference mode, determinism, gradients that do
+  not depend on the batch, the stream of a backward, the refusal of a
+  backward under CUDA graph capture and in no-compile mode, `torch.compile`
+  with the `eager` and `inductor` backends, and no module, synchronization,
+  event, memory, or garbage left behind by 100 calls with backward passes.
+
+The recorded run of these checks was on one NVIDIA RTX A6000 (`sm_86`),
+with PyTorch 2.12.0+cu130, CUDA 13.0, and Python 3.13, at commit `a8c3c8b`
+of the branch that added gradients. The whole `python/tests/mlir`
+directory, which holds the gradient file, ran ten times, one run after
+another. No test of the gradient file failed in any run. Every run passed
+3708 tests, skipped the 2 opt-in racecheck tests, and had 31 failures and
+677 errors, all of them in checks that pair the frontend with its
+bindings. The bindings of that
+machine were built beside the frontend of the base of the branch, with
+the same native sources, and the branch changes the frontend:
+
+- The artifact writer refuses a frontend that the bindings were not built
+  beside. This accounts for 307 failures and errors in
+  `python/tests/mlir/test_artifact.py`, among them the derivatives of
+  calls that run from an artifact, which therefore did not execute, and
+  for 399 errors in `python/tests/mlir/test_segmented_classification.py`,
+  whose runtime-library classifier is read from an artifact.
+- The bindings refuse a copy of the frontend outside the checkout, in one
+  test of `python/tests/mlir/test_cache_process_reuse.py`.
+- The warning for a frontend that moved since the build is an error under
+  `-W error`, in one test of `python/tests/mlir/test_native_identity.py`.
+
+At the base of the branch, with the same bindings, the whole directory
+passed 4184 tests and skipped 2. The trusted GPU workflow has not run
+these checks; it runs on `main` only.
 
 The trusted GPU workflow runs only on `main` through the self-hosted
 `swage-gpu` runner. It runs the whole `python/tests/mlir` directory, so every
