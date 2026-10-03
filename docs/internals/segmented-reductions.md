@@ -262,14 +262,14 @@ name.
 
 `swage.segment_reduce` runs the tile for `[N, D]` values with more than
 one column. It classifies the rows of each segment as the rank-one call
-classifies elements, under the default limits divided by `W`:
+classifies elements, in one walk over the offsets that also validates
+them, with the default chunk limit divided by `W` as both of its limits:
 
 - A segment of at most `floor(4096 / W)` rows is one task of the task-id
-  kernel at 128 threads, at most eight rows per stripe. The warp class,
-  up to `floor(32 / W)` rows, runs on the same kernel: the warp ids and
-  the CTA ids lie together at the start of the records, and the kernel
-  reads them as one task list. A batch without a longer segment is not
-  classified: it uploads no record and reads the identity task list,
+  kernel at 128 threads, at most eight rows per stripe. There is no warp
+  tile of rank two, so there is one direct class: a warp class would run
+  on the same kernel and only slow the classifier down. A batch without a
+  longer segment uploads no record and reads the identity task list,
   which gives every segment the same task and the same bits.
 - A longer segment is cut into chunks of `floor(4096 / W)` rows. The
   partial kernel reduces each chunk into a row of a `[P, D]` scratch, and
@@ -278,8 +278,8 @@ classifies elements, under the default limits divided by `W`:
   grid of a launch.
 
 The program is admitted under the default limits, the ones an artifact
-records, and its rows are classified under the row limits, which follow
-from the feature count. So the kernels of a segment, and the bits of its
+records, and its rows are classified under the chunk limit, which
+follows from the feature count. So the kernels of a segment, and the bits of its
 result, depend on its row count and the feature count alone, and not on
 the rest of the batch. A column sum of a segment cut into `P` chunks has
 `6 + 2 log2(R) + ceil(P / R)` additions on its longest path, for the

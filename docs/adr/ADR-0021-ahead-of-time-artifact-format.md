@@ -122,9 +122,9 @@ a kernel is loaded or enqueued:
   in the manifest.
 - For a reduction, the planning limits of the call equal the ones in the
   manifest. A reduction over rank-two values is admitted under those
-  limits and classifies its rows under the same limits divided by the
-  column-group width of its feature count, which the manifest does not
-  record because they follow from it.
+  limits and classifies its rows with the chunk limit divided by the
+  column-group width of its feature count as both limits, which the
+  manifest does not record because they follow from it.
 
 Every failed check raises a `RuntimeError` that names the directory.
 Nothing is compiled in place of an artifact that cannot serve a call: a
