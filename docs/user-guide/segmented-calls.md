@@ -118,8 +118,9 @@ segment, leaves the counter of `out` alone. The counters of `values` and
 ## Results
 
 The results below are pinned by tests on the GPU. `torch.segment_reduce`
-returns the same value in every case on PyTorch 2.12, the version the GPU
-tests run with.
+returns the same value in every case but one on PyTorch 2.12, the version
+the GPU tests run with: the sign of a maximum or a minimum of zeros of both
+signs, which the two lists below state.
 
 A sum follows IEEE-754 addition:
 
@@ -138,6 +139,11 @@ A maximum propagates NaN:
 - A positive infinity gives positive infinity, also beside a negative one.
 - A negative infinity among finite elements gives the largest finite
   element.
+- Zeros of both signs give `+0.0`, wherever each sits, because IEEE-754
+  `maximum` orders `-0.0` below `+0.0`. Every schedule and the kernel of
+  rows return it. `torch.segment_reduce` returns the sign of the first zero
+  of the segment instead, on the GPU and on the CPU. The two results
+  compare equal, so only a comparison of bits tells them apart.
 
 A minimum is its mirror:
 
@@ -146,6 +152,8 @@ A minimum is its mirror:
 - A negative infinity gives negative infinity, also beside a positive one.
 - A positive infinity among finite elements gives the smallest finite
   element.
+- Zeros of both signs give `-0.0`, wherever each sits, where
+  `torch.segment_reduce` returns the sign of the first zero.
 
 A mean is the sum divided by the length of the segment:
 

@@ -218,7 +218,11 @@ The public calls and the private qualification path fix seven results:
 - The mean of a segment that contains a NaN is NaN.
 
 The tests pin all seven. On PyTorch 2.12,
-`torch.segment_reduce` returns the same values, and
+`torch.segment_reduce` returns the same values. It differs in one other
+result: of zeros of both signs, these calls return `+0.0` as the maximum
+and `-0.0` as the minimum, the IEEE-754 order, and `torch.segment_reduce`
+returns the sign of the first zero, so a comparison of bits with it can fail
+where masking by multiplication left a `-0.0`. Separately,
 `torch.nn.functional.embedding_bag` with `mode="max"` differs on the two
 maximum results: it returns `0.0` for an empty bag and skips a NaN member.
 With `mode="mean"` it returns `0.0` for an empty bag, where these calls

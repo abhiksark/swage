@@ -338,6 +338,41 @@ def test_empty_segments_give_every_column_the_value_of_the_kind(dtype):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+def test_column_extremes_order_signed_zeros_as_ieee(dtype):
+    """Return +0.0 as the maximum and -0.0 as the minimum of both zeros.
+
+    Each column of a segment holds zeros of both signs at other rows, or
+    zeros of one sign, so a result that took the first zero of a column,
+    as `torch.segment_reduce` does on PyTorch 2.12, or a neighboring
+    column, shows in its sign.
+    """
+    rows = 5
+    host_values = torch.full((2 * rows, 4), -0.0, dtype=dtype)
+    host_values[rows - 1, 0] = 0.0
+    host_values[0, 1] = 0.0
+    host_values[:, 3] = 0.0
+    host_values[rows + 2, 2] = 0.0
+    host_offsets = torch.tensor([0, rows, 2 * rows], dtype=torch.int32)
+
+    maximum = _reduce("max", host_values, host_offsets)
+    minimum = _reduce("min", host_values, host_offsets)
+
+    zero, negative = 0.0, -0.0
+    assert _bits(maximum) == _bits(
+        torch.tensor(
+            [[zero, zero, negative, zero], [negative, negative, zero, zero]],
+            dtype=dtype,
+        )
+    )
+    assert _bits(minimum) == _bits(
+        torch.tensor(
+            [[negative, negative, negative, zero]] * 2, dtype=dtype
+        )
+    )
+
+
+@_needs_cuda
 @pytest.mark.parametrize("kind", KINDS)
 def test_one_column_takes_the_schedules_of_rank_one(kind, monkeypatch):
     """Reduce `[N, 1]` values as the rank-one values they are.

@@ -1252,6 +1252,63 @@ def test_segment_reduce_min_propagates_nan_and_orders_infinities(
     assert _bits(actual[2:]) == _bits(theirs[2:])
 
 
+def _signed_zero_segments(length, dtype):
+    """Return segments of zeros of both signs and their IEEE extremes.
+
+    Returns:
+        A list of `(segment, maximum, minimum)`, where the maximum is +0.0
+        when the segment holds +0.0 and the minimum -0.0 when it holds
+        -0.0, wherever that zero sits.
+    """
+    negative = torch.full((length,), -0.0, dtype=dtype)
+    positive = torch.zeros(length, dtype=dtype)
+    last_positive, first_positive = negative.clone(), negative.clone()
+    last_positive[-1] = 0.0
+    first_positive[0] = 0.0
+    middle_negative = positive.clone()
+    middle_negative[length // 2] = -0.0
+    return [
+        (last_positive, 0.0, -0.0),
+        (first_positive, 0.0, -0.0),
+        (middle_negative, 0.0, -0.0),
+        (negative, -0.0, -0.0),
+        (positive, 0.0, 0.0),
+    ]
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_segment_reduce_orders_signed_zeros_as_ieee_maximum_and_minimum(
+    kind, dtype
+):
+    """Return +0.0 as the maximum and -0.0 as the minimum of both zeros.
+
+    IEEE-754 maximum and minimum order -0.0 below +0.0, whatever the
+    position of either zero, and so does every schedule: the lengths reach
+    warp, CTA, and split work. `torch.segment_reduce` is not the reference
+    here, because on PyTorch 2.12 it returns the sign of the first zero of
+    a segment, on the GPU and on the CPU.
+    """
+    cases = [
+        case
+        for length in SPECIAL_LENGTHS
+        for case in _signed_zero_segments(length, dtype)
+    ]
+    host_values = torch.cat([segment for segment, _, _ in cases])
+    host_offsets = torch.tensor(
+        _offsets([segment.numel() for segment, _, _ in cases]),
+        dtype=torch.int32,
+    )
+    expected = torch.tensor(
+        [extremes[kind == "min"] for _, *extremes in cases], dtype=dtype
+    )
+
+    actual = _reduce(kind, host_values, host_offsets)
+
+    assert _bits(actual) == _bits(expected)
+
+
 def _softmax(host_values, host_offsets):
     """Run the public softmax on fresh device tensors."""
     return swage.segment_softmax(host_values.cuda(), host_offsets.cuda()).cpu()
