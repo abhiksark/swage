@@ -286,20 +286,21 @@ jobs:
             'import pathlib, swage; print(pathlib.Path(swage.__file__).resolve().parents[2])')"
           ln -s "$GITHUB_WORKSPACE/build-native-wheel" "$root/build"
 
-      # The tests, the examples, and the two repository files the tests read
-      # are copied out of the checkout and run from there, so only the
-      # installed packages can be imported. Every CUDA test skips on this
-      # runner.
+      # The tests, the examples, and the repository files the tests read are
+      # copied out of the checkout and run from there, so only the installed
+      # packages can be imported. Every CUDA test skips on this runner.
       - name: Check the installed wheels without the checkout
         run: |
           revision="$(git rev-parse HEAD)"
           python="$RUNNER_TEMP/wheel-env/bin/python"
           proof="$RUNNER_TEMP/wheel-proof"
-          mkdir -p "$proof/python/tests" "$proof/cmake" "$proof/docs/internals"
+          mkdir -p "$proof/python/tests" "$proof/cmake" "$proof/docs/internals" \
+            "$proof/benchmarks"
           cp -r python/tests/mlir "$proof/python/tests/mlir"
           cp -r examples "$proof/examples"
           cp cmake/llvm-version.txt "$proof/cmake/"
           cp docs/internals/segmented-reductions.md "$proof/docs/internals/"
+          cp benchmarks/distributions.py "$proof/benchmarks/"
           cd "$proof"
           "$python" -m swage.env
           "$python" - "$revision" <<'PY'
