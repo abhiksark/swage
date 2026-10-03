@@ -121,7 +121,26 @@ def _segment_reduce(values, offsets, kind, *, out=None):
             "values must have dtype torch.float32 or torch.float64"
         )
     output = _result(torch, out, shape, values, values.dtype)
-    if rank == 2 and values.shape[1] != 1:
+    _launch_reduction(values, offsets, kind, output, element)
+    return output
+
+
+def _launch_reduction(values, offsets, kind, output, element):
+    """Validate and enqueue one reduction of `values` into `output`.
+
+    `[N, D]` values with more than one column run the column kernel of the
+    program. `[N, 1]` values are viewed as rank one and run the planned
+    path, as rank-one values do. Neither the values nor the output may
+    require grad: the shared validation refuses them.
+
+    Args:
+        values: The values, of rank one or two.
+        offsets: The int32 or int64 offsets of the call.
+        output: The result, of the shape the call returns.
+        kind: One of `_KINDS`.
+        element: The element type of the values, `"f32"` or `"f64"`.
+    """
+    if values.dim() == 2 and values.shape[1] != 1:
         _qualification._launch_columns(
             values,
             offsets,
@@ -131,9 +150,9 @@ def _segment_reduce(values, offsets, kind, *, out=None):
             validate_offsets=_qualification._validate_offsets,
             int64_offsets=True,
         )
-        return output
+        return
     kernel_values, kernel_output = values, output
-    if rank == 2:
+    if values.dim() == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
     _qualification._launch_planned_reduction(
         kernel_values,
@@ -142,7 +161,6 @@ def _segment_reduce(values, offsets, kind, *, out=None):
         module_text=_qualification._semantic_module(kind, element),
         kernel_name=_qualification._reduction_kernel(kind, element),
     )
-    return output
 
 
 def segment_softmax(values, offsets, *, out=None):
@@ -224,7 +242,26 @@ def _segment_softmax(values, offsets, *, out=None):
             "float64 kernel because the device has no 64-bit exp2"
         )
     output = _result(torch, out, shape, values, torch.float32)
-    if rank == 2 and values.shape[1] != 1:
+    _launch_softmax(torch, values, offsets, output)
+    return output
+
+
+def _launch_softmax(torch, values, offsets, output):
+    """Validate and enqueue one softmax of `values` into `output`.
+
+    `[N, D]` values with more than one column run the column kernel.
+    `[N, 1]` values are viewed as rank one and run the kernel of rank-one
+    values. Neither the values nor the output may require grad: the shared
+    validation refuses them.
+
+    Args:
+        torch: The PyTorch module.
+        values: The float32 values, of rank one or two.
+        offsets: The int32 or int64 offsets of the call, which cover every
+            value.
+        output: The result, of the shape of the values.
+    """
+    if values.dim() == 2 and values.shape[1] != 1:
         _qualification._launch_columns(
             values,
             offsets,
@@ -235,9 +272,9 @@ def _segment_softmax(values, offsets, *, out=None):
             int64_offsets=True,
             clamp_rows_to_output=True,
         )
-        return output
+        return
     kernel_values, kernel_output = values, output
-    if rank == 2:
+    if values.dim() == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
     value_count, segment_count, host_offsets = (
         _qualification._validate_shapes(
@@ -263,7 +300,6 @@ def _segment_softmax(values, offsets, *, out=None):
         segment_count,
         _qualification._target_description().cta_block_threads,
     )
-    return output
 
 
 def _untraced(function):
