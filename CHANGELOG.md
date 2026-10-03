@@ -134,7 +134,8 @@ semantic versioning (`0.x`; anything may change).
   the row-stripe tile in place of the column tile. A reduction classifies
   the rows of each segment under the default limits divided by the
   column-group width, and splits a segment of more than `4096 / W` rows; a
-  softmax launches one task per segment. The bits of a rank-two sum, mean,
+  batch without such a segment is not classified. A softmax launches one
+  task per segment. The bits of a rank-two sum, mean,
   and softmax change, and a sum lies within the `k` of the tile; a maximum
   and a minimum keep their bits. An artifact holds the `cta`, `partial`,
   and `merge` roles of the rank-two programs in place of `column`, so an

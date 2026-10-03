@@ -268,8 +268,9 @@ classifies elements, under the default limits divided by `W`:
   kernel at 128 threads, at most eight rows per stripe. The warp class,
   up to `floor(32 / W)` rows, runs on the same kernel: the warp ids and
   the CTA ids lie together at the start of the records, and the kernel
-  reads them as one task list. A batch without a longer segment uploads
-  no record and reads the identity task list instead.
+  reads them as one task list. A batch without a longer segment is not
+  classified: it uploads no record and reads the identity task list,
+  which gives every segment the same task and the same bits.
 - A longer segment is cut into chunks of `floor(4096 / W)` rows. The
   partial kernel reduces each chunk into a row of a `[P, D]` scratch, and
   the merge kernel reduces the partials of the segment.
