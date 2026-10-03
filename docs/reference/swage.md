@@ -196,8 +196,8 @@ kernels on the current PyTorch CUDA stream, and returns without waiting for
 them. Every call repeats the host work, so with offsets that change on every
 call it is slower than `torch.segment_reduce`.
 [Segmented Calls](../user-guide/segmented-calls.md#what-a-call-costs) cites
-the committed record of the private preparation that the call repeats; no
-record times the call itself.
+the committed record of the private preparation that the call repeats, and
+the record that times the call itself.
 
 Parameters
 :   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on
