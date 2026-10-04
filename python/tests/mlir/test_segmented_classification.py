@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import io
 import random
+from collections import OrderedDict
 from itertools import accumulate, pairwise
 
 import numpy
@@ -25,8 +26,12 @@ import torch
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
-from swage import _artifact, compile
+from swage import _artifact, _cuda_backend, compile
+from swage import _segmented_plan as _plan
+from swage import _segmented_programs as _programs
 from swage import _segmented_qualification as qualification
+from swage import _segmented_runtime as _execution
+from swage import _segmented_validation as _validation
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -136,7 +141,7 @@ def sum_module():
     """Parse the canonical sum once for every native classification here."""
     with ir.Context() as context:
         swage.register_dialects(context)
-        yield ir.Module.parse(qualification._semantic_module("sum"))
+        yield ir.Module.parse(_programs._semantic_module("sum"))
 
 
 def _native_plan(module, offsets, warp_max_elements, cta_chunk_elements):
@@ -642,14 +647,14 @@ def test_array_validation_matches_the_scalar_reference(seed):
 
     assert (
         _outcome(
-            qualification._validate_offset_sequence,
+            _validation._validate_offset_sequence,
             _i32(offsets),
             value_count,
         )
         == expected
     )
     assert (
-        _outcome(qualification._validate_offset_sequence, offsets, value_count)
+        _outcome(_validation._validate_offset_sequence, offsets, value_count)
         == expected
     )
 
@@ -670,7 +675,7 @@ def test_array_validation_keeps_every_message(offsets, value_count, message):
     """Pin each message, and the first invalid offset deciding which one."""
     for form in (offsets, _i32(offsets)):
         with pytest.raises(ValueError) as error:
-            qualification._validate_offset_sequence(form, value_count)
+            _validation._validate_offset_sequence(form, value_count)
         assert str(error.value) == message
 
 
@@ -689,7 +694,7 @@ def test_array_validation_keeps_every_message(offsets, value_count, message):
 def test_sequence_validation_rejects_values_outside_i32(offsets, message):
     """Keep the i32 check for a plain sequence, which no dtype guards."""
     with pytest.raises(ValueError) as error:
-        qualification._validate_offset_sequence(offsets, 10)
+        _validation._validate_offset_sequence(offsets, 10)
     assert str(error.value) == message
 
 
@@ -699,11 +704,11 @@ def test_validation_returns_the_host_offsets_as_one_int32_array():
     offsets = torch.tensor([0, 2, 6], dtype=torch.int32)
     output = torch.zeros(2)
 
-    value_count, segment_count, host_offsets = qualification._validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         values,
         offsets,
         output,
-        qualification._validate_offsets,
+        _validation._validate_offsets,
         require_cuda=False,
     )
 
@@ -729,7 +734,7 @@ def test_tensor_validation_keeps_every_message(offsets, message):
     output = torch.zeros(2)
 
     with pytest.raises(ValueError) as error:
-        qualification._validate_tensors(
+        _validation._validate_tensors(
             values,
             torch.tensor(offsets, dtype=torch.int32),
             output,
@@ -744,7 +749,7 @@ def test_softmax_validation_names_the_covered_values_as_an_integer():
     offsets = torch.tensor([0, 3, 7], dtype=torch.int32)
 
     with pytest.raises(ValueError) as error:
-        qualification._validate_softmax_tensors(
+        _validation._validate_softmax_tensors(
             values, offsets, torch.zeros(6), require_cuda=False
         )
     assert str(error.value) == "output has 6 elements for 7 values"
@@ -855,24 +860,41 @@ def test_persistent_preparation_uploads_the_reference_plan_in_one_array(
 def test_persistent_launch_reads_each_list_at_its_place_in_the_upload(
     monkeypatch,
 ):
-    """Pass one pointer per record list into the single uploaded buffer."""
-    from swage import _runtime
+    """Pass one pointer per record list into the single uploaded buffer.
+
+    The launch contract names each list by its key, so the bound values are
+    read by key: each pointer must land at the place of its list in the one
+    upload, and each count must be the length of its list.
+    """
 
     class _Driver:
         def __init__(self):
-            self.arguments = None
+            self.contract = None
+            self.values = None
+
+        def current_context(self):
+            return 1
 
         def load(self, _ptx, _kernel_name):
             return 1, 1
 
-        def launch_persistent(self, _function, _grid, _block, _stream, args):
-            self.arguments = args
+        def event_create(self):
+            return object()
+
+        def event_record(self, _event, _stream):
+            return None
+
+        def launch_entry(self, _function, contract, bindings, _grid, _stream):
+            self.contract = contract
+            _, self.values = bindings
 
     lengths = [1, 33, 4097, 8192, 0]
     values, offsets, _ = _integer_case(lengths)
     warp, cta, partial, merge = _reference_plan(offsets.tolist())
     driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
     original = torch.tensor
     uploads = []
 
@@ -881,12 +903,11 @@ def test_persistent_launch_reads_each_list_at_its_place_in_the_upload(
         uploads.append(tensor)
         return tensor
 
-    monkeypatch.setattr(torch, "tensor", capture)
-    prepared = qualification._prepare_persistent_sum(
-        values.cuda(), offsets.cuda(), torch.empty(5, device="cuda")
-    )
-    monkeypatch.undo()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "tensor", capture)
+        prepared = qualification._prepare_persistent_sum(
+            values.cuda(), offsets.cuda(), torch.empty(5, device="cuda")
+        )
 
     prepared.launch()
 
@@ -894,14 +915,35 @@ def test_persistent_launch_reads_each_list_at_its_place_in_the_upload(
     records = uploads[0].data_ptr()
     counts = (len(warp), len(cta), len(partial) // 2, len(merge) // 3)
     assert counts == (2, 1, 4, 2)
-    assert driver.arguments[3:8] == (
+    bound = {
+        argument.key: value
+        for argument, value in zip(
+            driver.contract.arguments, driver.values, strict=True
+        )
+        if argument.origin != "user"
+    }
+    assert [
+        bound[key]
+        for key in (
+            "warp_ids",
+            "cta_ids",
+            "partial_ranges",
+            "partial_merge_ids",
+            "merge_records",
+        )
+    ] == [
         records,
         records + 4 * 2,
         records + 4 * (2 + 1),
         records + 4 * (2 + 1 + 8 + 6),
         records + 4 * (2 + 1 + 8),
-    )
-    assert driver.arguments[11:15] == counts
+    ]
+    assert (
+        bound["warp_task_count"],
+        bound["cta_task_count"],
+        bound["partial_count"],
+        bound["merge_count"],
+    ) == counts
     assert uploads[0].tolist() == [
         *warp,
         *cta,
@@ -973,7 +1015,7 @@ class _CountingModule:
 @requires_cuda
 def test_a_program_is_parsed_and_inspected_once_for_many_layouts(monkeypatch):
     """Reuse one parsed module across preparations with fresh offsets."""
-    text = qualification._semantic_module("sum")
+    text = _programs._semantic_module("sum")
     layouts = [[5000] * 96, [4097] * 96, [6000, 7000] * 48]
     cases = [
         _integer_case(lengths, seed=index)
@@ -993,7 +1035,7 @@ def test_a_program_is_parsed_and_inspected_once_for_many_layouts(monkeypatch):
     # Compile and load every kernel first, so only preparation parses below.
     prepare(*cases[0][:2])
     inspections = []
-    inspect = qualification._has_small_element_program
+    inspect = _plan._has_small_element_program
 
     def counting_inspect(module):
         inspections.append(module)
@@ -1001,11 +1043,9 @@ def test_a_program_is_parsed_and_inspected_once_for_many_layouts(monkeypatch):
 
     counting_module = _CountingModule(ir.Module)
     monkeypatch.setattr(ir, "Module", counting_module)
-    monkeypatch.setattr(
-        qualification, "_has_small_element_program", counting_inspect
-    )
-    monkeypatch.setattr(qualification, "_module_memo", {})
-    monkeypatch.setattr(qualification, "_admitted", {})
+    monkeypatch.setattr(_plan, "_has_small_element_program", counting_inspect)
+    monkeypatch.setattr(_plan, "_module_memo", {})
+    monkeypatch.setattr(_plan, "_admitted", {})
 
     for values, offsets, expected in cases:
         prepared = prepare(values, offsets)
@@ -1040,7 +1080,7 @@ def test_a_program_is_admitted_once_per_pair_of_limits(monkeypatch):
     classify = _CountingCalls(native_swage._classify_segments)
     monkeypatch.setattr(native_swage, "_materialize_segmented_plan", plan)
     monkeypatch.setattr(native_swage, "_classify_segments", classify)
-    monkeypatch.setattr(qualification, "_admitted", {})
+    monkeypatch.setattr(_plan, "_admitted", {})
 
     def launch(case, **limits):
         values, offsets, expected = case
@@ -1075,12 +1115,12 @@ def test_a_refused_program_or_limit_is_refused_at_every_preparation(
     """Keep no admission for what planning admission rejects."""
     values, offsets, _ = _integer_case([3, 40])
     arguments = (values.cuda(), offsets.cuda(), torch.empty(2, device="cuda"))
-    monkeypatch.setattr(qualification, "_admitted", {})
+    monkeypatch.setattr(_plan, "_admitted", {})
 
     def fail(*_args, **_kwargs):
         pytest.fail("a refused preparation must not compile")
 
-    monkeypatch.setattr(qualification, "_compile_once", fail)
+    monkeypatch.setattr(_execution, "_compile_once", fail)
     for _ in range(2):
         with pytest.raises(ValueError, match="planning limits must satisfy"):
             qualification._prepare_planned_sum(
@@ -1089,10 +1129,10 @@ def test_a_refused_program_or_limit_is_refused_at_every_preparation(
         with pytest.raises(ValueError, match="capture-free maps"):
             qualification._prepare_planned_reduction(
                 *arguments,
-                module_text=qualification._SOFTMAX_MODULE,
+                module_text=_programs._SOFTMAX_MODULE,
                 kernel_name="ragged_softmax",
             )
-    assert qualification._admitted == {}
+    assert _plan._admitted == {}
 
 
 @requires_cuda
@@ -1101,7 +1141,7 @@ def test_later_preparations_repeat_no_device_or_program_lookup(monkeypatch):
     cases = [_integer_case(lengths) for lengths in ([1, 33, 5000], [40] * 7)]
     capability = _CountingCalls(torch.cuda.get_device_capability)
     monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
-    monkeypatch.setattr(qualification, "_targets", {})
+    monkeypatch.setattr(_execution, "_targets", {})
 
     def fail(*_args, **_kwargs):
         pytest.fail("the persistent counters are zeroed by every launch")
@@ -1128,7 +1168,7 @@ def test_later_preparations_repeat_no_device_or_program_lookup(monkeypatch):
 def test_segment_ids_are_uploaded_once_and_shared_by_preparations(monkeypatch):
     """Read the task list of the pure policies from one tensor per device."""
     cases = [_integer_case(lengths) for lengths in ([1, 33, 5000], [40] * 7)]
-    monkeypatch.setattr(qualification, "_identity_memo", {})
+    monkeypatch.setattr(_plan, "_identity_memo", {})
     uploads = _capture_uploads(monkeypatch)
 
     def fail(*_args, **_kwargs):
@@ -1149,7 +1189,7 @@ def test_segment_ids_are_uploaded_once_and_shared_by_preparations(monkeypatch):
         )
     monkeypatch.undo()
 
-    limit = qualification._IDENTITY_LIMIT
+    limit = _plan._IDENTITY_LIMIT
     assert [len(data) for data in uploads] == [limit, 11, 7]
     assert numpy.array_equal(uploads[0], numpy.arange(limit))
     for policies, output, expected in prepared:
@@ -1167,7 +1207,7 @@ def test_segment_ids_past_the_shared_tensor_are_filled_per_preparation(
     values, offsets, expected = _integer_case([1, 33, 5000, 2, 40])
     output = torch.full((5,), float("nan"), device="cuda")
     fills = _CountingCalls(torch.arange)
-    monkeypatch.setattr(qualification, "_IDENTITY_LIMIT", 4)
+    monkeypatch.setattr(_plan, "_IDENTITY_LIMIT", 4)
     monkeypatch.setattr(torch, "arange", fills)
 
     prepared = qualification._prepare_planned_sum(
@@ -1219,8 +1259,8 @@ def test_preparation_validates_offsets_by_classifying_them(
     def fail(*_args, **_kwargs):
         pytest.fail("valid offsets are validated by the classifier alone")
 
-    monkeypatch.setattr(qualification, "_validate_offsets", fail)
-    monkeypatch.setattr(qualification, "_validate_offset_sequence", fail)
+    monkeypatch.setattr(_validation, "_validate_offsets", fail)
+    monkeypatch.setattr(_validation, "_validate_offset_sequence", fail)
     offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
     getattr(prepare(values, offsets, output), policy)()
     assert output.tolist() == [2.0, 4.0]

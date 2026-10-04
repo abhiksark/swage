@@ -39,7 +39,7 @@ from mlir_swage._mlir_libs import _swageDialectsNanobind as extension
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
-from swage import _segmented_qualification as qualification
+from swage import _segmented_programs as segment_programs
 from test_target_compile import _ADMITTED as _PROCESSORS
 
 _DATA = pathlib.Path(__file__).with_name("ptx_digests.json")
@@ -204,7 +204,7 @@ def _programs():
         suffix = "" if element == "f32" else f"-{element}"
         programs[f"{kind}-{transform}{suffix}"] = (
             reduction_module(kind, transform, element),
-            qualification._reduction_kernel(kind, element),
+            segment_programs._reduction_kernel(kind, element),
             variants,
             processors,
         )
@@ -214,8 +214,8 @@ def _programs():
         for kind in ("sum", "max", "min", "mean"):
             suffix = "" if element == "f32" else f"-{element}"
             programs[f"{kind}-columns{suffix}"] = (
-                qualification._semantic_module(kind, element, 2),
-                qualification._reduction_kernel(kind, element, 2),
+                segment_programs._semantic_module(kind, element, 2),
+                segment_programs._reduction_kernel(kind, element, 2),
                 (
                     (
                         "direct-128",
@@ -228,7 +228,7 @@ def _programs():
     # The one program with a `map_store` terminal, as the runtime compiles
     # it: one block per segment, at its default width and at one warp.
     programs["ragged-softmax"] = (
-        qualification._SOFTMAX_MODULE,
+        segment_programs._SOFTMAX_MODULE,
         "ragged_softmax",
         (
             (
@@ -247,7 +247,7 @@ def _programs():
     # The softmax over rank-two values: the three stages of a column in
     # one thread, in the one kernel of a rank-two program.
     programs["ragged-softmax-columns"] = (
-        qualification._softmax_text(2),
+        segment_programs._softmax_text(2),
         "ragged_softmax_r2",
         (
             (

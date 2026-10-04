@@ -36,13 +36,15 @@ from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage as swage_dialect
 from reduction_programs import reduction_module
-from swage._segmented_qualification import (
+from swage._segmented_programs import (
     _element_of,
-    _prepare_persistent_sum,
-    _prepare_planned_reduction,
     _reduction_kernel,
     _semantic_module,
     _softmax_text,
+)
+from swage._segmented_qualification import (
+    _prepare_persistent_sum,
+    _prepare_planned_reduction,
     launch_gpu,
     launch_softmax_gpu,
 )

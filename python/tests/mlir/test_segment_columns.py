@@ -34,14 +34,12 @@ from itertools import pairwise
 import pytest
 import swage
 import torch
-from swage import _runtime
+from swage import _cuda_backend, _runtime
+from swage import _segmented_plan as _plan
 from swage import _segmented_qualification as qualification
-from swage._segmented_qualification import (
-    cpu_oracle,
-    cpu_softmax_oracle,
-    launch_gpu,
-    launch_softmax_gpu,
-)
+from swage import _segmented_runtime as _execution
+from swage._segmented_oracle import cpu_oracle, cpu_softmax_oracle
+from swage._segmented_qualification import launch_gpu, launch_softmax_gpu
 from test_segmented_numerics import _softmax_bound
 from test_segmented_runtime import (
     _EPS32,
@@ -370,10 +368,9 @@ def test_no_column_returns_an_empty_result_without_a_launch(
     rows, kind, monkeypatch
 ):
     """Return `[S, 0]` for `[N, 0]` values and enqueue nothing."""
-    driver = _runtime._get_driver()
     monkeypatch.setattr(
-        driver,
-        "launch_segmented",
+        _cuda_backend._get_driver(),
+        "launch_entry",
         lambda *arguments: pytest.fail("a kernel was launched"),
     )
     values = torch.empty(rows, 0, device="cuda")
@@ -415,12 +412,12 @@ def test_a_rank_two_call_classifies_nothing_and_compiles_one_kernel(
     """
     for name in ("_admit_program", "_classifying_validator"):
         monkeypatch.setattr(
-            qualification,
+            _plan,
             name,
             lambda *arguments, **keywords: pytest.fail("the call planned"),
         )
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
@@ -431,7 +428,7 @@ def test_a_rank_two_call_classifies_nothing_and_compiles_one_kernel(
     _assert_columns_match("sum", host_values, host_offsets, actual)
     assert [
         (compile_ptx.__name__, dict(options)["kernel_name"])
-        for compile_ptx, _, options in qualification._ptx_memo
+        for compile_ptx, _, options in _execution._ptx_memo
     ] == [("_compile_segmented_reduction_ptx", "segmented_sum_r2")]
 
 
@@ -810,10 +807,9 @@ def test_no_column_of_logits_returns_an_empty_result_without_a_launch(
     rows, monkeypatch
 ):
     """Return `[N, 0]` for `[N, 0]` values and enqueue nothing."""
-    driver = _runtime._get_driver()
     monkeypatch.setattr(
-        driver,
-        "launch_segmented",
+        _cuda_backend._get_driver(),
+        "launch_entry",
         lambda *arguments: pytest.fail("a kernel was launched"),
     )
     values = torch.empty(rows, 0, device="cuda")
@@ -847,7 +843,7 @@ def test_logit_rows_without_a_segment_return_no_row():
 def test_a_rank_two_softmax_compiles_one_kernel(monkeypatch):
     """Validate the offsets, compile the column kernel, and launch it."""
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
@@ -858,7 +854,7 @@ def test_a_rank_two_softmax_compiles_one_kernel(monkeypatch):
     _assert_softmax_columns_match(host_values, host_offsets, actual)
     assert [
         (compile_ptx.__name__, dict(options)["kernel_name"])
-        for compile_ptx, _, options in qualification._ptx_memo
+        for compile_ptx, _, options in _execution._ptx_memo
     ] == [("_compile_segmented_reduction_ptx", "ragged_softmax_r2")]
 
 

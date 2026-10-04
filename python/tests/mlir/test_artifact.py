@@ -25,6 +25,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import types
 
 import pytest
 import swage
@@ -33,8 +34,11 @@ from artifact_child import COMPILER_LIBRARY
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage as swage_dialect
-from swage import _artifact, _runtime, compile
+from swage import _artifact, _cuda_backend, _runtime, compile
+from swage import _segmented_plan as _plan
+from swage import _segmented_programs as _programs
 from swage import _segmented_qualification as qualification
+from swage import _segmented_runtime as _execution
 from test_public_segments import (
     DISTRIBUTIONS,
     _assert_reduction_matches,
@@ -61,15 +65,15 @@ _CHILD = pathlib.Path(__file__).with_name("artifact_child.py")
 _KINDS = ("sum", "max", "min", "mean")
 _PROGRAMS = {
     **{
-        qualification._reduction_kernel(kind, element, rank): (
-            qualification._semantic_module(kind, element, rank)
+        _programs._reduction_kernel(kind, element, rank): (
+            _programs._semantic_module(kind, element, rank)
         )
         for rank in (1, 2)
         for element in ("f32", "f64")
         for kind in _KINDS
     },
-    "ragged_softmax": qualification._SOFTMAX_MODULE,
-    "ragged_softmax_r2": qualification._softmax_text(2),
+    "ragged_softmax": _programs._SOFTMAX_MODULE,
+    "ragged_softmax_r2": _programs._softmax_text(2),
 }
 _PROGRAM_NAMES = (
     "segmented_sum",
@@ -247,10 +251,7 @@ def test_the_manifest_identifies_each_program(manifest):
         for name in _PROGRAM_NAMES
     ]
     for name in _PLANNED:
-        assert (
-            qualification._admit_program(_PROGRAMS[name], name, 32, 4096)
-            is True
-        )
+        assert _plan._admit_program(_PROGRAMS[name], name, 32, 4096) is True
 
 
 def test_the_manifest_identifies_the_runtime_library(written, manifest):
@@ -268,28 +269,43 @@ def test_the_manifest_identifies_the_runtime_library(written, manifest):
     assert packaged.parent.name == "_mlir_libs"
 
 
-@pytest.mark.parametrize(("program", "role"), _kernel_ids())
-def test_each_kernel_is_what_the_runner_compiles(
-    program, role, written, manifest
-):
-    """Ship the PTX that the compiled path would load for the same request."""
-    known = next(
+def _known(program, role):
+    """Return the kernel of the table for one role of one program."""
+    return next(
         kernel for kernel in _artifact._PROGRAMS[program] if kernel.role == role
     )
-    entry = next(
-        kernel
-        for kernel in manifest["kernels"]
-        if (kernel["program"], kernel["role"]) == (program, role)
-    )
-    # A compile of its own, not the memo the command filled.
+
+
+def _compiled(program, known):
+    """Compile one kernel of the table for `sm_87` and return it.
+
+    The compile is one of its own, not the memo the command filled.
+
+    Returns:
+        The PTX and the launch contract the compiler gives the kernel.
+    """
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
-        _, compiled, _ = getattr(native_swage, known.compiler)(
+        _, ptx, contract_json = getattr(native_swage, known.compiler)(
             ir.Module.parse(_PROGRAMS[program]),
             kernel_name=program,
             target="sm_87",
             **dict(known.options),
         )
+    return ptx, contract_json
+
+
+@pytest.mark.parametrize(("program", "role"), _kernel_ids())
+def test_each_kernel_is_what_the_runner_compiles(
+    program, role, written, manifest
+):
+    """Ship the PTX that the compiled path would load for the same request."""
+    entry = next(
+        kernel
+        for kernel in manifest["kernels"]
+        if (kernel["program"], kernel["role"]) == (program, role)
+    )
+    compiled, _ = _compiled(program, _known(program, role))
     shipped = (written / entry["file"]).read_bytes()
 
     assert shipped == compiled.encode()
@@ -559,7 +575,7 @@ def test_the_command_refuses_to_run_while_an_artifact_is_selected(
 def test_the_command_obeys_the_no_compile_switch(tmp_path, monkeypatch):
     """Refuse to compile on a host whose operator switched compiling off."""
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
@@ -682,6 +698,31 @@ def test_a_written_artifact_loads(selected, written, manifest):
     assert selected.programs == _PROGRAM_NAMES
 
 
+@pytest.mark.parametrize(("program", "role"), _kernel_ids())
+def test_each_kernel_is_served_with_the_contract_the_compiler_emits(
+    program, role, selected, monkeypatch
+):
+    """Serve the PTX and the launch contract of a compile of the same request.
+
+    The loader derives the contract of a kernel from its manifest entry, so
+    this pins that derivation to what the compiler emits. Nothing is
+    launched: the process driver is a stand-in, which keeps the test free
+    of a GPU and the driver of this process free of the artifact.
+    """
+    driver = types.SimpleNamespace(_native_launch=None, _split_launch=None)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    known = _known(program, role)
+
+    served = selected.kernel(
+        known.compiler,
+        _PROGRAMS[program],
+        {"kernel_name": program, "target": "sm_87", **dict(known.options)},
+    )
+
+    assert served == _compiled(program, known)
+    assert served[1] == _artifact._contract_json(program, known)
+
+
 def test_a_written_artifact_survives_a_copy_that_keeps_its_modes(
     written, tmp_path, monkeypatch
 ):
@@ -694,6 +735,9 @@ def test_a_written_artifact_survives_a_copy_that_keeps_its_modes(
     assert _artifact.selected().directory == copied
 
 
+# Launches the runtime library refuses, and its words for each. The first
+# four are a grid or block the driver cannot take; the last passes more
+# arguments than the library forwards.
 _BAD_GEOMETRY = [
     ((0, 0, 32, 0, (0,), (0,)), "grid_x must be a positive u32"),
     ((0, 1 << 32, 32, 0, (0,), (0,)), "grid_x must be a positive u32"),
@@ -701,6 +745,33 @@ _BAD_GEOMETRY = [
     ((0, 1, 1025, 0, (0,), (0,)), "block_x must be in 1..1024"),
     ((0, 1, 32, 0, (0,) * 10, (0,) * 7), "too many kernel arguments"),
 ]
+# What `_launch_cuda_kernel` of the bindings raises for the same grid or
+# block. It has no argument limit of its own, so the last launch of
+# `_BAD_GEOMETRY` has no counterpart here.
+_BINDINGS_GEOMETRY = [
+    "grid axes must be positive u32 values",
+    "grid axes must be positive u32 values",
+    "block axes must be positive u32 values",
+    "block may contain at most 1024 threads",
+]
+
+
+def _bindings_launch(function, grid_x, block_x, stream, pointers, scalars):
+    """Launch through `_launch_cuda_kernel` of the bindings, in split form.
+
+    It takes what the launcher of the runtime library takes: the pointers
+    become `ptr` arguments, and the i32 scalars, which are signed, become
+    `i32` arguments, which carry their raw bits.
+    """
+    native_swage._launch_cuda_kernel(
+        ("ptr",) * len(pointers) + ("i32",) * len(scalars),
+        (*pointers, *(scalar & 0xFFFFFFFF for scalar in scalars)),
+        (grid_x, 1, 1),
+        (block_x, 1, 1),
+        0,
+        stream,
+        function,
+    )
 
 
 @pytest.mark.parametrize(("arguments", "message"), _BAD_GEOMETRY)
@@ -713,17 +784,28 @@ def test_the_runtime_library_launcher_checks_its_geometry(
 
 
 @_needs_cuda
-@pytest.mark.parametrize(("arguments", "message"), _BAD_GEOMETRY)
-def test_both_launchers_refuse_a_geometry_in_the_same_words(
-    arguments, message, selected
+@pytest.mark.parametrize(
+    ("arguments", "message", "bindings_message"),
+    [
+        (*refused, words)
+        for refused, words in zip(_BAD_GEOMETRY, _BINDINGS_GEOMETRY)
+    ],
+)
+def test_both_launchers_refuse_a_geometry_before_the_driver(
+    arguments, message, bindings_message, selected
 ):
-    """Raise what the launcher of the bindings raises for the same call."""
+    """Raise a ValueError where the launcher of the bindings raises one.
+
+    Both refuse the grid or block before they call the driver. Each states
+    the reason in words of its own.
+    """
     with pytest.raises(ValueError) as bindings:
-        native_swage._launch_kernel(*arguments)
+        _bindings_launch(*arguments)
     with pytest.raises(ValueError) as library:
         selected._launch_kernel(*arguments)
 
-    assert str(library.value) == str(bindings.value) == message
+    assert str(library.value) == message
+    assert str(bindings.value) == bindings_message
 
 
 @_needs_cuda
@@ -736,7 +818,7 @@ def test_the_runtime_library_launcher_surfaces_driver_errors(selected):
     with pytest.raises(RuntimeError) as shim:
         selected._launch_kernel(*arguments)
     with pytest.raises(RuntimeError) as bindings:
-        native_swage._launch_kernel(*arguments)
+        _bindings_launch(*arguments)
 
     assert str(shim.value) == str(bindings.value)
     assert str(shim.value).startswith("CUDA Driver cuLaunchKernel failed: ")
@@ -1077,11 +1159,18 @@ def test_artifact_results_equal_the_compiled_path_bit_for_bit(name, child):
 
 
 def _select(monkeypatch, directory):
-    """Select an artifact in this process, whose kernel memo starts empty."""
+    """Select an artifact in this process, whose kernel memo starts empty.
+
+    The process driver is created first, without an artifact: a driver
+    takes its launchers when it is created, and one created while an
+    artifact is selected would launch through that artifact for the rest
+    of the run.
+    """
+    _cuda_backend._get_driver()
     monkeypatch.setenv("SWAGE_ARTIFACT_DIR", str(directory))
     monkeypatch.setattr(_artifact, "_selected", (None, None))
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
@@ -1119,11 +1208,13 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
 
     The batches reach the fused, partial, and merge kernels, the task-ID
     CTA kernel through the direct-CTA selection, and the softmax kernel.
-    A public call never requests the pure warp kernel.
+    A public call never requests the pure warp kernel. The driver launches
+    through the runtime library of the artifact, as in a process without
+    the bindings.
     """
     _select(monkeypatch, device_artifact)
     artifact = _artifact.selected()
-    driver = _runtime._get_driver()
+    driver = _cuda_backend._get_driver()
     launched = []
 
     def record(function, grid_x, block_x, stream, pointers, scalars):
@@ -1132,7 +1223,8 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
             function, grid_x, block_x, stream, pointers, scalars
         )
 
-    monkeypatch.setattr(driver, "_native_launch", record)
+    monkeypatch.setattr(driver, "_native_launch", None)
+    monkeypatch.setattr(driver, "_split_launch", record)
     values, offsets = _device_batch()
     swage.segment_reduce(values, offsets, "sum")
     swage.segment_softmax(values, offsets)

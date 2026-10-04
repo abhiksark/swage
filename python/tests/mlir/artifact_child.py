@@ -93,13 +93,26 @@ def _compiler_libraries():
     ]
 
 
+def _launches_with_the_runtime_library(cuda_backend, artifact):
+    """Return whether the driver launches through the library of `artifact`.
+
+    The driver prefers the compiled launcher of the bindings and takes the
+    split launcher only without one, so both are checked.
+    """
+    driver = cuda_backend._get_driver()
+    return (
+        driver._native_launch is None
+        and getattr(driver._split_launch, "__self__", None) is artifact
+    )
+
+
 def main(cases_path, results_path, bindings="blocked"):
     """Run every case from the selected artifact and save the report."""
     if bindings == "blocked":
         sys.meta_path.insert(0, _NoNativeBindings())
     import swage
     import torch
-    from swage import _artifact, _runtime
+    from swage import _artifact, _cuda_backend
 
     results = {}
     for name, (kind, values, offsets) in torch.load(cases_path).items():
@@ -118,7 +131,6 @@ def main(cases_path, results_path, bindings="blocked"):
     ]
     assert "mlir_swage" not in sys.modules, "mlir_swage was imported"
     assert not compiler, f"compiler libraries are mapped: {compiler}"
-    launcher = _runtime._get_driver()._native_launch
     report = {
         "results": results,
         "mapped": mapped,
@@ -128,18 +140,21 @@ def main(cases_path, results_path, bindings="blocked"):
             name for name in sys.modules if name.startswith("mlir")
         ),
         "launches_with_the_runtime_library": (
-            getattr(launcher, "__self__", None) is _artifact.selected()
+            _launches_with_the_runtime_library(
+                _cuda_backend, _artifact.selected()
+            )
         ),
     }
     if bindings == "importable":
         # The same process can still compile: the public launch imports the
         # bindings, and the driver keeps the launcher of the artifact.
         output, expected = _launch_vector_add(swage, torch)
-        launcher = _runtime._get_driver()._native_launch
         report["vector_add"] = (output, expected)
         report["compiler_mapped_after_the_launch"] = _compiler_libraries()
         report["launcher_after_the_launch_is_the_runtime_library"] = (
-            getattr(launcher, "__self__", None) is _artifact.selected()
+            _launches_with_the_runtime_library(
+                _cuda_backend, _artifact.selected()
+            )
         )
     torch.save(report, results_path)
 

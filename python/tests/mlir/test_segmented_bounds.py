@@ -3,11 +3,11 @@
 
 Host validation sees one snapshot of the offsets. The kernels reload them
 from device memory at every launch, so the bound that keeps every read inside
-``[0, value_count)`` has to live in the kernel. The CUDA tests here launch
-through the driver, below the Python validation, with ranges that validation
-would reject. Plan-owned ranges take the same bound against the buffer they
-index: partial ranges against the value count, merge ranges against the
-partial count.
+``[0, value_count)`` has to live in the kernel. The CUDA tests here bind
+their arguments by the launch contract of each kernel and enqueue it below
+the Python validation, with ranges that validation would reject. Plan-owned
+ranges take the same bound against the buffer they index: partial ranges
+against the value count, merge ranges against the partial count.
 
 Three loaded indices take a bound of their own: a segment ID read from a task
 buffer and the output segment of a merge record against the segment count,
@@ -31,16 +31,21 @@ import torch
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
-from swage import _runtime
-from swage._segmented_qualification import (
+from swage import _cuda_backend, _segmented_runtime
+from swage._segmented_programs import (
     _SOFTMAX_MODULE,
-    _launch_segmented_sum_tasks,
+    _parameter_roles,
     _semantic_module,
     _softmax_text,
-    _validate_offsets,
-    _validate_softmax_tensors,
+)
+from swage._segmented_qualification import (
+    _launch_segmented_sum_tasks,
     launch_gpu,
     launch_softmax_gpu,
+)
+from swage._segmented_validation import (
+    _validate_offsets,
+    _validate_softmax_tensors,
 )
 
 requires_cuda = pytest.mark.skipif(
@@ -200,12 +205,62 @@ def _compile(
         )
 
 
-def _load(compiler, entry=_KERNEL, **arguments):
-    """Compile for the current device and return the loaded function."""
+def _word(value):
+    """Return a count as the i32 word a launch takes; pass a buffer through.
+
+    A negative count passes as its 32-bit two's complement, so the kernel
+    reads the same signed value.
+    """
+    return value & 0xFFFFFFFF if isinstance(value, int) else value
+
+
+def _launcher(compiler, *, module_text=None, kernel_name=_KERNEL, **options):
+    """Compile a kernel for the current device and return its raw launch.
+
+    The program is the canonical identity sum unless ``module_text`` names
+    another one. The launch binds its arguments by the contract of the
+    kernel, without any host validation, and enqueues it on the current
+    stream under a lease that it releases once the launch is enqueued.
+
+    Returns:
+        A function of the block count of a one-dimensional grid, the plan
+        and scratch buffers and derived counts by contract key
+        (``named``), and the user values by parameter role. A buffer is a
+        tensor and a count is an integer. A role the kernel does not take
+        may be left out.
+    """
+    module_text = module_text or _semantic_module("sum")
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    _, ptx, _ = _compile(compiler, f"sm_{major}{minor}", **arguments)
-    _, function = _runtime._get_driver().load(ptx, entry)
-    return function
+    kernel = _segmented_runtime._compile_once(
+        getattr(native_swage, compiler),
+        module_text,
+        kernel_name=kernel_name,
+        target=f"sm_{major}{minor}",
+        **options,
+    )
+
+    def launch(blocks, named=None, **by_role):
+        user = dict.fromkeys(_parameter_roles(module_text))
+        user.update((role, _word(value)) for role, value in by_role.items())
+        arguments = _segmented_runtime._bind(
+            kernel,
+            _segmented_runtime._user_arguments(module_text, **user),
+            {key: _word(value) for key, value in (named or {}).items()},
+        )
+        lease = _segmented_runtime._lease(torch, kernel)
+        try:
+            _segmented_runtime._enqueue(
+                torch,
+                lease,
+                kernel,
+                arguments,
+                blocks,
+                torch.cuda.current_stream(),
+            )
+        finally:
+            lease.release()
+
+    return launch
 
 
 def _guarded(host_values):
@@ -415,30 +470,26 @@ def test_direct_kernel_clamps_offsets_that_validation_rejects(
     values, host_values = _guarded_values()
     device_offsets = _device_i32(offsets)
     output = _nan_output(segment_count)
-    function = _load("_compile_segmented_reduction_ptx", block_size=block_size)
+    launch = _launcher(
+        "_compile_segmented_reduction_ptx", block_size=block_size
+    )
 
-    _runtime._get_driver().launch_segmented(
-        function,
-        (segment_count,),
-        block_size,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            _VALUE_COUNT,
-            segment_count,
-        ),
+    launch(
+        segment_count,
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     _assert_clamped(output, host_values, pairwise(offsets))
 
 
 def _column_kernel():
-    """Compile and load the column kernel of the rank-two sum."""
-    return _load(
+    """Compile the column kernel of the rank-two sum and return its launch."""
+    return _launcher(
         "_compile_segmented_reduction_ptx",
-        entry="segmented_sum_r2",
         block_size=128,
         module_text=_semantic_module("sum", "f32", 2),
         kernel_name="segmented_sum_r2",
@@ -479,7 +530,7 @@ def test_column_kernel_clamps_row_ranges_that_validation_rejects(
 ):
     """Keep every load inside `[N, D]` and every store inside `[S, D]`.
 
-    The launch goes through the driver, below the Python validation, with
+    The launch is bound by the contract, below the Python validation, with
     row offsets that validation rejects. The values sit between NaN guards
     at least as long as the values, and the output between canaries. A row
     range that was not clamped to the row count would read a guard, or
@@ -492,19 +543,14 @@ def test_column_kernel_clamps_row_ranges_that_validation_rejects(
     device_offsets = _device_i32(offsets)
     output, output_buffer = _canaried_output(segment_count * columns)
 
-    _runtime._get_driver().launch_segmented(
-        _column_kernel(),
-        (segment_count,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            _VALUE_COUNT,
-            segment_count,
-            columns,
-        ),
+    _column_kernel()(
+        segment_count,
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        feature_count=columns,
     )
 
     torch.cuda.synchronize()
@@ -534,19 +580,14 @@ def test_column_kernel_stores_one_row_per_segment_and_nothing_else(
     values, host_rows = _guarded_rows(row_offsets[-1], feature_count)
     output, output_buffer = _canaried_output(segment_count * feature_count)
 
-    _runtime._get_driver().launch_segmented(
-        _column_kernel(),
-        (segment_count + 2,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(row_offsets).data_ptr(),
-            output.data_ptr(),
-            row_offsets[-1],
-            segment_count,
-            feature_count,
-        ),
+    _column_kernel()(
+        segment_count + 2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=segment_count,
+        feature_count=feature_count,
     )
 
     torch.cuda.synchronize()
@@ -572,29 +613,23 @@ def test_column_kernel_does_nothing_without_a_positive_feature_count(
     values, _ = _guarded_rows(row_offsets[-1], 4)
     output, output_buffer = _canaried_output(2 * 4)
 
-    _runtime._get_driver().launch_segmented(
-        _column_kernel(),
-        (2,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(row_offsets).data_ptr(),
-            output.data_ptr(),
-            row_offsets[-1],
-            2,
-            feature_count,
-        ),
+    _column_kernel()(
+        2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=2,
+        feature_count=feature_count,
     )
 
     _assert_only_stored(output_buffer, {})
 
 
 def _softmax_column_kernel(block_size=128):
-    """Compile and load the column kernel of the rank-two softmax."""
-    return _load(
+    """Compile the column kernel of the rank-two softmax; return its launch."""
+    return _launcher(
         "_compile_segmented_reduction_ptx",
-        entry="ragged_softmax_r2",
         block_size=block_size,
         module_text=_softmax_text(2),
         kernel_name="ragged_softmax_r2",
@@ -627,7 +662,7 @@ def test_softmax_column_kernel_stores_only_rows_inside_the_clamped_ranges(
 ):
     """Keep every load and every store inside `[N, D]`.
 
-    The launch goes through the driver, below the Python validation, with
+    The launch is bound by the contract, below the Python validation, with
     row offsets that validation rejects. The values sit between NaN guards
     and the output between canaries. A softmax output is positive, so the
     canary of minus one shows a row that no thread stored. A row range that
@@ -642,19 +677,14 @@ def test_softmax_column_kernel_stores_only_rows_inside_the_clamped_ranges(
     values, host_rows = _guarded_logits(_VALUE_COUNT, columns)
     output, output_buffer = _canaried_output(_VALUE_COUNT * columns)
 
-    _runtime._get_driver().launch_segmented(
-        _softmax_column_kernel(),
-        (segment_count,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(offsets).data_ptr(),
-            output.data_ptr(),
-            _VALUE_COUNT,
-            segment_count,
-            columns,
-        ),
+    _softmax_column_kernel()(
+        segment_count,
+        values=values,
+        offsets=_device_i32(offsets),
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        feature_count=columns,
     )
 
     torch.cuda.synchronize()
@@ -691,19 +721,14 @@ def test_softmax_column_kernel_stores_its_own_columns_and_nothing_else(
     values, host_rows = _guarded_logits(row_offsets[-1], feature_count)
     output, output_buffer = _canaried_output(row_offsets[-1] * feature_count)
 
-    _runtime._get_driver().launch_segmented(
-        _softmax_column_kernel(),
-        (segment_count + 2,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(row_offsets).data_ptr(),
-            output.data_ptr(),
-            row_offsets[-1],
-            segment_count,
-            feature_count,
-        ),
+    _softmax_column_kernel()(
+        segment_count + 2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=segment_count,
+        feature_count=feature_count,
     )
 
     torch.cuda.synchronize()
@@ -732,19 +757,14 @@ def test_softmax_column_kernel_does_nothing_without_a_positive_feature_count(
     values, _ = _guarded_logits(row_offsets[-1], 4)
     output, output_buffer = _canaried_output(row_offsets[-1] * 4)
 
-    _runtime._get_driver().launch_segmented(
-        _softmax_column_kernel(),
-        (2,),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(row_offsets).data_ptr(),
-            output.data_ptr(),
-            row_offsets[-1],
-            2,
-            feature_count,
-        ),
+    _softmax_column_kernel()(
+        2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=2,
+        feature_count=feature_count,
     )
 
     _assert_only_stored(output_buffer, {})
@@ -762,18 +782,20 @@ def test_softmax_column_launch_passes_the_rows_of_the_shorter_buffer(
     be the ten rows of the values.
     """
     launches = []
+
+    def launch_entry(function, contract, bindings, grid, stream):
+        launches.append((grid, bindings))
+
     monkeypatch.setattr(
-        _runtime._get_driver(),
-        "launch_segmented",
-        lambda *arguments: launches.append(arguments),
+        _cuda_backend._get_driver(), "launch_entry", launch_entry
     )
     values = torch.ones(10, 3, device="cuda")
     output = torch.zeros(6, 3, device="cuda")
 
     launch_softmax_gpu(values, _device_i32((0, 2, 6)), output)
 
-    ((_, grid, _, _, arguments),) = launches
-    assert grid == (2,)
+    ((grid, (_, arguments)),) = launches
+    assert grid == (2, 1, 1)
     assert arguments[3:] == (6, 2, 3)
 
 
@@ -795,19 +817,14 @@ def test_softmax_column_store_stays_inside_the_validated_rows(block_size):
     output = output_buffer[: covered * columns]
     stale = (0, 400, _VALUE_COUNT)
 
-    _runtime._get_driver().launch_segmented(
-        _softmax_column_kernel(block_size),
-        (2,),
-        block_size,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            _device_i32(stale).data_ptr(),
-            output.data_ptr(),
-            covered,
-            2,
-            columns,
-        ),
+    _softmax_column_kernel(block_size)(
+        2,
+        values=values,
+        offsets=_device_i32(stale),
+        output=output,
+        value_count=covered,
+        segment_count=2,
+        feature_count=columns,
     )
     torch.cuda.synchronize()
 
@@ -832,26 +849,20 @@ def test_task_id_kernels_clamp_offsets(block_size):
     device_offsets = _device_i32(_MIXED_OFFSETS)
     output = _nan_output(segment_count)
     task_ids = _device_i32(list(reversed(range(segment_count))))
-    function = _load(
+    launch = _launcher(
         "_compile_segmented_reduction_ptx",
         block_size=block_size,
         use_task_ids=True,
     )
 
-    _runtime._get_driver().launch_segmented_tasks(
-        function,
-        (segment_count,),
-        block_size,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            task_ids.data_ptr(),
-            _VALUE_COUNT,
-            segment_count,
-            segment_count,
-        ),
+    launch(
+        segment_count,
+        {"task_ids": task_ids, "task_count": segment_count},
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     _assert_clamped(output, host_values, pairwise(_MIXED_OFFSETS))
@@ -867,23 +878,20 @@ def test_fused_kernel_clamps_offsets_in_both_branches():
     warp_ids = [0, 2, 3]
     cta_ids = [1, 4]
     task_ids = _device_i32([*warp_ids, *cta_ids])
-    function = _load("_compile_fused_segmented_reduction_ptx")
+    launch = _launcher("_compile_fused_segmented_reduction_ptx")
 
-    _runtime._get_driver().launch_segmented_mixed(
-        function,
-        ((len(warp_ids) + 3) // 4 + len(cta_ids),),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            task_ids.data_ptr(),
-            _VALUE_COUNT,
-            len(warp_ids),
-            len(cta_ids),
-            segment_count,
-        ),
+    launch(
+        (len(warp_ids) + 3) // 4 + len(cta_ids),
+        {
+            "task_ids": task_ids,
+            "warp_task_count": len(warp_ids),
+            "cta_task_count": len(cta_ids),
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     _assert_clamped(output, host_values, pairwise(_MIXED_OFFSETS))
@@ -917,31 +925,28 @@ def test_persistent_kernel_clamps_offsets_partial_and_merge_ranges():
     )
     scratch = _guarded(torch.full((len(partial_ranges),), float("nan")))
     counters = torch.zeros(3 + merge_count, dtype=torch.int32, device="cuda")
-    function = _load("_compile_persistent_segmented_reduction_ptx")
+    launch = _launcher("_compile_persistent_segmented_reduction_ptx")
 
-    _runtime._get_driver().launch_persistent(
-        function,
-        (2,),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            warp_tasks.data_ptr(),
-            cta_tasks.data_ptr(),
-            device_partials.data_ptr(),
-            partial_merges.data_ptr(),
-            merge_records.data_ptr(),
-            scratch.data_ptr(),
-            counters.data_ptr(),
-            _VALUE_COUNT,
-            warp_tasks.numel(),
-            cta_tasks.numel(),
-            len(partial_ranges),
-            merge_count,
-            output.numel(),
-        ),
+    launch(
+        2,
+        {
+            "warp_ids": warp_tasks,
+            "cta_ids": cta_tasks,
+            "partial_ranges": device_partials,
+            "partial_merge_ids": partial_merges,
+            "merge_records": merge_records,
+            "scratch": scratch,
+            "counters": counters,
+            "warp_task_count": warp_tasks.numel(),
+            "cta_task_count": cta_tasks.numel(),
+            "partial_count": len(partial_ranges),
+            "merge_count": merge_count,
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=output.numel(),
     )
 
     partial_sums = _clamped_sums(host_values, partial_ranges)
@@ -961,22 +966,17 @@ def test_split_partial_kernel_clamps_plan_ranges():
     values, host_values = _guarded_values()
     device_ranges = _device_ranges(ranges)
     scratch = _nan_output(len(ranges))
-    function = _load(
-        "_compile_split_partial_reduction_ptx", entry=f"{_KERNEL}__partial"
-    )
+    launch = _launcher("_compile_split_partial_reduction_ptx")
 
-    _runtime._get_driver().launch_segmented(
-        function,
-        (len(ranges),),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_ranges.data_ptr(),
-            scratch.data_ptr(),
-            _VALUE_COUNT,
-            len(ranges),
-        ),
+    launch(
+        len(ranges),
+        {
+            "partial_ranges": device_ranges,
+            "scratch": scratch,
+            "partial_count": len(ranges),
+        },
+        values=values,
+        value_count=_VALUE_COUNT,
     )
 
     _assert_clamped(scratch, host_values, ranges)
@@ -1074,23 +1074,18 @@ def test_split_merge_kernel_clamps_plan_ranges():
         ]
     )
     output = _nan_output(len(ranges))
-    function = _load(
-        "_compile_split_merge_reduction_ptx", entry=f"{_KERNEL}__merge"
-    )
+    launch = _launcher("_compile_split_merge_reduction_ptx")
 
-    _runtime._get_driver().launch_segmented(
-        function,
-        (len(ranges),),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            scratch.data_ptr(),
-            output.data_ptr(),
-            records.data_ptr(),
-            partial_count,
-            len(ranges),
-            output.numel(),
-        ),
+    launch(
+        len(ranges),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_count": partial_count,
+            "merge_count": len(ranges),
+        },
+        output=output,
+        segment_count=output.numel(),
     )
 
     _assert_clamped(output, host_scratch, ranges)
@@ -1146,27 +1141,23 @@ def test_mean_merge_kernel_reads_range_records_inside_the_partial_count(
         ]
     )
     output, output_buffer = _canaried_output(segment_count)
-    function = _load(
+    launch = _launcher(
         "_compile_split_merge_reduction_ptx",
-        entry="segmented_mean__merge",
         module_text=_semantic_module("mean"),
         kernel_name="segmented_mean",
     )
 
-    _runtime._get_driver().launch_segmented_tasks(
-        function,
-        (len(partials),),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            scratch.data_ptr(),
-            output.data_ptr(),
-            records.data_ptr(),
-            ranges.data_ptr(),
-            partial_count,
-            len(partials),
-            segment_count,
-        ),
+    launch(
+        len(partials),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_ranges": ranges,
+            "partial_count": partial_count,
+            "merge_count": len(partials),
+        },
+        output=output,
+        segment_count=segment_count,
     )
 
     # The first segment merges partials [0, 3) and the second [3, 6). The
@@ -1204,26 +1195,20 @@ def test_softmax_store_stays_inside_the_validated_output(block_size):
     with pytest.raises(ValueError, match="output has 600 elements"):
         _validate_softmax_tensors(values, _device_i32(stale), output)
     offsets.copy_(_device_i32(stale))
-    function = _load(
+    launch = _launcher(
         "_compile_segmented_reduction_ptx",
-        entry="ragged_softmax",
         module_text=_SOFTMAX_MODULE,
         kernel_name="ragged_softmax",
         block_size=block_size,
     )
 
-    _runtime._get_driver().launch_segmented(
-        function,
-        (segment_count,),
-        block_size,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            offsets.data_ptr(),
-            output.data_ptr(),
-            bound,
-            segment_count,
-        ),
+    launch(
+        segment_count,
+        values=values,
+        offsets=offsets,
+        output=output,
+        value_count=bound,
+        segment_count=segment_count,
     )
     torch.cuda.synchronize()
 
@@ -1261,26 +1246,20 @@ def test_task_id_kernels_skip_ids_outside_the_segment_count(
         _launch_segmented_sum_tasks(
             values, device_offsets, output, task_ids, block_size=block_size
         )
-    function = _load(
+    launch = _launcher(
         "_compile_segmented_reduction_ptx",
         block_size=block_size,
         use_task_ids=True,
     )
 
-    _runtime._get_driver().launch_segmented_tasks(
-        function,
-        (task_ids.numel(),),
-        block_size,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            task_ids.data_ptr(),
-            _VALUE_COUNT,
-            task_ids.numel(),
-            segment_count,
-        ),
+    launch(
+        task_ids.numel(),
+        {"task_ids": task_ids, "task_count": task_ids.numel()},
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     sums = _clamped_sums(host_values, pairwise(offsets))
@@ -1302,23 +1281,20 @@ def test_fused_kernel_skips_ids_outside_the_segment_count(stray_ids):
     warp_ids = [0, *stray, 2]
     cta_ids = [*stray, 3]
     task_ids = _device_i32([*warp_ids, *cta_ids])
-    function = _load("_compile_fused_segmented_reduction_ptx")
+    launch = _launcher("_compile_fused_segmented_reduction_ptx")
 
-    _runtime._get_driver().launch_segmented_mixed(
-        function,
-        ((len(warp_ids) + 3) // 4 + len(cta_ids),),
-        128,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            task_ids.data_ptr(),
-            _VALUE_COUNT,
-            len(warp_ids),
-            len(cta_ids),
-            segment_count,
-        ),
+    launch(
+        (len(warp_ids) + 3) // 4 + len(cta_ids),
+        {
+            "task_ids": task_ids,
+            "warp_task_count": len(warp_ids),
+            "cta_task_count": len(cta_ids),
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     sums = _clamped_sums(host_values, pairwise(offsets))
@@ -1368,31 +1344,28 @@ def test_persistent_kernel_skips_ids_outside_their_counts(stray_ids):
     )
     scratch, scratch_buffer = _canaried_output(len(partial_ranges))
     counters, counters_buffer = _canaried_i32([0] * (3 + merge_count))
-    function = _load("_compile_persistent_segmented_reduction_ptx")
+    launch = _launcher("_compile_persistent_segmented_reduction_ptx")
 
-    _runtime._get_driver().launch_persistent(
-        function,
-        (2,),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            values.data_ptr(),
-            device_offsets.data_ptr(),
-            output.data_ptr(),
-            warp_tasks.data_ptr(),
-            cta_tasks.data_ptr(),
-            device_partials.data_ptr(),
-            partial_merges.data_ptr(),
-            device_merges.data_ptr(),
-            scratch.data_ptr(),
-            counters.data_ptr(),
-            _VALUE_COUNT,
-            warp_tasks.numel(),
-            cta_tasks.numel(),
-            len(partial_ranges),
-            merge_count,
-            segment_count,
-        ),
+    launch(
+        2,
+        {
+            "warp_ids": warp_tasks,
+            "cta_ids": cta_tasks,
+            "partial_ranges": device_partials,
+            "partial_merge_ids": partial_merges,
+            "merge_records": device_merges,
+            "scratch": scratch,
+            "counters": counters,
+            "warp_task_count": warp_tasks.numel(),
+            "cta_task_count": cta_tasks.numel(),
+            "partial_count": len(partial_ranges),
+            "merge_count": merge_count,
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
     )
 
     sums = _clamped_sums(host_values, pairwise(offsets))
@@ -1425,23 +1398,18 @@ def test_split_merge_kernel_skips_output_segments_outside_the_segment_count(
             for field in (segment, begin, end)
         ]
     )
-    function = _load(
-        "_compile_split_merge_reduction_ptx", entry=f"{_KERNEL}__merge"
-    )
+    launch = _launcher("_compile_split_merge_reduction_ptx")
 
-    _runtime._get_driver().launch_segmented(
-        function,
-        (len(ranges),),
-        512,
-        torch.cuda.current_stream().cuda_stream,
-        (
-            scratch.data_ptr(),
-            output.data_ptr(),
-            records.data_ptr(),
-            partial_count,
-            len(ranges),
-            segment_count,
-        ),
+    launch(
+        len(ranges),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_count": partial_count,
+            "merge_count": len(ranges),
+        },
+        output=output,
+        segment_count=segment_count,
     )
 
     sums = _clamped_sums(host_scratch, ranges)

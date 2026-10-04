@@ -167,14 +167,20 @@ def test_multiply_stream_switches_and_graph_replay(native, dtype, monkeypatch):
 def test_same_name_operations_reuse_eight_persistent_artifacts_in_child(
     tmp_path, monkeypatch, caplog
 ):
-    """Reuse all add/multiply PTX without compiling in process two."""
-    identity = _runtime._cached_identity()
-    if not identity["clean"]:
-        if os.environ.get("SWAGE_REQUIRE_PERSISTENT_CACHE_TEST") == "1":
-            pytest.fail("persistent cache regression requires a clean build")
-        pytest.skip("dirty builds intentionally disable persistent caching")
+    """Reuse all add/multiply PTX without compiling in process two.
+
+    A dirty checkout uses the persistent cache too; only a cache this
+    process would not read or write, such as one whose compiler files
+    changed after it started, skips the test.
+    """
     cache_dir = tmp_path / "cache"
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache_dir))
+    status = _runtime._cache_status()
+    if status.problem is not None or not status.writes:
+        reason = status.problem or "this process does not write the cache"
+        if os.environ.get("SWAGE_REQUIRE_PERSISTENT_CACHE_TEST") == "1":
+            pytest.fail(f"persistent cache regression cannot run: {reason}")
+        pytest.skip(f"the persistent cache is off: {reason}")
     monkeypatch.setattr(_runtime, "_artifact_cache", _runtime.OrderedDict())
     caplog.set_level(logging.DEBUG, logger="swage.runtime")
 
@@ -375,7 +381,9 @@ def test_negative_metadata_is_rejected_without_writes(backend, operation):
         before = [tensor.clone() for tensor in storage]
         artifacts = tuple(_runtime._artifact_cache)
         for n in (129, 0):
-            with pytest.raises(ValueError, match=f"{name}.*negative"):
+            with pytest.raises(
+                ValueError, match=f"'{name}' must not be a lazy negation view"
+            ):
                 launch(tensors, n)
             assert tuple(_runtime._artifact_cache) == artifacts
             for tensor, expected in zip(storage, before):

@@ -1,35 +1,50 @@
 # python/tests/mlir/test_segmented_runtime.py
 """Differential qualification for native segmented reductions."""
 
+import dataclasses
+import functools
 import gc
 import os
 import pathlib
 import re
 import threading
 import weakref
+from collections import OrderedDict
 from itertools import pairwise
+from typing import NamedTuple
 
 import pytest
 import torch
 from reduction_programs import reduction_module
-from swage import _segmented_qualification as qualification
-from swage._segmented_qualification import (
+from swage import _abi, _cuda_backend, _runtime
+from swage import _segmented_oracle as _oracle
+from swage import _segmented_plan as _plan
+from swage import _segmented_runtime as _execution
+from swage._segmented_oracle import (
     _execute,
-    _launch_segmented_sum_tasks,
     _llvm_tool,
+    _runner_module,
+    cpu_oracle,
+    cpu_softmax_oracle,
+)
+from swage._segmented_programs import (
+    _parameter_roles,
+    _program_element,
+    _reduction_kernel,
+    _semantic_module,
+)
+from swage._segmented_qualification import (
+    _launch_segmented_sum_tasks,
     _prepare_persistent_sum,
     _prepare_planned_reduction,
     _prepare_planned_sum,
-    _program_element,
-    _reduction_kernel,
-    _runner_module,
+    launch_gpu,
+    launch_softmax_gpu,
+)
+from swage._segmented_validation import (
     _validate_counts,
     _validate_offsets,
     _validate_tensors,
-    cpu_oracle,
-    cpu_softmax_oracle,
-    launch_gpu,
-    launch_softmax_gpu,
 )
 
 
@@ -491,14 +506,30 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
         monkeypatch.setattr(
             native, f"_compile_split_{name}_reduction_ptx", unexpected_split
         )
-    prepared = _prepare_planned_reduction(
-        host_values.cuda(),
-        host_offsets.cuda(),
-        output,
-        module_text=reduction_module(kind, transform),
-        kernel_name=f"segmented_{kind}",
-    )
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    # A split allocates its partial results with torch.empty, one per chunk
+    # and of the type of the values; nothing else in a preparation does.
+    original_empty = torch.empty
+    scratch = []
+
+    def empty(*args, **kwargs):
+        tensor = original_empty(*args, **kwargs)
+        if tensor.dtype == values.dtype:
+            scratch.append(tensor)
+        return tensor
+
+    with monkeypatch.context() as preparing:
+        preparing.setattr(torch, "empty", empty)
+        prepared = _prepare_planned_reduction(
+            values,
+            offsets,
+            output,
+            module_text=reduction_module(kind, transform),
+            kernel_name=f"segmented_{kind}",
+        )
     assert prepared.mixed is prepared.cta
+    assert not scratch
     prepared.mixed()
     tolerance = (
         {"rtol": _TRANSFORM_RTOL, "atol": _TRANSFORM_ATOL}
@@ -523,7 +554,9 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["exp2_chain", "rational8"])
-def test_expensive_regular_batch_retains_split_execution(kind, transform):
+def test_expensive_regular_batch_retains_split_execution(
+    kind, transform, monkeypatch
+):
     """A shape eligible for CTA still splits an expensive element program."""
     count = torch.cuda.get_device_properties(0).multi_processor_count
     values, offsets = _case([8192] * count)
@@ -531,6 +564,14 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     _assert_tolerance_sees_every_element(transformed, offsets, kind)
     expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(count, device="cuda")
+    compile_once = _execution._compile_once
+    compiled = []
+
+    def record_compile(compile_ptx, *args, **kwargs):
+        compiled.append(compile_ptx.__name__)
+        return compile_once(compile_ptx, *args, **kwargs)
+
+    monkeypatch.setattr(_execution, "_compile_once", record_compile)
     prepared = _prepare_planned_reduction(
         values.cuda(),
         offsets.cuda(),
@@ -539,6 +580,10 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
         kernel_name=f"segmented_{kind}",
     )
     assert prepared.mixed is not prepared.cta
+    assert {
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+    } <= set(compiled)
     prepared.mixed()
     torch.testing.assert_close(
         output.cpu(), expected, rtol=_TRANSFORM_RTOL, atol=_TRANSFORM_ATOL
@@ -867,16 +912,16 @@ def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
 
 def _checkout_build():
     """Return the build directory beside the imported `swage` checkout."""
-    return pathlib.Path(qualification.__file__).resolve().parents[2] / "build"
+    return pathlib.Path(_oracle.__file__).resolve().parents[2] / "build"
 
 
 def test_cpu_oracle_takes_its_build_directory_from_the_checkout(monkeypatch):
     """Without the variable, use `build` beside the imported package."""
     monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
-    assert qualification._oracle_build() == _checkout_build()
+    assert _oracle._oracle_build() == _checkout_build()
 
     monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", "")
-    assert qualification._oracle_build() == _checkout_build()
+    assert _oracle._oracle_build() == _checkout_build()
 
 
 def test_cpu_oracle_takes_its_build_directory_from_the_environment(
@@ -901,7 +946,7 @@ def test_cpu_oracle_takes_its_build_directory_from_the_environment(
     monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", str(named))
     values, offsets = _case([3, 4])
 
-    assert qualification._oracle_build() == named
+    assert _oracle._oracle_build() == named
     actual = cpu_oracle(values, offsets, "sum")
 
     torch.testing.assert_close(
@@ -940,9 +985,7 @@ def test_cpu_oracle_names_the_variable_when_no_checkout_build_exists(
     installed = tmp_path / "site-packages" / "swage"
     monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
     monkeypatch.setattr(
-        qualification,
-        "__file__",
-        str(installed / "_segmented_qualification.py"),
+        _oracle, "__file__", str(installed / "_segmented_oracle.py")
     )
     values, offsets = _case([3, 4])
 
@@ -1173,6 +1216,50 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_invalid_gpu_reduction_kind_precedes_compiler_and_driver(monkeypatch):
+    """Reject an unsupported kind before native or driver work."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("invalid reduction kind must stop before native work")
+
+    monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
+    values = torch.ones(1, device="cuda")
+    offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+
+    with pytest.raises(ValueError) as raised:
+        launch_gpu(values, offsets, output, "unsupported")
+
+    assert str(raised.value) == (
+        "reduction kind must be 'sum', 'max', 'min', or 'mean'"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+def test_empty_gpu_reduction_is_validated_no_op(monkeypatch, kind):
+    """Keep valid zero-segment reductions free of compiler and driver work."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    def fail(*_args, **_kwargs):
+        pytest.fail("empty reduction must not compile or access the driver")
+
+    monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
+    values = torch.empty(0, device="cuda", dtype=torch.float32)
+    offsets = torch.zeros(1, device="cuda", dtype=torch.int32)
+    output = torch.empty(0, device="cuda", dtype=torch.float32)
+
+    assert launch_gpu(values, offsets, output, kind) is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1629,13 +1716,268 @@ def test_persistent_extreme_skew_completes_without_starvation():
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+class _Launch(NamedTuple):
+    """One launch the runtime asked of a fake driver."""
+
+    function: object
+    contract: _abi.KernelContract
+    values: tuple
+    grid: tuple
+    stream: int
+
+    @property
+    def block(self):
+        """Return the block, which comes from the contract."""
+        return self.contract.launch.block
+
+    @property
+    def phase(self):
+        """Return `partial` or `merge` for a split kernel, else `direct`."""
+        for phase in ("partial", "merge"):
+            if self.contract.entry.endswith(f"__{phase}"):
+                return phase
+        return "direct"
+
+    @property
+    def arguments(self):
+        """Name each launched value by its contract binding.
+
+        A user argument takes the role of the parameter of the canonical sum
+        it binds, and every other argument takes its contract key.
+        """
+        roles = _parameter_roles(_semantic_module("sum"))
+        named = {}
+        for argument, value in zip(
+            self.contract.arguments, self.values, strict=True
+        ):
+            if argument.origin == "user":
+                named[roles[argument.source_index]] = value
+            else:
+                named[argument.key] = value
+        return named
+
+
+class _Driver:
+    """Stand in for the CUDA driver: record loads and launches, run nothing.
+
+    The context is fixed. Every load returns fresh module and function
+    handles, and every launch is recorded as a `_Launch`.
+    """
+
+    context = 1
+
+    def __init__(self):
+        self.loads = []
+        self.launches = []
+        self.events = 0
+
+    def current_context(self):
+        return self.context
+
+    def load(self, ptx, kernel_name):
+        self.loads.append((ptx, kernel_name))
+        return 100 + len(self.loads), len(self.loads)
+
+    def launch_entry(self, function, contract, bindings, grid, stream):
+        kinds, values = bindings
+        assert tuple(kinds) == tuple(
+            argument.kind for argument in contract.arguments
+        )
+        self.launches.append(_Launch(function, contract, values, grid, stream))
+
+    def event_create(self):
+        self.events += 1
+        return self.events
+
+    def event_record(self, _event, _stream):
+        return None
+
+    def is_stream_capturing(self, _stream):
+        return False
+
+    def event_query(self, _event):
+        return True
+
+    def event_destroy(self, _event):
+        return None
+
+    def module_unload(self, _module):
+        return None
+
+
+def _install_driver(monkeypatch, driver):
+    """Make `driver` the CUDA driver of this test, with nothing loaded.
+
+    The loaded-module cache is replaced too, so a fake module never meets a
+    real one, and the real cache is back after the test.
+    """
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    return driver
+
+
+def _upload_shared_segment_ids():
+    """Upload the shared segment ids of the current device, once.
+
+    The first preparation of a process uploads them with `torch.tensor`. A
+    test that replaces `torch.tensor` calls this first, so that it sees the
+    task records of its preparation and nothing else.
+    """
+    _plan._identity_ids(
+        torch, torch.device("cuda", torch.cuda.current_device()), 0
+    )
+
+
+# The arguments of the kernels the native compile functions emit for the
+# canonical sum, as their contracts give them. A user argument binds a
+# parameter of the segment function by position; every other argument names
+# its value by key.
+_VALUES = _abi.KernelArgument("ptr", "user", 0, access="read")
+_OFFSETS = _abi.KernelArgument("ptr", "user", 1, access="read")
+_OUTPUT = _abi.KernelArgument("ptr", "user", 2, access="write")
+_VALUE_COUNT = _abi.KernelArgument("i32", "user", 3)
+_SEGMENT_COUNT = _abi.KernelArgument("i32", "user", 4)
+
+
+def _plan_argument(key):
+    """Return a contract argument for one task record list."""
+    return _abi.KernelArgument("ptr", "plan", key=key, access="read")
+
+
+def _derived_argument(key):
+    """Return a contract argument for one count of the plan."""
+    return _abi.KernelArgument("i32", "derived", key=key)
+
+
+def _scratch_argument(key, access):
+    """Return a contract argument for one private buffer of the launch."""
+    return _abi.KernelArgument("ptr", "scratch", key=key, access=access)
+
+
+_FAKE_ARGUMENTS = {
+    "_compile_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        _plan_argument("task_ids"),
+        _VALUE_COUNT,
+        _derived_argument("task_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_fused_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        _plan_argument("task_ids"),
+        _VALUE_COUNT,
+        _derived_argument("warp_task_count"),
+        _derived_argument("cta_task_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_split_partial_reduction_ptx": (
+        _VALUES,
+        _plan_argument("partial_ranges"),
+        _scratch_argument("scratch", "write"),
+        _VALUE_COUNT,
+        _derived_argument("partial_count"),
+    ),
+    "_compile_split_merge_reduction_ptx": (
+        _scratch_argument("scratch", "read"),
+        _OUTPUT,
+        _plan_argument("merge_records"),
+        _derived_argument("partial_count"),
+        _derived_argument("merge_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_persistent_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        *map(
+            _plan_argument,
+            (
+                "warp_ids",
+                "cta_ids",
+                "partial_ranges",
+                "partial_merge_ids",
+                "merge_records",
+            ),
+        ),
+        _scratch_argument("scratch", "readwrite"),
+        _scratch_argument("counters", "readwrite"),
+        _VALUE_COUNT,
+        *map(
+            _derived_argument,
+            (
+                "warp_task_count",
+                "cta_task_count",
+                "partial_count",
+                "merge_count",
+            ),
+        ),
+        _SEGMENT_COUNT,
+    ),
+}
+
+
+def _fake_compiler(name, arguments=None):
+    """Return a stand-in for one native compile function of the planner.
+
+    It emits no code. It returns placeholder PTX, one text per kernel, and
+    the launch contract the native function gives the canonical sum, with
+    the block it requests or the one the target description gives the
+    kernel. It carries the native name, which the runtime reads to check
+    the entry of the contract.
+
+    Args:
+        name: Name of the native compile function.
+        arguments: Contract arguments that replace the native ones.
+    """
+    blocks = _execution._target_description()
+    suffix = {
+        "_compile_split_partial_reduction_ptx": "__partial",
+        "_compile_split_merge_reduction_ptx": "__merge",
+    }.get(name, "")
+    default_block = {
+        "_compile_fused_segmented_reduction_ptx": blocks.cta_block_threads,
+        "_compile_persistent_segmented_reduction_ptx": (
+            blocks.persistent_block_threads
+        ),
+    }.get(name, blocks.split_block_threads)
+
+    def compile_ptx(_module, *, kernel_name, target, **options):
+        block = options.get("block_size", default_block)
+        contract = _abi.KernelContract(
+            _abi._VERSION,
+            "cuda",
+            kernel_name + suffix,
+            _abi.KernelLaunch("spmd-grid", (block, 1, 1)),
+            _FAKE_ARGUMENTS[name] if arguments is None else arguments,
+        )
+        ptx = f"{name} {kernel_name} {target} {sorted(options.items())}"
+        return "", ptx, _abi.serialize_kernel_contract(contract)
+
+    compile_ptx.__name__ = compile_ptx.__qualname__ = name
+    return compile_ptx
+
+
+def _install_fake_compilers(monkeypatch, *names):
+    """Replace the named native compile functions, or all, with fakes."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    for name in names or _FAKE_ARGUMENTS:
+        monkeypatch.setattr(native_swage, name, _fake_compiler(name))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_empty_persistent_sum_does_not_compile_allocate_or_launch(monkeypatch):
     """Return a no-op after classifying an empty segment set."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
 
     values = torch.empty(0, device="cuda", dtype=torch.float32)
     offsets = torch.zeros(1, device="cuda", dtype=torch.int32)
@@ -1649,7 +1991,7 @@ def test_empty_persistent_sum_does_not_compile_allocate_or_launch(monkeypatch):
     )
     monkeypatch.setattr(torch, "tensor", fail)
     monkeypatch.setattr(torch, "zeros", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
 
     prepared = _prepare_persistent_sum(values, offsets, output)
 
@@ -1663,7 +2005,6 @@ def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
 
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
@@ -1681,7 +2022,7 @@ def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
         compile_fail,
     )
     monkeypatch.setattr(torch, "tensor", continue_fail)
-    monkeypatch.setattr(_runtime, "_get_driver", continue_fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", continue_fail)
 
     with pytest.raises(RuntimeError, match="persistent compile failed"):
         _prepare_persistent_sum(values, offsets, output)
@@ -1690,31 +2031,11 @@ def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_allocation_failure_precedes_launch(monkeypatch):
     """Do not submit resident work after private allocation fails."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.launches = []
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_persistent(self, *arguments):
-            self.launches.append(arguments)
-
     values = torch.ones(4097, device="cuda")
     offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
-    monkeypatch.setattr(
-        native_swage,
-        "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx", "{}"),
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     monkeypatch.setattr(
         torch,
         "tensor",
@@ -1731,29 +2052,14 @@ def test_persistent_allocation_failure_precedes_launch(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_launch_failure_has_no_static_fallback(monkeypatch):
     """Propagate the resident launch error without submitting another policy."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
 
-    class _Driver:
-        def __init__(self):
-            self.launches = 0
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_persistent(self, *_arguments):
-            self.launches += 1
+    class _FailingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
             raise RuntimeError("persistent launch failed")
 
-    monkeypatch.setattr(
-        native_swage,
-        "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx", "{}"),
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _FailingDriver())
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
@@ -1761,34 +2067,14 @@ def test_persistent_launch_failure_has_no_static_fallback(monkeypatch):
 
     with pytest.raises(RuntimeError, match="persistent launch failed"):
         prepared.launch()
-    assert driver.launches == 1
+    assert len(driver.launches) == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
     """Reject device drift before resetting counters or launching workers."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.launches = []
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_persistent(self, *arguments):
-            self.launches.append(arguments)
-
-    monkeypatch.setattr(
-        native_swage,
-        "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx", "{}"),
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
@@ -1803,27 +2089,11 @@ def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
     """Keep every private device allocation alive across submissions."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    class _Driver:
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_persistent(self, *_arguments):
-            return None
-
     values = torch.ones(4098, device="cuda")
     offsets = torch.tensor([0, 1, 4098], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
-    monkeypatch.setattr(
-        native_swage,
-        "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx", "{}"),
-    )
-    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     original_empty = torch.empty
     original_tensor = torch.tensor
     original_zeros = torch.zeros
@@ -1856,6 +2126,7 @@ def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
 
     prepared.launch()
     gc.collect()
+    assert len(driver.launches) == 1
     assert all(reference() is not None for reference in references)
 
 
@@ -1890,10 +2161,8 @@ def test_prepared_split_sum_matches_nontrivial_oracles(lengths):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_sum_rejects_output_aliases_before_driver_work(monkeypatch):
     """Reject either input alias before compilation or driver access."""
-    from swage import _runtime
-
     monkeypatch.setattr(
-        _runtime,
+        _cuda_backend,
         "_get_driver",
         lambda: pytest.fail("driver must not be accessed"),
     )
@@ -1970,22 +2239,14 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     when it returns: the uploaded records, and segment ids past the shared
     tensor, which are filled on the device. Either one is made slow here.
     """
-    from swage import _runtime
-    from swage import _segmented_qualification as qualification
-
     preparation_stream = torch.cuda.Stream()
     launch_stream = torch.cuda.Stream()
     launch_observed = torch.cuda.Event()
     launch_completed = threading.Event()
 
-    class _Driver:
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_segmented_tasks(self, *_arguments):
-            launch_observed.record(launch_stream)
-
-        def launch_segmented_mixed(self, *_arguments):
+    class _ObservingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
             launch_observed.record(launch_stream)
 
     values = torch.ones(34, device="cuda", dtype=torch.float32)
@@ -1993,8 +2254,9 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     output = torch.empty(2, device="cuda", dtype=torch.float32)
     all_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
     mixed_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    _upload_shared_segment_ids()
     torch.cuda.synchronize()
-    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+    driver = _install_driver(monkeypatch, _ObservingDriver())
 
     def asynchronous_arange(*_args, **_kwargs):
         if slow == "segment id fill":
@@ -2010,7 +2272,7 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
 
     if slow == "segment id fill":
         # Two segments are past this limit, so their ids are filled here.
-        monkeypatch.setattr(qualification, "_IDENTITY_LIMIT", 1)
+        monkeypatch.setattr(_plan, "_IDENTITY_LIMIT", 1)
     monkeypatch.setattr(torch, "arange", asynchronous_arange)
     monkeypatch.setattr(torch, "tensor", asynchronous_tensor)
     with torch.cuda.stream(preparation_stream):
@@ -2029,6 +2291,7 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     launch_stream.synchronize()
     observer.join()
 
+    assert len(driver.launches) == 1
     assert not bypassed_initialization
 
 
@@ -2036,51 +2299,23 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
 @pytest.mark.parametrize(
     ("lengths", "expected_ids", "expected_counts", "expected_grid"),
     [
-        ([33, 1], [1, 0], (1, 1), (2,)),
-        ([1, 2, 3, 4, 33], [0, 1, 2, 3, 4], (4, 1), (2,)),
-        ([1, 2, 3, 4, 5, 33], [0, 1, 2, 3, 4, 5], (5, 1), (3,)),
-        ([0, 32], [0, 1], (2, 0), (1,)),
-        ([33, 34], [0, 1], (0, 2), (2,)),
+        ([33, 1], [1, 0], (1, 1), (2, 1, 1)),
+        ([1, 2, 3, 4, 33], [0, 1, 2, 3, 4], (4, 1), (2, 1, 1)),
+        ([1, 2, 3, 4, 5, 33], [0, 1, 2, 3, 4, 5], (5, 1), (3, 1, 1)),
+        ([0, 32], [0, 1], (2, 0), (1, 1, 1)),
+        ([33, 34], [0, 1], (0, 2), (2, 1, 1)),
     ],
 )
 def test_prepared_mixed_uses_one_ordered_fused_launch(
     monkeypatch, lengths, expected_ids, expected_counts, expected_grid
 ):
     """Submit stable warp IDs before CTA IDs through one fused kernel."""
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.loads = []
-            self.launches = []
-
-        def load(self, ptx, kernel_name):
-            self.loads.append((ptx, kernel_name))
-            function = len(self.loads)
-            return function + 100, function
-
-        def launch_segmented_tasks(
-            self, function, grid, block, stream, arguments
-        ):
-            self.launches.append(
-                ("pure", function, grid, block, stream, arguments)
-            )
-
-        def launch_segmented_mixed(
-            self, function, grid, block, stream, arguments
-        ):
-            self.launches.append(
-                ("mixed", function, grid, block, stream, arguments)
-            )
-
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
+    offsets = _offsets(lengths)
     values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
     device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     output = torch.empty(len(lengths), device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    driver = _install_driver(monkeypatch, _Driver())
+    _upload_shared_segment_ids()
     original_tensor = torch.tensor
     task_tensors = []
 
@@ -2097,51 +2332,30 @@ def test_prepared_mixed_uses_one_ordered_fused_launch(
 
     assert len(driver.launches) == 1
     assert len(task_tensors) == 1
-    kind, _, grid, block, _, arguments = driver.launches[0]
+    (launch,) = driver.launches
+    arguments = launch.arguments
     mixed_ids, mixed_tasks = task_tensors[-1]
-    assert kind == "mixed"
-    assert grid == expected_grid
-    assert block == 128
+    assert launch.grid == expected_grid
+    assert launch.block == (128, 1, 1)
     assert mixed_ids == expected_ids
-    assert arguments[3] == mixed_tasks.data_ptr()
-    assert arguments[5:7] == expected_counts
+    # Only the fused kernel takes the two direct counts.
+    assert arguments["task_ids"] == mixed_tasks.data_ptr()
+    assert (
+        arguments["warp_task_count"],
+        arguments["cta_task_count"],
+    ) == expected_counts
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     """Submit direct work before every partial and every final merge."""
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.loads = []
-            self.launches = []
-
-        def load(self, ptx, kernel_name):
-            self.loads.append((ptx, kernel_name))
-            return 100 + len(self.loads), len(self.loads)
-
-        def launch_segmented_mixed(
-            self, function, grid, block, stream, arguments
-        ):
-            self.launches.append(
-                ("direct", function, grid, block, stream, arguments)
-            )
-
-        def launch_segmented(self, function, grid, block, stream, arguments):
-            self.launches.append(
-                ("split", function, grid, block, stream, arguments)
-            )
-
     lengths = [1, 33, 4097, 8192, 0]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
+    offsets = _offsets(lengths)
     values = torch.ones(offsets[-1], device="cuda")
     device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     output = torch.empty(len(lengths), device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    driver = _install_driver(monkeypatch, _Driver())
+    _upload_shared_segment_ids()
     original_tensor = torch.tensor
     descriptor_tensors = []
 
@@ -2156,18 +2370,30 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     prepared = _prepare_planned_sum(values, device_offsets, output)
     prepared.mixed()
 
-    assert [launch[0] for launch in driver.launches] == [
+    assert [launch.phase for launch in driver.launches] == [
         "direct",
-        "split",
-        "split",
+        "partial",
+        "merge",
     ]
     direct, partial, merge = driver.launches
-    assert direct[2:4] == ((2,), 128)
-    assert direct[5][5:7] == (2, 1)
-    assert partial[2:4] == ((4,), 512)
-    assert partial[5][3:] == (offsets[-1], 4)
-    assert merge[2:4] == ((2,), 512)
-    assert merge[5][3:5] == (4, 2)
+    assert (direct.grid, direct.block) == ((2, 1, 1), (128, 1, 1))
+    assert (
+        direct.arguments["warp_task_count"],
+        direct.arguments["cta_task_count"],
+    ) == (2, 1)
+    assert (partial.grid, partial.block) == ((4, 1, 1), (512, 1, 1))
+    assert (
+        partial.arguments["value_count"],
+        partial.arguments["partial_count"],
+    ) == (offsets[-1], 4)
+    assert (merge.grid, merge.block) == ((2, 1, 1), (512, 1, 1))
+    assert (
+        merge.arguments["partial_count"],
+        merge.arguments["merge_count"],
+    ) == (4, 2)
+    # The merge reads the partial results where the partial kernel wrote
+    # them.
+    assert merge.arguments["scratch"] == partial.arguments["scratch"]
     # One upload holds the direct ids, then the partial ranges, then the
     # merge records, and each phase reads its list at its place in it. The
     # merge of every partial task follows; only the persistent kernel reads
@@ -2181,9 +2407,9 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
         ]
     ]
     records = descriptor_tensors[0][1].data_ptr()
-    assert direct[5][3] == records
-    assert partial[5][1] == records + 4 * 3
-    assert merge[5][2] == records + 4 * (3 + 8)
+    assert direct.arguments["task_ids"] == records
+    assert partial.arguments["partial_ranges"] == records + 4 * 3
+    assert merge.arguments["merge_records"] == records + 4 * (3 + 8)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -2192,17 +2418,6 @@ def test_split_only_mixed_skips_the_direct_phase(monkeypatch):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.launches = []
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_segmented(self, _function, grid, _block, _stream, _args):
-            self.launches.append(grid)
 
     def reject_direct(*_args, **_kwargs):
         pytest.fail("split-only work must not compile a direct kernel")
@@ -2210,15 +2425,131 @@ def test_split_only_mixed_skips_the_direct_phase(monkeypatch):
     monkeypatch.setattr(
         native_swage, "_compile_fused_segmented_reduction_ptx", reject_direct
     )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(4097, device="cuda")
     offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
 
     _prepare_planned_sum(values, offsets, output).mixed()
 
-    assert driver.launches == [(2,), (1,)]
+    assert [(launch.phase, launch.grid) for launch in driver.launches] == [
+        ("partial", (2, 1, 1)),
+        ("merge", (1, 1, 1)),
+    ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_warm_preparation_reuses_compilation_and_context_load(monkeypatch):
+    """Compile and load each kernel once, and lease it per preparation.
+
+    A preparation holds one lease on each module it launches for as long
+    as it lives. Collecting it gives the leases back, and the modules stay
+    loaded for the next preparation.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    compiles = []
+    loads = []
+
+    def counted(compile_ptx):
+        @functools.wraps(compile_ptx)
+        def compile_and_count(module, **options):
+            compiles.append(compile_ptx.__name__)
+            return compile_ptx(module, **options)
+
+        return compile_and_count
+
+    for name in (
+        "_compile_segmented_reduction_ptx",
+        "_compile_fused_segmented_reduction_ptx",
+    ):
+        monkeypatch.setattr(
+            native_swage, name, counted(getattr(native_swage, name))
+        )
+    driver = _cuda_backend._get_driver()
+    original_load = driver.load
+
+    def load(ptx, entry):
+        loads.append(entry)
+        return original_load(ptx, entry)
+
+    monkeypatch.setattr(driver, "load", load)
+    monkeypatch.setattr(
+        _execution,
+        "_ptx_memo",
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
+    )
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    values = torch.ones(34, device="cuda")
+    offsets = torch.tensor([0, 1, 34], dtype=torch.int32, device="cuda")
+    output = torch.empty(2, device="cuda")
+
+    first = _prepare_planned_sum(values, offsets, output)
+    second = _prepare_planned_sum(values, offsets, output)
+    entries = list(_cuda_backend._loaded_functions.values())
+
+    # The pure warp and CTA kernels, then the fused one.
+    assert sorted(compiles) == [
+        "_compile_fused_segmented_reduction_ptx",
+        "_compile_segmented_reduction_ptx",
+        "_compile_segmented_reduction_ptx",
+    ]
+    assert loads == ["segmented_sum"] * 3
+    assert len(entries) == 3
+    assert [entry.leases for entry in entries] == [2, 2, 2]
+
+    del first
+    gc.collect()
+    assert [entry.leases for entry in entries] == [1, 1, 1]
+    del second
+    gc.collect()
+    assert [entry.leases for entry in entries] == [0, 0, 0]
+    assert all(entry.cache_resident for entry in entries)
+    assert not any(entry.unloaded for entry in entries)
+    # The modules leave the cache with this test. Nothing launched or
+    # leases them, so they are unloaded here.
+    for entry in entries:
+        driver.module_unload(entry.module)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_contract_binding_failure_precedes_any_launch(monkeypatch):
+    """Refuse a contract that names a value the runtime lacks, unlaunched.
+
+    The fused contract here names `unknown_tasks` where the kernel takes
+    `task_ids`. Arguments are bound once the task storage exists, so the
+    refusal follows the module loads and the uploads, and precedes every
+    launch.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    name = "_compile_fused_segmented_reduction_ptx"
+    renamed = tuple(
+        dataclasses.replace(argument, key="unknown_tasks")
+        if argument.key == "task_ids"
+        else argument
+        for argument in _FAKE_ARGUMENTS[name]
+    )
+    _install_fake_compilers(monkeypatch)
+    monkeypatch.setattr(native_swage, name, _fake_compiler(name, renamed))
+    driver = _install_driver(monkeypatch, _Driver())
+    values = torch.ones(1, device="cuda")
+    offsets = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    output = torch.empty(1, device="cuda")
+
+    with pytest.raises(
+        ValueError,
+        match="^plan bindings do not match contract: missing unknown_tasks$",
+    ):
+        _prepare_planned_sum(values, offsets, output)
+    # The warp, CTA, and fused modules were leased before binding.
+    assert len(driver.loads) == 3
+    assert not driver.launches
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -2227,14 +2558,13 @@ def test_prepared_sum_rejects_invalid_limits_before_work(monkeypatch):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
 
     def fail(*_args, **_kwargs):
         pytest.fail("invalid limits must not continue")
 
     monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
     monkeypatch.setattr(torch, "arange", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
@@ -2255,16 +2585,11 @@ def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
 
     def fail(*_args, **_kwargs):
         raise RuntimeError("partial compile failed")
 
-    monkeypatch.setattr(
-        native_swage,
-        "_compile_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx", "{}"),
-    )
+    _install_fake_compilers(monkeypatch, "_compile_segmented_reduction_ptx")
     monkeypatch.setattr(
         native_swage, "_compile_split_partial_reduction_ptx", fail
     )
@@ -2274,7 +2599,7 @@ def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("must not allocate"),
     )
     monkeypatch.setattr(
-        _runtime,
+        _cuda_backend,
         "_get_driver",
         lambda: pytest.fail("must not access driver"),
     )
@@ -2289,36 +2614,14 @@ def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_split_allocation_failure_precedes_launch(monkeypatch):
     """Surface descriptor allocation failure without dispatching a kernel."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.launches = []
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_segmented(self, *arguments):
-            self.launches.append(arguments)
-
-    for name in (
-        "_compile_segmented_reduction_ptx",
-        "_compile_split_partial_reduction_ptx",
-        "_compile_split_merge_reduction_ptx",
-    ):
-        monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
-        )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(4097, device="cuda")
     offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
     # The records are the task storage a preparation allocates; the segment
     # ids are shared and already on the device.
+    _upload_shared_segment_ids()
     monkeypatch.setattr(
         torch,
         "tensor",
@@ -2345,42 +2648,16 @@ def test_split_launch_failures_stop_later_phases(
     monkeypatch, failed_phase, expected
 ):
     """Stop the ordered stream sequence at its first launch failure."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
 
-    class _Driver:
-        def __init__(self):
-            self.phases = []
-            self.split_launches = 0
-
-        def load(self, _ptx, kernel_name):
-            return 1, kernel_name
-
-        def observe(self, phase):
-            self.phases.append(phase)
+    class _FailingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
+            phase = self.launches[-1].phase
             if phase == failed_phase:
                 raise RuntimeError(f"{phase} launch failed")
 
-        def launch_segmented_mixed(self, *_arguments):
-            self.observe("direct")
-
-        def launch_segmented(self, *_arguments):
-            self.split_launches += 1
-            self.observe("partial" if self.split_launches == 1 else "merge")
-
-    for name in (
-        "_compile_segmented_reduction_ptx",
-        "_compile_fused_segmented_reduction_ptx",
-        "_compile_split_partial_reduction_ptx",
-        "_compile_split_merge_reduction_ptx",
-    ):
-        monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
-        )
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _FailingDriver())
     values = torch.ones(4098, device="cuda")
     offsets = torch.tensor([0, 1, 4098], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
@@ -2388,37 +2665,14 @@ def test_split_launch_failures_stop_later_phases(
 
     with pytest.raises(RuntimeError, match=f"{failed_phase} launch failed"):
         prepared.mixed()
-    assert driver.phases == expected
+    assert [launch.phase for launch in driver.launches] == expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_sum_retains_private_split_storage(monkeypatch):
     """Keep task descriptors and scratch alive for every prepared launch."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-    from swage import _runtime
-
-    class _Driver:
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_segmented_mixed(self, *_arguments):
-            return None
-
-        def launch_segmented(self, *_arguments):
-            return None
-
-    for name in (
-        "_compile_segmented_reduction_ptx",
-        "_compile_fused_segmented_reduction_ptx",
-        "_compile_split_partial_reduction_ptx",
-        "_compile_split_merge_reduction_ptx",
-    ):
-        monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
-        )
-    monkeypatch.setattr(_runtime, "_get_driver", _Driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     original_arange = torch.arange
     original_empty = torch.empty
     original_tensor = torch.tensor
@@ -2454,6 +2708,7 @@ def test_prepared_sum_retains_private_split_storage(monkeypatch):
 
     prepared.mixed()
     gc.collect()
+    assert len(driver.launches) == 3
     assert all(reference() is not None for reference in references)
 
 
@@ -2463,7 +2718,6 @@ def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from swage import _runtime
 
     def fail(*_args, **_kwargs):
         pytest.fail("empty work must not compile, allocate, or access driver")
@@ -2474,7 +2728,7 @@ def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
     )
     monkeypatch.setattr(torch, "arange", fail)
     monkeypatch.setattr(torch, "tensor", fail)
-    monkeypatch.setattr(_runtime, "_get_driver", fail)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
     values = torch.empty(0, device="cuda", dtype=torch.float32)
     offsets = torch.empty(1, device="cuda", dtype=torch.int32)
     offsets.zero_()
@@ -2490,23 +2744,10 @@ def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_sum_rejects_a_different_current_device(monkeypatch):
     """Do not dispatch a prepared policy after the current device changes."""
-    from swage import _runtime
-
-    class _Driver:
-        def __init__(self):
-            self.launches = []
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_segmented_tasks(self, *arguments):
-            self.launches.append(arguments)
-
     values = torch.ones(34, device="cuda", dtype=torch.float32)
     offsets = torch.tensor([0, 1, 34], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    driver = _install_driver(monkeypatch, _Driver())
     prepared = _prepare_planned_sum(values, offsets, output)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 999)
 
@@ -2970,44 +3211,51 @@ def test_rejects_softmax_output_aliasing_offsets():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_mismatched_blockdim_fails_at_launch_instead_of_wrong_sums():
     """Turn a launch-geometry mismatch into a driver error via reqntid."""
-    from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage as swage_dialect
-    from swage import _runtime
-    from swage._segmented_qualification import _semantic_module
 
     values = torch.ones(256, device="cuda")
     offsets = torch.tensor([0, 256], dtype=torch.int32, device="cuda")
     output = torch.zeros(1, device="cuda")
-    major, minor = torch.cuda.get_device_capability()
-    with ir.Context() as context:
-        swage_dialect.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
-        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
-            module,
-            kernel_name="segmented_sum",
-            block_size=128,
-            target=f"sm_{major}{minor}",
-        )
-
-    driver = _runtime._get_driver()
-    _, function = driver.load(ptx, "segmented_sum")
-    stream = torch.cuda.current_stream()
-    arguments = (
-        values.data_ptr(),
-        offsets.data_ptr(),
-        output.data_ptr(),
-        256,
-        1,
+    module_text = _semantic_module("sum")
+    kernel = _execution._compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name="segmented_sum",
+        block_size=128,
+        target=_execution._target(torch, torch.cuda.current_device()),
     )
+    bindings = _execution._bind(
+        kernel,
+        _execution._user_arguments(
+            module_text,
+            values=values.data_ptr(),
+            offsets=offsets.data_ptr(),
+            output=output.data_ptr(),
+            value_count=256,
+            segment_count=1,
+        ),
+        {},
+    )
+    # The same kernel and arguments, with 64 threads per block.
+    mismatched = dataclasses.replace(
+        kernel.contract, launch=_abi.KernelLaunch("spmd-grid", (64, 1, 1))
+    )
+    driver = _cuda_backend._get_driver()
+    module, function = driver.load(kernel.image, kernel.contract.entry)
+    stream = torch.cuda.current_stream().cuda_stream
 
-    with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
-        driver.launch_segmented(
-            function, (1,), 64, stream.cuda_stream, arguments
+    try:
+        with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
+            driver.launch_entry(
+                function, mismatched, bindings, (1, 1, 1), stream
+            )
+
+        driver.launch_entry(
+            function, kernel.contract, bindings, (1, 1, 1), stream
         )
-
-    driver.launch_segmented(function, (1,), 128, stream.cuda_stream, arguments)
-    torch.cuda.synchronize()
+    finally:
+        torch.cuda.synchronize()
+        driver.module_unload(module)
     assert output.item() == 256.0

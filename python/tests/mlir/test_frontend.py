@@ -5,6 +5,7 @@ import gc
 import inspect
 import sys
 import weakref
+from unittest import mock
 
 import pytest
 import swage as sw
@@ -22,6 +23,16 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
     sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+@sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
 
 
 @sw.jit
@@ -87,6 +98,13 @@ SIGNATURE = {
     "n": sl.int32,
 }
 
+DTYPES = [
+    (sl.float32, torch.float32, "f32"),
+    (sl.float16, torch.float16, "f16"),
+    (sl.float8_e4m3fn, torch.float8_e4m3fn, "f8E4M3FN"),
+    (sl.float8_e5m2, torch.float8_e5m2, "f8E5M2"),
+]
+
 
 def _emit(kernel=add_kernel, signature=SIGNATURE, constexprs=None):
     """Emit one native module with the standard test signature."""
@@ -95,20 +113,41 @@ def _emit(kernel=add_kernel, signature=SIGNATURE, constexprs=None):
     return kernel.emit_mlir(signature=signature, constexprs=constexprs)
 
 
-def _arguments(device="cpu"):
+def _arguments(device="cpu", dtype=torch.float32):
     """Create metadata inputs for the standard vector-add kernel."""
     return {
-        "x_ptr": torch.empty(8, device=device),
-        "y_ptr": torch.empty(8, device=device),
-        "output_ptr": torch.empty(8, device=device),
+        "x_ptr": torch.empty(8, device=device, dtype=dtype),
+        "y_ptr": torch.empty(8, device=device, dtype=dtype),
+        "output_ptr": torch.empty(8, device=device, dtype=dtype),
         "n": 8,
     }
 
 
-def test_vector_add_emits_a_deterministic_live_module():
-    """Build the required vector-add structure without textual round trips."""
-    first = _emit()
-    second = _emit()
+@pytest.mark.parametrize(
+    "kernel, arithmetic",
+    [(add_kernel, "arith.addf"), (multiply_kernel, "arith.mulf")],
+)
+@pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
+def test_vector_add_emits_a_deterministic_live_module(
+    dtype, torch_dtype, element_type, kernel, arithmetic
+):
+    """Keep same-type gather/add/scatter semantic IR for every storage type."""
+    signature = {
+        "x_ptr": sl.pointer(dtype),
+        "y_ptr": sl.pointer(dtype),
+        "output_ptr": sl.pointer(dtype),
+        "n": sl.int32,
+    }
+    real_import = __import__
+
+    def import_without_torch(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            raise AssertionError("explicit signatures must not import torch")
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=import_without_torch):
+        first = _emit(kernel=kernel, signature=signature)
+        second = _emit(kernel=kernel, signature=signature)
 
     assert isinstance(first, ir.Module)
     assert first.operation.verify()
@@ -118,18 +157,37 @@ def test_vector_add_emits_a_deterministic_live_module():
     assert "swage.program_id" in first_asm
     assert "vector.step" in first_asm
     assert first_asm.count("vector.gather") == 2
-    assert "arith.addf" in first_asm
-    assert "vector.scatter" in first_asm
+    assert first_asm.count(arithmetic) == 1
+    assert first_asm.count("vector.scatter") == 1
+    assert f"memref<?x{element_type}>" in first_asm
+    assert f"vector<128x{element_type}>" in first_asm
+    assert "arith.extf" not in first_asm
+    assert "arith.truncf" not in first_asm
 
 
-def test_inferred_and_explicit_signatures_emit_identical_mlir():
-    """Route inferred descriptors through the existing emitter unchanged."""
-    explicit = _emit().operation.get_asm(enable_debug_info=False)
-    first = add_kernel.emit_mlir(
-        arguments=_arguments(), constexprs={"BLOCK": 128}
+@pytest.mark.parametrize(
+    "kernel, arithmetic",
+    [(add_kernel, "arith.addf"), (multiply_kernel, "arith.mulf")],
+)
+@pytest.mark.parametrize(("dtype", "torch_dtype", "element_type"), DTYPES)
+def test_inferred_and_explicit_signatures_emit_identical_mlir(
+    dtype, torch_dtype, element_type, kernel, arithmetic
+):
+    """Infer each storage format without host casts or element-type changes."""
+    explicit = _emit(
+        kernel=kernel,
+        signature={
+            "x_ptr": sl.pointer(dtype),
+            "y_ptr": sl.pointer(dtype),
+            "output_ptr": sl.pointer(dtype),
+            "n": sl.int32,
+        },
+    ).operation.get_asm(enable_debug_info=False)
+    first = kernel.emit_mlir(
+        arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
-    second = add_kernel.emit_mlir(
-        arguments=_arguments(), constexprs={"BLOCK": 128}
+    second = kernel.emit_mlir(
+        arguments=_arguments(dtype=torch_dtype), constexprs={"BLOCK": 128}
     )
 
     assert first.operation.verify()
@@ -168,6 +226,8 @@ def test_inferred_i32_boundaries_are_accepted(value):
 @pytest.mark.parametrize(
     ("tensor", "reason"),
     [
+        (torch.empty(8, dtype=torch.int32), "dtype torch.int32"),
+        (torch.empty(8, dtype=torch.bfloat16), "dtype torch.bfloat16"),
         (torch.empty(8, dtype=torch.float64), "dtype torch.float64"),
         (torch.empty(2, 4), "rank 2"),
         (torch.empty(16)[::2], "non-contiguous"),
@@ -224,12 +284,13 @@ def test_inferred_emission_does_not_retain_arguments():
     assert reference() is None
 
 
-def test_vector_add_preserves_kernel_and_python_source_locations():
+@pytest.mark.parametrize("kernel", [add_kernel, multiply_kernel])
+def test_vector_add_preserves_kernel_and_python_source_locations(kernel):
     """Expose kernel-name and file-line locations in debug assembly."""
-    debug_asm = _emit().operation.get_asm(enable_debug_info=True)
-    source_line = inspect.getsourcelines(add_kernel.python_function)[1]
+    debug_asm = _emit(kernel=kernel).operation.get_asm(enable_debug_info=True)
+    source_line = inspect.getsourcelines(kernel.python_function)[1]
 
-    assert 'loc("add_kernel"' in debug_asm
+    assert f'loc("{kernel.__name__}"' in debug_asm
     assert __file__ in debug_asm
     assert f":{source_line + 1}:" in debug_asm
 
@@ -380,6 +441,71 @@ def test_empty_return_must_be_the_final_statement():
         bad_kernel.emit_mlir(signature={}, constexprs={})
 
 
+@pytest.mark.parametrize("kernel", [add_kernel, multiply_kernel])
+@pytest.mark.parametrize("inferred", [False, True])
+@pytest.mark.parametrize(
+    ("left", "right", "output", "left_type", "right_type", "operation"),
+    [
+        ("float16", "float32", "float16", "f16", "f32", "addition"),
+        (
+            "float8_e4m3fn",
+            "float8_e5m2",
+            "float8_e4m3fn",
+            "f8E4M3FN",
+            "f8E5M2",
+            "addition",
+        ),
+        ("float16", "float16", "float32", "f16", "f32", "store"),
+        (
+            "float8_e4m3fn",
+            "float8_e4m3fn",
+            "float8_e5m2",
+            "f8E4M3FN",
+            "f8E5M2",
+            "store",
+        ),
+    ],
+)
+def test_mixed_element_types_have_source_located_diagnostics(
+    inferred, left, right, output, left_type, right_type, operation, kernel
+):
+    """Reject arithmetic/store mismatches before generic MLIR verification."""
+    dtypes = dict(zip(("x_ptr", "y_ptr", "output_ptr"), (left, right, output)))
+    if inferred:
+        inputs = {
+            "arguments": {
+                name: torch.empty(8, dtype=getattr(torch, dtype))
+                for name, dtype in dtypes.items()
+            }
+        }
+        inputs["arguments"]["n"] = 8
+    else:
+        inputs = {
+            "signature": {
+                name: sl.pointer(getattr(sl, dtype))
+                for name, dtype in dtypes.items()
+            }
+        }
+        inputs["signature"]["n"] = sl.int32
+
+    with pytest.raises(sw.CompilationError) as caught:
+        kernel.emit_mlir(**inputs, constexprs={"BLOCK": 128})
+
+    source, source_line = inspect.getsourcelines(kernel.python_function)
+    token = "x + y" if operation == "addition" else "sl.store"
+    if kernel is multiply_kernel and operation == "addition":
+        token = "x * y"
+        operation = "multiplication"
+    column = source[7].index(token) + 1
+    message = str(caught.value)
+    assert message.startswith(
+        f"{__file__}:{source_line + 7}:{column}: {kernel.__name__}:"
+    )
+    assert operation in message
+    assert "matching" in message
+    assert f"got {left_type} and {right_type}" in message
+
+
 def test_unsupported_types_are_reported_in_source_parameter_order():
     """Choose the first invalid parameter independently of set ordering."""
 
@@ -450,7 +576,7 @@ def test_block_must_be_a_positive_integer(block):
     [sl.float32, sl.pointer(sl.int32), object()],
 )
 def test_unsupported_runtime_types_have_stable_diagnostics(bad_type):
-    """Accept only i32 scalars and dynamic rank-one f32 pointers."""
+    """Accept only i32 scalars and supported floating-point pointers."""
     with pytest.raises(
         sw.CompilationError,
         match="unsupported type for parameter 'n'",
@@ -745,3 +871,30 @@ def test_an_accepted_body_reports_missing_bindings_only_after_the_check(
 
     with pytest.raises(RuntimeError, match="requires the build-tree"):
         _emit()
+
+
+@pytest.mark.parametrize("scalar_on_left", [False, True])
+def test_vector_scalar_multiplication_is_rejected(scalar_on_left):
+    """Do not add scalar broadcasting to floating-point multiplication."""
+
+    @sw.jit
+    def right_scalar(x_ptr, BLOCK: sl.constexpr):
+        offsets = sl.arange(0, BLOCK)
+        x = sl.load(x_ptr + offsets, mask=offsets < BLOCK, other=0.0)
+        _ = x * 2
+
+    @sw.jit
+    def left_scalar(x_ptr, BLOCK: sl.constexpr):
+        offsets = sl.arange(0, BLOCK)
+        x = sl.load(x_ptr + offsets, mask=offsets < BLOCK, other=0.0)
+        _ = 2 * x
+
+    kernel = left_scalar if scalar_on_left else right_scalar
+    with pytest.raises(
+        sw.CompilationError,
+        match=r"'\*' on a float vector requires another float vector",
+    ):
+        kernel.emit_mlir(
+            signature={"x_ptr": sl.pointer(sl.float32)},
+            constexprs={"BLOCK": 128},
+        )

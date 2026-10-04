@@ -508,23 +508,25 @@ def test_the_runner_takes_its_block_widths_from_the_target_description(
     monkeypatch,
 ):
     """Read block widths and planning defaults from the compiler, lazily."""
-    from swage import _segmented_qualification as qualification
+    from swage import _segmented_plan as _plan
+    from swage import _segmented_runtime as _execution
+    from swage import _segmented_validation as _validation
 
-    description = qualification._target_description()
+    description = _execution._target_description()
     assert vars(description) == native_swage._target_description()
-    assert qualification._target_description() is description
-    assert qualification._planning_limits(None, None) == (32, 4096)
-    assert qualification._planning_limits(8, None) == (8, 4096)
-    assert qualification._planning_limits(None, 64) == (32, 64)
+    assert _execution._target_description() is description
+    assert _plan._planning_limits(None, None) == (32, 4096)
+    assert _plan._planning_limits(8, None) == (8, 4096)
+    assert _plan._planning_limits(None, 64) == (32, 64)
 
     # The runner holds no copy of its own: another description changes what
     # an omitted limit and the warp rule resolve to.
     narrow = dict(native_swage._target_description())
     narrow.update(subgroup_width=16, default_cta_chunk_elements=2048)
     monkeypatch.setattr(
-        qualification, "_target_record", type(description)(**narrow)
+        _execution, "_target_record", type(description)(**narrow)
     )
-    assert qualification._planning_limits(None, None) == (32, 2048)
-    qualification._validate_warp_count(16)
+    assert _plan._planning_limits(None, None) == (32, 2048)
+    _validation._validate_warp_count(16)
     with pytest.raises(ValueError, match="power-of-two warp count, got 48"):
-        qualification._validate_warp_count(48)
+        _validation._validate_warp_count(48)

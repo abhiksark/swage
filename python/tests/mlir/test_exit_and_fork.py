@@ -2,9 +2,10 @@
 """Interpreter exit and fork while a native compile is in flight.
 
 The native compiler releases the GIL, and the runtime holds its cold-path
-lock for a whole compile. An interpreter that finalizes under a compile
-crashes, and a child forked under one inherits a lock that nobody releases.
-The runtime registers an exit handler and fork handlers against both.
+lock for a whole compile, as it does for a module load and for the creation
+of the CUDA driver. An interpreter that finalizes under a compile crashes,
+and a child forked under one inherits a lock that nobody releases. The
+runtime registers an exit handler and fork handlers against both.
 
 Each test runs `_PROGRAM` in fresh interpreters, where a thread keeps
 compiling through the runtime while the main thread exits or forks. Nothing
@@ -38,15 +39,16 @@ import time
 import warnings
 
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native
-from swage import _segmented_qualification as qualification
+from swage import _segmented_programs as _programs
+from swage import _segmented_runtime as _execution
 
-text = qualification._semantic_module("sum")
+text = _programs._semantic_module("sum")
 started = threading.Event()
 stop = threading.Event()
 
 
 def compile_variant(label):
-    return qualification._compile_once(
+    return _execution._compile_once(
         native._compile_persistent_segmented_reduction_ptx,
         text + f"// {label}\\n",
         kernel_name="segmented_sum",
@@ -80,8 +82,8 @@ else:
         if child == 0:
             # SIGALRM ends a child that waits for a lock nobody releases.
             signal.alarm(10)
-            ptx = compile_variant(f"child {attempt}")
-            os._exit(0 if ".entry segmented_sum" in ptx else 3)
+            kernel = compile_variant(f"child {attempt}")
+            os._exit(0 if ".entry segmented_sum" in kernel.image else 3)
         _, status = os.waitpid(child, 0)
         if os.WIFSIGNALED(status):
             outcomes.append(f"signal {os.WTERMSIG(status)}")

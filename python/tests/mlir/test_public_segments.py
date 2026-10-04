@@ -28,14 +28,16 @@ import math
 import pathlib
 import sys
 import threading
-import weakref
 from itertools import pairwise
 
 import pytest
 import swage
 import torch
-from swage import _runtime
+from swage import _cuda_backend, _runtime
+from swage import _segmented_plan as _plan
+from swage import _segmented_programs as _programs
 from swage import _segmented_qualification as qualification
+from swage import _segmented_runtime as _execution
 from test_segmented_numerics import (
     SPECIAL_CASES,
     SPECIAL_LENGTHS,
@@ -297,7 +299,9 @@ FUNCTIONS = [swage.segment_reduce, swage.segment_softmax]
 def test_public_package_exports_exactly_the_two_segmented_calls():
     """Keep the prepared launches, the policies, and the limits private."""
     assert swage.__all__ == [
+        "BackendUnavailableError",
         "CompilationError",
+        "SwageError",
         "jit",
         "segment_reduce",
         "segment_softmax",
@@ -806,27 +810,58 @@ def test_int64_offsets_of_an_empty_batch_need_no_upload(function):
     assert _call(function, values, offsets).shape == (0,)
 
 
+def _recorded_launches(monkeypatch):
+    """Record every kernel launch the process driver enqueues.
+
+    Returns:
+        A list that fills during the test with the `(contract, bindings,
+        stream)` of each launch, where `bindings` are the kinds and values
+        of its arguments in the order of the contract.
+    """
+    driver = _cuda_backend._get_driver()
+    launches = []
+    launch_entry = driver.launch_entry
+
+    def recording(function, contract, bindings, grid, stream):
+        launches.append((contract, bindings, stream))
+        return launch_entry(function, contract, bindings, grid, stream)
+
+    monkeypatch.setattr(driver, "launch_entry", recording)
+    return launches
+
+
+def _offsets_arguments(launches):
+    """Return the offsets pointer of every recorded launch that reads them.
+
+    A kernel binds the parameters of its program that it reads as user
+    arguments, by their parameter index. A merge kernel reads no offsets.
+    """
+    (index,) = {
+        _programs._parameter_roles(module).index("offsets")
+        for module in (
+            _programs._semantic_module("sum"),
+            _programs._SOFTMAX_MODULE,
+        )
+    }
+    return [
+        value
+        for contract, (_, values), _ in launches
+        for argument, value in zip(contract.arguments, values, strict=True)
+        if argument.origin == "user" and argument.source_index == index
+    ]
+
+
 def _launched_and_retained(monkeypatch):
     """Record every launch and every tensor a call retains on a stream.
 
     Returns:
-        Two lists that fill during the test: the pointer arguments of each
-        launch, and the `(first byte, one past the last byte, stream)` of
-        each tensor that was passed to `record_stream`.
+        Two lists that fill during the test: the launches, as
+        `_recorded_launches` records them, and the `(first byte, one past
+        the last byte, stream)` of each tensor that was passed to
+        `record_stream`.
     """
-    driver = _runtime._get_driver()
-    launches, retained = [], []
-
-    def recording(original):
-        def launch(function, grid, block, stream, arguments):
-            launches.append(arguments)
-            return original(function, grid, block, stream, arguments)
-
-        return launch
-
-    # The fused launch goes through the task-ID launch.
-    for name in ("launch_segmented", "launch_segmented_tasks"):
-        monkeypatch.setattr(driver, name, recording(getattr(driver, name)))
+    launches = _recorded_launches(monkeypatch)
+    retained = []
     record_stream = torch.Tensor.record_stream
 
     def retaining(tensor, stream):
@@ -875,15 +910,7 @@ def test_a_kernel_reads_a_retained_private_copy_of_int64_offsets(
     with torch.cuda.stream(side):
         result = _call(function, values, offsets)
         side.synchronize()
-    # The offsets are the second pointer of every kernel that takes them.
-    # A merge kernel has six arguments and no offsets, and a partial
-    # kernel, the five-argument launch of a reduction, takes range records.
-    partial = 5 if function is swage.segment_reduce else None
-    copies = [
-        arguments[1]
-        for arguments in launches
-        if len(arguments) not in (6, partial)
-    ]
+    copies = _offsets_arguments(launches)
 
     caller = (
         offsets.data_ptr(),
@@ -1385,7 +1412,7 @@ def test_segment_reduce_sum_is_the_default_mixed_schedule_of_its_batch():
         values,
         offsets,
         output,
-        module_text=qualification._semantic_module("sum"),
+        module_text=_programs._semantic_module("sum"),
         kernel_name="segmented_sum",
     ).mixed()
 
@@ -1404,13 +1431,13 @@ def _prepared_mixed(kind, values, offsets):
         dtype=values.dtype,
         device=values.device,
     )
-    element = qualification._element_of(torch, values)
+    element = _programs._element_of(torch, values)
     qualification._prepare_planned_reduction(
         values,
         offsets,
         output,
-        module_text=qualification._semantic_module(kind, element),
-        kernel_name=qualification._reduction_kernel(kind, element),
+        module_text=_programs._semantic_module(kind, element),
+        kernel_name=_programs._reduction_kernel(kind, element),
     ).mixed()
     return output
 
@@ -1499,7 +1526,7 @@ def _held_kernels():
                 if name in ("block_size", "use_task_ids")
             ),
         )
-        for compile_ptx, _, options in qualification._ptx_memo
+        for compile_ptx, _, options in _execution._ptx_memo
     )
 
 
@@ -1557,13 +1584,13 @@ def test_segment_reduce_reads_the_shared_segment_ids_only_when_selected(
     values, offsets = host_values.cuda(), host_offsets.cuda()
     expected = swage.segment_reduce(values, offsets, "sum").cpu()
     used = []
-    identity_ids = qualification._identity_ids
+    identity_ids = _plan._identity_ids
 
     def recording(*arguments):
         used.append(arguments[2])
         return identity_ids(*arguments)
 
-    monkeypatch.setattr(qualification, "_identity_ids", recording)
+    monkeypatch.setattr(_plan, "_identity_ids", recording)
 
     actual = swage.segment_reduce(values, offsets, "sum").cpu()
     assert used == []
@@ -1799,26 +1826,15 @@ def test_segmented_calls_launch_on_the_current_stream(function, monkeypatch):
     # Inputs made on the default stream must be complete before another
     # stream reads them, as for any PyTorch operation.
     torch.cuda.synchronize()
-    driver = _runtime._get_driver()
-    streams = []
-
-    def recording(original):
-        def launch(function, grid, block, stream, arguments):
-            streams.append(stream)
-            return original(function, grid, block, stream, arguments)
-
-        return launch
-
-    for name in ("launch_segmented", "launch_segmented_tasks"):
-        monkeypatch.setattr(driver, name, recording(getattr(driver, name)))
+    launches = _recorded_launches(monkeypatch)
     side = torch.cuda.Stream()
 
     with torch.cuda.stream(side):
         result = _call(function, values, offsets)
     side.synchronize()
 
-    assert streams
-    assert set(streams) == {side.cuda_stream}
+    assert launches
+    assert {stream for _, _, stream in launches} == {side.cuda_stream}
     assert _bits(result.cpu()) == _bits(expected)
 
 
@@ -1896,15 +1912,33 @@ def test_segmented_calls_run_on_a_thread_that_has_not_used_cuda():
 
 @pytest.fixture
 def empty_kernel_memo(monkeypatch):
-    """Give the test a process that holds no compiled segmented kernel."""
+    """Give the test a process that holds no compiled or loaded kernel.
+
+    The modules the test loads are retired when it ends, as a module that
+    leaves the loaded-module LRU is, and unloaded once they are idle.
+    """
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
     monkeypatch.setattr(
-        qualification, "_load_memo", weakref.WeakKeyDictionary()
+        _cuda_backend, "_loaded_functions", collections.OrderedDict()
     )
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    yield
+    gc.collect()
+    torch.cuda.synchronize()
+    with _cuda_backend._cuda_lock:
+        _cuda_backend._evict_loaded_locked(0)
+    _poll_retired()
+
+
+def _poll_retired():
+    """Unload the retired modules of the current context that are idle."""
+    driver = _cuda_backend._get_driver()
+    context = _cuda_backend.ensure_context(torch, torch.cuda.current_device())
+    _cuda_backend._poll_deferred(driver, context)
 
 
 @_needs_cuda
@@ -1987,11 +2021,17 @@ def test_a_call_that_enqueues_nothing_leaves_the_out_version_alone(
 
 @pytest.fixture
 def driver_calls(monkeypatch):
-    """Count the loads, unloads, and waits the real driver performs."""
-    driver = _runtime._get_driver()
+    """Count the loads, unloads, and waits the real driver performs.
+
+    The idle modules that earlier tests retired, and that the test could
+    reach, are unloaded first, so every unload counted is one the test
+    caused. The driver no longer synchronizes a context; the count of
+    `cuCtxSynchronize` guards against a launch path that would.
+    """
+    driver = _cuda_backend._get_driver()
     gc.collect()
     torch.cuda.synchronize()
-    driver.unload_retired()
+    _poll_retired()
     calls = collections.Counter()
 
     def counting(name, original):
@@ -2078,7 +2118,7 @@ def test_calls_with_fresh_offsets_leave_nothing_behind(
         one_call(seed)
     torch.cuda.synchronize()
     loads = driver_calls["cuModuleLoadData"]
-    kernels = len(qualification._ptx_memo)
+    kernels = len(_execution._ptx_memo)
     allocated = torch.cuda.memory_allocated()
     reserved = torch.cuda.memory_reserved()
     event_counts.clear()
@@ -2101,5 +2141,5 @@ def test_calls_with_fresh_offsets_leave_nothing_behind(
     assert driver_calls["cuModuleLoadData"] == loads
     assert driver_calls["cuModuleUnload"] == 0
     assert driver_calls["cuCtxSynchronize"] == 0
-    assert len(qualification._ptx_memo) == kernels
+    assert len(_execution._ptx_memo) == kernels
     assert event_counts == {}

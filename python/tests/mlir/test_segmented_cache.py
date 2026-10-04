@@ -3,12 +3,17 @@
 
 import threading
 import time
-import weakref
+from collections import OrderedDict
 
 import pytest
 import torch
-from swage import _runtime
+from swage import _abi, _cuda_backend, _runtime
+from swage import _segmented_oracle as _oracle
+from swage import _segmented_programs as _programs
 from swage import _segmented_qualification as qualification
+from swage import _segmented_runtime as _execution
+from swage import _segmented_validation as _validation
+from swage._errors import BackendUnavailableError
 
 _requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"
@@ -27,15 +32,19 @@ _SENTINEL = -5.0
 
 @pytest.fixture(autouse=True)
 def _fresh_memo(monkeypatch):
-    """Start every test from empty memos so counts ignore test order."""
+    """Start every test from empty memos so counts ignore test order.
+
+    The loaded-module caches are replaced, not cleared, and restored after
+    the test, so a fake driver's modules never reach a later test. A real
+    module loaded here stays loaded, unreferenced, for the process.
+    """
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
         _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
-    monkeypatch.setattr(
-        qualification, "_load_memo", weakref.WeakKeyDictionary()
-    )
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
     # A caller's switch would make every miss in this file a refusal.
     monkeypatch.delenv("SWAGE_NO_COMPILE", raising=False)
 
@@ -60,7 +69,7 @@ class _Counts:
 
     def __init__(self):
         self.compiles = []
-        self.driver = _CountingDriver(_runtime._get_driver())
+        self.driver = _CountingDriver(_cuda_backend._get_driver())
 
     @property
     def loads(self):
@@ -83,11 +92,13 @@ def counts(monkeypatch):
             observed.compiles.append(name)
             return original(*args, **kwargs)
 
+        # The runner tells a split kernel's entry by the compiler's name.
+        compile_ptx.__name__ = name
         return compile_ptx
 
     for name in _COMPILERS:
         monkeypatch.setattr(native, name, counting(name, getattr(native, name)))
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: observed.driver)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: observed.driver)
     return observed
 
 
@@ -131,7 +142,7 @@ def _prepare_planned(kind, values, offsets, output):
         values,
         offsets,
         output,
-        module_text=qualification._semantic_module(kind),
+        module_text=_programs._semantic_module(kind),
         kernel_name=f"segmented_{kind}",
     )
 
@@ -155,15 +166,48 @@ def _forbid_host_readback(patch):
     patch.setattr(torch.cuda, "synchronize", fail)
 
 
+def _contract_json(entry, block_size=128):
+    """Return the canonical launch contract of a fake segmented kernel."""
+    argument = _abi.KernelArgument
+    contract = _abi.KernelContract(
+        version=_abi._VERSION,
+        backend="cuda",
+        entry=entry,
+        launch=_abi.KernelLaunch("spmd-grid", (block_size, 1, 1)),
+        arguments=(
+            argument("ptr", "user", source_index=0, access="read"),
+            argument("ptr", "user", source_index=1, access="read"),
+            argument("ptr", "user", source_index=2, access="write"),
+            argument("i32", "user", source_index=3),
+        ),
+    )
+    return _abi.serialize_kernel_contract(contract)
+
+
+def _kernel(ptx, entry="segmented_sum"):
+    """Return a compiled kernel of `ptx` whose contract names `entry`."""
+    contract_json = _contract_json(entry)
+    return _execution._Kernel(
+        ptx, contract_json, _abi.parse_kernel_contract(contract_json)
+    )
+
+
 class _FakeCompiler:
-    """A compile function that returns a distinct PTX string per call."""
+    """A compile function that returns a distinct PTX string per call.
+
+    Its contract names the requested kernel and block, as the runner
+    requires of every compile.
+    """
 
     def __init__(self):
         self.calls = []
 
     def __call__(self, module, **options):
         self.calls.append((module, options))
-        return "lowered", f"ptx{len(self.calls)}", "{}"
+        contract_json = _contract_json(
+            options["kernel_name"], options.get("block_size", 128)
+        )
+        return "lowered", f"ptx{len(self.calls)}", contract_json
 
 
 class _FakeDriver:
@@ -172,6 +216,7 @@ class _FakeDriver:
     def __init__(self, context=1):
         self.context = context
         self.loads = []
+        self.unloads = []
 
     def current_context(self):
         return self.context
@@ -179,6 +224,14 @@ class _FakeDriver:
     def load(self, ptx, kernel_name):
         self.loads.append((self.context, ptx, kernel_name))
         return 100 + len(self.loads), len(self.loads)
+
+    def module_unload(self, module):
+        self.unloads.append(module)
+
+
+def _lease(kernel, driver):
+    """Lease `kernel` in the driver's current context."""
+    return _cuda_backend._load_artifact(kernel, driver)
 
 
 _OPTIONS = {
@@ -189,18 +242,20 @@ _OPTIONS = {
 
 
 def test_compile_memo_reuses_one_compile_for_one_key():
-    """Return the first PTX again without calling the compiler."""
+    """Return the first kernel again without calling the compiler."""
     compiler = _FakeCompiler()
     module = object()
 
-    first = qualification._compile_once(
+    first = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
-    second = qualification._compile_once(
+    second = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
 
-    assert first == second == "ptx1"
+    assert second is first
+    assert first.image == "ptx1"
+    assert first.contract.entry == "segmented_sum"
     assert compiler.calls == [(module, _OPTIONS)]
 
 
@@ -219,17 +274,22 @@ def test_compile_memo_key_separates_targets_and_options(change):
     compiler = _FakeCompiler()
     module = object()
 
-    first = qualification._compile_once(
+    first = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
-    changed = qualification._compile_once(
+    changed = _execution._compile_once(
         compiler, "program", module=module, **{**_OPTIONS, **change}
     )
-    repeated = qualification._compile_once(
+    repeated = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
 
-    assert (first, changed, repeated) == ("ptx1", "ptx2", "ptx1")
+    assert [kernel.image for kernel in (first, changed, repeated)] == [
+        "ptx1",
+        "ptx2",
+        "ptx1",
+    ]
+    assert repeated is first
     assert len(compiler.calls) == 2
 
 
@@ -239,10 +299,10 @@ def test_compile_memo_key_separates_programs_and_compile_functions():
     replacement = _FakeCompiler()
     module = object()
 
-    qualification._compile_once(compiler, "sum", module=module, **_OPTIONS)
-    qualification._compile_once(compiler, "max", module=module, **_OPTIONS)
-    qualification._compile_once(replacement, "sum", module=module, **_OPTIONS)
-    qualification._compile_once(replacement, "sum", module=module, **_OPTIONS)
+    _execution._compile_once(compiler, "sum", module=module, **_OPTIONS)
+    _execution._compile_once(compiler, "max", module=module, **_OPTIONS)
+    _execution._compile_once(replacement, "sum", module=module, **_OPTIONS)
+    _execution._compile_once(replacement, "sum", module=module, **_OPTIONS)
 
     assert len(compiler.calls) == 2
     assert len(replacement.calls) == 1
@@ -259,11 +319,12 @@ def test_compile_memo_parses_the_program_only_on_a_miss():
         seen.append(isinstance(module, ir.Module))
         return compiler(str(module), **options)
 
-    text = qualification._semantic_module("sum")
-    first = qualification._compile_once(compile_ptx, text, **_OPTIONS)
-    second = qualification._compile_once(compile_ptx, text, **_OPTIONS)
+    text = _programs._semantic_module("sum")
+    first = _execution._compile_once(compile_ptx, text, **_OPTIONS)
+    second = _execution._compile_once(compile_ptx, text, **_OPTIONS)
 
-    assert first == second == "ptx1"
+    assert second is first
+    assert first.image == "ptx1"
     assert seen == [True]
     assert "swage.reduce" in compiler.calls[0][0]
 
@@ -280,14 +341,14 @@ def test_compile_failure_is_not_memoized():
         return compiler(module, **options)
 
     with pytest.raises(RuntimeError, match="compile failed"):
-        qualification._compile_once(
+        _execution._compile_once(
             compile_ptx, "program", module=object(), **_OPTIONS
         )
-    ptx = qualification._compile_once(
+    kernel = _execution._compile_once(
         compile_ptx, "program", module=object(), **_OPTIONS
     )
 
-    assert ptx == "ptx1"
+    assert kernel.image == "ptx1"
     assert len(attempts) == 2
 
 
@@ -306,7 +367,7 @@ def test_compile_memo_compiles_once_across_threads():
     def prepare():
         barrier.wait()
         results.append(
-            qualification._compile_once(
+            _execution._compile_once(
                 compile_ptx, "program", module=object(), **_OPTIONS
             )
         )
@@ -317,22 +378,27 @@ def test_compile_memo_compiles_once_across_threads():
     for thread in threads:
         thread.join()
 
-    assert results == ["ptx1"] * workers
+    assert len(results) == workers
+    assert all(kernel is results[0] for kernel in results)
+    assert results[0].image == "ptx1"
     assert len(compiler.calls) == 1
 
 
-def test_load_memo_reuses_one_module_within_a_context():
-    """Load one module per PTX and kernel name in one context."""
+def test_lease_reuses_one_module_within_a_context():
+    """Load one module per PTX and entry name in one context."""
     driver = _FakeDriver()
 
-    first = qualification._load_once(driver, "ptx", "segmented_sum")
-    second = qualification._load_once(driver, "ptx", "segmented_sum")
-    renamed = qualification._load_once(driver, "ptx", "segmented_sum__merge")
-    other = qualification._load_once(driver, "other ptx", "segmented_sum")
+    first = _lease(_kernel("ptx"), driver)
+    second = _lease(_kernel("ptx"), driver)
+    renamed = _lease(_kernel("ptx", "segmented_sum__merge"), driver)
+    other = _lease(_kernel("other ptx"), driver)
 
-    assert first == second == (101, 1)
-    assert renamed == (102, 2)
-    assert other == (103, 3)
+    assert second.entry is first.entry
+    assert first.entry.leases == 2
+    assert [
+        (lease.entry.module, lease.entry.function)
+        for lease in (first, renamed, other)
+    ] == [(101, 1), (102, 2), (103, 3)]
     assert driver.loads == [
         (1, "ptx", "segmented_sum"),
         (1, "ptx", "segmented_sum__merge"),
@@ -340,100 +406,132 @@ def test_load_memo_reuses_one_module_within_a_context():
     ]
 
 
-def test_load_memo_hit_does_not_read_the_ptx_text_again():
-    """Look a loaded kernel up by its text without hashing the text."""
+class _CountedImage:
+    """A kernel that counts how often its PTX text is read."""
 
-    class _Text(str):
-        def encode(self, *_args, **_kwargs):
-            pytest.fail("a lookup must not encode the PTX text")
+    def __init__(self, kernel):
+        self.identity = kernel.identity
+        self.contract = kernel.contract
+        self._image = kernel.image
+        self.image_reads = 0
 
+    @property
+    def image(self):
+        """Return the PTX text and count the read."""
+        self.image_reads += 1
+        return self._image
+
+
+def test_lease_hit_does_not_read_the_ptx_text_again():
+    """Find a loaded module by the kernel identity, not by its PTX text."""
     driver = _FakeDriver()
-    ptx = _Text("ptx")
+    kernel = _CountedImage(_kernel("ptx"))
+    other = _CountedImage(_kernel("other"))
 
-    first = qualification._load_once(driver, ptx, "segmented_sum")
-    second = qualification._load_once(driver, ptx, "segmented_sum")
-    other = qualification._load_once(driver, _Text("other"), "segmented_sum")
+    first = _lease(kernel, driver)
+    second = _lease(kernel, driver)
+    third = _lease(other, driver)
 
-    assert first is second
-    assert other != first
+    assert second.entry is first.entry
+    assert third.entry is not first.entry
+    assert (kernel.image_reads, other.image_reads) == (1, 1)
     assert [loaded[1] for loaded in driver.loads] == ["ptx", "other"]
 
 
-def test_load_memo_does_not_cross_cuda_contexts():
-    """Load again in a second context and keep both handles apart."""
+def test_lease_does_not_cross_cuda_contexts():
+    """Load again in a second context and keep both modules apart."""
     driver = _FakeDriver(context=1)
-    first = qualification._load_once(driver, "ptx", "segmented_sum")
+    first = _lease(_kernel("ptx"), driver)
 
     driver.context = 2
-    second = qualification._load_once(driver, "ptx", "segmented_sum")
-    assert qualification._load_once(driver, "ptx", "segmented_sum") == second
+    second = _lease(_kernel("ptx"), driver)
+    assert _lease(_kernel("ptx"), driver).entry is second.entry
 
     driver.context = 1
-    assert qualification._load_once(driver, "ptx", "segmented_sum") == first
+    assert _lease(_kernel("ptx"), driver).entry is first.entry
 
-    assert first != second
+    assert first.entry is not second.entry
+    assert (first.entry.context, second.entry.context) == (1, 2)
     assert [load[0] for load in driver.loads] == [1, 2]
 
 
-def test_load_memo_does_not_cross_drivers():
-    """Keep a handle with the driver that loaded it."""
+def test_lease_does_not_cross_drivers():
+    """Keep a module with the driver that loaded it."""
     first_driver = _FakeDriver()
     second_driver = _FakeDriver()
 
-    qualification._load_once(first_driver, "ptx", "segmented_sum")
-    qualification._load_once(second_driver, "ptx", "segmented_sum")
-    qualification._load_once(second_driver, "ptx", "segmented_sum")
+    first = _lease(_kernel("ptx"), first_driver)
+    second = _lease(_kernel("ptx"), second_driver)
+    third = _lease(_kernel("ptx"), second_driver)
 
+    assert second.entry is not first.entry
+    assert third.entry is second.entry
+    assert first.entry.driver is first_driver
+    assert second.entry.driver is second_driver
     assert len(first_driver.loads) == 1
     assert len(second_driver.loads) == 1
 
 
-def test_driver_without_a_context_is_never_memoized():
-    """Do not reuse a handle whose context the driver cannot name."""
+def test_driver_without_a_current_context_loads_nothing():
+    """Refuse to lease when the driver cannot name its current context.
 
-    class _Driver:
-        def __init__(self):
-            self.loads = 0
+    A module is valid only in the context that loaded it, so a lease is
+    keyed by that context. A driver that names none gets no module, and
+    nothing is kept for a later lease to reuse.
+    """
 
-        def load(self, _ptx, _kernel_name):
-            self.loads += 1
-            return 1, self.loads
+    class _Driver(_FakeDriver):
+        def current_context(self):
+            raise BackendUnavailableError(
+                "PyTorch has no current CUDA context",
+                code="cuda-context-unavailable",
+                backend="cuda",
+                remediation="Initialize PyTorch CUDA first.",
+            )
 
     driver = _Driver()
 
-    first = qualification._load_once(driver, "ptx", "segmented_sum")
-    second = qualification._load_once(driver, "ptx", "segmented_sum")
+    for _ in range(2):
+        with pytest.raises(
+            BackendUnavailableError, match="no current CUDA context"
+        ):
+            _lease(_kernel("ptx"), driver)
 
-    assert (first, second) == ((1, 1), (1, 2))
+    assert driver.loads == []
+    assert not _cuda_backend._loaded_functions
 
 
 class _ForbiddenLock:
     """A lock that fails the test when anything tries to take it."""
 
-    def __enter__(self):
+    def acquire(self, *_args, **_kwargs):
         pytest.fail("a memo hit took the cold-path lock")
+
+    def __enter__(self):
+        self.acquire()
 
     def __exit__(self, *_error):
         return False
 
 
 def test_memo_hits_take_no_lock(monkeypatch):
-    """Serve a compiled and a loaded kernel without the cold-path lock."""
+    """Serve a compiled kernel and lease its module without the lock."""
     compiler = _FakeCompiler()
     driver = _FakeDriver()
     module = object()
-    ptx = qualification._compile_once(
+    kernel = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
-    handles = qualification._load_once(driver, ptx, "segmented_sum")
-    monkeypatch.setattr(qualification, "_memo_lock", _ForbiddenLock())
+    lease = _lease(kernel, driver)
+    monkeypatch.setattr(_execution, "_memo_lock", _ForbiddenLock())
+    monkeypatch.setattr(_runtime, "_compile_lock", _ForbiddenLock())
 
-    again = qualification._compile_once(
+    again = _execution._compile_once(
         compiler, "program", module=module, **_OPTIONS
     )
 
-    assert again == ptx
-    assert qualification._load_once(driver, ptx, "segmented_sum") == handles
+    assert again is kernel
+    assert _lease(kernel, driver).entry is lease.entry
     assert len(compiler.calls) == len(driver.loads) == 1
 
 
@@ -451,22 +549,22 @@ def test_memo_hits_do_not_wait_for_a_cold_compile():
         finish.wait(60)
         return compiler(module, **options)
 
-    warm = qualification._compile_once(
+    warm = _execution._compile_once(
         compiler, "warm", module=object(), **_OPTIONS
     )
-    handles = qualification._load_once(driver, warm, "segmented_sum")
+    lease = _lease(warm, driver)
     served = []
 
     def serve():
         served.append(
-            qualification._compile_once(
+            _execution._compile_once(
                 compiler, "warm", module=object(), **_OPTIONS
             )
         )
-        served.append(qualification._load_once(driver, warm, "segmented_sum"))
+        served.append(_lease(warm, driver))
 
     cold = threading.Thread(
-        target=lambda: qualification._compile_once(
+        target=lambda: _execution._compile_once(
             slow_compile, "cold", module=object(), **_OPTIONS
         )
     )
@@ -484,46 +582,78 @@ def test_memo_hits_do_not_wait_for_a_cold_compile():
 
     assert started
     assert not blocked
-    assert served == [warm, handles]
+    assert served[0] is warm
+    assert served[1].entry is lease.entry
     assert len(driver.loads) == 1
 
 
 def test_compile_memo_forgets_its_oldest_program_at_the_bound(monkeypatch):
     """Keep at most the bound and compile a forgotten program again."""
-    monkeypatch.setattr(qualification, "_ptx_memo", _runtime._BoundedCache(2))
+    monkeypatch.setattr(_execution, "_ptx_memo", _runtime._BoundedCache(2))
     compiler = _FakeCompiler()
     module = object()
 
     results = [
-        qualification._compile_once(compiler, text, module=module, **_OPTIONS)
+        _execution._compile_once(compiler, text, module=module, **_OPTIONS)
         for text in ("a", "b", "a", "c", "a")
     ]
 
-    assert results == ["ptx1", "ptx2", "ptx1", "ptx3", "ptx4"]
-    assert len(qualification._ptx_memo) == 2
-
-
-def test_load_memo_forgets_its_oldest_kernel_at_the_bound(monkeypatch):
-    """Keep at most the bound per driver and load a forgotten kernel again."""
-    monkeypatch.setattr(_runtime, "_CACHE_LIMIT", 2)
-    driver = _FakeDriver()
-
-    results = [
-        qualification._load_once(driver, ptx, "segmented_sum")
-        for ptx in ("a", "b", "a", "c", "a")
+    assert [kernel.image for kernel in results] == [
+        "ptx1",
+        "ptx2",
+        "ptx1",
+        "ptx3",
+        "ptx4",
     ]
+    assert len(_execution._ptx_memo) == 2
 
-    assert [function for _, function in results] == [1, 2, 1, 3, 4]
-    assert len(qualification._load_memo[driver]) == 2
-    assert qualification._load_memo[driver].limit == 2
+
+def test_lease_forgets_its_least_recent_module_at_the_bound(monkeypatch):
+    """Retire the least recently leased module and load it again later.
+
+    A lease refreshes the recency of its module, so the module left out is
+    the one leased longest ago, not the one loaded first. It is retired, not
+    unloaded at once: the next lease in its context unloads it, because no
+    lease holds it any more, and then loads it again as a new module.
+    """
+    monkeypatch.setattr(_cuda_backend, "_memory_cache_entries", 2)
+    driver = _FakeDriver()
+    kernels = {ptx: _kernel(ptx) for ptx in ("a", "b", "c")}
+    entries = {}
+    functions = []
+    for ptx in ("a", "b", "a", "c"):
+        lease = _lease(kernels[ptx], driver)
+        entries[ptx] = lease.entry
+        functions.append(lease.entry.function)
+        lease.release()
+
+    assert functions == [1, 2, 1, 3]
+    assert list(_cuda_backend._loaded_functions.values()) == [
+        entries["a"],
+        entries["c"],
+    ]
+    assert list(_cuda_backend._retired_loaded.values()) == [entries["b"]]
+    assert driver.unloads == []
+
+    again = _lease(kernels["b"], driver)
+
+    assert again.entry.function == 4
+    assert again.entry is not entries["b"]
+    assert entries["b"].unloaded
+    assert driver.unloads == [entries["b"].module]
+    assert list(_cuda_backend._loaded_functions.values()) == [
+        entries["c"],
+        again.entry,
+    ]
+    assert list(_cuda_backend._retired_loaded.values()) == [entries["a"]]
 
 
 @pytest.mark.parametrize("name", ["values", "output"])
 @pytest.mark.parametrize(
     "validate",
     [
-        qualification._validate_tensors,
-        qualification._validate_softmax_tensors,
+        _validation._validate_tensors,
+        _validation._validate_softmax_tensors,
     ],
     ids=["reduction", "softmax"],
 )
@@ -556,8 +686,8 @@ def _reduction_tensors():
 @pytest.mark.parametrize(
     "validate",
     [
-        qualification._validate_tensors,
-        qualification._validate_softmax_tensors,
+        _validation._validate_tensors,
+        _validation._validate_softmax_tensors,
     ],
     ids=["reduction", "softmax"],
 )
@@ -594,7 +724,7 @@ def test_rejects_lazy_conjugate_views(monkeypatch, name):
             r"tensor.resolve_conj\(\)$"
         ),
     ):
-        qualification._validate_tensors(**tensors, require_cuda=False)
+        _validation._validate_tensors(**tensors, require_cuda=False)
 
 
 def test_cpu_oracle_rejects_the_negation_view_the_review_summed():
@@ -604,12 +734,12 @@ def test_cpu_oracle_rejects_the_negation_view_the_review_summed():
     assert float(view.sum()) == -4.0
 
     with pytest.raises(ValueError, match="values must not be a lazy negation"):
-        qualification._validate_tensors(
+        _validation._validate_tensors(
             view, offsets, torch.zeros(1), require_cuda=False
         )
     with pytest.raises(ValueError, match="values must not be a lazy negation"):
-        qualification.cpu_oracle(view, offsets, "sum")
-    assert qualification._validate_tensors(
+        _oracle.cpu_oracle(view, offsets, "sum")
+    assert _validation._validate_tensors(
         view.resolve_neg(), offsets, torch.zeros(1), require_cuda=False
     ) == (4, 1)
 
@@ -654,12 +784,12 @@ def test_no_compile_mode_serves_a_held_kernel_and_refuses_another(
 ):
     """Return what the process compiled and raise instead of compiling."""
     compiler = _FakeCompiler()
-    held = qualification._compile_once(
+    held = _execution._compile_once(
         compiler, "program", module=object(), **_OPTIONS
     )
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
 
-    again = qualification._compile_once(
+    again = _execution._compile_once(
         compiler, "program", module=object(), **_OPTIONS
     )
     for _ in range(2):
@@ -672,16 +802,17 @@ def test_no_compile_mode_serves_a_held_kernel_and_refuses_another(
                 "has no persistent cache$"
             ),
         ):
-            qualification._compile_once(
+            _execution._compile_once(
                 compiler,
                 "program",
                 module=object(),
                 **{**_OPTIONS, "block_size": 32},
             )
 
-    assert held == again == "ptx1"
+    assert again is held
+    assert held.image == "ptx1"
     assert len(compiler.calls) == 1
-    assert len(qualification._ptx_memo) == 1
+    assert len(_execution._ptx_memo) == 1
 
 
 def test_no_compile_mode_does_not_parse_the_program(_no_compile):
@@ -689,7 +820,7 @@ def test_no_compile_mode_does_not_parse_the_program(_no_compile):
     compiler = _FakeCompiler()
 
     with pytest.raises(RuntimeError, match="SWAGE_NO_COMPILE=1 refuses"):
-        qualification._compile_once(compiler, "not a module", **_OPTIONS)
+        _execution._compile_once(compiler, "not a module", **_OPTIONS)
 
     assert compiler.calls == []
 
@@ -703,7 +834,7 @@ def test_no_compile_mode_names_a_kernel_without_a_block_size(_no_compile):
             "not hold it for target sm_86, and"
         ),
     ):
-        qualification._compile_once(
+        _execution._compile_once(
             _FakeCompiler(),
             "program",
             module=object(),
@@ -721,7 +852,7 @@ def test_compile_memo_rejects_a_mistyped_no_compile_switch(monkeypatch, value):
     with pytest.raises(
         ValueError, match=f"SWAGE_NO_COMPILE must be 0 or 1; found '{value}'"
     ):
-        qualification._compile_once(
+        _execution._compile_once(
             compiler, "program", module=object(), **_OPTIONS
         )
 
@@ -768,7 +899,7 @@ def test_rejects_values_computed_from_a_tensor_that_requires_grad():
     weights = torch.ones(4, requires_grad=True)
 
     with pytest.raises(ValueError, match="values must not require grad"):
-        qualification._validate_tensors(
+        _validation._validate_tensors(
             weights * 2,
             torch.tensor([0, 4], dtype=torch.int32),
             torch.zeros(1),
@@ -779,13 +910,13 @@ def test_rejects_values_computed_from_a_tensor_that_requires_grad():
 def test_offsets_version_detects_only_in_place_offset_writes():
     """Compare the version counter recorded for one offsets tensor."""
     offsets = torch.tensor([0, 2, 6], dtype=torch.int32)
-    version = qualification._offsets_version(offsets)
+    version = _validation._offsets_version(offsets)
 
-    qualification._require_unchanged_offsets(offsets, version)
+    _validation._require_unchanged_offsets(offsets, version)
     offsets[1] += 1
 
     with pytest.raises(RuntimeError, match=_STALE):
-        qualification._require_unchanged_offsets(offsets, version)
+        _validation._require_unchanged_offsets(offsets, version)
 
 
 def test_offsets_version_rejects_inference_tensors():
@@ -796,7 +927,7 @@ def test_offsets_version_rejects_inference_tensors():
     with pytest.raises(
         ValueError, match="offsets must not be an inference tensor"
     ):
-        qualification._offsets_version(offsets)
+        _validation._offsets_version(offsets)
 
 
 @_requires_cuda

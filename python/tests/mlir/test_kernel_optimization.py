@@ -24,7 +24,7 @@ from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
-from swage._segmented_qualification import (
+from swage._segmented_programs import (
     _SOFTMAX_MODULE,
     _reduction_kernel,
     _semantic_module,

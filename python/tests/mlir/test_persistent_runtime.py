@@ -1,7 +1,12 @@
 # python/tests/mlir/test_persistent_runtime.py
 """Adversarial GPU qualification for the private persistent scheduler."""
 
+import os
+import pathlib
 import random
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -40,6 +45,35 @@ def _closure_values(function):
             function.__code__.co_freevars, function.__closure__
         )
     }
+
+
+def _bound_buffer(prepared, key):
+    """Return the buffer that a persistent launch binds to a contract key.
+
+    The launch keeps its kernel, its bound arguments, and its buffers in its
+    closure. The buffer returned is the retained tensor whose data pointer
+    the launch passes for the contract argument named `key`, so poisoning
+    it poisons what the kernel reads.
+
+    Args:
+        prepared: What `_prepare_persistent_sum` returned.
+        key: Contract key of an argument that points at the start of a
+            retained tensor: `scratch` or `counters`.
+    """
+    closure = _closure_values(prepared.launch)
+    contract = closure["kernel"].contract
+    _, values = closure["arguments"]
+    (pointer,) = (
+        value
+        for argument, value in zip(contract.arguments, values, strict=True)
+        if argument.key == key
+    )
+    (buffer,) = (
+        value
+        for value in closure.values()
+        if isinstance(value, torch.Tensor) and value.data_ptr() == pointer
+    )
+    return buffer
 
 
 @pytest.mark.parametrize("resident_blocks", [1, 2, 3, 7, 168, 336])
@@ -100,7 +134,7 @@ def test_persistent_merge_never_observes_poisoned_scratch(resident_blocks):
         output,
         resident_blocks=resident_blocks,
     )
-    scratch = _closure_values(prepared.launch)["scratch"]
+    scratch = _bound_buffer(prepared, "scratch")
     expected = torch.tensor(lengths, dtype=torch.float32)
 
     for _ in range(100):
@@ -125,7 +159,7 @@ def test_persistent_poisoned_scratch_survives_graph_replay(resident_blocks):
         output,
         resident_blocks=resident_blocks,
     )
-    scratch = _closure_values(prepared.launch)["scratch"]
+    scratch = _bound_buffer(prepared, "scratch")
     expected = torch.tensor(lengths, dtype=torch.float32)
 
     # The first launch may only queue the wait for task storage. Capture
@@ -231,3 +265,96 @@ def test_persistent_capture_requires_initialized_task_storage(monkeypatch):
 
     with pytest.raises(RuntimeError, match="must launch once"):
         prepared.launch()
+
+
+def test_persistent_rejects_overlapping_cross_stream_launches():
+    """Fence one prepared object's mutable counters without synchronizing."""
+    values = torch.ones(33, device="cuda")
+    offsets = torch.tensor([0, 33], dtype=torch.int32, device="cuda")
+    output = torch.empty(1, device="cuda")
+    prepared = _prepare_persistent_sum(values, offsets, output)
+    first = torch.cuda.Stream()
+    second = torch.cuda.Stream()
+
+    with torch.cuda.stream(first):
+        torch.cuda._sleep(2_000_000_000)
+        prepared.launch()
+    with torch.cuda.stream(second):
+        with pytest.raises(RuntimeError, match="in flight on another stream"):
+            prepared.launch()
+
+    first.synchronize()
+    with torch.cuda.stream(second):
+        prepared.launch()
+    second.synchronize()
+    torch.testing.assert_close(output.cpu(), torch.tensor([33.0]))
+
+
+def test_persistent_kernel_is_not_cached_for_a_clean_child_process(
+    tmp_path, monkeypatch
+):
+    """Write no PTX to the persistent cache, and serve no child from it.
+
+    The private segmented path keeps its kernels in the process only. A
+    launch in the parent leaves the cache directory empty, and a clean
+    child process that may not compile is refused instead of being served
+    the parent's kernel.
+    """
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache_dir))
+
+    lengths = [0, 1, 33, 4097]
+    values = torch.ones(sum(lengths), device="cuda")
+    offsets = torch.tensor(_offsets(lengths), device="cuda", dtype=torch.int32)
+    output = torch.empty(len(lengths), device="cuda")
+    prepared = _prepare_persistent_sum(values, offsets, output)
+    prepared.launch()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        output.cpu(), torch.tensor(lengths, dtype=torch.float32)
+    )
+    assert not cache_dir.exists() or not any(cache_dir.iterdir())
+
+    script = textwrap.dedent(
+        """
+        import torch
+
+        from swage._segmented_qualification import _prepare_persistent_sum
+
+        lengths = [0, 1, 33, 4097]
+        host_offsets = [0]
+        for length in lengths:
+            host_offsets.append(host_offsets[-1] + length)
+        values = torch.ones(sum(lengths), device="cuda")
+        offsets = torch.tensor(
+            host_offsets, device="cuda", dtype=torch.int32
+        )
+        output = torch.empty(len(lengths), device="cuda")
+        try:
+            _prepare_persistent_sum(values, offsets, output)
+        except RuntimeError as error:
+            print(error)
+        """
+    )
+    root = pathlib.Path(__file__).parents[3]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(root / "python"), str(root / "build" / "python_packages"))
+    )
+    environment["SWAGE_CACHE_DIR"] = str(cache_dir)
+    environment["SWAGE_NO_COMPILE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    refusal = result.stdout.strip()
+    assert refusal.startswith(
+        "SWAGE_NO_COMPILE=1 refuses to compile kernel 'segmented_sum'"
+    )
+    assert refusal.endswith(
+        "the private segmented path has no persistent cache"
+    )

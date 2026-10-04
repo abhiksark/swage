@@ -43,7 +43,7 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
 
 def _compile_only(block):
     """Run the compile that `launch()` runs, without needing a device."""
-    from swage import _runtime
+    from swage import _cuda_backend, _runtime
 
     constexprs = {"BLOCK": block}
     signature = {
@@ -57,8 +57,10 @@ def _compile_only(block):
         descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
         constexprs=constexprs,
         target="sm_80",
+        adapter=_cuda_backend.CUDA_BACKEND,
     )
     return _runtime._compile_cached(
+        _cuda_backend.CUDA_BACKEND,
         specialization,
         add_kernel.__name__,
         block,
@@ -84,21 +86,21 @@ def _launch(block):
     )
     torch.cuda.synchronize()
     assert torch.equal(output, x + y)
-    return list(_runtime._ptx_cache.values())[-1]
+    return list(_runtime._artifact_cache.values())[-1]
 
 
 def _main(mode, touch, blocks):
     """Compile or launch once per block size and print a JSON report."""
-    from swage import _runtime
+    from swage import _cuda_backend, _runtime
 
     compiles = []
-    compile_native = _runtime._compile_native
+    compile_native = _cuda_backend._compile_native
 
     def counting_compile(*arguments):
         compiles.append(arguments[1])
         return compile_native(*arguments)
 
-    _runtime._compile_native = counting_compile
+    _cuda_backend._compile_native = counting_compile
     package = pathlib.Path(sw.__file__).parent
     if touch == "touch":
         # Same bytes, so the same key, but newer than this process.
@@ -113,7 +115,7 @@ def _main(mode, touch, blocks):
         "package": str(package),
         "keys": [artifact.key for artifact in artifacts],
         "ptx": [
-            hashlib.sha256(artifact.ptx.encode()).hexdigest()
+            hashlib.sha256(artifact.image.encode()).hexdigest()
             for artifact in artifacts
         ],
         "compiles": len(compiles),
@@ -200,6 +202,8 @@ def _assert_published_once_then_reused(cache, first, second):
     assert second["frontend"] == first["frontend"]
     assert second["native"] == first["native"]
     recorded = json.loads((cache / key / "metadata.json").read_text())
+    assert recorded["version"] == 4
+    assert (recorded["backend"], recorded["format"]) == ("cuda", "ptx")
     assert recorded["key"] == key
     assert recorded["specialization"]["frontend"] == first["frontend"]
     assert recorded["specialization"]["native"] == first["native"]

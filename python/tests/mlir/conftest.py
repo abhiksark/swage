@@ -47,6 +47,6 @@ def _shared_identity_ids():
     """
     torch = pytest.importorskip("torch")
     if torch.cuda.is_available():
-        from swage import _segmented_qualification as qualification
+        from swage import _segmented_plan as _plan
 
-        qualification._identity_ids(torch, torch.device("cuda", 0), 1)
+        _plan._identity_ids(torch, torch.device("cuda", 0), 1)

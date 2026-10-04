@@ -36,12 +36,11 @@ from itertools import accumulate, pairwise
 import pytest
 import swage
 import torch
-from swage import _runtime
+from swage import _abi, _cuda_backend
+from swage._segmented_programs import _reduction_kernel, _semantic_module
 from swage._segmented_qualification import (
     _prepare_persistent_sum,
     _prepare_planned_reduction,
-    _reduction_kernel,
-    _semantic_module,
     launch_gpu,
     launch_softmax_gpu,
 )
@@ -329,18 +328,41 @@ def _run_kernels():
 
 
 def _run_control():
-    """Launch the racy kernel on one block of 64 threads."""
+    """Launch the racy kernel on one block of 64 threads.
+
+    The kernel has no compiler, so its launch contract is written here: the
+    five parameters of the segmented ABI, all bound as user values.
+    """
+    user = [
+        _abi.KernelArgument("ptr", "user", source_index=index, access=access)
+        for index, access in enumerate(("read", "read", "write"))
+    ]
+    user += [
+        _abi.KernelArgument("i32", "user", source_index=index)
+        for index in (3, 4)
+    ]
+    contract = _abi.KernelContract(
+        version=2,
+        backend="cuda",
+        entry="racy_control",
+        launch=_abi.KernelLaunch("spmd-grid", (64, 1, 1)),
+        arguments=tuple(user),
+    )
     # The tensor comes first: creating it makes the CUDA context current.
     unused = torch.zeros(1, device="cuda")
     pointer = unused.data_ptr()
-    driver = _runtime._get_driver()
-    _, function = driver.load(_RACY_PTX, "racy_control")
-    driver.launch_segmented(
+    driver = _cuda_backend._get_driver()
+    _, function = driver.load(_RACY_PTX, contract.entry)
+    driver.launch_entry(
         function,
-        (1,),
-        64,
+        contract,
+        _abi.materialize_launch_arguments(
+            _abi.bind_kernel_contract(
+                contract, user=(pointer, pointer, pointer, 0, 0)
+            )
+        ),
+        (1, 1, 1),
         torch.cuda.current_stream().cuda_stream,
-        (pointer, pointer, pointer, 0, 0),
     )
     torch.cuda.synchronize()
     return {"control": True}

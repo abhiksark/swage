@@ -1,7 +1,7 @@
 # python/tests/mlir/reduction_programs.py
 """Semantic programs shared by static codegen and runtime qualification."""
 
-from swage._segmented_qualification import _reduction_kernel, _semantic_module
+from swage._segmented_programs import _reduction_kernel, _semantic_module
 
 
 def reduction_module(kind, transform, element="f32"):
