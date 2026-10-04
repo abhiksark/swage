@@ -344,9 +344,13 @@ def test_loaded_ptx_is_hashed_when_the_driver_loads_it(provenance):
     ]
 
 
-def test_loaded_ptx_sees_the_private_segmented_load_path(provenance):
+def test_loaded_ptx_sees_the_private_segmented_load_path(
+    provenance, monkeypatch
+):
     """Stay attached to the load call the prepared reductions really make."""
-    from swage import _segmented_qualification
+    from collections import OrderedDict
+
+    from swage import _abi, _cuda_backend, _segmented_runtime
 
     class Driver:
         def current_context(self):
@@ -356,10 +360,29 @@ def test_loaded_ptx_sees_the_private_segmented_load_path(provenance):
             return "module", "function"
 
     driver = Driver()
-    loaded = provenance.record_loaded_ptx(driver)
-    for _ in range(2):
-        _segmented_qualification._load_once(driver, "warp ptx", "segmented_sum")
-    _segmented_qualification._load_once(driver, "cta ptx", "segmented_sum")
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    contract = _abi.KernelContract(
+        version=_abi._VERSION,
+        backend="cuda",
+        entry="segmented_sum",
+        launch=_abi.KernelLaunch("spmd-grid", (128, 1, 1)),
+        arguments=(_abi.KernelArgument("ptr", "user", 0, access="read"),),
+    )
+    contract_json = _abi.serialize_kernel_contract(contract)
+    torch = types.SimpleNamespace(cuda=types.SimpleNamespace())
+    loaded = provenance.record_loaded_ptx(_cuda_backend._get_driver())
+    # Each prepared reduction leases its kernels; a second lease of the
+    # same PTX finds the module loaded.
+    leases = [
+        _segmented_runtime._lease(
+            torch, _segmented_runtime._Kernel(ptx, contract_json, contract)
+        )
+        for ptx in ("warp ptx", "warp ptx", "cta ptx")
+    ]
+    for lease in leases:
+        lease.release()
 
     assert [entry["sha256"] for entry in loaded] == [
         hashlib.sha256(text).hexdigest() for text in (b"warp ptx", b"cta ptx")

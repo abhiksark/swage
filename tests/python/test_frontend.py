@@ -641,9 +641,12 @@ def test_the_none_return_annotation_is_accepted(tmp_path):
     _assert_passes_check(
         add_kernel, signature=ADD_SIGNATURE, constexprs={"BLOCK": 128}
     )
-    assert _runtime._launch_descriptors(
-        add_kernel, {}, {"BLOCK": 128}, list(ADD_SIGNATURE)
-    ) == ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
+    assert _runtime._launch_descriptors(add_kernel, sl.float32) == (
+        "ptr<f32>",
+        "ptr<f32>",
+        "ptr<f32>",
+        "i32",
+    )
 
 
 def test_index_arithmetic_on_compile_time_operands_is_range_checked():
@@ -987,9 +990,4 @@ def test_launch_validation_applies_the_parameter_checks():
         sw.CompilationError,
         match="unsupported annotation 'int' on parameter 'n'",
     ):
-        _runtime._launch_descriptors(
-            add_kernel,
-            {},
-            {"BLOCK": 128},
-            ["x_ptr", "y_ptr", "output_ptr", "n"],
-        )
+        _runtime._launch_descriptors(add_kernel, sl.float32)

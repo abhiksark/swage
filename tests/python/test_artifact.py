@@ -23,27 +23,29 @@ from unittest import mock
 
 import pytest
 import swage
-from swage import _artifact, env
-from swage import _segmented_qualification as qualification
+from swage import _abi, _artifact, _cuda_backend, _runtime, env
+from swage import _segmented_plan as _plan
+from swage import _segmented_programs as _programs
+from swage import _segmented_runtime as _execution
 
 PROGRAM_TEXTS = {
-    "segmented_sum": qualification._semantic_module("sum"),
-    "segmented_max": qualification._semantic_module("max"),
-    "segmented_min": qualification._semantic_module("min"),
-    "segmented_mean": qualification._semantic_module("mean"),
-    "segmented_sum_f64": qualification._semantic_module("sum", "f64"),
-    "segmented_max_f64": qualification._semantic_module("max", "f64"),
-    "segmented_min_f64": qualification._semantic_module("min", "f64"),
-    "segmented_mean_f64": qualification._semantic_module("mean", "f64"),
+    "segmented_sum": _programs._semantic_module("sum"),
+    "segmented_max": _programs._semantic_module("max"),
+    "segmented_min": _programs._semantic_module("min"),
+    "segmented_mean": _programs._semantic_module("mean"),
+    "segmented_sum_f64": _programs._semantic_module("sum", "f64"),
+    "segmented_max_f64": _programs._semantic_module("max", "f64"),
+    "segmented_min_f64": _programs._semantic_module("min", "f64"),
+    "segmented_mean_f64": _programs._semantic_module("mean", "f64"),
     **{
-        qualification._reduction_kernel(kind, element, 2): (
-            qualification._semantic_module(kind, element, 2)
+        _programs._reduction_kernel(kind, element, 2): (
+            _programs._semantic_module(kind, element, 2)
         )
         for element in ("f32", "f64")
         for kind in ("sum", "max", "min", "mean")
     },
-    "ragged_softmax": qualification._SOFTMAX_MODULE,
-    "ragged_softmax_r2": qualification._softmax_text(2),
+    "ragged_softmax": _programs._SOFTMAX_MODULE,
+    "ragged_softmax_r2": _programs._softmax_text(2),
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
 
@@ -94,8 +96,8 @@ def _isolated(monkeypatch):
     monkeypatch.delenv("SWAGE_ARTIFACT_DIR", raising=False)
     monkeypatch.setattr(_artifact, "_selected", (None, None))
     monkeypatch.setattr(ctypes, "PyDLL", _FakeLibrary)
-    driver = types.SimpleNamespace(_native_launch=None)
-    monkeypatch.setattr(_artifact._runtime, "_get_driver", lambda: driver)
+    driver = types.SimpleNamespace(_native_launch=None, _split_launch=None)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
 
 
 def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
@@ -190,15 +192,28 @@ def _load(monkeypatch, directory):
     return _artifact.selected()
 
 
-def _request(program="segmented_sum", role="cta", target="sm_86"):
-    """Return what the runner passes for one kernel of one program."""
-    kernel = next(
+def _known(program, role):
+    """Return the kernel of the table for one role of one program."""
+    return next(
         kernel for kernel in _artifact._PROGRAMS[program] if kernel.role == role
     )
+
+
+def _request(program="segmented_sum", role="cta", target="sm_86"):
+    """Return what the runner passes for one kernel of one program."""
+    kernel = _known(program, role)
     return (
         kernel.compiler,
         PROGRAM_TEXTS[program],
         {"kernel_name": program, "target": target, **dict(kernel.options)},
+    )
+
+
+def _served(program="segmented_sum", role="cta"):
+    """Return the PTX and contract an artifact of `_manifest` serves."""
+    return (
+        f"// {program} {role}\n",
+        _artifact._contract_json(program, _known(program, role)),
     )
 
 
@@ -498,16 +513,16 @@ def test_an_artifact_gives_the_runner_its_block_widths_and_limits(
     description = _compiler_target_description()
     _select(monkeypatch, artifact_dir)
 
-    runner = qualification._target_description()
+    runner = _execution._target_description()
 
     assert runner.subgroup_width == description["subgroupWidth"]
     assert runner.cta_block_threads == description["ctaBlockThreads"]
     assert runner.split_block_threads == description["splitBlockThreads"]
-    assert qualification._planning_limits(None, None) == (
+    assert _plan._planning_limits(None, None) == (
         description["defaultWarpMaxElements"],
         description["defaultCtaChunkElements"],
     )
-    assert qualification._planning_limits(8, None) == (8, 4096)
+    assert _plan._planning_limits(8, None) == (8, 4096)
     assert sys.modules["mlir_swage"] is None
 
 
@@ -524,7 +539,7 @@ def test_the_subgroup_width_of_the_runner_is_the_one_of_the_manifest(
     manifest["target_description"]["subgroup_width"] = 16
     _select(monkeypatch, _write(tmp_path / "artifact", manifest))
 
-    assert qualification._target_description().subgroup_width == 16
+    assert _execution._target_description().subgroup_width == 16
 
 
 def test_a_selected_artifact_is_read_and_verified_once(
@@ -538,20 +553,70 @@ def test_a_selected_artifact_is_read_and_verified_once(
     assert _artifact.selected() is artifact
     assert artifact.target == "sm_86"
     assert artifact.directory == artifact_dir
-    assert artifact.kernel(*_request()) == "// segmented_sum cta\n"
+    assert artifact.kernel(*_request()) == _served()
 
 
 def test_an_artifact_serves_every_kernel_of_its_programs(
     artifact_dir, monkeypatch
 ):
-    """Answer each request of the table with the PTX of its file."""
+    """Answer each request of the table with its PTX file and contract."""
     artifact = _load(monkeypatch, artifact_dir)
 
     for program, kernels in _artifact._PROGRAMS.items():
         for kernel in kernels:
             assert artifact.kernel(*_request(program, kernel.role)) == (
-                f"// {program} {kernel.role}\n"
+                _served(program, kernel.role)
             )
+
+
+def test_an_artifact_serves_the_launch_contract_of_each_kernel(
+    artifact_dir, monkeypatch
+):
+    """Bind the user arguments by parameter and the others by plan key.
+
+    The contract comes from the role and the C type of each argument of
+    the manifest. A role of the segment function is a user argument at the
+    index of its parameter in the program text, and the others are the
+    scratch buffer, plan records, and counts derived from the plan.
+    """
+    artifact = _load(monkeypatch, artifact_dir)
+
+    for program, kernels in _artifact._PROGRAMS.items():
+        parameters = _programs._parameter_roles(PROGRAM_TEXTS[program])
+        for kernel in kernels:
+            _, served = artifact.kernel(*_request(program, kernel.role))
+            contract = _abi.parse_kernel_contract(served)
+
+            assert served == _abi.serialize_kernel_contract(contract)
+            assert (contract.backend, contract.entry) == (
+                "cuda",
+                program + kernel.entry_suffix,
+            )
+            assert contract.launch == _abi.KernelLaunch(
+                "spmd-grid", (kernel.block_size, 1, 1)
+            )
+            assert len(contract.arguments) == len(kernel.arguments)
+            for (role, kind), argument in zip(
+                kernel.arguments, contract.arguments
+            ):
+                pointer = kind.endswith("*")
+                if role in parameters:
+                    origin, source, key = "user", parameters.index(role), None
+                elif role == "scratch":
+                    origin, source, key = "scratch", None, role
+                else:
+                    origin = "plan" if pointer else "derived"
+                    source, key = None, role
+                access = None
+                if pointer:
+                    access = "read" if kind.startswith("const ") else "write"
+                assert argument == _abi.KernelArgument(
+                    kind="ptr" if pointer else "i32",
+                    origin=origin,
+                    source_index=source,
+                    key=key,
+                    access=access,
+                )
 
 
 def test_the_artifact_stands_in_for_the_native_compile_functions(
@@ -594,32 +659,40 @@ def test_a_kernel_lends_the_launcher_to_a_driver_without_one(
 ):
     """Give the driver the runtime library launcher, and keep a better one."""
     artifact = _load(monkeypatch, artifact_dir)
-    bare = types.SimpleNamespace(_native_launch=None)
-    monkeypatch.setattr(_artifact._runtime, "_get_driver", lambda: bare)
+    bare = types.SimpleNamespace(_native_launch=None, _split_launch=None)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: bare)
     artifact.kernel(*_request())
 
-    assert bare._native_launch == artifact._launch_kernel
+    assert bare._split_launch == artifact._launch_kernel
+    assert bare._native_launch is None
 
-    compiled = types.SimpleNamespace(_native_launch=print)
-    monkeypatch.setattr(_artifact._runtime, "_get_driver", lambda: compiled)
+    compiled = types.SimpleNamespace(_native_launch=print, _split_launch=None)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: compiled)
     artifact.kernel(*_request())
 
     assert compiled._native_launch is print
+    assert compiled._split_launch is None
 
 
 def _bindings_that_must_stay_unimported(monkeypatch):
-    """Make the bindings importable and fail the test if they are asked."""
-    monkeypatch.setattr(
-        _artifact._runtime.ctypes, "CDLL", lambda name: mock.MagicMock()
-    )
+    """Make the bindings importable and record each time they are asked.
+
+    Returns:
+        The list of requests for the bindings, and the bindings, whose two
+        launchers are markers the driver can be checked for.
+    """
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: mock.MagicMock())
     asked = []
+    bindings = types.SimpleNamespace(
+        _launch_cuda_kernel=print, _FixedCUDALaunch=repr
+    )
 
     def native_bindings():
         asked.append("bindings")
-        return types.SimpleNamespace(_launch_kernel=print)
+        return bindings
 
-    monkeypatch.setattr(_artifact._runtime, "_native_bindings", native_bindings)
-    return asked
+    monkeypatch.setattr(_runtime, "_native_bindings", native_bindings)
+    return asked, bindings
 
 
 def test_a_driver_takes_its_launcher_from_a_selected_artifact(
@@ -627,26 +700,30 @@ def test_a_driver_takes_its_launcher_from_a_selected_artifact(
 ):
     """Launch through the runtime library and leave the bindings alone.
 
-    The compiled launcher of the bindings loads LLVM with them. A process
+    The compiled launchers of the bindings load LLVM with them. A process
     that selected an artifact must not depend on the bindings being absent
     to stay free of LLVM, so its driver does not ask for them.
     """
-    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    asked, _ = _bindings_that_must_stay_unimported(monkeypatch)
     artifact = _load(monkeypatch, artifact_dir)
 
-    driver = _artifact._runtime._CudaDriver()
+    driver = _cuda_backend._CudaDriver()
 
-    assert driver._native_launch == artifact._launch_kernel
+    assert driver._split_launch == artifact._launch_kernel
+    assert driver._native_launch is None
+    assert driver._native_fixed_launcher is None
     assert asked == []
 
 
 def test_a_driver_takes_the_bindings_without_an_artifact(monkeypatch):
-    """Keep the compiled launcher of the bindings as the default."""
-    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    """Keep the compiled launchers of the bindings as the default."""
+    asked, bindings = _bindings_that_must_stay_unimported(monkeypatch)
 
-    driver = _artifact._runtime._CudaDriver()
+    driver = _cuda_backend._CudaDriver()
 
-    assert driver._native_launch is print
+    assert driver._native_launch is bindings._launch_cuda_kernel
+    assert driver._native_fixed_launcher is bindings._FixedCUDALaunch
+    assert driver._split_launch is None
     assert asked == ["bindings"]
 
 
@@ -659,12 +736,14 @@ def test_a_driver_does_not_fall_back_to_the_bindings_for_a_bad_artifact(
     serves other launches through ctypes meanwhile, and a kernel of an
     artifact that loads later lends it the launcher.
     """
-    asked = _bindings_that_must_stay_unimported(monkeypatch)
+    asked, _ = _bindings_that_must_stay_unimported(monkeypatch)
     _select(monkeypatch, tmp_path / "missing")
 
-    driver = _artifact._runtime._CudaDriver()
+    driver = _cuda_backend._CudaDriver()
 
     assert driver._native_launch is None
+    assert driver._split_launch is None
+    assert driver._native_fixed_launcher is None
     assert asked == []
 
 
@@ -1074,7 +1153,7 @@ def test_symbolic_links_are_followed_and_judged_by_their_target(
 
     artifact = _load(monkeypatch, link)
 
-    assert artifact.kernel(*_request()) == "// segmented_sum cta\n"
+    assert artifact.kernel(*_request()) == _served()
 
     stored.chmod(0o664)
     monkeypatch.setattr(_artifact, "_selected", (None, None))
@@ -1278,9 +1357,9 @@ def test_a_relative_directory_is_resolved_when_it_is_selected(
 def empty_kernel_memo(monkeypatch):
     """Give the test a process that holds no compiled segmented kernel."""
     monkeypatch.setattr(
-        qualification,
+        _execution,
         "_ptx_memo",
-        _artifact._runtime._BoundedCache(_artifact._runtime._CACHE_LIMIT),
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
 
 
@@ -1289,11 +1368,11 @@ def test_the_runner_takes_the_artifact_for_the_native_bindings(
 ):
     """Hand the runner the artifact, and the bindings only without one."""
     with pytest.raises(ImportError):
-        qualification._native_swage()
+        _execution._native_swage()
 
     artifact = _load(monkeypatch, artifact_dir)
 
-    assert qualification._native_swage() is artifact
+    assert _execution._native_swage() is artifact
 
 
 def test_the_runner_serves_a_kernel_from_the_artifact(
@@ -1303,7 +1382,7 @@ def test_the_runner_serves_a_kernel_from_the_artifact(
     artifact = _load(monkeypatch, artifact_dir)
 
     def compile_from(artifact):
-        return qualification._compile_once(
+        return _execution._compile_once(
             artifact._compile_segmented_reduction_ptx,
             PROGRAM_TEXTS["segmented_sum"],
             kernel_name="segmented_sum",
@@ -1312,12 +1391,13 @@ def test_the_runner_serves_a_kernel_from_the_artifact(
             use_task_ids=True,
         )
 
-    ptx = compile_from(artifact)
+    kernel = compile_from(artifact)
     for path in artifact_dir.iterdir():
         path.unlink()
 
-    assert ptx == "// segmented_sum cta\n"
-    assert compile_from(artifact) is ptx
+    assert (kernel.image, kernel.contract_json) == _served()
+    assert kernel.contract == _abi.parse_kernel_contract(kernel.contract_json)
+    assert compile_from(artifact) is kernel
     assert sys.modules["mlir_swage"] is None
 
 
@@ -1328,14 +1408,15 @@ def test_an_artifact_serves_kernels_while_compiling_is_switched_off(
     artifact = _load(monkeypatch, artifact_dir)
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
 
-    assert (
-        qualification._compile_once(
-            artifact._compile_fused_segmented_reduction_ptx,
-            PROGRAM_TEXTS["segmented_max"],
-            kernel_name="segmented_max",
-            target="sm_86",
-        )
-        == "// segmented_max mixed\n"
+    kernel = _execution._compile_once(
+        artifact._compile_fused_segmented_reduction_ptx,
+        PROGRAM_TEXTS["segmented_max"],
+        kernel_name="segmented_max",
+        target="sm_86",
+    )
+
+    assert (kernel.image, kernel.contract_json) == _served(
+        "segmented_max", "mixed"
     )
 
 
@@ -1351,7 +1432,7 @@ def test_the_runner_compiles_nothing_while_an_artifact_is_selected(
     native_compile.__name__ = "_compile_persistent_segmented_reduction_ptx"
 
     with pytest.raises(RuntimeError, match="holds no kernel 'segmented_sum'"):
-        qualification._compile_once(
+        _execution._compile_once(
             native_compile,
             PROGRAM_TEXTS["segmented_sum"],
             kernel_name="segmented_sum",
@@ -1359,7 +1440,7 @@ def test_the_runner_compiles_nothing_while_an_artifact_is_selected(
         )
     native_compile.__name__ = "_compile_fused_segmented_reduction_ptx"
     with pytest.raises(RuntimeError, match="the current device needs sm_120"):
-        qualification._compile_once(
+        _execution._compile_once(
             native_compile,
             PROGRAM_TEXTS["segmented_sum"],
             kernel_name="segmented_sum",
@@ -1373,20 +1454,20 @@ def test_the_runner_admits_a_program_from_the_artifact(
     """Skip planning admission, which needs the native bindings."""
     _select(monkeypatch, artifact_dir)
     monkeypatch.setattr(
-        qualification,
+        _plan,
         "_admitted",
-        _artifact._runtime._BoundedCache(_artifact._runtime._CACHE_LIMIT),
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
     )
 
     for _ in range(2):
         assert (
-            qualification._admit_program(
+            _plan._admit_program(
                 PROGRAM_TEXTS["segmented_max"], "segmented_max", 32, 4096
             )
             is False
         )
     with pytest.raises(RuntimeError, match="was planned for"):
-        qualification._admit_program(
+        _plan._admit_program(
             PROGRAM_TEXTS["segmented_max"], "segmented_max", 8, 64
         )
     assert sys.modules["mlir_swage"] is None
@@ -1647,7 +1728,9 @@ def test_the_compile_module_defines_no_public_name():
 
     assert defined == []
     assert swage.__all__ == [
+        "BackendUnavailableError",
         "CompilationError",
+        "SwageError",
         "jit",
         "segment_reduce",
         "segment_softmax",

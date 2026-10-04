@@ -1,10 +1,11 @@
 # tests/python/test_runtime.py
-"""LLVM-free tests for the fixed vector-add CUDA launch boundary."""
+"""LLVM-free tests for the fixed elementwise launch and its runtime."""
 
 import ctypes
 import gc
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
 import pathlib
@@ -14,15 +15,19 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import types
 import warnings
 import weakref
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import pytest
 import swage as sw
 import swage.language as sl
+from swage import _abi, _cuda_backend
 
 
 @sw.jit
@@ -33,6 +38,28 @@ def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
     x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
     sl.store(output_ptr + offsets, x + y, mask=mask)
+
+
+@sw.jit
+def multiply_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+    """Canonical vector multiply used to exercise launch admission."""
+    pid = sl.program_id(0)
+    offsets = pid * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+    sl.store(output_ptr + offsets, x * y, mask=mask)
+
+
+@sw.jit
+def renamed_kernel(left, right, destination, length, TILE: sl.constexpr):
+    """Canonical vector add with arbitrary diagnostic parameter labels."""
+    pid = sl.program_id(0)
+    offsets = pid * TILE + sl.arange(0, TILE)
+    mask = offsets < length
+    x = sl.load(left + offsets, mask=mask, other=0.0)
+    y = sl.load(right + offsets, mask=mask, other=0.0)
+    sl.store(destination + offsets, x + y, mask=mask)
 
 
 @sw.jit
@@ -84,7 +111,170 @@ def annotated_block_kernel(  # noqa: D103
 
 
 _IMPORTED_NS = time.time_ns()
-_SHARED_KEY = {"kernel": "add_kernel", "target": "sm_86"}
+
+
+def _user(kind, index, access=None):
+    """Return a contract argument bound to source parameter `index`."""
+    return _abi.KernelArgument(kind, "user", source_index=index, access=access)
+
+
+def _keyed(kind, origin, key, access=None):
+    """Return a derived, plan, or scratch contract argument named `key`."""
+    return _abi.KernelArgument(kind, origin, key=key, access=access)
+
+
+# The fixed elementwise kernel: two inputs, the output, and the count.
+_FIXED_ARGUMENTS = (
+    _user("ptr", 0, "read"),
+    _user("ptr", 1, "read"),
+    _user("ptr", 2, "write"),
+    _user("i32", 3),
+)
+# A segmented kernel binds the parameters of its segment function by
+# position (values, offsets, output, value_count, segment_count), and its
+# plan records, plan counts, and scratch buffers by key.
+_SEGMENT_BUFFERS = (
+    _user("ptr", 0, "read"),
+    _user("ptr", 1, "read"),
+    _user("ptr", 2, "write"),
+)
+_DIRECT_ARGUMENTS = (*_SEGMENT_BUFFERS, _user("i32", 3), _user("i32", 4))
+_TASK_ARGUMENTS = (
+    *_SEGMENT_BUFFERS,
+    _keyed("ptr", "plan", "task_ids", "read"),
+    _user("i32", 3),
+    _keyed("i32", "derived", "task_count"),
+    _user("i32", 4),
+)
+_FUSED_ARGUMENTS = (
+    *_SEGMENT_BUFFERS,
+    _keyed("ptr", "plan", "task_ids", "read"),
+    _user("i32", 3),
+    _keyed("i32", "derived", "warp_task_count"),
+    _keyed("i32", "derived", "cta_task_count"),
+    _user("i32", 4),
+)
+_PERSISTENT_ARGUMENTS = (
+    *_SEGMENT_BUFFERS,
+    *(
+        _keyed("ptr", "plan", key, "read")
+        for key in (
+            "warp_ids",
+            "cta_ids",
+            "partial_ranges",
+            "partial_merge_ids",
+            "merge_records",
+        )
+    ),
+    _keyed("ptr", "scratch", "scratch", "readwrite"),
+    _keyed("ptr", "scratch", "counters", "readwrite"),
+    _user("i32", 3),
+    *(
+        _keyed("i32", "derived", key)
+        for key in (
+            "warp_task_count",
+            "cta_task_count",
+            "partial_count",
+            "merge_count",
+        )
+    ),
+    _user("i32", 4),
+)
+
+
+def _contract(
+    entry="add_kernel", block=128, arguments=_FIXED_ARGUMENTS, backend="cuda"
+):
+    """Return the launch contract a compiler gives one kernel."""
+    if backend == "cuda":
+        launch = _abi.KernelLaunch("spmd-grid", (block, 1, 1))
+    else:
+        launch = _abi.KernelLaunch("host-call")
+    return _abi.KernelContract(
+        _abi._VERSION, backend, entry, launch, tuple(arguments)
+    )
+
+
+def _contract_json(entry="add_kernel", block=128, **options):
+    """Return the canonical JSON of `_contract(entry, block, **options)`."""
+    return _abi.serialize_kernel_contract(_contract(entry, block, **options))
+
+
+def _spec(kernel="add_kernel", block=128, **fields):
+    """Return a fixed CUDA specialization of `kernel`, plus `fields`."""
+    return {
+        "kernel": kernel,
+        "backend": "cuda",
+        "format": "ptx",
+        "target": "sm_86",
+        "descriptors": ["ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"],
+        "codegen": {"lowering": "fixed", "block_size": block, "options": []},
+        **fields,
+    }
+
+
+_SHARED_KEY = _spec()
+
+
+def _artifact(
+    key="cache-key",
+    kernel_name="add_kernel",
+    block=128,
+    *,
+    image="ptx",
+    lowered="lowered",
+):
+    """Return the verified CUDA artifact a fixed compile would produce."""
+    from swage import _runtime
+
+    contract_json = _contract_json(kernel_name, block)
+    return _runtime._make_artifact(
+        key,
+        _cuda_backend.CUDA_BACKEND,
+        "sm_86",
+        lowered,
+        image,
+        contract_json,
+        _abi.parse_kernel_contract(contract_json),
+    )
+
+
+def _fixed_compile_artifact(
+    _adapter, _specialization, kernel_name, block_size, *_args, **_kwargs
+):
+    """Stand in for `_runtime._compile_cached` without any cache."""
+    return _artifact(kernel_name=kernel_name, block=block_size)
+
+
+def _compiler(calls=None, *, ptx="ptx", lowered="lowered"):
+    """Return a stand-in for `_cuda_backend._compile_native`.
+
+    It answers every compile with `lowered`, `ptx`, and the canonical fixed
+    contract of the requested kernel and block, and records it in `calls`.
+    """
+
+    def compile_native(_module, kernel_name, block_size, *_options):
+        if calls is not None:
+            calls.append(True)
+        return lowered, ptx, _contract_json(kernel_name, block_size)
+
+    return compile_native
+
+
+def _compile(specialization=None, emit=object, **options):
+    """Compile one fixed CUDA specialization through both caches."""
+    from swage import _runtime
+
+    if specialization is None:
+        specialization = _SHARED_KEY
+    return _runtime._compile_cached(
+        _cuda_backend.CUDA_BACKEND,
+        specialization,
+        specialization["kernel"],
+        specialization["codegen"]["block_size"],
+        emit,
+        **options,
+    )
 
 
 def _identity(**overrides):
@@ -100,16 +290,34 @@ def _identity(**overrides):
     return identity
 
 
+def _unpersisted_identity():
+    """Return an identity without native libraries, which nothing persists."""
+    return _identity(revision=None, clean=False, llvm=None, native=None)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path, monkeypatch):
-    """Keep every test away from the user's cache and from earlier tests."""
+    """Keep every test away from the user's cache and from earlier tests.
+
+    Each test also starts with empty process caches of artifacts and of
+    loaded modules, whose bounds are read again, and leaks neither.
+    """
     from swage import _runtime
 
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path / "isolated-cache"))
     monkeypatch.setattr(_runtime, "_cache_off", {}, raising=False)
+    monkeypatch.setattr(_runtime, "_artifact_cache", OrderedDict())
+    monkeypatch.setattr(_runtime, "_memory_cache_entries", None)
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    monkeypatch.setattr(_cuda_backend, "_memory_cache_entries", None)
     for name in (
+        "SWAGE_ARTIFACT_DIR",
         "SWAGE_CACHE_MAX_ENTRIES",
         "SWAGE_CACHE_READ_ONLY",
+        "SWAGE_DUMP_MLIR",
+        "SWAGE_DUMP_PTX",
+        "SWAGE_MEMORY_CACHE_ENTRIES",
         "SWAGE_NO_COMPILE",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -127,17 +335,16 @@ def _use_shared_cache(cache_dir):
 
 def _cold_start(cache_dir, results_dir, barrier, rounds):
     """Cold-start one key per round, in step with the other processes."""
-    _runtime = _use_shared_cache(cache_dir)
-    ptx = f"ptx from process {os.getpid()}"
-    _runtime._compile_native = lambda *_args: ("lowered", ptx)
+    _use_shared_cache(cache_dir)
+    _cuda_backend._compile_native = _compiler(
+        ptx=f"ptx from process {os.getpid()}"
+    )
     try:
         for round_id in range(rounds):
             barrier.wait(timeout=60)
-            artifact = _runtime._compile_cached(
-                dict(_SHARED_KEY, round=round_id), "add_kernel", 128, object
-            )
+            artifact = _compile(dict(_SHARED_KEY, round=round_id))
             result = pathlib.Path(results_dir) / f"{round_id}-{os.getpid()}"
-            result.write_text(artifact.ptx)
+            result.write_text(artifact.image)
     except BaseException:
         barrier.abort()  # Release the other processes instead of timing out.
         raise
@@ -146,21 +353,18 @@ def _cold_start(cache_dir, results_dir, barrier, rounds):
 def _churn(cache_dir, barrier, rounds, bound):
     """Publish a contended key and a private key per round, bounded."""
     os.environ["SWAGE_CACHE_MAX_ENTRIES"] = str(bound)
-    _runtime = _use_shared_cache(cache_dir)
-    _runtime._compile_native = lambda *_args: ("lowered", "ptx")
+    _use_shared_cache(cache_dir)
+    _cuda_backend._compile_native = _compiler()
     # A cache that gives up warns, and here a warning fails the process.
     warnings.simplefilter("error")
     try:
         for round_id in range(rounds):
             barrier.wait(timeout=60)
             for owner in ("every process", os.getpid()):
-                artifact = _runtime._compile_cached(
-                    dict(_SHARED_KEY, round=round_id, owner=owner),
-                    "add_kernel",
-                    128,
-                    object,
+                artifact = _compile(
+                    dict(_SHARED_KEY, round=round_id, owner=owner)
                 )
-                assert artifact.ptx == "ptx"
+                assert artifact.image == "ptx"
     except BaseException:
         barrier.abort()  # Release the other processes instead of timing out.
         raise
@@ -190,7 +394,7 @@ def _hang(_seconds):
 def _killed_writer(cache_dir):
     """Die from SIGKILL after writing one of the three entry files."""
     _runtime = _use_shared_cache(cache_dir)
-    _runtime._compile_native = lambda *_args: ("lowered", "ptx")
+    _cuda_backend._compile_native = _compiler()
     write = _runtime._atomic_write
 
     def write_then_die(path, contents):
@@ -198,7 +402,7 @@ def _killed_writer(cache_dir):
         os.kill(os.getpid(), signal.SIGKILL)
 
     _runtime._atomic_write = write_then_die
-    _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    _compile()
 
 
 class _Device:
@@ -233,6 +437,11 @@ class _Tensor:
         self._negative = negative
         self._conjugate = conjugate
         self.requires_grad = requires_grad
+        self._element_size = 1
+        if self.dtype is torch.float32:
+            self._element_size = 4
+        elif self.dtype is getattr(torch, "float16", None):
+            self._element_size = 2
         self.recorded_streams = []
 
     def dim(self):
@@ -251,7 +460,7 @@ class _Tensor:
         return self._size
 
     def element_size(self):
-        return 4
+        return self._element_size
 
     def data_ptr(self):
         return self._pointer
@@ -261,9 +470,12 @@ class _Tensor:
 
 
 class _Driver:
+    """A CUDA driver that records loads and launches and completes all."""
+
     def __init__(self):
         self.loads = []
         self.launches = []
+        self.launch_kinds = []
 
     def current_context(self):
         return 0xCAFE
@@ -272,16 +484,122 @@ class _Driver:
         self.loads.append((ptx, kernel_name))
         return 0xBEEF, 0xF00D
 
-    def launch(self, function, grid, block, stream, arguments):
-        self.launches.append((function, grid, block, stream, arguments))
+    def event_create(self):
+        return 0xE001
+
+    def is_stream_capturing(self, _stream):
+        return False
+
+    def event_record(self, _event, _stream):
+        return None
+
+    def event_query(self, _event):
+        return True
+
+    def event_destroy(self, _event):
+        return None
+
+    def module_unload(self, _module):
+        return None
+
+    def launch_entry(self, function, contract, bindings, grid, stream):
+        kinds, arguments = bindings
+        self.launch_kinds.append(kinds)
+        self.launches.append(
+            (function, grid, contract.launch.block[0], stream, arguments)
+        )
+
+
+class _RecordingLease:
+    def __init__(self, entry):
+        self.entry = entry
+        self.released = False
+
+    def release(self):
+        self.released = True
+
+
+class _RecordingBackend:
+    """A backend adapter that records every call it receives."""
+
+    def __init__(self, name, *, compile_error=None):
+        self.name = name
+        self.artifact_format = "ptx" if name == "cuda" else "llvm-jit"
+        self.persistent_cache = False
+        self.compile_error = compile_error
+        self.calls = []
+
+    def compile(
+        self,
+        _module,
+        kernel_name,
+        block_size,
+        target,
+        lowering_kind,
+        lowering_options,
+    ):
+        self.calls.append(
+            (
+                "compile",
+                kernel_name,
+                block_size,
+                target,
+                lowering_kind,
+                lowering_options,
+            )
+        )
+        if self.compile_error is not None:
+            raise self.compile_error
+        if self.name == "cuda":
+            return "lowered", "ptx", _contract_json(kernel_name, block_size)
+        return "lowered", object(), _contract_json(kernel_name, backend="cpu")
+
+    def lease(self, artifact, *, capturing=False):
+        self.calls.append(("lease", artifact.backend))
+        return _RecordingLease(artifact.image)
+
+    def launch(
+        self,
+        lease,
+        contract,
+        bindings,
+        *,
+        grid,
+        stream,
+        capturing,
+    ):
+        self.calls.append(
+            (
+                "launch",
+                contract.backend,
+                bindings,
+                grid,
+                stream,
+                capturing,
+            )
+        )
+        assert not lease.released
+
+    def release(self, lease):
+        self.calls.append(("release",))
+        lease.release()
 
 
 def _fake_torch(
-    *, available=True, current_device=0, max_threads=1024, version="2.6.0"
+    *,
+    available=True,
+    current_device=0,
+    max_threads=1024,
+    version="2.6.0",
+    low_precision=False,
 ):
     torch = types.ModuleType("torch")
     torch.__version__ = version
     torch.float32 = object()
+    if low_precision:
+        torch.float16 = object()
+        torch.float8_e4m3fn = object()
+        torch.float8_e5m2 = object()
     torch.strided = object()
     stream = types.SimpleNamespace(cuda_stream=0xABCD)
     torch.cuda = types.SimpleNamespace(
@@ -292,6 +610,7 @@ def _fake_torch(
         get_device_properties=lambda _device=None: types.SimpleNamespace(
             max_threads_per_block=max_threads
         ),
+        is_current_stream_capturing=lambda: False,
     )
     torch.version = types.SimpleNamespace(cuda="13.0")
     torch.Tensor = _Tensor
@@ -323,16 +642,130 @@ def _install_launch_fakes(monkeypatch, torch):
     driver = _Driver()
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_cached",
-        lambda *_args, **_kwargs: _runtime._Artifact(
-            key="cache-key", lowered="lowered", ptx="ptx"
-        ),
-    )
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
-    _runtime._loaded_functions.clear()
+    monkeypatch.setattr(_runtime, "_compile_cached", _fixed_compile_artifact)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
     return driver
+
+
+def _install_recording_backends(monkeypatch, torch, *adapters):
+    """Route launches to `adapters` by name, with nothing persisted.
+
+    A CUDA launch makes a context current before it leases its module, so
+    a fake driver answers for the context.
+    """
+    from swage import _runtime
+
+    by_name = {adapter.name: adapter for adapter in adapters}
+    driver = _Driver()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(_runtime, "get_backend", by_name.__getitem__)
+    monkeypatch.setattr(_runtime, "_compiler_identity", _unpersisted_identity)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    _runtime._identity_cache = None
+    return driver
+
+
+@pytest.mark.parametrize(
+    ("requested_backend", "device_type"),
+    [(None, "cuda"), ("cuda", "cuda"), ("cpu", "cpu")],
+)
+def test_public_launch_routes_only_to_selected_backend(
+    monkeypatch,
+    requested_backend,
+    device_type,
+):
+    """Route default CUDA, explicit CUDA, and explicit CPU without fallback."""
+    adapters = {name: _RecordingBackend(name) for name in ("cuda", "cpu")}
+    torch, _ = _fake_torch()
+    _install_recording_backends(monkeypatch, torch, *adapters.values())
+    monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
+    add_kernel.__dict__.pop("_specialization_memo", None)
+    arguments = _arguments(torch, device_type=device_type)
+    launch_kwargs = {
+        "arguments": arguments,
+        "constexprs": {"BLOCK": 128},
+        "grid": (2,),
+    }
+    if requested_backend is not None:
+        launch_kwargs["backend"] = requested_backend
+
+    add_kernel.launch(**launch_kwargs)
+
+    selected = requested_backend or "cuda"
+    other = "cpu" if selected == "cuda" else "cuda"
+    assert [call[0] for call in adapters[selected].calls] == [
+        "compile",
+        "lease",
+        "launch",
+        "release",
+    ]
+    assert adapters[selected].calls[0][3] == (
+        "native" if selected == "cpu" else "sm_86"
+    )
+    physical = adapters[selected].calls[2]
+    assert physical[3] == (None if selected == "cpu" else (2, 1, 1))
+    assert adapters[other].calls == []
+
+
+def test_unknown_backend_fails_before_torch_or_pointer_access(monkeypatch):
+    """Reject an unknown backend before importing torch or reading inputs."""
+    real_import = __import__
+
+    def reject_torch(name, *args, **kwargs):
+        if name == "torch":
+            pytest.fail("unknown backend imported torch")
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=reject_torch):
+        with pytest.raises(
+            ValueError,
+            match="unknown execution backend 'rocm'; expected 'cpu' or 'cuda'",
+        ):
+            add_kernel.launch(
+                arguments=object(),
+                constexprs=object(),
+                grid=object(),
+                backend="rocm",
+            )
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_selected_backend_compile_failure_does_not_consult_other(
+    monkeypatch, backend, unavailable
+):
+    """Never probe the other backend after compilation or availability fails."""
+    error = (
+        sw.BackendUnavailableError(
+            "native missing",
+            code="native-unavailable",
+            backend=backend,
+            remediation="Install a supported wheel.",
+        )
+        if unavailable
+        else RuntimeError("compile failed")
+    )
+    other = "cuda" if backend == "cpu" else "cpu"
+    adapters = {
+        backend: _RecordingBackend(backend, compile_error=error),
+        other: _RecordingBackend(other),
+    }
+    torch, _ = _fake_torch()
+    _install_recording_backends(monkeypatch, torch, *adapters.values())
+    monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
+    add_kernel.__dict__.pop("_specialization_memo", None)
+
+    with pytest.raises(RuntimeError) as caught:
+        add_kernel.launch(
+            arguments=_arguments(torch, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(2,),
+            backend=backend,
+        )
+
+    assert caught.value is error
+    assert [call[0] for call in adapters[backend].calls] == ["compile"]
+    assert adapters[other].calls == []
 
 
 def test_launch_uses_current_stream_and_raw_abi(monkeypatch):
@@ -350,10 +783,35 @@ def test_launch_uses_current_stream_and_raw_abi(monkeypatch):
     assert result is None
     assert driver.loads == [("ptx", "add_kernel")]
     assert driver.launches == [
-        (0xF00D, (2,), 128, 0xABCD, (0x1000, 0x2000, 0x3000, 129))
+        (0xF00D, (2, 1, 1), 128, 0xABCD, (0x1000, 0x2000, 0x3000, 129))
     ]
+    assert driver.launch_kinds == [("ptr", "ptr", "ptr", "i32")]
     for tensor in tuple(arguments.values())[:3]:
         assert tensor.recorded_streams == [stream]
+
+
+def test_launch_accepts_renamed_canonical_parameters(monkeypatch):
+    """Use source order and compiler metadata instead of fixed labels."""
+    torch, _ = _fake_torch()
+    driver = _install_launch_fakes(monkeypatch, torch)
+    monkeypatch.setattr(renamed_kernel, "emit_mlir", lambda **_kwargs: object())
+    arguments = {
+        "left": _Tensor(torch, pointer=0x1000),
+        "right": _Tensor(torch, pointer=0x2000),
+        "destination": _Tensor(torch, pointer=0x3000),
+        "length": 129,
+    }
+
+    renamed_kernel.launch(
+        arguments=arguments,
+        constexprs={"TILE": 128},
+        grid=(2,),
+    )
+
+    assert driver.loads == [("ptx", "renamed_kernel")]
+    assert driver.launches == [
+        (0xF00D, (2, 1, 1), 128, 0xABCD, (0x1000, 0x2000, 0x3000, 129))
+    ]
 
 
 def test_launch_advances_the_version_of_the_output_only(monkeypatch):
@@ -428,6 +886,169 @@ def test_empty_launch_is_a_validated_noop(monkeypatch):
     emit.assert_not_called()
 
 
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("arguments-type", "mapping"),
+        ("argument-count", "arguments must contain exactly"),
+        ("constexpr-count", "constexprs must contain exactly"),
+        ("zero-block", "positive integer"),
+        ("negative-block", "positive integer"),
+        ("boolean-block", "positive integer"),
+        ("oversized-block", "1024|device limit"),
+        ("grid-type", "one-element tuple"),
+        ("boolean-grid", "one-element tuple"),
+        ("negative-grid", "grid must equal"),
+        ("multidimensional-grid", "one-element tuple"),
+        ("grid-count", "grid must equal"),
+        ("boolean-count", "nonnegative i32"),
+        ("floating-count", "nonnegative i32"),
+        ("negative-count", "nonnegative i32"),
+        ("oversized-count", "nonnegative i32"),
+        ("length", "exceeds tensor length"),
+        ("rank", "rank one"),
+        ("stride", "contiguous"),
+        ("dtype", "must have dtype"),
+        ("mixed-dtype", "same dtype"),
+        ("device", "tensor"),
+        ("zero-rank", "rank one"),
+        ("zero-stride", "contiguous"),
+        ("zero-dtype", "must have dtype"),
+        ("zero-device", "tensor"),
+    ],
+)
+def test_multiply_rejects_invalid_launches_before_backend_work(
+    monkeypatch, backend, warm, case, reason
+):
+    """Apply multiplication admission before cold or cached backend work."""
+    torch, _ = _fake_torch()
+    adapter = _RecordingBackend(backend)
+    _install_recording_backends(monkeypatch, torch, adapter)
+    monkeypatch.setattr(
+        multiply_kernel, "emit_mlir", lambda **_kwargs: object()
+    )
+    multiply_kernel.__dict__.pop("_specialization_memo", None)
+    if warm:
+        multiply_kernel.launch(
+            arguments=_arguments(torch, n=1, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(1,),
+            backend=backend,
+        )
+    calls_before = list(adapter.calls)
+    arguments = _arguments(torch, n=1, device_type=backend)
+    constexprs = {"BLOCK": 128}
+    grid = (1,)
+    if case == "arguments-type":
+        arguments = []
+    elif case == "argument-count":
+        arguments.pop("y_ptr")
+    elif case == "constexpr-count":
+        constexprs["EXTRA"] = 1
+    elif case == "zero-block":
+        constexprs["BLOCK"] = 0
+    elif case == "negative-block":
+        constexprs["BLOCK"] = -1
+    elif case == "boolean-block":
+        constexprs["BLOCK"] = True
+    elif case == "oversized-block":
+        constexprs["BLOCK"] = 2048
+        grid = (1,)
+    elif case == "grid-type":
+        grid = [1]
+    elif case == "boolean-grid":
+        grid = (True,)
+    elif case == "negative-grid":
+        grid = (-1,)
+    elif case == "multidimensional-grid":
+        grid = (1, 1)
+    elif case == "grid-count":
+        grid = (2,)
+    elif case == "boolean-count":
+        arguments["n"] = True
+    elif case == "floating-count":
+        arguments["n"] = 1.0
+    elif case == "negative-count":
+        arguments["n"] = -1
+    elif case == "oversized-count":
+        arguments["n"] = 1 << 31
+    elif case == "length":
+        arguments["x_ptr"] = _Tensor(torch, size=0, device_type=backend)
+    elif case == "rank":
+        arguments["y_ptr"] = _Tensor(torch, rank=2, device_type=backend)
+    elif case == "stride":
+        arguments["output_ptr"] = _Tensor(
+            torch, contiguous=False, device_type=backend
+        )
+    elif case == "dtype":
+        arguments["x_ptr"] = _Tensor(torch, dtype=object(), device_type=backend)
+    elif case == "mixed-dtype":
+        torch.float16 = object()
+        arguments["y_ptr"] = _Tensor(
+            torch, dtype=torch.float16, device_type=backend
+        )
+    elif case == "device":
+        wrong_device = "cpu" if backend == "cuda" else "cuda"
+        arguments["x_ptr"] = _Tensor(torch, device_type=wrong_device)
+    elif case.startswith("zero-"):
+        arguments = _arguments(torch, n=0, size=0, device_type=backend)
+        grid = (0,)
+        parameter = {
+            "zero-rank": "x_ptr",
+            "zero-stride": "y_ptr",
+            "zero-dtype": "output_ptr",
+            "zero-device": "x_ptr",
+        }[case]
+        overrides = {"size": 0, "device_type": backend}
+        if case == "zero-rank":
+            overrides["rank"] = 2
+        elif case == "zero-stride":
+            overrides["contiguous"] = False
+        elif case == "zero-dtype":
+            overrides["dtype"] = object()
+        else:
+            overrides["device_type"] = "cpu" if backend == "cuda" else "cuda"
+        arguments[parameter] = _Tensor(torch, **overrides)
+
+    with pytest.raises((TypeError, ValueError), match=reason):
+        multiply_kernel.launch(
+            arguments=arguments,
+            constexprs=constexprs,
+            grid=grid,
+            backend=backend,
+        )
+
+    assert adapter.calls == calls_before
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_empty_multiply_is_a_validated_noop_for_every_backend(
+    monkeypatch, backend
+):
+    """Validate zero work without compilation, pointer access, or writes."""
+    torch, _ = _fake_torch()
+    adapter = _RecordingBackend(backend)
+    _install_recording_backends(monkeypatch, torch, adapter)
+    monkeypatch.setattr(
+        _Tensor,
+        "data_ptr",
+        lambda _self: pytest.fail("zero work acquired a raw pointer"),
+    )
+    with mock.patch.object(multiply_kernel, "emit_mlir") as emit:
+        multiply_kernel.launch(
+            arguments=_arguments(torch, n=0, size=0, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(0,),
+            backend=backend,
+        )
+
+    emit.assert_not_called()
+    assert adapter.calls == []
+    assert torch.advanced == []
+
+
 @pytest.mark.parametrize(
     ("arguments", "constexprs", "grid", "reason"),
     [
@@ -482,6 +1103,88 @@ def test_launch_rejects_invalid_tensor_metadata(
         )
 
 
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("n", [0, 1])
+@pytest.mark.parametrize("dtype_name", ["int32", "bfloat16", "float64"])
+def test_unsupported_dtypes_fail_before_pointer_acquisition(
+    monkeypatch, backend, n, dtype_name
+):
+    """Reject unsupported storage even for a zero-length public launch."""
+    torch, _ = _fake_torch(low_precision=True)
+    dtype = object()
+    setattr(torch, dtype_name, dtype)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    def reject_pointer_read(self):
+        raise AssertionError("validation must precede data_ptr")
+
+    monkeypatch.setattr(_Tensor, "data_ptr", reject_pointer_read)
+    with pytest.raises(TypeError, match="argument 'x_ptr' must have dtype"):
+        add_kernel.launch(
+            arguments=_arguments(torch, n=n, dtype=dtype, device_type=backend),
+            constexprs={"BLOCK": 128},
+            grid=(n,),
+            backend=backend,
+        )
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("n", [0, 1])
+@pytest.mark.parametrize(
+    ("base_dtype", "mixed_dtype", "parameter"),
+    [
+        ("float32", "float16", "y_ptr"),
+        ("float8_e4m3fn", "float8_e5m2", "output_ptr"),
+    ],
+)
+def test_mixed_dtypes_fail_before_pointer_acquisition(
+    monkeypatch, backend, n, base_dtype, mixed_dtype, parameter
+):
+    """Reject mixed input/output types, including equal-width FP8 formats."""
+    torch, _ = _fake_torch(low_precision=True)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    arguments = _arguments(
+        torch, n=n, dtype=getattr(torch, base_dtype), device_type=backend
+    )
+    arguments[parameter].dtype = getattr(torch, mixed_dtype)
+
+    def reject_pointer_read(self):
+        raise AssertionError("validation must precede data_ptr")
+
+    monkeypatch.setattr(_Tensor, "data_ptr", reject_pointer_read)
+    with pytest.raises(
+        TypeError,
+        match=f"argument '{parameter}' must have the same dtype",
+    ):
+        add_kernel.launch(
+            arguments=arguments,
+            constexprs={"BLOCK": 128},
+            grid=(n,),
+            backend=backend,
+        )
+
+
+@pytest.mark.parametrize("flag", ["_negative", "_conjugate"])
+def test_lazy_metadata_fails_before_any_pointer_access(monkeypatch, flag):
+    """Reject unresolved metadata in every position before pointer access."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    monkeypatch.setattr(
+        _Tensor, "data_ptr", lambda _self: pytest.fail("pointer read")
+    )
+    for name in ("x_ptr", "y_ptr", "output_ptr"):
+        for n in (0, 1):
+            arguments = _arguments(torch, n=n)
+            setattr(arguments[name], flag, True)
+            with pytest.raises(
+                ValueError, match=f"{name}.*(negation|conjugate)"
+            ):
+                _runtime._validate_runtime_arguments(
+                    arguments, tuple(arguments), torch, "cuda"
+                )
+
+
 @pytest.mark.parametrize(
     ("view", "reason"),
     [
@@ -526,15 +1229,13 @@ def test_launch_rejects_tensors_that_require_grad(monkeypatch, name):
     assert driver.loads == driver.launches == []
 
 
-# Each fake tensor holds 129 four-byte elements: 0x204 bytes.
+# A launch of 129 four-byte elements covers 0x204 bytes of each tensor.
 @pytest.mark.parametrize(
     ("pointers", "overlapped"),
     [
-        ({"output_ptr": 0x1000}, "x_ptr"),
         ({"output_ptr": 0x1004}, "x_ptr"),
         ({"output_ptr": 0x1000 - 0x200}, "x_ptr"),
         ({"output_ptr": 0x1000 + 0x200}, "x_ptr"),
-        ({"output_ptr": 0x2000}, "y_ptr"),
         ({"output_ptr": 0x2000 - 4}, "y_ptr"),
         ({"x_ptr": 0x3000 + 0x100}, "x_ptr"),
     ],
@@ -542,7 +1243,7 @@ def test_launch_rejects_tensors_that_require_grad(monkeypatch, name):
 def test_launch_rejects_an_output_that_overlaps_an_input(
     monkeypatch, pointers, overlapped
 ):
-    """Reject an output sharing any byte with a buffer the kernel reads."""
+    """Reject an output that shares only part of an input's active range."""
     torch, _ = _fake_torch()
     driver = _install_launch_fakes(monkeypatch, torch)
     arguments = _arguments(torch)
@@ -551,7 +1252,10 @@ def test_launch_rejects_an_output_that_overlaps_an_input(
 
     with pytest.raises(
         ValueError,
-        match=f"'output_ptr' must not overlap argument '{overlapped}'",
+        match=(
+            f"argument 'output_ptr' must not partially overlap argument "
+            f"'{overlapped}' in their active ranges"
+        ),
     ):
         add_kernel.launch(
             arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
@@ -565,15 +1269,29 @@ def test_launch_rejects_an_output_that_overlaps_an_input(
     [
         {"output_ptr": 0x1000 + 0x204},
         {"output_ptr": 0x1000 - 0x204},
+        {"output_ptr": 0x1000},
+        {"output_ptr": 0x2000},
         {"y_ptr": 0x1000},
         {"y_ptr": 0x1004},
     ],
+    ids=[
+        "after-x",
+        "before-x",
+        "output-is-x",
+        "output-is-y",
+        "same-inputs",
+        "overlapping-inputs",
+    ],
 )
-def test_launch_accepts_adjacent_buffers_and_overlapping_inputs(
+def test_launch_accepts_adjacent_aliased_and_overlapping_inputs(
     monkeypatch, pointers
 ):
-    """Allow buffers that only touch, and two inputs that share memory."""
-    torch, _ = _fake_torch()
+    """Allow touching buffers, an output that is an input, shared inputs.
+
+    Every lane reads and writes one element index, so an output exactly
+    equal to an input is safe, and only the output is written.
+    """
+    torch, stream = _fake_torch()
     driver = _install_launch_fakes(monkeypatch, torch)
     arguments = _arguments(torch)
     for name, pointer in pointers.items():
@@ -582,19 +1300,20 @@ def test_launch_accepts_adjacent_buffers_and_overlapping_inputs(
     add_kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
 
     assert len(driver.launches) == 1
+    assert torch.advanced == [(arguments["output_ptr"], [stream])]
 
 
-def test_empty_launch_still_rejects_an_overlapping_output(monkeypatch):
-    """Validate the whole boundary before the zero-work return."""
+def test_empty_launch_has_no_active_range_to_overlap(monkeypatch):
+    """Admit any placement at zero work, where no element is active."""
     torch, _ = _fake_torch()
-    monkeypatch.setitem(sys.modules, "torch", torch)
+    driver = _install_launch_fakes(monkeypatch, torch)
     arguments = _arguments(torch, n=0)
-    arguments["output_ptr"] = arguments["x_ptr"]
+    arguments["output_ptr"] = _Tensor(torch, pointer=0x1004)
 
-    with pytest.raises(ValueError, match="must not overlap"):
-        add_kernel.launch(
-            arguments=arguments, constexprs={"BLOCK": 128}, grid=(0,)
-        )
+    add_kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(0,))
+
+    assert driver.loads == driver.launches == []
+    assert torch.advanced == []
 
 
 @pytest.mark.parametrize(
@@ -606,16 +1325,17 @@ def test_launch_rejects_a_pytorch_below_the_floor(monkeypatch, version):
     driver = _install_launch_fakes(monkeypatch, torch)
     reason = (
         "requires PyTorch 2.6 or newer; found PyTorch "
-        f"{re.escape(str(version))}$"
+        f"{re.escape(str(version))}; install PyTorch 2.6 or newer$"
     )
 
     for _ in range(2):
-        with pytest.raises(RuntimeError, match=reason):
+        with pytest.raises(sw.BackendUnavailableError, match=reason) as caught:
             add_kernel.launch(
                 arguments=_arguments(torch),
                 constexprs={"BLOCK": 128},
                 grid=(2,),
             )
+        assert caught.value.code == "pytorch-unsupported"
 
     assert driver.loads == driver.launches == []
 
@@ -710,7 +1430,10 @@ def _launch_location(kernel):
 @pytest.mark.parametrize(
     ("kernel", "reason"),
     [
-        (defaulted_kernel, "parameter 'BLOCK' has a default value"),
+        (
+            defaulted_kernel,
+            "parameter 'BLOCK' has a default value",
+        ),
         (
             annotated_count_kernel,
             "unsupported annotation 'int' on parameter 'n'",
@@ -728,7 +1451,11 @@ def _launch_location(kernel):
 def test_launch_rejects_defaults_and_foreign_annotations(
     monkeypatch, kernel, reason
 ):
-    """Refuse a parameter list outside the ABI before any compile."""
+    """Refuse a parameter list outside the ABI before any compile.
+
+    The launch asks the frontend about the parameters before it checks
+    their shape, so each form is named with its source location.
+    """
     from swage import _runtime
 
     torch, _ = _fake_torch()
@@ -739,17 +1466,21 @@ def test_launch_rejects_defaults_and_foreign_annotations(
     monkeypatch.setattr(
         kernel, "emit_mlir", lambda **_kwargs: emissions.append(1)
     )
-    for name in ("_compile_cached", "_compile_native"):
+    for module, name in (
+        (_runtime, "_compile_cached"),
+        (_cuda_backend, "_compile_native"),
+    ):
         monkeypatch.setattr(
-            _runtime, name, lambda *_args, **_kwargs: compiles.append(1)
+            module, name, lambda *_args, **_kwargs: compiles.append(1)
         )
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
     arguments = _arguments(torch)
 
     with pytest.raises(sw.CompilationError) as rejection:
         kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
 
     message = str(rejection.value)
+    assert type(rejection.value) is sw.CompilationError
     assert message.startswith(f"{__file__}:")
     assert f": {kernel.__name__}: {reason}" in message
     assert emissions == compiles == []
@@ -810,7 +1541,7 @@ def test_launch_errors_name_the_kernel(
     # The original raise stays the last frame, with no chained exception.
     assert rejection.value.__cause__ is None
     assert rejection.value.__suppress_context__
-    assert rejection.traceback[-1].name.startswith("_validate_")
+    assert re.match(r"_?validate_", rejection.traceback[-1].name)
     assert driver.loads == driver.launches == []
 
 
@@ -860,12 +1591,14 @@ def test_launch_leaves_other_exception_types_unchanged(monkeypatch):
 
 def test_missing_bindings_error_names_the_installation_page(monkeypatch):
     """Point a launch without the native package at the build instructions."""
-    from swage import _frontend, _runtime
+    from swage import _frontend
 
     monkeypatch.setitem(sys.modules, "mlir_swage", None)
 
-    with pytest.raises(RuntimeError) as failure:
-        _runtime._compile_native(object(), "add_kernel", 128, "sm_86")
+    with pytest.raises(sw.BackendUnavailableError) as failure:
+        _cuda_backend._compile_native(
+            object(), "add_kernel", 128, "sm_86", "fixed", {}
+        )
 
     message = str(failure.value)
     assert message.startswith(
@@ -874,9 +1607,10 @@ def test_missing_bindings_error_names_the_installation_page(monkeypatch):
     assert "which the swage-compiler wheel does not include" in message
     assert "kernel 'add_kernel' was not compiled" in message
     assert message.endswith(
-        f"See {_frontend._INSTALLATION} for the native build"
+        f"; see {_frontend._INSTALLATION} for the native build"
     )
     assert "docs/getting-started/installation.md" in message
+    assert failure.value.code == "native-unavailable"
 
 
 def test_launch_requires_pytorch_and_cuda(monkeypatch):
@@ -920,25 +1654,16 @@ def _stub_compiler(monkeypatch, identity=_identity):
             _runtime, "_stale_identity", lambda _identity: None, raising=False
         )
     _runtime._identity_cache = None
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_native",
-        lambda *_args: calls.append(True) or ("lowered", "ptx"),
-    )
-    _runtime._ptx_cache.clear()
+    monkeypatch.setattr(_cuda_backend, "_compile_native", _compiler(calls))
+    _runtime._artifact_cache.clear()
     return _runtime, calls
 
 
-def _compile_recording_warnings(_runtime, key_data=None):
+def _compile_recording_warnings(specialization=None):
     """Compile one key and return the artifact with the warnings it raised."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        artifact = _runtime._compile_cached(
-            _SHARED_KEY if key_data is None else key_data,
-            "add_kernel",
-            128,
-            object,
-        )
+        artifact = _compile(specialization)
     return artifact, [str(warning.message) for warning in caught]
 
 
@@ -956,23 +1681,146 @@ def _assert_complete_entry(entry):
 
 def test_cache_round_trip_and_corruption_rejection(tmp_path, monkeypatch):
     """Reuse verified PTX and never return corrupted cache contents."""
-    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    _runtime, calls = _stub_compiler(monkeypatch)
-    key_data = {"kernel": "add_kernel", "target": "sm_86"}
+    from swage import _runtime
 
-    first = _runtime._compile_cached(key_data, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached(key_data, "add_kernel", 128, object)
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _, calls = _stub_compiler(monkeypatch)
+
+    first = _compile()
+    _runtime._artifact_cache.clear()
+    second = _compile()
 
     assert first == second
     assert len(calls) == 1
     assert [path.name for path in tmp_path.iterdir()] == [first.key]
     entry = tmp_path / first.key
     _assert_complete_entry(entry)
+    metadata = json.loads((entry / "metadata.json").read_text())
+    assert metadata["version"] == _runtime._CACHE_VERSION == 4
+    assert (metadata["backend"], metadata["format"], metadata["target"]) == (
+        "cuda",
+        "ptx",
+        "sm_86",
+    )
+    assert metadata["contract"] == _contract_json()
+    assert (
+        metadata["digests"]["contract"]
+        == hashlib.sha256(_contract_json().encode()).hexdigest()
+    )
+    assert first.contract_json == _contract_json()
+    assert first.contract == second.contract == _contract()
+    assert first.contract.arguments[0].access == "read"
+    with pytest.raises(AttributeError):
+        first.contract.entry = "changed"
     (entry / "kernel.ptx").write_text("corrupt")
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _runtime._compile_cached(key_data, "add_kernel", 128, object)
+        _compile()
+
+
+@pytest.mark.parametrize(
+    ("contract_json", "reason"),
+    [
+        ("not-json", "not valid JSON"),
+        (
+            _contract_json().replace('"version":2', '"version":1'),
+            "unsupported kernel contract version",
+        ),
+        (
+            _contract_json().replace('"kind":"i32"', '"kind":"u32"'),
+            "unknown kind",
+        ),
+        (_contract_json() + " ", "not canonical"),
+    ],
+)
+def test_contract_parser_rejects_unknown_or_malformed_schema(
+    contract_json, reason
+):
+    """Accept only canonical immutable v2 contracts."""
+    with pytest.raises((TypeError, ValueError), match=reason):
+        _abi.parse_kernel_contract(contract_json)
+
+
+def test_contract_parser_accepts_sparse_user_source_indexes():
+    """Preserve semantic source positions for entries using a subset."""
+    contract_json = _contract_json(
+        "split_merge", arguments=(_user("ptr", 2, "write"),)
+    )
+
+    contract = _abi.parse_kernel_contract(contract_json)
+
+    assert contract.arguments[0].source_index == 2
+
+
+def test_cache_rejects_contract_corruption_and_old_metadata(
+    tmp_path, monkeypatch
+):
+    """Fail closed on contract bytes and reject an older cache format."""
+    from swage import _runtime
+
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    _stub_compiler(monkeypatch)
+    artifact = _compile()
+    entry = tmp_path / artifact.key
+    metadata_path = entry / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["contract"] = _contract_json("other_kernel")
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    )
+    _runtime._artifact_cache.clear()
+    with pytest.raises(RuntimeError, match="contract digest mismatch"):
+        _compile()
+
+    metadata = json.loads(metadata_path.read_text())
+    metadata["digests"]["contract"] = hashlib.sha256(
+        metadata["contract"].encode()
+    ).hexdigest()
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    )
+    with pytest.raises(RuntimeError, match="entry does not match"):
+        _compile()
+
+    # The format before this one had the same fields.
+    metadata["version"] = 3
+    metadata["contract"] = _contract_json()
+    metadata["digests"]["contract"] = hashlib.sha256(
+        metadata["contract"].encode()
+    ).hexdigest()
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    )
+    with pytest.raises(
+        RuntimeError, match=_rejects("cache metadata mismatch", entry)
+    ):
+        _compile()
+
+
+def test_launch_rejects_contract_mismatch_before_module_load(monkeypatch):
+    """Validate compiler metadata before loading PTX into CUDA."""
+    from swage import _runtime
+
+    torch, _ = _fake_torch()
+    driver = _Driver()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        _cuda_backend,
+        "_compile_native",
+        lambda *_args: ("lowered", "ptx", _contract_json(block=64)),
+    )
+    monkeypatch.setattr(_runtime, "_compiler_identity", _unpersisted_identity)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    _runtime._identity_cache = None
+
+    with pytest.raises(RuntimeError, match="block does not match"):
+        add_kernel.launch(
+            arguments=_arguments(torch),
+            constexprs={"BLOCK": 128},
+            grid=(2,),
+        )
+    assert driver.loads == []
 
 
 def _rejects(reason, path):
@@ -984,8 +1832,7 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
     """Reject symlinked and world-writable files and a foreign-owned root."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    key_data = {"kernel": "add_kernel"}
-    key = _runtime._cache_key(key_data)
+    key = _runtime._cache_key(_SHARED_KEY)
     entry = tmp_path / key
     entry.mkdir()
     target = tmp_path / "outside.json"
@@ -993,13 +1840,13 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
     (entry / "metadata.json").symlink_to(target)
 
     with pytest.raises(RuntimeError, match="symlink"):
-        _runtime._compile_cached(key_data, "add_kernel", 128, object)
+        _compile()
 
     (entry / "metadata.json").unlink()
     (entry / "metadata.json").write_text("{}")
     (entry / "metadata.json").chmod(0o606)
     with pytest.raises(RuntimeError, match="world-writable"):
-        _runtime._compile_cached(key_data, "add_kernel", 128, object)
+        _compile()
 
     (entry / "metadata.json").chmod(0o600)
     other_user = os.geteuid() + 1
@@ -1007,7 +1854,7 @@ def test_cache_rejects_unsafe_entries(tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(_runtime.os, "geteuid", lambda: other_user)
         with pytest.raises(RuntimeError, match=_rejects("not owned", tmp_path)):
-            _runtime._compile_cached(key_data, "add_kernel", 128, object)
+            _compile()
 
     assert calls == []
     assert (entry / "metadata.json").read_text() == "{}"
@@ -1032,21 +1879,21 @@ def _published_entry(tmp_path, monkeypatch):
     """Publish one valid entry and forget it in the process."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
+    artifact = _compile()
+    _runtime._artifact_cache.clear()
     calls.clear()
     return _runtime, calls, tmp_path / artifact.key
 
 
 def test_cache_rejects_a_foreign_owned_entry_file(tmp_path, monkeypatch):
     """Check ownership of every file, not only of the cache root."""
-    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    _, calls, entry = _published_entry(tmp_path, monkeypatch)
     _make_foreign(monkeypatch, entry / "kernel.ptx")
 
     with pytest.raises(
         RuntimeError, match=_rejects("not owned", entry / "kernel.ptx")
     ):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
     assert calls == []
 
 
@@ -1062,7 +1909,7 @@ def test_cache_rejects_an_unsafe_entry_directory(
     tmp_path, monkeypatch, unsafe, reason
 ):
     """Check the entry directory itself, even when its files are safe."""
-    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    _, calls, entry = _published_entry(tmp_path, monkeypatch)
     if unsafe == "symlink":
         moved = tmp_path / "moved-entry"
         entry.rename(moved)
@@ -1073,19 +1920,19 @@ def test_cache_rejects_an_unsafe_entry_directory(
         _make_foreign(monkeypatch, entry)
 
     with pytest.raises(RuntimeError, match=_rejects(reason, entry)):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
     assert calls == []
 
 
 def test_cache_rejects_a_corrupt_lowered_module(tmp_path, monkeypatch):
     """Verify the lowered MLIR digest, not only the PTX digest."""
-    _runtime, calls, entry = _published_entry(tmp_path, monkeypatch)
+    _, calls, entry = _published_entry(tmp_path, monkeypatch)
     (entry / "lowered.mlir").write_text("corrupt")
 
     with pytest.raises(
         RuntimeError, match=_rejects("lowered MLIR digest mismatch", entry)
     ):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
     assert calls == []
 
 
@@ -1096,15 +1943,17 @@ def test_cache_rejects_an_entry_for_another_specialization(
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
     key = _runtime._cache_key(_SHARED_KEY)
-    other = dict(_SHARED_KEY, target="sm_80")
-    artifact = _runtime._Artifact(key, "lowered", "ptx")
-    _runtime._write_cache_entry(artifact, other)
-    assert _runtime._read_cache_entry(key, other).ptx == "ptx"
+    other = dict(_SHARED_KEY, source="another kernel body")
+    fixed = ("add_kernel", 128, "fixed", _cuda_backend.CUDA_BACKEND)
+    _runtime._write_cache_entry(_artifact(key), other, *fixed)
+    assert _runtime._read_cache_entry(key, other, *fixed, "sm_86").image == (
+        "ptx"
+    )
 
     with pytest.raises(
         RuntimeError, match=_rejects("specialization mismatch", tmp_path / key)
     ):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
     assert calls == []
 
 
@@ -1121,15 +1970,13 @@ def test_cache_rejects_metadata_of_another_format_or_key(
         (entry / "metadata.json").write_text(json.dumps(metadata))
     else:
         # A valid entry found under a name that is not its own key.
-        key = _runtime._cache_key({"kernel": "another"})
+        key = _runtime._cache_key(_spec("another"))
         entry = entry.rename(tmp_path / key)
 
     with pytest.raises(
         RuntimeError, match=_rejects("metadata mismatch", entry)
     ):
-        _runtime._compile_cached(
-            _SHARED_KEY, "add_kernel", 128, object, key=key
-        )
+        _compile(key=key)
     assert calls == []
 
 
@@ -1149,11 +1996,11 @@ def test_unidentified_compiler_uses_only_process_cache(
 ):
     """Do not persist artifacts when the loaded compiler is unidentified."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
-    _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
+    _, calls = _stub_compiler(monkeypatch, lambda: identity)
 
-    first, messages = _compile_recording_warnings(_runtime, {"kernel": "add"})
-    second, later = _compile_recording_warnings(_runtime, {"kernel": "add"})
-    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "sub"})
+    first, messages = _compile_recording_warnings(_spec("add"))
+    second, later = _compile_recording_warnings(_spec("add"))
+    _, other_key = _compile_recording_warnings(_spec("sub"))
 
     assert first == second
     assert len(calls) == 2
@@ -1177,9 +2024,9 @@ def test_identified_compiler_persists_without_a_clean_checkout(
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
 
-    first = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
-    _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached({"kernel": "add"}, "add", 128, object)
+    first = _compile(_spec("add"))
+    _runtime._artifact_cache.clear()
+    second = _compile(_spec("add"))
 
     assert first == second
     assert len(calls) == 1
@@ -1201,11 +2048,11 @@ def test_incomplete_entry_is_a_miss_and_is_replaced(
     for name in leftover:
         (entry / name).write_text("stale")
 
-    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    first = _compile()
+    _runtime._artifact_cache.clear()
+    second = _compile()
 
-    assert first == second == _runtime._Artifact(entry.name, "lowered", "ptx")
+    assert first == second == _artifact(entry.name)
     assert len(calls) == 1
     assert [path.name for path in tmp_path.iterdir()] == [entry.name]
     _assert_complete_entry(entry)
@@ -1221,9 +2068,9 @@ def test_leftover_staging_directories_are_ignored(tmp_path, monkeypatch):
     )
     (leftover / "lowered.mlir").write_text("stale")
 
-    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    first = _compile()
+    _runtime._artifact_cache.clear()
+    second = _compile()
 
     assert first == second
     assert len(calls) == 1
@@ -1238,10 +2085,17 @@ def test_losing_writer_uses_the_published_entry(tmp_path, monkeypatch):
     """Discard the staged copy when another writer published the key."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, _ = _stub_compiler(monkeypatch)
-    winner = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    loser = _runtime._Artifact(winner.key, "lowered", "ptx from the loser")
+    winner = _compile()
+    loser = _artifact(winner.key, image="ptx from the loser")
 
-    used = _runtime._write_cache_entry(loser, _SHARED_KEY)
+    used = _runtime._write_cache_entry(
+        loser,
+        _SHARED_KEY,
+        "add_kernel",
+        128,
+        "fixed",
+        _cuda_backend.CUDA_BACKEND,
+    )
 
     assert used == winner
     assert [path.name for path in tmp_path.iterdir()] == [winner.key]
@@ -1259,11 +2113,11 @@ def test_failed_publish_degrades_to_process_reuse(tmp_path, monkeypatch):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(_runtime.os, "rename", refuse)
-    first, messages = _compile_recording_warnings(_runtime)
-    second, repeated = _compile_recording_warnings(_runtime)
-    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+    first, messages = _compile_recording_warnings()
+    second, repeated = _compile_recording_warnings()
+    _, other_key = _compile_recording_warnings(_spec("other"))
 
-    assert first == second == _runtime._Artifact(first.key, "lowered", "ptx")
+    assert first == second == _artifact(first.key)
     assert len(calls) == 2
     assert len(renames) == 1
     assert len(messages) == 1
@@ -1313,16 +2167,12 @@ def _unwritable_root(tmp_path, monkeypatch, how):
 )
 def test_unwritable_cache_never_fails_a_launch(tmp_path, monkeypatch, how):
     """Launch from the retained artifact when the cache cannot be written."""
-    from swage import _runtime
-
     torch, _ = _fake_torch()
     driver = _Driver()
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setattr(add_kernel, "emit_mlir", lambda **_kwargs: object())
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
     _runtime, calls = _stub_compiler(monkeypatch)
-    _runtime._identity_cache = None
-    _runtime._loaded_functions.clear()
     monkeypatch.delitem(
         add_kernel.__dict__, "_specialization_memo", raising=False
     )
@@ -1363,15 +2213,15 @@ def test_read_only_cache_still_serves_published_entries(tmp_path, monkeypatch):
     """Keep reading a warm cache after a write to it has failed."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
+    warm = _compile()
+    _runtime._artifact_cache.clear()
 
     def no_space(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(_runtime.tempfile, "mkdtemp", no_space)
-    _, messages = _compile_recording_warnings(_runtime, {"kernel": "cold"})
-    reread, later = _compile_recording_warnings(_runtime)
+    _, messages = _compile_recording_warnings(_spec("cold"))
+    reread, later = _compile_recording_warnings()
 
     assert len(messages) == 1
     assert "published entries are still read" in messages[0]
@@ -1398,9 +2248,9 @@ def test_debris_in_a_read_only_cache_is_a_miss_for_its_key_only(
     """Keep reading other keys when an incomplete entry cannot be removed."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
-    debris = tmp_path / _runtime._cache_key({"kernel": "debris"})
+    warm = _compile()
+    _runtime._artifact_cache.clear()
+    debris = tmp_path / _runtime._cache_key(_spec("debris"))
     debris.mkdir(mode=0o700)
     (debris / "lowered.mlir").write_text("stale")
     if how == "read-only root":
@@ -1413,19 +2263,15 @@ def test_debris_in_a_read_only_cache_is_a_miss_for_its_key_only(
         monkeypatch.setattr(_runtime.tempfile, "mkdtemp", read_only)
 
     try:
-        missed, messages = _compile_recording_warnings(
-            _runtime, {"kernel": "debris"}
-        )
-        again, repeated = _compile_recording_warnings(
-            _runtime, {"kernel": "debris"}
-        )
-        reread, later = _compile_recording_warnings(_runtime)
-        _, cold = _compile_recording_warnings(_runtime, {"kernel": "cold"})
+        missed, messages = _compile_recording_warnings(_spec("debris"))
+        again, repeated = _compile_recording_warnings(_spec("debris"))
+        reread, later = _compile_recording_warnings()
+        _, cold = _compile_recording_warnings(_spec("cold"))
     finally:
         tmp_path.chmod(0o700)
 
     assert missed == again
-    assert missed.ptx == "ptx"
+    assert missed.image == "ptx"
     assert len(messages) == 1
     assert str(tmp_path) in messages[0]
     assert "published entries are still read" in messages[0]
@@ -1446,11 +2292,11 @@ def test_inaccessible_cache_root_degrades_to_process_reuse(
     root = tmp_path / "file" / "cache"
     root.parent.write_text("a file where a directory is expected")
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
-    first, messages = _compile_recording_warnings(_runtime)
-    second, repeated = _compile_recording_warnings(_runtime)
-    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+    first, messages = _compile_recording_warnings()
+    second, repeated = _compile_recording_warnings()
+    _, other_key = _compile_recording_warnings(_spec("other"))
 
     assert first == second
     assert len(calls) == 2
@@ -1472,26 +2318,26 @@ def test_tampering_found_while_publishing_still_raises(
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir(mode=0o700)
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
+    compile_native = _compiler(calls)
 
-    def compile_while_the_root_appears(*_args):
+    def compile_while_the_root_appears(*arguments):
         # The lookup found no root, so only the publish can notice this one.
-        calls.append(True)
         if unsafe == "symlink":
             root.symlink_to(elsewhere)
         else:
             root.mkdir()
             root.chmod(0o707)
-        return "lowered", "ptx"
+        return compile_native(*arguments)
 
     monkeypatch.setattr(
-        _runtime, "_compile_native", compile_while_the_root_appears
+        _cuda_backend, "_compile_native", compile_while_the_root_appears
     )
     with pytest.raises(RuntimeError, match=_rejects(reason, root)):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    retained = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
+    retained = _compile()
 
-    assert retained.ptx == "ptx"
+    assert retained.image == "ptx"
     assert len(calls) == 1
     assert list(elsewhere.iterdir()) == []
     assert list(root.iterdir()) == []
@@ -1503,19 +2349,16 @@ def test_removing_an_incomplete_entry_keeps_a_concurrent_publish(
     """Do not delete an entry that was published after the reader looked."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    published = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    published = _compile()
     entry = tmp_path / published.key
 
     # A reader that saw debris reaches removal after the publish above.
     _runtime._remove_incomplete_entry(entry)
 
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     assert [path.name for path in tmp_path.iterdir()] == [published.key]
     _assert_complete_entry(entry)
-    assert (
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-        == published
-    )
+    assert _compile() == published
     assert len(calls) == 1
 
     (entry / "metadata.json").unlink()
@@ -1532,7 +2375,7 @@ def test_a_file_in_place_of_an_entry_is_rejected(tmp_path, monkeypatch):
     entry.write_text("not an entry")
 
     with pytest.raises(RuntimeError, match="not a directory"):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
 
     assert calls == []
     assert [path.name for path in tmp_path.iterdir()] == [entry.name]
@@ -1553,24 +2396,22 @@ def test_read_only_mode_reads_entries_and_writes_nothing(tmp_path, monkeypatch):
     """Serve published entries and keep new kernels in the process only."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    debris = tmp_path / _runtime._cache_key({"kernel": "debris"})
+    warm = _compile()
+    debris = tmp_path / _runtime._cache_key(_spec("debris"))
     debris.mkdir(mode=0o700)
     (debris / "lowered.mlir").write_text("stale")
     before = _snapshot(tmp_path)
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
 
-    reread, on_hit = _compile_recording_warnings(_runtime)
-    cold, on_miss = _compile_recording_warnings(_runtime, {"kernel": "cold"})
-    again, repeated = _compile_recording_warnings(_runtime, {"kernel": "cold"})
-    missed, on_debris = _compile_recording_warnings(
-        _runtime, {"kernel": "debris"}
-    )
+    reread, on_hit = _compile_recording_warnings()
+    cold, on_miss = _compile_recording_warnings(_spec("cold"))
+    again, repeated = _compile_recording_warnings(_spec("cold"))
+    missed, on_debris = _compile_recording_warnings(_spec("debris"))
 
     assert reread == warm
     assert cold == again
-    assert cold.ptx == missed.ptx == "ptx"
+    assert cold.image == missed.image == "ptx"
     assert len(calls) == 3
     assert on_hit == on_miss == repeated == on_debris == []
     assert _snapshot(tmp_path) == before
@@ -1582,11 +2423,11 @@ def test_read_only_mode_does_not_create_the_cache_root(tmp_path, monkeypatch):
     root = tmp_path / "absent" / "cache"
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
     monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
-    artifact, messages = _compile_recording_warnings(_runtime)
+    artifact, messages = _compile_recording_warnings()
 
-    assert artifact.ptx == "ptx"
+    assert artifact.image == "ptx"
     assert len(calls) == 1
     assert messages == []
     assert not root.parent.exists()
@@ -1596,13 +2437,13 @@ def test_read_only_mode_still_rejects_unsafe_entries(tmp_path, monkeypatch):
     """Keep treating a corrupt entry as tamper evidence."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    warm = _compile()
     (tmp_path / warm.key / "kernel.ptx").write_text("corrupt")
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
 
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
 
     assert len(calls) == 1
 
@@ -1613,20 +2454,18 @@ def test_no_compile_mode_serves_entries_and_refuses_a_miss(
     """Launch from the cache and raise instead of compiling on a miss."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
-    warm = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    warm = _compile()
     before = _snapshot(tmp_path)
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
     emissions = []
-    cold = {"kernel": "cold"}
+    cold = _spec("cold_kernel")
 
-    reread, on_hit = _compile_recording_warnings(_runtime)
-    in_process, _ = _compile_recording_warnings(_runtime)
+    reread, on_hit = _compile_recording_warnings()
+    in_process, _ = _compile_recording_warnings()
     for _ in range(2):
         with pytest.raises(RuntimeError) as refusal:
-            _runtime._compile_cached(
-                cold, "cold_kernel", 128, lambda: emissions.append(1)
-            )
+            _compile(cold, lambda: emissions.append(1))
 
     assert reread == in_process == warm
     assert on_hit == []
@@ -1653,12 +2492,12 @@ def test_no_compile_mode_says_why_the_cache_was_not_read(
     """Name the cause when the refusal follows from an unusable cache."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
-    _runtime, calls = _stub_compiler(monkeypatch, lambda: identity)
+    _, calls = _stub_compiler(monkeypatch, lambda: identity)
     for _ in range(2):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with pytest.raises(RuntimeError) as refusal:
-                _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+                _compile()
         assert "SWAGE_NO_COMPILE=1 refuses to compile" in str(refusal.value)
         assert "the persistent cache is off for this process" in str(
             refusal.value
@@ -1676,13 +2515,13 @@ def test_no_compile_mode_says_when_the_cache_root_is_unreadable(
     root.parent.write_text("a file where a directory is expected")
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(root))
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
     for _ in range(2):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with pytest.raises(RuntimeError) as refusal:
-                _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+                _compile()
         assert f"cannot use {root}" in str(refusal.value)
         assert "Not a directory" in str(refusal.value)
 
@@ -1693,8 +2532,6 @@ def test_no_compile_mode_refuses_a_launch_before_any_driver_work(
     tmp_path, monkeypatch
 ):
     """Raise from the public launch with nothing loaded or enqueued."""
-    from swage import _runtime
-
     torch, _ = _fake_torch()
     driver = _Driver()
     emissions = []
@@ -1702,9 +2539,8 @@ def test_no_compile_mode_refuses_a_launch_before_any_driver_work(
     monkeypatch.setattr(
         add_kernel, "emit_mlir", lambda **_kwargs: emissions.append(1)
     )
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
     _runtime, calls = _stub_compiler(monkeypatch)
-    _runtime._loaded_functions.clear()
     monkeypatch.delitem(
         add_kernel.__dict__, "_specialization_memo", raising=False
     )
@@ -1734,12 +2570,12 @@ def test_cache_switches_reject_unknown_values(
     """Fail instead of guessing what a mistyped safety switch meant."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv(name, value)
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
     with pytest.raises(
         ValueError, match=rf"{name} must be 0 or 1; found '{value}'"
     ):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
 
     assert calls == []
     assert list(tmp_path.iterdir()) == []
@@ -1753,17 +2589,19 @@ def test_cache_switches_are_off_when_empty_or_zero(
     """Treat an empty switch and `0` like an unset switch."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv(name, value)
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
-    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    artifact = _compile()
 
     assert len(calls) == 1
     _assert_complete_entry(tmp_path / artifact.key)
 
 
-def _publish(_runtime, name, age_seconds):
+def _publish(name, age_seconds):
     """Publish one entry and date it `age_seconds` before now."""
-    artifact = _runtime._compile_cached({"kernel": name}, name, 128, object)
+    from swage import _runtime
+
+    artifact = _compile(_spec(name))
     entry = _runtime._cache_dir() / artifact.key
     published = time.time() - age_seconds
     os.utime(entry, (published, published))
@@ -1778,18 +2616,18 @@ def test_cache_keeps_the_newest_entries_within_the_bound(tmp_path, monkeypatch):
 
     # Published out of age order, so the age decides, not the name or the
     # order of arrival.
-    middle = _publish(_runtime, "middle", 200)
-    oldest = _publish(_runtime, "oldest", 400)
-    newer = _publish(_runtime, "newer", 100)
+    middle = _publish("middle", 200)
+    oldest = _publish("oldest", 400)
+    newer = _publish("newer", 100)
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [middle, oldest, newer]
     )
     # This publish is not dated back, so it is the newest of the four.
-    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    latest = _compile()
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [middle, newer, latest.key]
     )
-    one_more = _publish(_runtime, "one more", 0)
+    one_more = _publish("one more", 0)
 
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [newer, latest.key, one_more]
@@ -1798,9 +2636,9 @@ def test_cache_keeps_the_newest_entries_within_the_bound(tmp_path, monkeypatch):
         _assert_complete_entry(tmp_path / key)
 
     # An evicted key is a plain miss and is published again.
-    _runtime._ptx_cache.clear()
+    _runtime._artifact_cache.clear()
     compiles = len(calls)
-    assert _publish(_runtime, "oldest", 0) == oldest
+    assert _publish("oldest", 0) == oldest
     assert len(calls) == compiles + 1
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [latest.key, one_more, oldest]
@@ -1826,7 +2664,7 @@ def test_cache_bound_rejects_values_that_are_not_positive_integers(
     """Fail instead of guessing a bound, before compiling or writing."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", value)
-    _runtime, calls = _stub_compiler(monkeypatch)
+    _, calls = _stub_compiler(monkeypatch)
 
     with pytest.raises(
         ValueError,
@@ -1835,7 +2673,7 @@ def test_cache_bound_rejects_values_that_are_not_positive_integers(
             f"found '{re.escape(value)}'"
         ),
     ):
-        _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+        _compile()
 
     assert calls == []
     assert list(tmp_path.iterdir()) == []
@@ -1878,9 +2716,9 @@ def test_trimming_leaves_everything_that_is_not_an_old_entry(
         link = tmp_path / name
         link.symlink_to(outside, target_is_directory=True)
         kept.append(old(link))
-    evicted = _publish(_runtime, "evicted", 3600)
+    evicted = _publish("evicted", 3600)
 
-    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    latest = _compile()
 
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [path.name for path in kept] + [latest.key]
@@ -1894,10 +2732,10 @@ def test_trimming_skips_directories_of_another_user(tmp_path, monkeypatch):
     """Leave a foreign entry for the lookup that will reject it."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
-    _runtime, _ = _stub_compiler(monkeypatch)
-    foreign = tmp_path / _publish(_runtime, "foreign", 3600)
+    _stub_compiler(monkeypatch)
+    foreign = tmp_path / _publish("foreign", 3600)
     _make_foreign(monkeypatch, foreign)
-    latest = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    latest = _compile()
 
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         [foreign.name, latest.key]
@@ -1911,7 +2749,7 @@ def test_an_entry_evicted_by_another_process_is_not_an_error(
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
     _runtime, _ = _stub_compiler(monkeypatch)
-    raced = tmp_path / _publish(_runtime, "raced", 3600)
+    raced = tmp_path / _publish("raced", 3600)
     rename = os.rename
 
     def rename_after_another_process_removed_it(source, destination):
@@ -1922,7 +2760,7 @@ def test_an_entry_evicted_by_another_process_is_not_an_error(
     monkeypatch.setattr(
         _runtime.os, "rename", rename_after_another_process_removed_it
     )
-    latest, messages = _compile_recording_warnings(_runtime)
+    latest, messages = _compile_recording_warnings()
 
     assert messages == []
     assert [path.name for path in tmp_path.iterdir()] == [latest.key]
@@ -1935,7 +2773,7 @@ def test_failed_trimming_stops_publishing_with_one_warning(
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "1")
     _runtime, calls = _stub_compiler(monkeypatch)
-    stuck = _publish(_runtime, "stuck", 3600)
+    stuck = _publish("stuck", 3600)
     rename = os.rename
 
     def refuse_to_move_the_old_entry(source, destination):
@@ -1944,10 +2782,10 @@ def test_failed_trimming_stops_publishing_with_one_warning(
         return rename(source, destination)
 
     monkeypatch.setattr(_runtime.os, "rename", refuse_to_move_the_old_entry)
-    latest, messages = _compile_recording_warnings(_runtime)
-    later, repeated = _compile_recording_warnings(_runtime, {"kernel": "later"})
+    latest, messages = _compile_recording_warnings()
+    later, repeated = _compile_recording_warnings(_spec("later"))
 
-    assert latest.ptx == later.ptx == "ptx"
+    assert latest.image == later.image == "ptx"
     assert len(calls) == 3
     assert len(messages) == 1
     assert "persistent cache is not written by this process" in messages[0]
@@ -1980,8 +2818,8 @@ def test_cache_status_describes_an_active_cache_without_touching_it(
         compiles=True,
     )
 
-    _publish(_runtime, "first", 10)
-    _publish(_runtime, "second", 0)
+    _publish("first", 10)
+    _publish("second", 0)
     (root / "notes").mkdir()
     (root / ("b" * 64)).write_text("a file named like an entry")
     before = _snapshot(root)
@@ -2035,7 +2873,7 @@ def test_cache_status_reports_what_this_process_gave_up(tmp_path, monkeypatch):
     _runtime, _ = _stub_compiler(monkeypatch)
 
     fresh = _runtime._cache_status()
-    _compile_recording_warnings(_runtime)
+    _compile_recording_warnings()
     after = _runtime._cache_status()
 
     assert f"cannot use {root}" in fresh.problem
@@ -2094,10 +2932,16 @@ def test_concurrent_cold_starts_publish_one_entry(tmp_path, monkeypatch):
     for key, round_id in keys.items():
         _assert_complete_entry(cache / key)
         published = _runtime._read_cache_entry(
-            key, dict(_SHARED_KEY, round=round_id)
+            key,
+            dict(_SHARED_KEY, round=round_id),
+            "add_kernel",
+            128,
+            "fixed",
+            _cuda_backend.CUDA_BACKEND,
+            "sm_86",
         )
         used = [path.read_text() for path in results.glob(f"{round_id}-*")]
-        assert used == [published.ptx] * processes
+        assert used == [published.image] * processes
 
 
 def test_concurrent_publishers_keep_the_cache_within_its_bound(tmp_path):
@@ -2160,11 +3004,11 @@ def test_writer_killed_mid_entry_does_not_poison_the_key(tmp_path, monkeypatch):
     assert exit_code == -signal.SIGKILL
     assert key not in [path.name for path in tmp_path.iterdir()]
 
-    first = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
-    _runtime._ptx_cache.clear()
-    second = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    first = _compile()
+    _runtime._artifact_cache.clear()
+    second = _compile()
 
-    assert first == second == _runtime._Artifact(key, "lowered", "ptx")
+    assert first == second == _artifact(key)
     assert len(calls) == 1
     _assert_complete_entry(tmp_path / key)
 
@@ -2176,7 +3020,7 @@ def test_dump_switches_write_requested_artifacts(tmp_path, monkeypatch):
     monkeypatch.setenv("SWAGE_DUMP_DIR", str(tmp_path))
     monkeypatch.setenv("SWAGE_DUMP_MLIR", "1")
     monkeypatch.setenv("SWAGE_DUMP_PTX", "1")
-    artifact = _runtime._Artifact("key", "lowered", "ptx")
+    artifact = _artifact("key")
 
     _runtime._write_dumps(artifact)
 
@@ -2194,15 +3038,23 @@ def test_compiler_key_contains_every_specialization_input(monkeypatch):
         descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
         constexprs={"BLOCK": 128},
         target="sm_86",
+        adapter=_cuda_backend.CUDA_BACKEND,
     )
 
     assert data == {
         "source": mock.ANY,
         "kernel": "add_kernel",
+        "backend": "cuda",
+        "format": "ptx",
+        "target": "sm_86",
         "descriptors": ["ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"],
         "constexprs": [["BLOCK", 128]],
-        "compute_capability": "sm_86",
-        "codegen": {"block_size": 128, "index_bits": 64},
+        "codegen": {
+            "lowering": "fixed",
+            "block_size": 128,
+            "options": [],
+            "index_bits": 64,
+        },
         "frontend": "f" * 64,
         "native": [["_swageDialectsNanobind.so", 1, 2]],
         "dialect_version": 1,
@@ -2255,6 +3107,7 @@ def _fresh_key(_runtime):
         descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
         constexprs={"BLOCK": 128},
         target="sm_86",
+        adapter=_cuda_backend.CUDA_BACKEND,
     )
     return _runtime._cache_key(data)
 
@@ -2317,18 +3170,13 @@ def test_persistence_does_not_need_a_git_checkout(tmp_path, monkeypatch):
         raise AssertionError("git must not run outside a checkout")
 
     monkeypatch.setattr(_runtime.subprocess, "run", no_git)
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_native",
-        lambda *_args: ("lowered", "ptx"),
-    )
+    monkeypatch.setattr(_cuda_backend, "_compile_native", _compiler())
     cache = tmp_path / "cache"
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
     _runtime._identity_cache = None
-    _runtime._ptx_cache.clear()
 
     identity = _runtime._cached_identity()
-    artifact = _runtime._compile_cached(_SHARED_KEY, "add_kernel", 128, object)
+    artifact = _compile()
     _runtime._identity_cache = None
 
     assert identity == {
@@ -2382,8 +3230,8 @@ def test_unreadable_frontend_file_turns_persistence_off(tmp_path, monkeypatch):
     try:
         digest = _runtime._frontend_digest(package)
         identity = _runtime._cached_identity()
-        first, messages = _compile_recording_warnings(_runtime)
-        second, repeated = _compile_recording_warnings(_runtime)
+        first, messages = _compile_recording_warnings()
+        second, repeated = _compile_recording_warnings()
     finally:
         (package / "_frontend.py").chmod(0o600)
         _runtime._identity_cache = None
@@ -2398,6 +3246,15 @@ def test_unreadable_frontend_file_turns_persistence_off(tmp_path, monkeypatch):
     assert "Permission denied" in messages[0]
     assert repeated == []
     assert not cache.exists()
+
+
+def _kernel_k_arguments():
+    """Return the specialization and contract a script compiles `k` with.
+
+    The scripts below run in a fresh interpreter and read both from their
+    last two arguments.
+    """
+    return [json.dumps(_spec("k")), _contract_json("k")]
 
 
 _STALE_FRONTEND_SCRIPT = """
@@ -2415,27 +3272,37 @@ if sys.argv[1] == "edit after import":
     with open(package / "_frontend.py", "ab") as source:
         source.write(b"# edited after this process imported swage")
 
-from swage import _runtime
+from swage import _cuda_backend, _runtime
 
+specialization = json.loads(sys.argv[-2])
+contract = sys.argv[-1]
 native = [["_swageDialectsNanobind.so", 1, 2]]
 compiles = []
 _runtime._native_identity = lambda: native
 _runtime._native_libraries = lambda: []
-_runtime._compile_native = lambda *_args: compiles.append(1) or (
+_cuda_backend._compile_native = lambda *_args: compiles.append(1) or (
     "lowered",
     "ptx from the frontend this process loaded",
+    contract,
 )
 identity = _runtime._cached_identity()
-data = {"kernel": "k", "frontend": identity["frontend"], "native": native}
+data = dict(specialization, frontend=identity["frontend"], native=native)
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
-    first = _runtime._compile_cached(data, "k", 128, object)
-    second = _runtime._compile_cached(data, "k", 128, object)
+    first, second = (
+        _runtime._compile_cached(
+            _cuda_backend.CUDA_BACKEND, data, "k", 128, object
+        )
+        for _ in range(2)
+    )
 cache = pathlib.Path(os.environ["SWAGE_CACHE_DIR"])
 on_disk = dict(data, frontend=_runtime._frontend_digest(package))
+# A package outside a checkout reads the build record of `mlir_swage`,
+# which imports that namespace package but never the native extension.
+heavy = ("torch", "mlir_swage._mlir_libs")
 print(json.dumps({
     "sampled_at_import": sampled_at_import,
-    "heavy": [name for name in ("torch", "mlir_swage") if name in sys.modules],
+    "heavy": [name for name in heavy if name in sys.modules],
     "same": first == second,
     "compiles": len(compiles),
     "warnings": [str(warning.message) for warning in caught],
@@ -2467,7 +3334,13 @@ def _run_with_copied_frontend(tmp_path, mode):
     site = _copied_package(tmp_path)
     before = time.time_ns()
     completed = subprocess.run(
-        [sys.executable, "-c", _STALE_FRONTEND_SCRIPT, mode],
+        [
+            sys.executable,
+            "-c",
+            _STALE_FRONTEND_SCRIPT,
+            mode,
+            *_kernel_k_arguments(),
+        ],
         env=dict(
             os.environ,
             PYTHONPATH=str(site),
@@ -2533,22 +3406,29 @@ package = pathlib.Path(swage.__file__).parent
 
 
 def compile_in_the_child():
-    from swage import _runtime
+    from swage import _cuda_backend, _runtime
 
+    specialization = json.loads(sys.argv[-2])
+    contract = sys.argv[-1]
     native = [["_swageDialectsNanobind.so", 1, 2]]
     compiles = []
     _runtime._native_identity = lambda: native
     _runtime._native_libraries = lambda: []
-    _runtime._compile_native = lambda *_args: compiles.append(1) or (
+    _cuda_backend._compile_native = lambda *_args: compiles.append(1) or (
         "lowered",
         "ptx from the frontend the parent loaded",
+        contract,
     )
     identity = _runtime._cached_identity()
-    data = {"kernel": "k", "frontend": identity["frontend"], "native": native}
+    data = dict(specialization, frontend=identity["frontend"], native=native)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        first = _runtime._compile_cached(data, "k", 128, object)
-        second = _runtime._compile_cached(data, "k", 128, object)
+        first, second = (
+            _runtime._compile_cached(
+                _cuda_backend.CUDA_BACKEND, data, "k", 128, object
+            )
+            for _ in range(2)
+        )
     cache = pathlib.Path(os.environ["SWAGE_CACHE_DIR"])
     on_disk = dict(data, frontend=_runtime._frontend_digest(package))
     pathlib.Path(sys.argv[2]).write_text(json.dumps({
@@ -2598,7 +3478,14 @@ def test_forked_child_does_not_publish_code_its_parent_loaded_earlier(
     site = _copied_package(tmp_path)
     report = tmp_path / "report.json"
     completed = subprocess.run(
-        [sys.executable, "-c", _FORKED_CHILD_SCRIPT, how, str(report)],
+        [
+            sys.executable,
+            "-c",
+            _FORKED_CHILD_SCRIPT,
+            how,
+            str(report),
+            *_kernel_k_arguments(),
+        ],
         env=dict(
             os.environ,
             PYTHONPATH=str(site),
@@ -2626,6 +3513,7 @@ def test_forked_child_does_not_publish_code_its_parent_loaded_earlier(
 _NO_START_TIME_SCRIPT = """
 import builtins
 import io
+import json
 import os
 import sys
 import time
@@ -2653,19 +3541,27 @@ elif failure == "undefined clock tick":
     os.sysconf = lambda _name: -1
 
 import swage  # Runs under -W error: a warning here is a failure.
-from swage import _runtime
+from swage import _cuda_backend, _runtime
 
 assert _runtime._PROCESS_START_NS is None
 assert not _runtime._cache_off
 
+specialization = json.loads(sys.argv[-2])
+contract = sys.argv[-1]
 compiles = []
 _runtime._native_identity = lambda: [["_swageDialectsNanobind.so", 1, 2]]
 _runtime._native_libraries = lambda: []
-_runtime._compile_native = lambda *_args: compiles.append(1) or ("l", "p")
+_cuda_backend._compile_native = lambda *_args: compiles.append(1) or (
+    "l",
+    "p",
+    contract,
+)
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
-    _runtime._compile_cached({"kernel": "k"}, "k", 128, object)
-    _runtime._compile_cached({"kernel": "k"}, "k", 128, object)
+    for _ in range(2):
+        _runtime._compile_cached(
+            _cuda_backend.CUDA_BACKEND, specialization, "k", 128, object
+        )
 (warning,) = caught
 assert "start time is unavailable" in str(warning.message), warning.message
 assert compiles == [1]
@@ -2701,7 +3597,10 @@ def _run_cold(arguments, tmp_path):
 )
 def test_import_is_silent_without_a_process_start_time(tmp_path, failure):
     """Import cleanly without a start time and warn only at first use."""
-    completed = _run_cold(["-c", _NO_START_TIME_SCRIPT, failure], tmp_path)
+    completed = _run_cold(
+        ["-c", _NO_START_TIME_SCRIPT, failure, *_kernel_k_arguments()],
+        tmp_path,
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stderr == ""
@@ -2764,7 +3663,7 @@ def test_identity_of_files_older_than_the_process_is_current(
     )
 
     assert _runtime._stale_identity(identity) is None
-    artifact, messages = _compile_recording_warnings(_runtime)
+    artifact, messages = _compile_recording_warnings()
     _runtime._identity_cache = None
 
     assert messages == []
@@ -2780,7 +3679,7 @@ def test_identity_is_stale_without_a_process_start_time(tmp_path, monkeypatch):
     monkeypatch.setattr(_runtime, "_PROCESS_START_NS", None)
 
     assert "start time" in _runtime._stale_identity(identity)
-    _, messages = _compile_recording_warnings(_runtime)
+    _, messages = _compile_recording_warnings()
     _runtime._identity_cache = None
 
     assert len(messages) == 1
@@ -2805,7 +3704,7 @@ def test_identity_is_stale_when_a_file_changed_after_start(
     monkeypatch.setattr(_runtime, "_PROCESS_START_NS", _changed_ns(path))
 
     problem = _runtime._stale_identity(identity)
-    _, messages = _compile_recording_warnings(_runtime)
+    _, messages = _compile_recording_warnings()
     _runtime._identity_cache = None
 
     assert str(path.parent) in problem
@@ -2824,26 +3723,28 @@ def test_identity_changed_during_a_compile_is_not_published(
     _runtime, calls, identity, package, versioned, cache = _identified_process(
         tmp_path, monkeypatch
     )
+    compile_native = _compiler(
+        calls, ptx="ptx from the compiler that was loaded"
+    )
 
-    def compile_while_the_disk_changes(*_args):
-        calls.append(True)
+    def compile_while_the_disk_changes(*arguments):
         if changed == "frontend":
             (package / "_frontend.py").write_text("LOWERING = 2\n")
         else:
             versioned.write_bytes(b"another library")
-        return "lowered", "ptx from the compiler that was loaded"
+        return compile_native(*arguments)
 
     monkeypatch.setattr(
-        _runtime, "_compile_native", compile_while_the_disk_changes
+        _cuda_backend, "_compile_native", compile_while_the_disk_changes
     )
-    first, messages = _compile_recording_warnings(_runtime)
-    second, repeated = _compile_recording_warnings(_runtime)
-    _, other_key = _compile_recording_warnings(_runtime, {"kernel": "other"})
+    first, messages = _compile_recording_warnings()
+    second, repeated = _compile_recording_warnings()
+    _, other_key = _compile_recording_warnings(_spec("other"))
     problem = _runtime._stale_identity(identity)
     _runtime._identity_cache = None
 
     assert first == second
-    assert first.ptx == "ptx from the compiler that was loaded"
+    assert first.image == "ptx from the compiler that was loaded"
     assert len(calls) == 2
     assert len(messages) == 1
     assert changed in problem
@@ -2950,173 +3851,101 @@ def test_cache_path_defaults_to_user_cache(monkeypatch):
     assert _runtime._cache_dir() == pathlib.Path("/tmp/user-cache/swage")
 
 
-def test_driver_marshals_pointer_and_i32_parameters():
-    """Pass raw pointers and an i32 through the CUDA Driver ABI."""
-    from swage import _runtime
+def _ctypes_launch(arguments, values, grid, block=128):
+    """Launch one contract through the ctypes path and decode the call.
 
-    driver = object.__new__(_runtime._CudaDriver)
+    Returns:
+        The driver function called, its grid and block, and the pointer and
+        i32 parameter values that reached it, each in order.
+    """
+    driver = object.__new__(_cuda_backend._CudaDriver)
     calls = []
     driver._call = lambda name, *args: calls.append((name, args))
+    kinds = tuple(argument.kind for argument in arguments)
 
-    driver.launch(0xF00D, (2,), 128, 0xABCD, (0x10, 0x20, 0x30, 129))
+    driver.launch_entry(
+        0xF00D,
+        _contract("kernel", block, arguments),
+        (kinds, values),
+        grid,
+        0xABCD,
+    )
 
-    name, call = calls[0]
+    ((name, call),) = calls
     parameters = call[-2]
-    pointer_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_void_p)
-        ).contents.value
-        for index in range(3)
-    ]
-    scalar = ctypes.cast(
-        parameters[3], ctypes.POINTER(ctypes.c_int32)
-    ).contents.value
+    decoded = {"ptr": [], "i32": []}
+    for index, kind in enumerate(kinds):
+        storage = ctypes.c_void_p if kind == "ptr" else ctypes.c_int32
+        decoded[kind].append(
+            ctypes.cast(
+                parameters[index], ctypes.POINTER(storage)
+            ).contents.value
+        )
+    return name, call[1:7], decoded["ptr"], decoded["i32"]
+
+
+def test_driver_marshals_pointer_and_i32_parameters():
+    """Pass raw pointers and an i32 through the CUDA Driver ABI."""
+    name, geometry, pointers, scalars = _ctypes_launch(
+        _FIXED_ARGUMENTS, (0x10, 0x20, 0x30, 129), (2, 1, 1)
+    )
+
     assert name == "cuLaunchKernel"
-    assert pointer_values == [0x10, 0x20, 0x30]
-    assert scalar == 129
+    assert geometry == (2, 1, 1, 128, 1, 1)
+    assert pointers == [0x10, 0x20, 0x30]
+    assert scalars == [129]
 
 
 def test_driver_marshals_four_pointer_segmented_task_abi():
-    """Pass four pointers and two i32 counts through the CUDA Driver ABI."""
-    from swage import _runtime
-
-    driver = object.__new__(_runtime._CudaDriver)
-    calls = []
-    driver._call = lambda name, *args: calls.append((name, args))
-
-    driver.launch_segmented_tasks(
-        0xF00D,
-        (7,),
-        32,
-        0xABCD,
-        (0x10, 0x20, 0x30, 0x40, 4096, 7),
+    """Pass four pointers and three i32 counts through the CUDA Driver ABI."""
+    name, geometry, pointers, scalars = _ctypes_launch(
+        _TASK_ARGUMENTS,
+        (0x10, 0x20, 0x30, 0x40, 4096, 7, 5),
+        (7, 1, 1),
+        block=32,
     )
 
-    name, call = calls[0]
-    parameters = call[-2]
-    pointer_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_void_p)
-        ).contents.value
-        for index in range(4)
-    ]
-    scalar_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_int32)
-        ).contents.value
-        for index in range(4, 6)
-    ]
     assert name == "cuLaunchKernel"
-    assert pointer_values == [0x10, 0x20, 0x30, 0x40]
-    assert scalar_values == [4096, 7]
+    assert geometry == (7, 1, 1, 32, 1, 1)
+    assert pointers == [0x10, 0x20, 0x30, 0x40]
+    assert scalars == [4096, 7, 5]
 
 
 def test_driver_marshals_four_pointer_fused_segmented_abi():
-    """Pass four pointers and three i32 counts through the CUDA Driver ABI."""
-    from swage import _runtime
-
-    driver = object.__new__(_runtime._CudaDriver)
-    calls = []
-    driver._call = lambda name, *args: calls.append((name, args))
-
-    driver.launch_segmented_mixed(
-        0xF00D,
-        (9,),
-        128,
-        0xABCD,
-        (0x10, 0x20, 0x30, 0x40, 4096, 5, 7),
+    """Pass four pointers and four i32 counts through the CUDA Driver ABI."""
+    name, geometry, pointers, scalars = _ctypes_launch(
+        _FUSED_ARGUMENTS,
+        (0x10, 0x20, 0x30, 0x40, 4096, 5, 7, 9),
+        (9, 1, 1),
     )
 
-    name, call = calls[0]
-    parameters = call[-2]
-    pointer_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_void_p)
-        ).contents.value
-        for index in range(4)
-    ]
-    scalar_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_int32)
-        ).contents.value
-        for index in range(4, 7)
-    ]
     assert name == "cuLaunchKernel"
-    assert pointer_values == [0x10, 0x20, 0x30, 0x40]
-    assert scalar_values == [4096, 5, 7]
+    assert geometry == (9, 1, 1, 128, 1, 1)
+    assert pointers == [0x10, 0x20, 0x30, 0x40]
+    assert scalars == [4096, 5, 7, 9]
 
 
 def test_driver_marshals_ten_pointer_persistent_abi():
     """Pass queues, dependencies, scratch, and counts through the ABI."""
-    from swage import _runtime
-
-    driver = object.__new__(_runtime._CudaDriver)
-    calls = []
-    driver._call = lambda name, *args: calls.append((name, args))
-
-    driver.launch_persistent(
-        0xF00D,
-        (168,),
-        128,
-        0xABCD,
-        (
-            0x10,
-            0x20,
-            0x30,
-            0x40,
-            0x50,
-            0x60,
-            0x70,
-            0x80,
-            0x90,
-            0xA0,
-            4096,
-            5,
-            7,
-            11,
-            2,
-        ),
+    buffers = (0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0)
+    name, geometry, pointers, scalars = _ctypes_launch(
+        _PERSISTENT_ARGUMENTS, (*buffers, 4096, 5, 7, 11, 2, 13), (168, 1, 1)
     )
 
-    name, call = calls[0]
-    parameters = call[-2]
-    pointer_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_void_p)
-        ).contents.value
-        for index in range(10)
-    ]
-    scalar_values = [
-        ctypes.cast(
-            parameters[index], ctypes.POINTER(ctypes.c_int32)
-        ).contents.value
-        for index in range(10, 15)
-    ]
     assert name == "cuLaunchKernel"
-    assert pointer_values == [
-        0x10,
-        0x20,
-        0x30,
-        0x40,
-        0x50,
-        0x60,
-        0x70,
-        0x80,
-        0x90,
-        0xA0,
-    ]
-    assert scalar_values == [4096, 5, 7, 11, 2]
+    assert geometry == (168, 1, 1, 128, 1, 1)
+    assert pointers == list(buffers)
+    assert scalars == [4096, 5, 7, 11, 2, 13]
 
 
 def test_driver_error_contains_stable_name_code_and_text():
     """Preserve actionable CUDA Driver diagnostics."""
-    from swage import _runtime
 
     def set_text(_result, output, value):
         ctypes.cast(output, ctypes.POINTER(ctypes.c_char_p))[0] = value
         return 0
 
-    driver = object.__new__(_runtime._CudaDriver)
+    driver = object.__new__(_cuda_backend._CudaDriver)
     driver.library = types.SimpleNamespace(
         cuBad=lambda: 1,
         cuGetErrorName=lambda result, output: set_text(
@@ -3139,8 +3968,6 @@ def test_driver_error_contains_stable_name_code_and_text():
 
 def test_compiler_identity_is_cached_per_process(tmp_path, monkeypatch):
     """Spawn the git subprocesses once, not twice per launch."""
-    import subprocess
-
     from swage import _runtime
 
     commands = []
@@ -3184,6 +4011,106 @@ def test_identity_cache_notices_a_monkeypatched_identity(monkeypatch):
     fake = _identity(revision="r")
     monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
     assert _runtime._cached_identity() == fake
+
+
+def _packaged_build_info():
+    """Return a valid build record of a packaged native compiler."""
+    return {
+        "schema_version": 2,
+        "package_version": "0.5.2",
+        "source_revision": "a" * 40,
+        "source_clean": True,
+        "frontend_digest": "d" * 64,
+        "llvm_version": "llvmorg-22.1.8",
+        "build_type": "Release",
+    }
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_packaged_identity_describes_a_package_outside_a_checkout(
+    tmp_path, monkeypatch, malformed
+):
+    """Take provenance from the build record, and never key on it.
+
+    A package outside a Swage checkout reports the revision, cleanliness,
+    and LLVM release its build recorded, and an invalid record gives no
+    revision instead of a guess. Provenance is diagnostic only: the cache
+    key follows the contents of the frontend and the native libraries.
+    """
+    from swage import _runtime
+
+    info = _packaged_build_info()
+
+    def build_info():
+        if malformed:
+            raise ValueError("invalid native build metadata: source_revision")
+        return info
+
+    _fake_package(tmp_path, monkeypatch)
+    native = [["_swageDialectsNanobind.so", 10, 20]]
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: native)
+    monkeypatch.setattr(_runtime._native, "build_info", build_info)
+    monkeypatch.setattr(
+        _runtime.subprocess,
+        "run",
+        mock.Mock(side_effect=AssertionError("packaged identity ran git")),
+    )
+
+    identity = _runtime._compiler_identity()
+
+    if malformed:
+        assert (identity["revision"], identity["clean"]) == (None, False)
+        assert identity["llvm"] is None
+    else:
+        assert (identity["revision"], identity["clean"]) == ("a" * 40, True)
+        assert identity["llvm"] == "llvmorg-22.1.8"
+    assert identity["native"] == native
+    assert len(identity["frontend"]) == 64
+
+    original = _fresh_key(_runtime)
+    info.update(
+        source_revision="b" * 40,
+        source_clean=False,
+        llvm_version="llvmorg-23.1.0",
+    )
+    assert _fresh_key(_runtime) == original
+    _runtime._identity_cache = None
+
+
+def test_checkout_identity_precedes_the_packaged_record(tmp_path, monkeypatch):
+    """Describe a Swage checkout by git, whatever record a build left."""
+    from swage import _runtime
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "cmake").mkdir()
+    (tmp_path / "cmake" / "llvm-version.txt").write_text("llvmorg-source\n")
+    monkeypatch.setattr(
+        _runtime, "__file__", str(tmp_path / "python/swage/_runtime.py")
+    )
+    monkeypatch.setattr(
+        _runtime._native,
+        "build_info",
+        mock.Mock(side_effect=AssertionError("a checkout read the record")),
+    )
+    monkeypatch.setattr(_runtime, "_native_identity", lambda: None)
+    monkeypatch.setattr(
+        _runtime.subprocess,
+        "run",
+        mock.Mock(
+            side_effect=[
+                types.SimpleNamespace(stdout="c" * 40 + "\n"),
+                types.SimpleNamespace(stdout=""),
+            ]
+        ),
+    )
+
+    assert _runtime._compiler_identity() == {
+        "revision": "c" * 40,
+        "clean": True,
+        "llvm": "llvmorg-source",
+        "frontend": None,
+        "native": None,
+    }
 
 
 def _git(root, *arguments):
@@ -3307,17 +4234,10 @@ def test_warm_launch_emits_mlir_only_once(monkeypatch):
         "emit_mlir",
         lambda **_kwargs: emissions.append(1) or object(),
     )
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_native",
-        lambda *_args, **_kwargs: ("lowered", "ptx"),
-    )
-    fake = _identity(revision=None, clean=False, llvm=None, native=None)
-    monkeypatch.setattr(_runtime, "_compiler_identity", lambda: fake)
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_compile_native", _compiler())
+    monkeypatch.setattr(_runtime, "_compiler_identity", _unpersisted_identity)
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
     _runtime._identity_cache = None
-    _runtime._ptx_cache.clear()
-    _runtime._loaded_functions.clear()
 
     for _ in range(3):
         add_kernel.launch(
@@ -3328,6 +4248,11 @@ def test_warm_launch_emits_mlir_only_once(monkeypatch):
 
     assert len(emissions) == 1
     assert len(driver.launches) == 3
+    artifact = next(iter(_runtime._artifact_cache.values()))
+    assert artifact.contract_json == _contract_json()
+    assert tuple(
+        argument.source_index for argument in artifact.contract.arguments
+    ) == (0, 1, 2, 3)
 
 
 def test_device_fact_cache_is_isolated_per_torch_module(monkeypatch):
@@ -3335,15 +4260,8 @@ def test_device_fact_cache_is_isolated_per_torch_module(monkeypatch):
     from swage import _runtime
 
     driver = _Driver()
-    monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
-    monkeypatch.setattr(
-        _runtime,
-        "_compile_cached",
-        lambda *_args, **_kwargs: _runtime._Artifact(
-            key="cache-key", lowered="lowered", ptx="ptx"
-        ),
-    )
-    _runtime._loaded_functions.clear()
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_runtime, "_compile_cached", _fixed_compile_artifact)
 
     big_torch, _ = _fake_torch(max_threads=1024)
     monkeypatch.setitem(sys.modules, "torch", big_torch)
@@ -3365,10 +4283,8 @@ def test_device_fact_cache_is_isolated_per_torch_module(monkeypatch):
 
 
 def _stub_cuda_library(monkeypatch):
-    from swage import _runtime
-
     monkeypatch.setattr(
-        _runtime.ctypes,
+        _cuda_backend.ctypes,
         "CDLL",
         lambda _name: mock.MagicMock(**{"cuLaunchKernel.return_value": 0}),
     )
@@ -3384,7 +4300,8 @@ def test_driver_prefers_the_native_launcher_when_available(monkeypatch):
     native.swage = types.SimpleNamespace(
         __version__=sw.__version__,
         __source_revision__="unknown",
-        _launch_kernel=lambda *arguments: calls.append(arguments),
+        _launch_cuda_kernel=lambda *arguments: calls.append(arguments),
+        _FixedCUDALaunch=object,
     )
     monkeypatch.setattr(_runtime, "_verified_bindings", None)
     libs = types.ModuleType("mlir_swage._mlir_libs")
@@ -3393,33 +4310,44 @@ def test_driver_prefers_the_native_launcher_when_available(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "mlir_swage._mlir_libs._swageDialectsNanobind", native
     )
-
-    driver = _runtime._CudaDriver()
-    driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
-    driver.launch_segmented(7, (4,), 128, 9, (0x1, 0x2, 0x3, 60, 4))
-    driver.launch_segmented_tasks(7, (5,), 32, 9, (1, 2, 3, 4, 60, 5))
-    driver.launch_segmented_mixed(7, (6,), 128, 9, (1, 2, 3, 4, 60, 5, 1))
-    driver.launch_persistent(
-        7,
-        (7,),
-        512,
-        9,
-        (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 60, 5, 1, 7, 2),
-    )
-
-    assert calls == [
-        (7, 3, 128, 9, (0x1, 0x2, 0x3), (129,)),
-        (7, 4, 128, 9, (0x1, 0x2, 0x3), (60, 4)),
-        (7, 5, 32, 9, (1, 2, 3, 4), (60, 5)),
-        (7, 6, 128, 9, (1, 2, 3, 4), (60, 5, 1)),
-        (7, 7, 512, 9, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), (60, 5, 1, 7, 2)),
+    launches = [
+        (_FIXED_ARGUMENTS, 128, (3, 1, 1), (0x1, 0x2, 0x3, 129)),
+        (_DIRECT_ARGUMENTS, 128, (4, 1, 1), (0x1, 0x2, 0x3, 60, 4)),
+        (_TASK_ARGUMENTS, 32, (5, 1, 1), (1, 2, 3, 4, 60, 5, 4)),
+        (_FUSED_ARGUMENTS, 128, (6, 1, 1), (1, 2, 3, 4, 60, 5, 1, 4)),
+        (
+            _PERSISTENT_ARGUMENTS,
+            512,
+            (7, 1, 1),
+            (*range(1, 11), 60, 5, 1, 7, 2, 4),
+        ),
     ]
+
+    driver = _cuda_backend._CudaDriver()
+    for arguments, block, grid, values in launches:
+        kinds = tuple(argument.kind for argument in arguments)
+        driver.launch_entry(
+            7, _contract("kernel", block, arguments), (kinds, values), grid, 9
+        )
+
+    assert driver._native_fixed_launcher is object
+    assert calls == [
+        (
+            tuple(argument.kind for argument in arguments),
+            values,
+            grid,
+            (block, 1, 1),
+            0,
+            9,
+            7,
+        )
+        for arguments, block, grid, values in launches
+    ]
+    assert not driver.library.cuLaunchKernel.called
 
 
 def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
     """Keep the ctypes path working when mlir_swage is absent."""
-    from swage import _runtime
-
     _stub_cuda_library(monkeypatch)
     # Blocking the parent is not enough: a fully dotted module already in
     # sys.modules is returned without consulting the parent, so drop any
@@ -3432,10 +4360,903 @@ def test_driver_falls_back_to_ctypes_without_the_bindings(monkeypatch):
     )
     monkeypatch.delitem(sys.modules, "mlir_swage._mlir_libs", raising=False)
 
-    driver = _runtime._CudaDriver()
+    driver = _cuda_backend._CudaDriver()
     assert driver._native_launch is None
-    driver.launch(7, (3,), 128, 9, (0x1, 0x2, 0x3, 129))
+    driver.launch_entry(
+        7,
+        _contract(),
+        (("ptr", "ptr", "ptr", "i32"), (0x1, 0x2, 0x3, 129)),
+        (3, 1, 1),
+        9,
+    )
     assert driver.library.cuLaunchKernel.called
+
+
+def test_segmented_artifact_compile_and_context_load_reuse(monkeypatch):
+    """Reuse one compiled artifact and one loaded module per CUDA context."""
+    from swage import _runtime
+
+    identity = _identity(revision=None, clean=False, native=None)
+    monkeypatch.setattr(_runtime, "_cached_identity", lambda: identity)
+    specialization = _runtime.segmented_specialization(
+        "module { func.func @segmented_sum() }",
+        kernel_name="segmented_sum",
+        target="sm_86",
+        block_size=32,
+        lowering_kind="segmented",
+        lowering_options={"use_task_ids": True},
+        schedule={"warp_max_elements": 32, "cta_chunk_elements": 4096},
+        adapter=_cuda_backend.CUDA_BACKEND,
+    )
+    contract_json = _contract_json(
+        "segmented_sum", 32, arguments=_TASK_ARGUMENTS
+    )
+    compiles = []
+    emits = []
+
+    def compile_native(module, kernel, block, target, kind, options):
+        compiles.append((module, kernel, block, target, kind, options))
+        return "lowered", "ptx", contract_json
+
+    monkeypatch.setattr(_cuda_backend, "_compile_native", compile_native)
+    first = _runtime._compile_cached(
+        _cuda_backend.CUDA_BACKEND,
+        specialization,
+        "segmented_sum",
+        32,
+        lambda: emits.append(True) or object(),
+        lowering_kind="segmented",
+        lowering_options={"use_task_ids": True},
+    )
+    second = _runtime._compile_cached(
+        _cuda_backend.CUDA_BACKEND,
+        specialization,
+        "segmented_sum",
+        32,
+        lambda: pytest.fail("warm artifact must not emit MLIR"),
+        lowering_kind="segmented",
+        lowering_options={"use_task_ids": True},
+    )
+
+    class _ContextDriver:
+        def __init__(self):
+            self.context = 1
+            self.loads = []
+
+        def current_context(self):
+            return self.context
+
+        def load(self, ptx, entry):
+            loaded = (100 + self.context, 200 + self.context)
+            self.loads.append((self.context, ptx, entry, loaded))
+            return loaded
+
+    driver = _ContextDriver()
+    assert first is second
+    assert len(emits) == 1
+    assert compiles[0][4:] == ("segmented", {"use_task_ids": True})
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    first_lease = _cuda_backend.CUDA_BACKEND.lease(first)
+    second_lease = _cuda_backend.CUDA_BACKEND.lease(first)
+    assert (first_lease.entry.module, first_lease.entry.function) == (101, 201)
+    assert second_lease.entry is first_lease.entry
+    driver.context = 2
+    third_lease = _cuda_backend.CUDA_BACKEND.lease(first)
+    assert (third_lease.entry.module, third_lease.entry.function) == (102, 202)
+    for lease in (first_lease, second_lease, third_lease):
+        _cuda_backend.CUDA_BACKEND.release(lease)
+    assert len(driver.loads) == 2
+
+
+def _install_fake_compiler(monkeypatch, runtime, callback=None):
+    monkeypatch.setattr(runtime, "_cached_identity", _unpersisted_identity)
+    compile_native = _compiler()
+
+    def compile_with_callback(*arguments):
+        if callback is not None:
+            callback()
+        return compile_native(*arguments)
+
+    monkeypatch.setattr(_cuda_backend, "_compile_native", compile_with_callback)
+
+
+def test_compiled_artifact_does_not_retain_emitted_module(monkeypatch):
+    """Keep compiler artifacts free of semantic modules and caller storage."""
+    from swage import _runtime
+
+    class _Module:
+        pass
+
+    module = _Module()
+    reference = weakref.ref(module)
+    holder = [module]
+    _install_fake_compiler(monkeypatch, _runtime)
+    artifact = _compile(emit=lambda: holder[0], lowering_kind="fixed")
+    holder.clear()
+    del module
+    gc.collect()
+
+    assert artifact.image == "ptx"
+    assert reference() is None
+
+
+def test_memory_artifact_lru_is_bounded_and_refreshes_recency(monkeypatch):
+    """Bound complete artifacts and refresh a warm specialization."""
+    from swage import _runtime
+
+    monkeypatch.setenv("SWAGE_MEMORY_CACHE_ENTRIES", "2")
+    _install_fake_compiler(monkeypatch, _runtime)
+
+    first = _compile(key="first")
+    _compile(key="second")
+    assert (
+        _compile(emit=lambda: pytest.fail("warm hit emitted MLIR"), key="first")
+        is first
+    )
+    _compile(key="third")
+
+    assert list(_runtime._artifact_cache) == ["first", "third"]
+    assert all(
+        artifact.lowered == "lowered"
+        and artifact.image == "ptx"
+        and artifact.contract.entry == "add_kernel"
+        for artifact in _runtime._artifact_cache.values()
+    )
+
+
+@pytest.mark.parametrize("module", ["_runtime", "_cuda_backend"])
+@pytest.mark.parametrize(
+    "configured", ["", "0", "-1", "+", "+1", "1.5", "many"]
+)
+def test_memory_cache_entries_rejects_invalid_values(
+    monkeypatch, module, configured
+):
+    """Reject every noncanonical or nonpositive process-cache capacity.
+
+    The bound applies to the artifacts of `_runtime` and to the loaded
+    modules of `_cuda_backend` alike.
+    """
+    import swage
+
+    monkeypatch.setenv("SWAGE_MEMORY_CACHE_ENTRIES", configured)
+    with pytest.raises(
+        ValueError,
+        match="SWAGE_MEMORY_CACHE_ENTRIES must be a positive integer",
+    ):
+        getattr(swage, module)._memory_cache_limit()
+
+
+def test_same_specialization_compilation_is_coalesced(monkeypatch):
+    """Make concurrent callers of one key share a single compile."""
+    from swage import _runtime
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def callback():
+        calls.append(True)
+        started.set()
+        assert release.wait(5)
+
+    _install_fake_compiler(monkeypatch, _runtime, callback)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        first = pool.submit(_compile, key="shared")
+        assert started.wait(5)
+        others = [pool.submit(_compile, key="shared") for _ in range(7)]
+        release.set()
+        results = [first.result(), *(future.result() for future in others)]
+
+    assert len(calls) == 1
+    assert all(result is results[0] for result in results)
+
+
+def test_different_specializations_compile_one_at_a_time(monkeypatch):
+    """Serialize cold compiles of any keys, and never make a hit wait.
+
+    Every miss holds the cold-path lock, so a second key compiles only
+    after the first. A key the process holds is served while a compile is
+    in flight.
+    """
+    from swage import _runtime
+
+    _install_fake_compiler(monkeypatch, _runtime)
+    warm = _compile(key="warm")
+    started = threading.Event()
+    release = threading.Event()
+    entered = []
+
+    def callback():
+        entered.append(threading.get_ident())
+        started.set()
+        assert release.wait(5)
+
+    _install_fake_compiler(monkeypatch, _runtime, callback)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        left = pool.submit(_compile, key="left")
+        assert started.wait(5)
+        right = pool.submit(_compile, key="right")
+        hit = pool.submit(
+            _compile,
+            emit=lambda: pytest.fail("warm hit emitted MLIR"),
+            key="warm",
+        )
+        assert hit.result(timeout=5) is warm
+        # Time enough for the right miss to start compiling, if it could.
+        time.sleep(0.1)
+        assert len(entered) == 1
+        release.set()
+        compiled = [left.result(timeout=5), right.result(timeout=5)]
+
+    assert len(entered) == 2
+    assert [artifact.key for artifact in compiled] == ["left", "right"]
+
+
+class _LifecycleDriver:
+    """Model CUDA events as snapshots of submitted stream work."""
+
+    def __init__(self):
+        self.context = 1
+        self.next_handle = 0
+        self.queries = []
+        self.submitted = {}
+        self.completed = {}
+        self.closed_streams = set()
+        self.fences = {}
+        self.destroyed = []
+        self.unloaded = []
+        self.launch_error = None
+        self.record_failures = set()
+
+    def current_context(self):
+        return self.context
+
+    def load(self, _ptx, _entry):
+        self.next_handle += 1
+        return 100 + self.next_handle, 200 + self.next_handle
+
+    def launch_entry(self, _function, _contract, _bindings, _grid, stream):
+        self.submitted[stream] = self.submitted.get(stream, 0) + 1
+        if self.launch_error is not None:
+            raise self.launch_error
+
+    def complete_stream(self, stream):
+        self.completed[stream] = self.submitted[stream]
+
+    def close_stream(self, stream):
+        assert stream != 0
+        self.closed_streams.add(stream)
+
+    def is_stream_capturing(self, stream):
+        assert stream not in self.closed_streams
+        return False
+
+    def event_create(self):
+        self.next_handle += 1
+        event = 300 + self.next_handle
+        # CUDA considers a newly created, unrecorded event complete.
+        self.fences[event] = None
+        return event
+
+    def event_record(self, event, stream):
+        assert stream not in self.closed_streams
+        if event in self.record_failures:
+            raise RuntimeError("record failed")
+        self.fences[event] = (stream, self.submitted.get(stream, 0))
+
+    def event_query(self, event):
+        self.queries.append((self.context, event))
+        fence = self.fences[event]
+        if fence is None:
+            return True
+        stream, sequence = fence
+        return self.completed.get(stream, 0) >= sequence
+
+    def event_destroy(self, event):
+        self.destroyed.append(event)
+
+    def module_unload(self, module):
+        self.unloaded.append((self.context, module))
+
+
+def _install_lifecycle_driver(monkeypatch):
+    """Keep one loaded module resident and model its unload with a driver."""
+    monkeypatch.setenv("SWAGE_MEMORY_CACHE_ENTRIES", "1")
+    driver = _LifecycleDriver()
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    return driver
+
+
+def _lease(key):
+    """Lease the module of a fixed artifact named `key`."""
+    return _cuda_backend.CUDA_BACKEND.lease(_artifact(key))
+
+
+def _retire_all_but(key):
+    """Lease and release another module, which retires the resident one."""
+    _lease(key).release()
+
+
+def _launch_fake_loaded(lease, stream, *, capturing=False):
+    artifact = _artifact()
+    _cuda_backend.CUDA_BACKEND.launch(
+        lease,
+        artifact.contract,
+        (artifact.argument_kinds, (1, 2, 3, 4)),
+        grid=(1, 1, 1),
+        stream=stream,
+        capturing=capturing,
+    )
+
+
+def test_deferred_unload_waits_for_all_streams_in_same_context(monkeypatch):
+    """Fence every stream in its own context, then wait for all completions."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("first")
+    _launch_fake_loaded(lease, 0)
+    _launch_fake_loaded(lease, 22)
+    events = tuple(lease.entry.events.values())
+    driver.complete_stream(22)
+    lease.release()
+    _retire_all_but("second")
+
+    driver.context = 2
+    _cuda_backend._poll_deferred(driver, 2)
+    assert driver.queries == []
+    driver.context = 1
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+    assert {event for _context, event in driver.queries} == set(events)
+    driver.complete_stream(0)
+    _cuda_backend._poll_deferred(driver, 1)
+
+    assert set(driver.destroyed) == set(events)
+    assert driver.unloaded == [(1, lease.entry.module)]
+
+
+def test_loaded_module_lease_blocks_unload_until_final_launch(monkeypatch):
+    """A retired lease may enqueue more work before its final fence."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("leased")
+    _launch_fake_loaded(lease, 0)
+    event = lease.entry.events[0]
+    assert driver.event_query(event) is True
+    _retire_all_but("replacement")
+    driver.complete_stream(0)
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+
+    _launch_fake_loaded(lease, 0)
+    lease.release()
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+    driver.complete_stream(0)
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == [(1, lease.entry.module)]
+
+
+def test_revived_module_requires_a_fence_covering_its_new_launch(monkeypatch):
+    """An old completed fence must not authorize unloading revived work."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("revived")
+    _launch_fake_loaded(lease, 0)
+    event = lease.entry.events[0]
+    lease.release()
+    _retire_all_but("replacement")
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+    assert driver.event_query(event) is False
+
+    revived = _lease("revived")
+    assert revived.entry is lease.entry
+    driver.complete_stream(0)
+    _launch_fake_loaded(revived, 0)
+    # The first fence is complete even though the later launch is not.
+    assert driver.event_query(event) is True
+    revived.release()
+    _retire_all_but("third")
+    _cuda_backend._poll_deferred(driver, 1)
+    assert (1, lease.entry.module) not in driver.unloaded
+    assert driver.event_query(event) is False
+
+    driver.complete_stream(0)
+    _cuda_backend._poll_deferred(driver, 1)
+    assert event in driver.destroyed
+    assert (1, lease.entry.module) in driver.unloaded
+
+
+@pytest.mark.parametrize("stream", [0, 11], ids=["legacy", "external"])
+def test_enqueue_error_still_fences_possibly_submitted_work(
+    monkeypatch, stream
+):
+    """Fence failed legacy work and retain unsafe external-stream work."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("failed-launch")
+    driver.launch_error = RuntimeError("launch failed")
+    with pytest.raises(RuntimeError):
+        _launch_fake_loaded(lease, stream)
+    if stream:
+        driver.close_stream(stream)
+    lease.release()
+    _retire_all_but("replacement")
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+
+    driver.complete_stream(stream)
+    _cuda_backend._poll_deferred(driver, 1)
+    if stream:
+        assert driver.unloaded == []
+    else:
+        assert driver.unloaded == [(1, lease.entry.module)]
+
+
+def test_module_retirement_does_not_reuse_destroyed_stream(monkeypatch):
+    """A caller may destroy its stream while its recorded work completes."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("external")
+    _launch_fake_loaded(lease, 11)
+    driver.close_stream(11)
+    lease.release()
+    _retire_all_but("replacement")
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == []
+
+    driver.complete_stream(11)
+    _cuda_backend._poll_deferred(driver, 1)
+    assert driver.unloaded == [(1, lease.entry.module)]
+
+
+def test_retired_modules_of_one_key_both_stay_queued(monkeypatch):
+    """Unload an older module whose key a newer retired module shares.
+
+    A module that another thread is fencing is not revived, so a lease of
+    its key loads a new module. When that one retires too, the older module
+    must stay queued: dropping it would leave it loaded for good.
+    """
+    driver = _install_lifecycle_driver(monkeypatch)
+    first = _lease("same")
+    _launch_fake_loaded(first, 11)
+    older = first.entry
+    first.release()
+    _retire_all_but("other")
+    # Another thread's poll is fencing the older module.
+    older.unloading = True
+    second = _lease("same")
+    newer = second.entry
+    older.unloading = False
+    second.release()
+    _retire_all_but("other")
+
+    assert newer is not older
+    assert newer.key == older.key
+    assert {id(entry) for entry in _cuda_backend._retired_loaded.values()} >= {
+        id(older),
+        id(newer),
+    }
+    driver.complete_stream(11)
+    _cuda_backend._poll_deferred(driver, 1)
+
+    assert {(1, older.module), (1, newer.module)} <= set(driver.unloaded)
+    assert older not in _cuda_backend._retired_loaded.values()
+    assert newer not in _cuda_backend._retired_loaded.values()
+
+
+def test_capture_pinned_module_is_never_explicitly_unloaded(monkeypatch):
+    """Leave graph-captured module and event ownership to context teardown."""
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("captured")
+    _launch_fake_loaded(lease, 11, capturing=True)
+    driver.complete_stream(11)
+    lease.release()
+    _retire_all_but("replacement")
+    _cuda_backend._poll_deferred(driver, 1)
+
+    assert driver.destroyed == []
+    assert driver.unloaded == []
+
+
+def test_event_record_failure_permanently_blocks_explicit_unload(monkeypatch):
+    """Never treat an unrecorded completion event as proof of completion.
+
+    The failure is reported once as a warning, never raised, and the other
+    retired modules still unload.
+    """
+    driver = _install_lifecycle_driver(monkeypatch)
+    lease = _lease("failed-record")
+    _launch_fake_loaded(lease, 0)
+    independent = _lease("independent")
+    _launch_fake_loaded(independent, 0)
+    independent_events = tuple(independent.entry.events.values())
+    _retire_all_but("replacement")
+    lease.release()
+    independent.release()
+    driver.record_failures.add(lease.entry.events[0])
+    with pytest.warns(
+        RuntimeWarning, match="left 1 unused CUDA module loaded: record failed"
+    ):
+        _cuda_backend._poll_deferred(driver, 1)
+    assert lease.entry.unload_blocked
+
+    driver.record_failures.clear()
+    driver.complete_stream(0)
+    _cuda_backend._poll_deferred(driver, 1)
+    _cuda_backend._poll_deferred(driver, 1)
+
+    assert set(driver.destroyed) == set(independent_events)
+    assert driver.unloaded == [(1, independent.entry.module)]
+
+
+def test_stream_wrapper_cache_is_module_scoped_and_bounded(monkeypatch):
+    """Bound wrappers and release them with their injected torch module."""
+
+    class _Stream:
+        pass
+
+    handle = [77]
+    streams = {}
+    torch = types.ModuleType("stream-cache-torch")
+    torch._C = types.SimpleNamespace(
+        _cuda_getCurrentRawStream=lambda _index: handle[0]
+    )
+    torch.cuda = types.SimpleNamespace(
+        current_stream=lambda _index: streams.setdefault(handle[0], _Stream())
+    )
+    monkeypatch.setattr(
+        _cuda_backend, "_stream_objects", weakref.WeakKeyDictionary()
+    )
+
+    first = _cuda_backend.current_stream(torch, 0)
+    assert _cuda_backend.current_stream(torch, 0) is first
+    for next_handle in range(78, 78 + 128):
+        handle[0] = next_handle
+        _cuda_backend.current_stream(torch, 0)
+    per_torch = _cuda_backend._stream_objects[torch]
+    assert len(per_torch) == 128
+    assert (0, 77) not in per_torch
+
+    module_reference = weakref.ref(torch)
+    del torch
+    gc.collect()
+    assert module_reference() is None
+    assert not _cuda_backend._stream_objects
+
+
+def test_driver_event_unload_surface_and_not_ready_mapping():
+    """Marshal event/module handles and map only CUDA error 600 to pending."""
+    driver = object.__new__(_cuda_backend._CudaDriver)
+    calls = []
+
+    def create(pointer, flags):
+        calls.append(("create", flags))
+        ctypes.cast(pointer, ctypes.POINTER(ctypes.c_void_p))[0] = 41
+        return 0
+
+    library = types.SimpleNamespace(
+        cuEventCreate=create,
+        cuEventRecord=lambda event, stream: (
+            calls.append(("record", event.value, stream.value)) or 0
+        ),
+        cuEventQuery=mock.Mock(side_effect=[600, 0, 700]),
+        cuModuleUnload=lambda module: (
+            calls.append(("unload", module.value)) or 0
+        ),
+        cuGetErrorName=lambda *_args: 0,
+        cuGetErrorString=lambda *_args: 0,
+    )
+    driver.library = library
+    driver._event_destroy = lambda event: (
+        calls.append(("destroy", event.value)) or 0
+    )
+
+    event = driver.event_create()
+    driver.event_record(event, 51)
+    assert driver.event_query(event) is False
+    assert driver.event_query(event) is True
+    with pytest.raises(RuntimeError, match=r"cuEventQuery.*\(700\)"):
+        driver.event_query(event)
+    driver.event_destroy(event)
+    driver.module_unload(61)
+
+    assert calls == [
+        ("create", 2),
+        ("record", 41, 51),
+        ("destroy", 41),
+        ("unload", 61),
+    ]
+
+
+def _assert_unavailable(error, code, backend):
+    assert isinstance(error, sw.SwageError)
+    assert isinstance(error, RuntimeError)
+    assert error.code == code
+    assert error.backend == backend
+    assert isinstance(error.remediation, str) and error.remediation
+    assert str(error).endswith(f"; {error.remediation}")
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+@pytest.mark.parametrize("failure_type", [ImportError, OSError])
+def test_torch_import_link_failure_is_selected_backend_unavailable(
+    monkeypatch, backend, failure_type
+):
+    """Classify import/link failures and preserve their original cause."""
+    real_import = __import__
+    cause = failure_type("torch dependency failed")
+
+    def unavailable(name, *args, **kwargs):
+        if name == "torch":
+            raise cause
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=unavailable):
+        with pytest.raises(sw.BackendUnavailableError) as caught:
+            add_kernel.launch(
+                arguments={}, constexprs={}, grid=(1,), backend=backend
+            )
+    _assert_unavailable(caught.value, "pytorch-unavailable", backend)
+    assert caught.value.__cause__ is cause
+
+
+def test_torch_initialization_bug_is_not_unavailability():
+    """Do not relabel arbitrary exceptions during optional dependency import."""
+    from swage import _runtime
+
+    real_import = __import__
+    cause = RuntimeError("initialization bug")
+
+    def broken(name, *args, **kwargs):
+        if name == "torch":
+            raise cause
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=broken):
+        with pytest.raises(RuntimeError) as caught:
+            _runtime._import_torch()
+    assert caught.value is cause
+
+
+@pytest.mark.parametrize(
+    ("backend", "reported"), [("cpu", "cpu"), ("cuda", "cuda")]
+)
+@pytest.mark.parametrize("failure_type", [ImportError, OSError])
+def test_native_compile_import_failure_is_backend_unavailable(
+    backend, reported, failure_type
+):
+    """Compilation requires native bindings regardless of selected backend.
+
+    The CUDA adapter loads them through the binding version check, which
+    reports the native bindings as what is unavailable.
+    """
+    from swage import _backends
+
+    real_import = __import__
+    cause = failure_type("native dependency missing")
+
+    def unavailable(name, *args, **kwargs):
+        if name == "mlir_swage" or name.startswith("mlir_swage."):
+            raise cause
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=unavailable):
+        with pytest.raises(sw.BackendUnavailableError) as caught:
+            _backends.get_backend(backend).compile(
+                object(),
+                "add_kernel",
+                128,
+                "native" if backend == "cpu" else "sm_86",
+                "fixed",
+                {},
+            )
+    _assert_unavailable(caught.value, "native-unavailable", reported)
+    assert caught.value.__cause__ is cause
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_native_compiler_failure_is_not_unavailability(monkeypatch, backend):
+    """Propagate compiler failures unchanged after native loading succeeds."""
+    from swage import _backends, _native, _runtime
+
+    cause = RuntimeError("compiler failure")
+    native = types.SimpleNamespace(
+        _compile_fixed_host=mock.Mock(side_effect=cause),
+        _compile_ptx=mock.Mock(side_effect=cause),
+    )
+    monkeypatch.setattr(_native, "load_extension", lambda **_kwargs: native)
+    monkeypatch.setattr(_runtime, "_native_bindings", lambda: native)
+    with pytest.raises(RuntimeError) as caught:
+        _backends.get_backend(backend).compile(
+            object(),
+            "add_kernel",
+            128,
+            "native" if backend == "cpu" else "sm_86",
+            "fixed",
+            {},
+        )
+    assert caught.value is cause
+
+
+def test_cuda_unavailable_never_probes_cpu(monkeypatch):
+    """Unavailable explicit CUDA fails without native compilation or CPU use."""
+    from swage import _cpu_backend
+
+    torch, _ = _fake_torch(available=False)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(
+        _cpu_backend.CPU_BACKEND,
+        "compile",
+        mock.Mock(side_effect=AssertionError("CUDA probed CPU")),
+    )
+    with mock.patch.object(
+        add_kernel,
+        "emit_mlir",
+        side_effect=AssertionError("unavailable CUDA compiled"),
+    ):
+        with pytest.raises(sw.BackendUnavailableError) as caught:
+            add_kernel.launch(
+                arguments=_arguments(torch),
+                constexprs={"BLOCK": 128},
+                grid=(2,),
+                backend="cuda",
+            )
+    _assert_unavailable(caught.value, "cuda-unavailable", "cuda")
+
+
+def test_cuda_driver_load_failure_preserves_cause(monkeypatch):
+    """Expose driver installation failure separately from CUDA build support."""
+    cause = OSError("libcuda.so.1 not found")
+    monkeypatch.setattr(
+        _cuda_backend.ctypes, "CDLL", mock.Mock(side_effect=cause)
+    )
+    with pytest.raises(sw.BackendUnavailableError) as caught:
+        _cuda_backend._CudaDriver()
+    _assert_unavailable(caught.value, "cuda-driver-unavailable", "cuda")
+    assert caught.value.__cause__ is cause
+
+
+def test_missing_cuda_context_is_unavailable():
+    """A successful driver query returning no context has a distinct code."""
+    driver = object.__new__(_cuda_backend._CudaDriver)
+    driver._context_id = None
+    driver.library = types.SimpleNamespace(
+        cuCtxGetCurrent=mock.Mock(return_value=0)
+    )
+    with pytest.raises(sw.BackendUnavailableError) as caught:
+        driver.current_context()
+    _assert_unavailable(caught.value, "cuda-context-unavailable", "cuda")
+
+
+@pytest.mark.parametrize("backend", ["cpu", "cuda"])
+def test_debug_events_report_cache_and_launch_without_payload(
+    tmp_path, monkeypatch, caplog, backend
+):
+    """Log cache decisions and successful launch status, never runtime data."""
+    from swage import _runtime
+
+    adapter = _RecordingBackend(backend)
+    adapter.persistent_cache = backend == "cuda"
+    torch, _ = _fake_torch()
+    _install_recording_backends(monkeypatch, torch, adapter)
+    monkeypatch.setattr(_runtime, "_compiler_identity", _identity)
+    monkeypatch.setattr(_runtime, "_stale_identity", lambda _identity: None)
+    _runtime._identity_cache = None
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SWAGE_TEST_SECRET", "secret-must-not-be-logged")
+    monkeypatch.setattr(
+        add_kernel, "emit_mlir", lambda **_kwargs: "secret-semantic-module"
+    )
+    arguments = _arguments(torch, device_type=backend)
+    arguments["x_ptr"]._pointer = 987654321
+    caplog.set_level(logging.DEBUG, logger="swage.runtime")
+    launches = 3 if backend == "cuda" else 2
+    for index in range(launches):
+        if index == 2:
+            _runtime._artifact_cache.clear()
+        add_kernel.launch(
+            arguments=arguments,
+            constexprs={"BLOCK": 128},
+            grid=(2,),
+            backend=backend,
+        )
+
+    records = [
+        record for record in caplog.records if record.name == "swage.runtime"
+    ]
+    messages = [record.getMessage() for record in records]
+    status = "launch complete" if backend == "cpu" else "launch enqueued"
+    events = [message.split(" backend=", 1)[0] for message in messages]
+    expected = ["compile", status, "memory-hit", status]
+    if backend == "cuda":
+        expected += ["persistent-hit", status]
+    assert events == expected
+    key = next(iter(_runtime._artifact_cache))
+    for record, message in zip(records, messages):
+        assert record.levelno == logging.DEBUG
+        assert record.args  # Formatting remains lazy until a handler reads it.
+        assert f"backend={backend}" in message
+        assert f"target={'native' if backend == 'cpu' else 'sm_86'}" in message
+        assert "kernel=add_kernel" in message
+        assert f"key={key[:12]}" in message
+        assert key not in message
+        fields = message.split(" backend=", 1)[1].split()
+        expected_fields = {"target", "kernel", "key"}
+        if message.startswith(status):
+            expected_fields.add("grid")
+            assert "grid=(2,)" in message
+        assert {field.split("=")[0] for field in fields[1:]} == (
+            expected_fields
+        )
+    for secret in (
+        "secret-must-not-be-logged",
+        "secret-semantic-module",
+        "987654321",
+        str(tmp_path),
+    ):
+        assert secret not in "\n".join(messages)
+
+
+def test_same_name_arithmetic_uses_distinct_disk_cache_entries(
+    tmp_path, monkeypatch
+):
+    """The AST digest separates add/multiply with every other field equal."""
+    from swage import _runtime
+
+    @sw.jit
+    def elementwise(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    addition = elementwise
+
+    @sw.jit
+    def elementwise(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x * y, mask=mask)
+
+    adapter = _RecordingBackend("cuda")
+    adapter.persistent_cache = True
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_runtime, "_compiler_identity", _identity)
+    monkeypatch.setattr(_runtime, "_stale_identity", lambda _identity: None)
+    _runtime._identity_cache = None
+    specializations = [
+        _runtime._specialization_data(
+            kernel,
+            descriptors=("ptr<f32>",) * 3 + ("i32",),
+            constexprs={"BLOCK": 128},
+            target="sm_86",
+            adapter=adapter,
+        )
+        for kernel in (addition, elementwise)
+    ]
+    assert specializations[0]["source"] != specializations[1]["source"]
+    assert {k: v for k, v in specializations[0].items() if k != "source"} == {
+        k: v for k, v in specializations[1].items() if k != "source"
+    }
+    first = [
+        _runtime._compile_cached(adapter, spec, "elementwise", 128, object)
+        for spec in specializations
+    ]
+    assert len(adapter.calls) == 2
+    assert first[0].key != first[1].key
+    assert len(list(tmp_path.glob("*/metadata.json"))) == 2
+    _runtime._artifact_cache.clear()
+    monkeypatch.setattr(
+        adapter,
+        "compile",
+        mock.Mock(side_effect=AssertionError("disk hit recompiled")),
+    )
+    for spec, expected in zip(reversed(specializations), reversed(first)):
+        actual = _runtime._compile_cached(
+            adapter, spec, "elementwise", 128, object
+        )
+        assert actual == expected
+    _runtime._identity_cache = None
 
 
 def test_atomic_write_closes_its_descriptor_only_once(tmp_path, monkeypatch):
@@ -3493,6 +5314,16 @@ def test_atomic_write_closes_a_descriptor_it_could_not_wrap(
     assert list(tmp_path.iterdir()) == []
 
 
+def _no_current_context():
+    """Raise what the driver raises on a thread without a CUDA context."""
+    raise sw.BackendUnavailableError(
+        "PyTorch has no current CUDA context",
+        code="cuda-context-unavailable",
+        backend="cuda",
+        remediation="initialize PyTorch CUDA on the selected device",
+    )
+
+
 def test_launch_gives_a_thread_without_a_context_its_device_context(
     monkeypatch,
 ):
@@ -3504,7 +5335,7 @@ def test_launch_gives_a_thread_without_a_context_its_device_context(
 
     def current_context():
         if not made_current:
-            raise RuntimeError("PyTorch has no current CUDA context")
+            _no_current_context()
         return 0xCAFE
 
     driver.current_context = current_context
@@ -3523,13 +5354,11 @@ def test_launch_reports_a_context_it_could_not_make_current(monkeypatch):
     driver = _install_launch_fakes(monkeypatch, torch)
     made_current = []
     torch.cuda.set_device = made_current.append
+    driver.current_context = _no_current_context
 
-    def no_context():
-        raise RuntimeError("PyTorch has no current CUDA context")
-
-    driver.current_context = no_context
-
-    with pytest.raises(RuntimeError, match="no current CUDA context"):
+    with pytest.raises(
+        sw.BackendUnavailableError, match="no current CUDA context"
+    ):
         add_kernel.launch(
             arguments=_arguments(torch), constexprs={"BLOCK": 128}, grid=(2,)
         )
@@ -3553,10 +5382,10 @@ def test_launch_does_not_touch_a_context_that_is_current(monkeypatch):
     assert len(driver.launches) == 1
 
 
-def _run_script(script, tmp_path, timeout=60):
+def _run_script(script, tmp_path, timeout=60, arguments=()):
     """Run `script` in a fresh interpreter with the package on its path."""
     return subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, *arguments],
         env=dict(
             os.environ,
             PYTHONPATH=str(pathlib.Path(sw.__file__).parents[1]),
@@ -3734,24 +5563,25 @@ import time
 import warnings
 
 from swage import _runtime
-from swage import _segmented_qualification as qualification
+from swage import _segmented_runtime as _execution
 
 in_flight = threading.Event()
 options = {"kernel_name": "segmented_sum", "target": "sm_86"}
+contract = sys.argv[1]
 
 
 def slow_compile(_module, **_options):
     in_flight.set()
     time.sleep(0.4)
-    return "lowered", "ptx of the parent", "{}"
+    return "lowered", "ptx of the parent", contract
 
 
 def fast_compile(_module, **_options):
-    return "lowered", "ptx of the child", "{}"
+    return "lowered", "ptx of the child", contract
 
 
 thread = threading.Thread(
-    target=qualification._compile_once,
+    target=_execution._compile_once,
     args=(slow_compile, "program"),
     kwargs=dict(options, module=object()),
 )
@@ -3762,11 +5592,11 @@ child = os.fork()
 if child == 0:
     # SIGALRM ends a child that waits for a lock nobody will release.
     signal.alarm(5)
-    ptx = qualification._compile_once(
+    kernel = _execution._compile_once(
         fast_compile, "another program", module=object(), **options
     )
     with _runtime._compile_lock:
-        os._exit(0 if ptx == "ptx of the child" else 3)
+        os._exit(0 if kernel.image == "ptx of the child" else 3)
 _, status = os.waitpid(child, 0)
 thread.join()
 if os.WIFSIGNALED(status):
@@ -3781,7 +5611,13 @@ with _runtime._compile_lock:
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
 def test_child_forked_during_a_compile_can_use_the_cold_path(tmp_path):
     """Do not hand a forked child a lock held by a thread it lacks."""
-    completed = _run_script(_FORK_DURING_A_COMPILE_SCRIPT, tmp_path)
+    completed = _run_script(
+        _FORK_DURING_A_COMPILE_SCRIPT,
+        tmp_path,
+        arguments=(
+            _contract_json("segmented_sum", arguments=_DIRECT_ARGUMENTS),
+        ),
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "child exited 0\nparent lock usable\n"

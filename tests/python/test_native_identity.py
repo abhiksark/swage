@@ -25,7 +25,8 @@ import warnings
 import pytest
 import swage as sw
 import swage.language as sl
-from swage import _runtime
+from swage import _cuda_backend, _runtime
+from swage._backends import get_backend
 
 _EXTENSION = "_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so"
 _LIBRARY = "libSwagePythonCAPI.so.22.1"
@@ -81,6 +82,7 @@ def _identity_and_key(monkeypatch, libraries):
         descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
         constexprs={"BLOCK": 128},
         target="sm_86",
+        adapter=get_backend("cuda"),
     )
     return data["native"], _runtime._cache_key(data)
 
@@ -341,6 +343,7 @@ def test_cache_key_is_the_same_in_a_checkout_and_in_an_install(monkeypatch):
             descriptors=("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
             constexprs={"BLOCK": 128},
             target="sm_86",
+            adapter=get_backend("cuda"),
         )
         return _runtime._cache_key(data)
 
@@ -471,7 +474,9 @@ def test_emit_and_compile_report_the_mismatch_itself(monkeypatch):
             constexprs={"BLOCK": 128},
         )
     with pytest.raises(_runtime._BindingsMismatch, match="0.0.1"):
-        _runtime._compile_native(object(), "add_kernel", 128, "sm_86")
+        _cuda_backend._compile_native(
+            object(), "add_kernel", 128, "sm_86", "fixed", {}
+        )
 
 
 def _git(root, *arguments):

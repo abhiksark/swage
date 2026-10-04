@@ -129,7 +129,9 @@ def _result_count(function):
 def test_swage_exports_the_two_segmented_calls():
     """Publish the two calls and nothing else of the segmented runner."""
     assert swage.__all__ == [
+        "BackendUnavailableError",
         "CompilationError",
+        "SwageError",
         "jit",
         "segment_reduce",
         "segment_softmax",
@@ -188,13 +190,14 @@ def test_segmented_calls_reject_a_pytorch_below_the_floor(
     _fake_torch(monkeypatch, version=version)
 
     with pytest.raises(
-        RuntimeError,
+        swage.BackendUnavailableError,
         match=(
             "requires PyTorch 2.6 or newer; found PyTorch "
-            f"{re.escape(version)}$"
+            f"{re.escape(version)}; install PyTorch 2.6 or newer$"
         ),
-    ):
+    ) as caught:
         _call(function, object(), object())
+    assert caught.value.code == "pytorch-unsupported"
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
@@ -212,16 +215,17 @@ def test_segmented_calls_name_the_installation_page_without_bindings(
 
     for keywords in ({}, {"out": out}):
         with pytest.raises(
-            RuntimeError,
+            swage.BackendUnavailableError,
             match=(
                 f"^Swage {function.__name__}\\(\\) requires the build-tree "
                 "mlir_swage bindings, which the swage-compiler wheel does "
-                "not include; nothing was launched. See "
+                "not include; nothing was launched; see "
                 "docs/getting-started/installation.md in "
                 "https://github.com/abhiksark/swage for the native build$"
             ),
-        ):
+        ) as caught:
             _call(function, values, offsets, **keywords)
+        assert caught.value.code == "native-unavailable"
 
 
 def _importable_bindings(monkeypatch):
@@ -251,16 +255,17 @@ def test_segmented_calls_name_numpy_when_it_is_missing(function, monkeypatch):
     monkeypatch.setitem(sys.modules, "numpy", None)
 
     with pytest.raises(
-        RuntimeError,
+        swage.BackendUnavailableError,
         match=(
             f"^Swage {function.__name__}\\(\\) requires numpy, which "
-            "cannot be imported; nothing was launched. Install "
-            "'swage-compiler\\[pytorch\\]', which declares it. See "
+            "cannot be imported; nothing was launched; install "
+            "'swage-compiler\\[pytorch\\]', which declares it; see "
             "docs/getting-started/installation.md in "
             "https://github.com/abhiksark/swage for the requirements$"
         ),
-    ):
+    ) as caught:
         _call(function, values, offsets)
+    assert caught.value.code == "numpy-unavailable"
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
