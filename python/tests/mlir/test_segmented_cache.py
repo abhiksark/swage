@@ -1,6 +1,7 @@
 # python/tests/mlir/test_segmented_cache.py
 """Kernel memo and launch guards of the private segmented runner."""
 
+import concurrent.futures
 import threading
 import time
 from collections import OrderedDict
@@ -353,7 +354,7 @@ def test_compile_failure_is_not_memoized():
 
 
 def test_compile_memo_compiles_once_across_threads():
-    """Hold the module lock so concurrent first uses share one compile."""
+    """Make concurrent first uses of one key share one compile."""
     compiler = _FakeCompiler()
     workers = 8
     barrier = threading.Barrier(workers)
@@ -382,6 +383,38 @@ def test_compile_memo_compiles_once_across_threads():
     assert all(kernel is results[0] for kernel in results)
     assert results[0].image == "ptx1"
     assert len(compiler.calls) == 1
+
+
+def test_compile_memo_compiles_different_programs_at_once():
+    """Compile two programs at the same time, each once.
+
+    Each miss holds a compile place of the cold-path lock, not the lock, so
+    the second program compiles while the first is in flight.
+    """
+    compiler = _FakeCompiler()
+    barrier = threading.Barrier(2)
+
+    def compile_ptx(module, **options):
+        # Both compiles must be inside the compiler at once to pass.
+        barrier.wait(5)
+        return compiler(module, **options)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        kernels = [
+            pool.submit(
+                _execution._compile_once,
+                compile_ptx,
+                program,
+                module=object(),
+                **_OPTIONS,
+            )
+            for program in ("left", "right")
+        ]
+        results = [kernel.result(timeout=10) for kernel in kernels]
+
+    assert sorted(kernel.image for kernel in results) == ["ptx1", "ptx2"]
+    assert len(compiler.calls) == 2
+    assert not _execution._flights
 
 
 def test_lease_reuses_one_module_within_a_context():

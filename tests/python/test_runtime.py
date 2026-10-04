@@ -4551,30 +4551,28 @@ def test_same_specialization_compilation_is_coalesced(monkeypatch):
     assert all(result is results[0] for result in results)
 
 
-def test_different_specializations_compile_one_at_a_time(monkeypatch):
-    """Serialize cold compiles of any keys, and never make a hit wait.
+def test_different_specializations_compile_concurrently(monkeypatch):
+    """Compile independent keys at once, and never make a hit wait.
 
-    Every miss holds the cold-path lock, so a second key compiles only
-    after the first. A key the process holds is served while a compile is
-    in flight.
+    Each miss holds a compile place of the cold-path lock, not the lock, so
+    a second key compiles while the first is in flight. A key the process
+    holds is served meanwhile.
     """
     from swage import _runtime
 
     _install_fake_compiler(monkeypatch, _runtime)
     warm = _compile(key="warm")
-    started = threading.Event()
-    release = threading.Event()
+    barrier = threading.Barrier(2)
     entered = []
 
     def callback():
         entered.append(threading.get_ident())
-        started.set()
-        assert release.wait(5)
+        # Both compiles must be inside the compiler at once to pass.
+        barrier.wait(5)
 
     _install_fake_compiler(monkeypatch, _runtime, callback)
     with ThreadPoolExecutor(max_workers=3) as pool:
         left = pool.submit(_compile, key="left")
-        assert started.wait(5)
         right = pool.submit(_compile, key="right")
         hit = pool.submit(
             _compile,
@@ -4582,14 +4580,90 @@ def test_different_specializations_compile_one_at_a_time(monkeypatch):
             key="warm",
         )
         assert hit.result(timeout=5) is warm
-        # Time enough for the right miss to start compiling, if it could.
-        time.sleep(0.1)
-        assert len(entered) == 1
-        release.set()
         compiled = [left.result(timeout=5), right.result(timeout=5)]
 
-    assert len(entered) == 2
+    assert len(set(entered)) == 2
     assert [artifact.key for artifact in compiled] == ["left", "right"]
+
+
+def test_a_failed_compile_is_retried_by_a_waiting_caller(monkeypatch):
+    """Let a caller that waited on a failed compile compile in its place."""
+    from swage import _runtime
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def callback():
+        calls.append(threading.get_ident())
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(5)
+            raise RuntimeError("first compile failed")
+
+    _install_fake_compiler(monkeypatch, _runtime, callback)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_compile, key="retried")
+        assert started.wait(5)
+        second = pool.submit(_compile, key="retried")
+        # Time enough for the second caller to find the key in flight.
+        time.sleep(0.05)
+        release.set()
+        with pytest.raises(RuntimeError, match="first compile failed"):
+            first.result(timeout=5)
+        artifact = second.result(timeout=5)
+
+    assert len(calls) == 2
+    assert artifact.key == "retried"
+    assert not _runtime._compile_flights
+
+
+def test_exit_and_fork_wait_for_a_compile_in_flight(monkeypatch):
+    """Hold the exit and fork handlers until every compile place is back."""
+    from swage import _runtime
+
+    lock = _runtime._ColdPathLock()
+    monkeypatch.setattr(_runtime, "_compile_lock", lock)
+    started = threading.Event()
+    release = threading.Event()
+
+    def callback():
+        started.set()
+        assert release.wait(5)
+
+    _install_fake_compiler(monkeypatch, _runtime, callback)
+    forked = threading.Event()
+
+    def fork_handlers():
+        lock.before_fork()
+        forked.set()
+        lock.after_fork()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        compiled = pool.submit(_compile, key="in-flight")
+        assert started.wait(5)
+        forking = pool.submit(fork_handlers)
+        time.sleep(0.05)
+        assert not forked.is_set()
+        release.set()
+        forking.result(timeout=5)
+        assert compiled.result(timeout=5).key == "in-flight"
+
+    # Exit waits for a place as well, and keeps the lock afterwards.
+    holder = threading.Event()
+    done = threading.Event()
+
+    def hold_a_place():
+        with lock.compiling():
+            holder.set()
+            assert done.wait(5)
+
+    thread = threading.Thread(target=hold_a_place)
+    thread.start()
+    assert holder.wait(5)
+    assert not lock.close(0.05)
+    done.set()
+    thread.join(5)
 
 
 class _LifecycleDriver:

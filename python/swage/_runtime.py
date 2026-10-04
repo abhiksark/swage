@@ -11,6 +11,7 @@ segmented runner shares them.
 
 import ast
 import atexit
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -65,13 +66,18 @@ class _ColdPathLock:
     """A reentrant lock that interpreter exit closes to every other thread.
 
     The thread that runs the exit handlers calls `close`. It waits for the
-    holder and then keeps the lock. From that call on, any other thread
-    that asks for the lock waits forever instead, so a thread that would
-    retake a released lock ahead of the exiting thread starts nothing new.
-    The exiting thread itself can still take the lock, because a later exit
-    handler may reach a cold path. When the wait of `close` ran out, the
-    exiting thread does not wait a second time behind the same holder: its
-    next request fails at once.
+    holder and for every compile in flight and then keeps the lock. From
+    that call on, any other thread that asks for the lock waits forever
+    instead, so a thread that would retake a released lock ahead of the
+    exiting thread starts nothing new. The exiting thread itself can still
+    take the lock, because a later exit handler may reach a cold path. When
+    the wait of `close` ran out, the exiting thread does not wait a second
+    time behind the same holder: its next request fails at once.
+
+    A compile does not hold the lock while it runs, so compiles of
+    different kernels run at once. It takes a place with `compiling`
+    instead: the place is granted under the lock, and `close` and `fork`
+    wait until every place is given back.
     """
 
     def __init__(self):
@@ -79,9 +85,24 @@ class _ColdPathLock:
         self._lock = threading.RLock()
         self._closed_by = None
         self._wait_ran_out = False
+        # The compiles in flight, and the condition `close` and a fork wait
+        # on until there are none.
+        self._compiles = 0
+        self._idle = threading.Condition(threading.Lock())
+        self._places = threading.local()
 
     def acquire(self, timeout=-1):
-        """Take the lock; return whether it was taken within `timeout`."""
+        """Take the lock; return whether it was taken within `timeout`.
+
+        Raises:
+            RuntimeError: This thread holds a compile place. A fork waits
+                for every place while it holds the lock, so taking the lock
+                there could wait forever.
+        """
+        if getattr(self._places, "held", False):
+            raise RuntimeError(
+                "a compile must not take the cold-path lock it holds a place of"
+            )
         closed_by = self._closed_by
         if closed_by is not None:
             if closed_by != threading.get_ident():
@@ -95,17 +116,63 @@ class _ColdPathLock:
         """Give the lock back once."""
         self._lock.release()
 
+    @contextlib.contextmanager
+    def compiling(self):
+        """Hold a place for one compile that runs without the lock.
+
+        The thread must not take the lock while it holds the place: `close`
+        and a fork hold the lock while they wait for every place.
+
+        Raises:
+            RuntimeError: The interpreter exits and the thread that held
+                the lock when the exit wait ran out still holds it.
+        """
+        with self:
+            with self._idle:
+                self._compiles += 1
+        self._places.held = True
+        try:
+            yield
+        finally:
+            self._places.held = False
+            with self._idle:
+                self._compiles -= 1
+                self._idle.notify_all()
+
     def close(self, timeout):
-        """Close the lock to other threads and wait for it.
+        """Close the lock to other threads and wait for it and the compiles.
 
         Returns:
-            Whether the caller holds the lock. When the wait timed out, the
-            holder is still at work and later requests still wait forever.
+            Whether the caller holds the lock and no compile is in flight.
+            When the wait timed out, the holder or a compile is still at work
+            and later requests still wait forever.
         """
         self._closed_by = threading.get_ident()
+        deadline = time.monotonic() + timeout
         acquired = self._lock.acquire(timeout=timeout)
+        if acquired:
+            with self._idle:
+                acquired = self._idle.wait_for(
+                    lambda: not self._compiles,
+                    max(0.0, deadline - time.monotonic()),
+                )
         self._wait_ran_out = not acquired
         return acquired
+
+    def before_fork(self):
+        """Take the lock and wait for the compiles, before `fork` copies them.
+
+        The condition's own lock is kept across the fork too, so the child
+        finds it free.
+        """
+        self._lock.acquire()
+        self._idle.acquire()
+        self._idle.wait_for(lambda: not self._compiles)
+
+    def after_fork(self):
+        """Give back what `before_fork` took, in the parent and the child."""
+        self._idle.release()
+        self._lock.release()
 
     def __enter__(self):
         """Take the lock for a `with` block.
@@ -127,25 +194,62 @@ class _ColdPathLock:
         self.release()
 
 
-# The cold-path lock: every native compile and every first load of a kernel
-# in this process holds it, here and in the private segmented runner.
-# Compiles are serialized on purpose. The native compiler admits concurrent
-# compiles only on separate MLIR contexts, and an LLVM fatal error ends the
-# process, so a lock per key would add risk for little gain. The compiler
-# releases the GIL while it works, and a warm launch never takes this lock:
-# it reads the caches below with one `get` each.
+# The cold-path lock. Every first load of a kernel and every creation of
+# the driver holds it, here and in `_cuda_backend`; every compile takes a
+# place with `compiling`, here and in the private segmented runner. The
+# native compiler releases the GIL and admits concurrent compiles on
+# separate MLIR contexts, and every compile parses or emits its module in a
+# context of its own, so compiles of different kernels run at once; a
+# second request for a kernel in flight waits for it (`_single_flight`). A
+# warm launch never takes this lock: it reads the caches with one `get`
+# each.
 #
 # The lock is reentrant for the two handlers registered below. Interpreter
 # exit keeps it on the exiting thread, whose later exit handlers may still
 # reach a cold path, and a fork takes it on a thread that may hold it.
 _compile_lock = _ColdPathLock()
-# How long interpreter exit waits for a cold path in flight. A compile takes
-# 3 to 20 ms here and a module load about as long, so the wait normally ends
-# within one of them. The lock is also held while `unload_retired` waits for
-# the device, which nothing bounds, so the wait is cut off: a thread stuck
-# there must not hold the process open. Past the bound the exit goes on and
-# the risk described at `_wait_for_cold_path_at_exit` returns.
+# How long interpreter exit waits for the cold paths in flight. A compile
+# takes 3 to 20 ms here and a module load about as long, so the wait
+# normally ends within one of them. A thread stuck in a cold path must not
+# hold the process open, so the wait is cut off. Past the bound the exit
+# goes on and the risk described at `_wait_for_cold_path_at_exit` returns.
 _EXIT_WAIT_SECONDS = 5.0
+# The request in flight for each kernel key, as an event set when it ends.
+_flights_lock = threading.Lock()
+_compile_flights = {}
+
+
+def _single_flight(flights, key, lookup, build):
+    """Build the value of `key` at most once at a time.
+
+    The first caller of a key builds it; a caller that finds the key in
+    flight waits for that build and then looks the value up. When the build
+    failed, a waiter builds in its place, so a failure is not kept. Builds
+    of different keys run at once.
+
+    Args:
+        flights: The registry of keys in flight that `key` belongs to.
+        key: The key of the value.
+        lookup: Returns the value when it exists, or None.
+        build: Builds, stores, and returns the value.
+    """
+    while True:
+        with _flights_lock:
+            flight = flights.get(key)
+            if flight is None:
+                flight = flights[key] = threading.Event()
+                break
+        flight.wait()
+        value = lookup()
+        if value is not None:
+            return value
+    try:
+        value = lookup()
+        return build() if value is None else value
+    finally:
+        with _flights_lock:
+            del flights[key]
+        flight.set()
 
 
 def _wait_for_cold_path_at_exit():
@@ -154,10 +258,12 @@ def _wait_for_cold_path_at_exit():
     The native compiler releases the GIL, so the interpreter can finalize
     while a daemon thread is inside LLVM, and the process then aborts or
     crashes. This handler closes the lock, which waits for the cold path in
-    flight and lets no other thread start a compile or a load afterwards.
-    Threads that are not daemons have ended before exit handlers run.
+    flight and every compile, and lets no other thread start a compile or a
+    load afterwards. Threads that are not daemons have ended before exit
+    handlers run.
 
-    A native compile that was not started under the lock is not waited for.
+    A native compile that was not started through the lock is not waited
+    for.
     """
     _compile_lock.close(_EXIT_WAIT_SECONDS)
 
@@ -167,11 +273,12 @@ if hasattr(os, "register_at_fork"):
     # A fork copies the lock in the state it has. Taken by another thread,
     # it would stay taken in the child, where that thread does not exist,
     # and the child's first cold path would wait for it forever. The fork
-    # therefore waits for the cold path in flight and both sides release.
+    # therefore waits for the cold path and the compiles in flight, and
+    # both sides release.
     os.register_at_fork(
-        before=_compile_lock.acquire,
-        after_in_parent=_compile_lock.release,
-        after_in_child=_compile_lock.release,
+        before=_compile_lock.before_fork,
+        after_in_parent=_compile_lock.after_fork,
+        after_in_child=_compile_lock.after_fork,
     )
 
 
@@ -200,6 +307,7 @@ _cache_lock = threading.Lock()
 _artifact_cache = OrderedDict()
 _memory_cache_entries = None
 _identity_cache = None
+_identity_lock = threading.Lock()
 
 
 class _Artifact(NamedTuple):
@@ -1186,9 +1294,18 @@ def _cached_identity():
     is always honored.
     """
     global _identity_cache
-    if _identity_cache is None or _identity_cache[0] is not _compiler_identity:
-        _identity_cache = (_compiler_identity, _compiler_identity())
-    return _identity_cache[1]
+    cached = _identity_cache
+    if cached is None or cached[0] is not _compiler_identity:
+        # Concurrent first launches derive it once, so every reader holds
+        # the same record, which the native fixed launcher compares.
+        with _identity_lock:
+            cached = _identity_cache
+            if cached is None or cached[0] is not _compiler_identity:
+                cached = _identity_cache = (
+                    _compiler_identity,
+                    _compiler_identity(),
+                )
+    return cached[1]
 
 
 class _BindingsMismatch(SwageError):
@@ -1658,9 +1775,11 @@ def _compile_cached(
     `emit` is a zero-argument callable producing the semantic module; it is
     deferred so a warm launch never pays for AST-to-MLIR emission. A warm
     launch stops at the process cache and never waits for a compile in
-    progress. A miss holds the cold-path lock, so compiles are serialized,
-    a second caller of the same key finds the first caller's artifact, and
-    interpreter exit and `fork` wait for the compile in flight.
+    progress. A miss of a key is built once at a time: a second caller of
+    the same key waits for the first caller's artifact, while misses of
+    different keys compile at once, each in a context of its own. Every
+    miss holds a compile place of the cold-path lock, so interpreter exit
+    and `fork` wait for it.
 
     A cache directory that cannot be read or written never fails the call:
     the artifact is kept for the process and one warning names the cause.
@@ -1710,113 +1829,123 @@ def _compile_cached(
                 key[:12],
             )
         return cached
-    with _compile_lock:
-        cached = _cached_artifact(key, adapter, target)
-        if cached is not None:
-            return cached
-        # Read before any cache or compiler work, so a mistyped value fails
-        # the call instead of being ignored.
-        _, no_compile, _ = _cache_settings()
-        identity = _cached_identity()
-        persistent = adapter.persistent_cache and _cache_usable(identity)
-        artifact = None
-        if persistent:
-            try:
-                artifact = _read_cache_entry(
-                    key,
-                    specialization,
-                    kernel_name,
-                    block_size,
-                    lowering_kind,
-                    adapter,
-                    target,
-                )
-            except OSError as error:
-                _warn_cache_off("read", f"cannot use {_cache_dir()}: {error}")
-                persistent = False
-        if artifact is not None:
-            if _logger.isEnabledFor(logging.DEBUG):
-                _logger.debug(
-                    "persistent-hit backend=%s target=%s kernel=%s key=%s",
-                    adapter.name,
-                    target,
-                    kernel_name,
-                    key[:12],
-                )
-        else:
-            if no_compile:
-                _refuse_compile(kernel_name, key, looked_up=persistent)
-            if _logger.isEnabledFor(logging.DEBUG):
-                _logger.debug(
-                    "compile backend=%s target=%s kernel=%s key=%s",
-                    adapter.name,
-                    target,
-                    kernel_name,
-                    key[:12],
-                )
-            result = adapter.compile(
-                emit(),
-                kernel_name,
-                block_size,
-                target,
-                lowering_kind,
-                lowering_options,
-            )
-            if not isinstance(result, tuple) or len(result) != 3:
-                raise RuntimeError(
-                    "backend compiler must return lowered MLIR, image, and "
-                    "contract"
-                )
-            lowered, image, contract_json = result
-            if not isinstance(lowered, str) or not isinstance(
-                contract_json, str
-            ):
-                raise RuntimeError(
-                    "backend compiler returned invalid artifact data"
-                )
-            if adapter.artifact_format == "ptx" and not isinstance(image, str):
-                raise RuntimeError("CUDA compiler returned non-text PTX")
-            contract = _parse_compiler_contract(contract_json)
-            _validate_contract_specialization(
-                contract,
-                specialization,
-                kernel_name,
-                block_size,
-                lowering_kind,
-                adapter,
-            )
-            artifact = _make_artifact(
-                key,
-                adapter,
-                target,
-                lowered,
-                image,
-                contract_json,
-                contract,
-            )
-            # Retained before any disk write, so no failure below costs it.
-            with _cache_lock:
-                _insert_artifact_locked(key, artifact, limit)
-            # The identity is checked again: the compile may have loaded
-            # code that changed on disk since the lookup above.
-            if persistent and _cache_writable() and _cache_usable(identity):
+
+    def build():
+        with _compile_lock.compiling():
+            # Read before any cache or compiler work, so a mistyped value fails
+            # the call instead of being ignored.
+            _, no_compile, _ = _cache_settings()
+            identity = _cached_identity()
+            persistent = adapter.persistent_cache and _cache_usable(identity)
+            artifact = None
+            if persistent:
                 try:
-                    artifact = _write_cache_entry(
-                        artifact,
+                    artifact = _read_cache_entry(
+                        key,
                         specialization,
                         kernel_name,
                         block_size,
                         lowering_kind,
                         adapter,
+                        target,
                     )
                 except OSError as error:
                     _warn_cache_off(
-                        "write", f"cannot use {_cache_dir()}: {error}"
+                        "read", f"cannot use {_cache_dir()}: {error}"
                     )
-        with _cache_lock:
-            _insert_artifact_locked(key, artifact, limit)
-        _write_dumps(artifact)
-        return artifact
+                    persistent = False
+            if artifact is not None:
+                if _logger.isEnabledFor(logging.DEBUG):
+                    _logger.debug(
+                        "persistent-hit backend=%s target=%s kernel=%s key=%s",
+                        adapter.name,
+                        target,
+                        kernel_name,
+                        key[:12],
+                    )
+            else:
+                if no_compile:
+                    _refuse_compile(kernel_name, key, looked_up=persistent)
+                if _logger.isEnabledFor(logging.DEBUG):
+                    _logger.debug(
+                        "compile backend=%s target=%s kernel=%s key=%s",
+                        adapter.name,
+                        target,
+                        kernel_name,
+                        key[:12],
+                    )
+                result = adapter.compile(
+                    emit(),
+                    kernel_name,
+                    block_size,
+                    target,
+                    lowering_kind,
+                    lowering_options,
+                )
+                if not isinstance(result, tuple) or len(result) != 3:
+                    raise RuntimeError(
+                        "backend compiler must return lowered MLIR, image, and "
+                        "contract"
+                    )
+                lowered, image, contract_json = result
+                if not isinstance(lowered, str) or not isinstance(
+                    contract_json, str
+                ):
+                    raise RuntimeError(
+                        "backend compiler returned invalid artifact data"
+                    )
+                if adapter.artifact_format == "ptx" and not isinstance(
+                    image, str
+                ):
+                    raise RuntimeError("CUDA compiler returned non-text PTX")
+                contract = _parse_compiler_contract(contract_json)
+                _validate_contract_specialization(
+                    contract,
+                    specialization,
+                    kernel_name,
+                    block_size,
+                    lowering_kind,
+                    adapter,
+                )
+                artifact = _make_artifact(
+                    key,
+                    adapter,
+                    target,
+                    lowered,
+                    image,
+                    contract_json,
+                    contract,
+                )
+                # Retained before any disk write, so no failure below costs it.
+                with _cache_lock:
+                    _insert_artifact_locked(key, artifact, limit)
+                # The identity is checked again: the compile may have loaded
+                # code that changed on disk since the lookup above.
+                if persistent and _cache_writable() and _cache_usable(identity):
+                    try:
+                        artifact = _write_cache_entry(
+                            artifact,
+                            specialization,
+                            kernel_name,
+                            block_size,
+                            lowering_kind,
+                            adapter,
+                        )
+                    except OSError as error:
+                        _warn_cache_off(
+                            "write", f"cannot use {_cache_dir()}: {error}"
+                        )
+            with _cache_lock:
+                _insert_artifact_locked(key, artifact, limit)
+            _write_dumps(artifact)
+            return artifact
+
+    return _single_flight(
+        _compile_flights,
+        key,
+        lambda: _cached_artifact(key, adapter, target),
+        build,
+    )
 
 
 def _native_compiler(kernel_name, backend):

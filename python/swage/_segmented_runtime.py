@@ -13,9 +13,10 @@ The PTX memo is keyed by the native compile function, the semantic module
 text, and every code generation option (kernel name, block size, target).
 It is bounded: it keeps `_runtime._CACHE_LIMIT` kernels and then forgets
 its oldest, which is compiled again on its next use. A hit takes no lock. A
-miss takes the process-wide cold-path lock, which serializes native
-compiles; see `_runtime._compile_lock`. The private segmented path has no
-persistent cache.
+miss of one key is compiled once at a time while misses of other keys
+compile at once, each holding a compile place of the process-wide
+cold-path lock; see `_runtime._compile_lock`. The private segmented path
+has no persistent cache.
 """
 
 import types
@@ -32,6 +33,8 @@ _ENTRY_SUFFIXES = {
 }
 _memo_lock = _runtime._compile_lock
 _ptx_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
+# The compile in flight for each memo key; see `_runtime._single_flight`.
+_flights = {}
 # The NVPTX processor of each CUDA device index. A device keeps its compute
 # capability for as long as the process runs.
 _targets = {}
@@ -186,32 +189,39 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
     kernel = _ptx_memo.get(key)
     if kernel is not None:
         return kernel
-    with _memo_lock:
-        kernel = _ptx_memo.get(key)
-        if kernel is not None:
-            return kernel
-        compiler = getattr(compile_ptx, "__name__", "")
-        artifact = _artifact.selected()
-        if artifact is not None:
-            ptx, contract_json = artifact.kernel(compiler, module_text, options)
-        else:
-            if _runtime._switch_on("SWAGE_NO_COMPILE"):
-                raise _compile_refusal(options)
-            if module is None:
-                from mlir_swage import ir
-                from mlir_swage.dialects import swage
 
-                with ir.Context() as context:
-                    swage.register_dialects(context)
-                    _, ptx, contract_json = compile_ptx(
-                        ir.Module.parse(module_text), **options
-                    )
+    def build():
+        compiler = getattr(compile_ptx, "__name__", "")
+        # Selecting an artifact may take the cold-path lock, which a compile
+        # place must not.
+        artifact = _artifact.selected()
+        with _memo_lock.compiling():
+            if artifact is not None:
+                ptx, contract_json = artifact.kernel(
+                    compiler, module_text, options
+                )
             else:
-                _, ptx, contract_json = compile_ptx(module, **options)
-        kernel = _ptx_memo[key] = _checked_kernel(
-            compiler, ptx, contract_json, options
-        )
-    return kernel
+                if _runtime._switch_on("SWAGE_NO_COMPILE"):
+                    raise _compile_refusal(options)
+                if module is None:
+                    from mlir_swage import ir
+                    from mlir_swage.dialects import swage
+
+                    with ir.Context() as context:
+                        swage.register_dialects(context)
+                        _, ptx, contract_json = compile_ptx(
+                            ir.Module.parse(module_text), **options
+                        )
+                else:
+                    _, ptx, contract_json = compile_ptx(module, **options)
+            kernel = _checked_kernel(compiler, ptx, contract_json, options)
+        with _memo_lock:
+            _ptx_memo[key] = kernel
+        return kernel
+
+    return _runtime._single_flight(
+        _flights, key, lambda: _ptx_memo.get(key), build
+    )
 
 
 def _compile_refusal(options):
