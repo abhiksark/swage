@@ -13,6 +13,7 @@ add_unittest(check-swage-unit SwageUnitTests
   RuntimeTest.cpp
   TargetDescriptionTest.cpp
   TaskClassifierTest.cpp
+  KernelContractTest.cpp
 )
 
 # The C API tests reach Swage only through SwageCAPI and the MLIR C API, as a
@@ -32,6 +33,7 @@ target_link_libraries(SwageUnitTests
   MLIRParser
   MLIRSwagePlan
   MLIRSwagePlanToGPU
+  MLIRSwageSupport
   MLIRSwageTarget
   MLIRSwageToPlan
   SwageCAPI

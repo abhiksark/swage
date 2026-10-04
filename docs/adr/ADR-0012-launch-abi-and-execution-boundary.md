@@ -93,6 +93,16 @@ The exact public call surface lives in
 target, zero-work, stream, retention, and cache contracts live in
 [Runtime and Environment](../reference/runtime-environment.md).
 
+## Subsequent extension
+
+The original decision above established the CUDA boundary. The current public
+API also accepts an explicit `backend="cpu"` selection for the same canonical
+fixed vector-add ABI. That path lowers through the Native LLVM target and runs
+synchronously through a process-local execution engine; it does not inherit
+CUDA stream, context, module-cache, or tensor-retention behavior. The
+backend-neutral generated contract and fail-closed backend selection are
+recorded in [ADR-0025](ADR-0025-compiler-generated-kernel-contracts.md).
+
 ## Consequences
 
 - The deterministic PTX compiler is an internal binding used by the runtime,

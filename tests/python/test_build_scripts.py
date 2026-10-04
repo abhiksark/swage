@@ -5,7 +5,8 @@ The documented commands call the interpreter `python`, so the scripts must
 configure the MLIR and Swage Python bindings for that interpreter and fall
 back to `python3` only where `python` is absent or too old. Each test runs
 the real script with a PATH that holds nothing but stand-ins: `cmake` records
-its arguments and `ninja` does nothing, so no build starts.
+its configure arguments and does nothing for `--build`, and `ninja` does
+nothing, so no build starts.
 """
 
 import shutil
@@ -57,7 +58,11 @@ def _run(script, tmp_path, interpreters):
     for tool in _HOST_TOOLS:
         (tools / tool).symlink_to(shutil.which(tool))
     record = tmp_path / "cmake-arguments.txt"
-    _executable(tools / "cmake", f'printf "%s\\n" "$@" > "{record}"')
+    # Only the configure call is recorded; `cmake --build` follows it.
+    _executable(
+        tools / "cmake",
+        f'[ "$1" = --build ] || printf "%s\\n" "$@" > "{record}"',
+    )
     _executable(tools / "ninja", "exit 0")
     for name, kind in interpreters.items():
         if kind == "current":

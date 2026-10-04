@@ -34,13 +34,14 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
-#include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
+#include "swage/Conversion/FixedBlock/FixedBlock.h"
 #include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
 #include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskClassifier.h"
 #include "swage/Dialect/SwagePlan/IR/TaskRecords.h"
+#include "swage/Support/KernelContract.h"
 #include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
@@ -214,9 +215,9 @@ void addKernelLoweringPasses(PassManager &manager, KernelSchedule schedule,
   manager.addPass(swage::createSwagePlanToGPUPass(target));
 }
 
-void configureCodegenPasses(PassManager &manager, KernelSchedule schedule,
-                            llvm::StringRef kernelName, int64_t blockSize) {
-  addKernelLoweringPasses(manager, schedule, kernelName, blockSize);
+/// Add the upstream conversion of every GPU module to the NVVM and LLVM
+/// dialects.
+void addNVVMLoweringPasses(PassManager &manager) {
   OpPassManager &gpuManager = manager.nest<gpu::GPUModuleOp>();
   gpuManager.addPass(createSCFToControlFlowPass());
   ConvertGpuOpsToNVVMOpsOptions options;
@@ -235,15 +236,16 @@ std::string expectedKernelName(llvm::StringRef kernelName,
   return expected;
 }
 
-/// Lower `module` and return the `gpu.module` of the requested kernel. A
-/// lowering names the module it creates `<kernel>_module`, so the module is
-/// found by its symbol, and it must hold the kernel.
+/// Lower `module` to the GPU dialect and return the `gpu.module` of the
+/// requested kernel. A lowering names the module it creates
+/// `<kernel>_module`, so the module is found by its symbol, and it must hold
+/// the kernel.
 FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
                                        llvm::StringRef kernelName,
                                        KernelSchedule schedule,
                                        int64_t blockSize) {
   PassManager manager(module.getContext());
-  configureCodegenPasses(manager, schedule, kernelName, blockSize);
+  addKernelLoweringPasses(manager, schedule, kernelName, blockSize);
   if (failed(manager.run(module)))
     return failure();
 
@@ -258,6 +260,47 @@ FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
     return failure();
   }
   return gpuModule;
+}
+
+/// Validate the launch contract a lowering attached to the kernel and remove
+/// it. The attribute is discardable: it describes the kernel to code
+/// generation and must not reach the lowered text or the LLVM IR, which the
+/// NVVM conversion would copy it into.
+LogicalResult eraseKernelContract(ModuleOp source, gpu::GPUModuleOp gpuModule,
+                                  llvm::StringRef kernelName,
+                                  KernelSchedule schedule) {
+  auto kernel = gpuModule.lookupSymbol<gpu::GPUFuncOp>(
+      expectedKernelName(kernelName, schedule));
+  if (!kernel)
+    return success();
+  Attribute attribute =
+      kernel->getDiscardableAttr(swage::kernelContractAttrName);
+  if (!attribute)
+    return success();
+  llvm::Expected<swage::KernelContract> contract =
+      swage::parseKernelContractAttr(attribute);
+  if (!contract)
+    return source.emitError("malformed swage.kernel_contract: ")
+           << llvm::toString(contract.takeError());
+  auto requiredBlock = kernel->getAttrOfType<DenseI32ArrayAttr>(
+      NVVM::NVVMDialect::getReqntidAttrName());
+  if (!requiredBlock)
+    return source.emitError(
+        "contract-bearing GPU function requires nvvm.reqntid");
+  if (llvm::Error error = swage::validateCUDAKernelContract(
+          *contract, kernel.getName(), kernel.getFunctionType(),
+          requiredBlock.asArrayRef()))
+    return source.emitError("invalid swage.kernel_contract: ")
+           << llvm::toString(std::move(error));
+  kernel->removeDiscardableAttr(swage::kernelContractAttrName);
+  return success();
+}
+
+/// Convert every GPU module of `module` to the NVVM and LLVM dialects.
+LogicalResult lowerGPUToNVVM(ModuleOp module) {
+  PassManager manager(module.getContext());
+  addNVVMLoweringPasses(manager);
+  return manager.run(module);
 }
 
 void printLoweredModule(ModuleOp module, std::string &lowered) {
@@ -413,7 +456,9 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (failed(loweredGPU))
     return failure();
   gpu::GPUModuleOp gpuModule = *loweredGPU;
-  if (failed(replaceLibdeviceCalls(gpuModule)))
+  if (failed(eraseKernelContract(source, gpuModule, kernelName, schedule)) ||
+      failed(lowerGPUToNVVM(*module)) ||
+      failed(replaceLibdeviceCalls(gpuModule)))
     return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
       context, {NVVM::NVVMTargetAttr::get(

@@ -20,7 +20,7 @@
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
-#include "swage/Conversion/FixedBlockToGPU/FixedBlockToGPU.h"
+#include "swage/Conversion/FixedBlock/FixedBlock.h"
 #include "swage/Conversion/SwagePlanToGPU/SwagePlanToGPU.h"
 #include "swage/Conversion/SwagePlanToSCF/SwagePlanToSCF.h"
 #include "swage/Conversion/SwageToPlan/SwageToPlan.h"
@@ -30,7 +30,7 @@
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
-  mlir::swage::registerFixedBlockToGPUPass();
+  mlir::swage::registerFixedBlockPasses();
   mlir::swage::registerSwageToPlanPass();
   mlir::swage::registerSwagePlanToGPUPass();
   mlir::swage::registerSwagePlanToSCFPass();

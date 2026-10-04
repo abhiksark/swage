@@ -33,13 +33,14 @@ no fast-math flags or new algebraic rewrites. Native exponential approximation
 continues to follow the existing direct-lowering contract.
 
 The private `_prepare_planned_reduction` helper accepts semantic qualification
-MLIR text and a kernel name. It returns the existing pure warp, pure CTA, and
-classified mixed launch callables. `_prepare_planned_sum` remains a wrapper
-for existing callers and frozen benchmarks. Public Python APIs do not change.
+MLIR text and a kernel name. It returns the existing owned prepared
+execution with its pure warp, pure CTA, and classified mixed launches.
+`_prepare_planned_sum` remains a wrapper for existing callers and frozen
+benchmarks. Public Python APIs do not change.
 
 The general private helper additionally enables a conservative preparation-time
 schedule choice: with default chunks, batches containing only 4097–8192-element
-segments and at least one segment per device SM can use the pure CTA callable
+segments and at least one segment per device SM can use the pure CTA launch
 in place of split execution. The element program must fit a relative work
 budget of 32: simple arithmetic costs one, `exp2` eight, and division sixteen,
 summed across all map and reduction regions. Constants and yields are free.

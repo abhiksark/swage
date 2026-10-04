@@ -1,6 +1,19 @@
 // test/Conversion/SwageToGPU/invalid-fixed-vector-add.mlir
 // RUN: swage-opt --swage-fixed-block-to-gpu='block-size=128' \
 // RUN:   --verify-diagnostics --split-input-file %s
+// RUN: swage-opt --swage-fixed-block-to-host='block-size=128' \
+// RUN:   --verify-diagnostics --split-input-file %s
+// RUN: swage-opt --swage-fixed-block-to-gpu='block-size=128' --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=UNCHANGED --implicit-check-not=gpu.module
+// RUN: swage-opt --swage-fixed-block-to-host='block-size=128' --verify-diagnostics --split-input-file --mlir-print-ir-after-failure %s 2>&1 | FileCheck %s --check-prefix=UNCHANGED --implicit-check-not=llvm.getelementptr
+
+// UNCHANGED-LABEL: func.func @unsupported_element(
+// UNCHANGED-SAME: memref<?xbf16>
+// UNCHANGED-LABEL: func.func @mixed_inputs(
+// UNCHANGED-SAME: memref<?xf16>
+// UNCHANGED-SAME: memref<?xf32>
+// UNCHANGED-LABEL: func.func @mixed_output(
+// UNCHANGED-SAME: memref<?xf8E4M3FN>
+// UNCHANGED-SAME: memref<?xf8E5M2>
 
 module {
   func.func @bad_axis(
@@ -28,7 +41,7 @@ module {
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
           into vector<128xf32>
     %sum = arith.addf %lhs, %rhs : vector<128xf32>
-    // expected-error@+1 {{fixed vector add must use canonical program offsets and bounds mask}}
+    // expected-error@+1 {{fixed elementwise operation must use canonical program offsets and bounds mask}}
     vector.scatter %output[%c0] [%offsets], %mask, %sum
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
     return
@@ -38,7 +51,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{fixed vector add requires three rank-one identity-layout f32 memrefs and one i32, got '(memref<?xf32, strided<[2]>>, memref<?xf32>, memref<?xf32>, i32) -> ()'}}
+  // expected-error@+1 {{fixed elementwise operation requires three rank-one identity-layout memrefs of f32, f16, f8E4M3FN, or f8E5M2 and one i32, got '(memref<?xf32, strided<[2]>>, memref<?xf32>, memref<?xf32>, i32) -> ()'}}
   func.func @bad_layout(
       %x: memref<?xf32, strided<[2]>>, %y: memref<?xf32>,
       %output: memref<?xf32>, %n: i32) {
@@ -129,7 +142,7 @@ module {
 
 module {
   // An unreachable second block is still a second block.
-  // expected-error@+1 {{fixed vector add requires one straight-line block, got 2 blocks}}
+  // expected-error@+1 {{fixed elementwise operation requires one straight-line block, got 2 blocks}}
   func.func @two_blocks(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     return
@@ -142,7 +155,7 @@ module {
 
 module {
   // A declaration has no block at all.
-  // expected-error@+1 {{fixed vector add requires one straight-line block, got 0 blocks}}
+  // expected-error@+1 {{fixed elementwise operation requires one straight-line block, got 0 blocks}}
   func.func private @declaration(
       memref<?xf32>, memref<?xf32>, memref<?xf32>, i32)
 }
@@ -153,7 +166,7 @@ module {
   func.func @unsupported_operation(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     %c0 = arith.constant 0 : index
-    // expected-error@+1 {{operation 'memref.load' is unsupported by fixed vector-add lowering}}
+    // expected-error@+1 {{operation 'memref.load' is unsupported by fixed elementwise lowering}}
     %value = memref.load %x[%c0] : memref<?xf32>
     return
   }
@@ -162,7 +175,7 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{expected one program_id, two gathers, one f32 add, and one scatter, found 1 program_id, 0 gathers, 0 f32 adds, and 0 scatters}}
+  // expected-error@+1 {{expected one program_id, two gathers, one floating-point add or multiply, and one scatter, found 1 program_id, 0 gathers, 0 floating-point adds or multiplies, and 0 scatters}}
   func.func @no_vector_add(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     %pid = swage.program_id 0
@@ -174,7 +187,7 @@ module {
 
 module {
   // The second gather reads %x again, so the kernel is not x + y.
-  // expected-error@+1 {{gathers, add, and scatter do not form a fixed vector add}}
+  // expected-error@+1 {{gathers, arithmetic, and scatter do not form a fixed elementwise operation}}
   func.func @gathers_one_input_twice(
       %x: memref<?xf32>, %y: memref<?xf32>, %output: memref<?xf32>, %n: i32) {
     %pid = swage.program_id 0
@@ -227,7 +240,7 @@ module {
           into vector<128xf32>
     %sum = arith.addf %lhs, %rhs : vector<128xf32>
     // The add is computed and dropped; the scatter writes %lhs unchanged.
-    // expected-error@+1 {{scatter value must be the vector f32 add}}
+    // expected-error@+1 {{scatter value must be the vector floating-point add or multiply}}
     vector.scatter %output[%c0] [%offsets], %mask, %lhs
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
     return
@@ -252,4 +265,37 @@ module {
 
 // expected-error@+1 {{expected exactly one kernel function, found 0}}
 module {
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{fixed elementwise operation requires three rank-one identity-layout memrefs of f32, f16, f8E4M3FN, or f8E5M2 and one i32, got '(memref<?xbf16>, memref<?xbf16>, memref<?xbf16>, i32) -> ()'}}
+  func.func @unsupported_element(
+      %x: memref<?xbf16>, %y: memref<?xbf16>,
+      %output: memref<?xbf16>, %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{fixed elementwise operation requires identical pointer element types, got '(memref<?xf16>, memref<?xf32>, memref<?xf16>, i32) -> ()'}}
+  func.func @mixed_inputs(
+      %x: memref<?xf16>, %y: memref<?xf32>,
+      %output: memref<?xf16>, %n: i32) {
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{fixed elementwise operation requires identical pointer element types, got '(memref<?xf8E4M3FN>, memref<?xf8E4M3FN>, memref<?xf8E5M2>, i32) -> ()'}}
+  func.func @mixed_output(
+      %x: memref<?xf8E4M3FN>, %y: memref<?xf8E4M3FN>,
+      %output: memref<?xf8E5M2>, %n: i32) {
+    return
+  }
 }

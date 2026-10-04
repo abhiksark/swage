@@ -142,9 +142,9 @@ under `lib/cmake/swage`. A consumer loads it with
 `find_package(Swage REQUIRED CONFIG)`:
 
 - The imported targets are `MLIRSwage`, `MLIRSwageTransforms`,
-  `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageToPlan`,
-  `MLIRSwagePlanToGPU`, `MLIRSwagePlanToSCF`, `MLIRSwageFixedBlockToGPU`,
-  and `SwageCAPI`.
+  `MLIRSwagePlan`, `MLIRSwageTarget`, `MLIRSwageSupport`, `MLIRSwageToPlan`,
+  `MLIRSwagePlanToGPU`, `MLIRSwagePlanToSCF`, `MLIRSwageFixedBlock`, and
+  `SwageCAPI`.
 - The targets carry no include directories, as the MLIR targets do not, so
   the consumer adds `SWAGE_INCLUDE_DIRS`, `MLIR_INCLUDE_DIRS`, and
   `LLVM_INCLUDE_DIRS`.

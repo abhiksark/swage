@@ -8,6 +8,9 @@ class _ScalarType(Enum):
     """Scalar types accepted by the first frontend slice."""
 
     FLOAT32 = "float32"
+    FLOAT16 = "float16"
+    FLOAT8_E4M3FN = "float8_e4m3fn"
+    FLOAT8_E5M2 = "float8_e5m2"
     INT32 = "int32"
 
 
@@ -40,7 +43,23 @@ class _PointerType:
 
 constexpr = _Marker.CONSTEXPR
 float32 = _ScalarType.FLOAT32
+float16 = _ScalarType.FLOAT16
+float8_e4m3fn = _ScalarType.FLOAT8_E4M3FN
+float8_e5m2 = _ScalarType.FLOAT8_E5M2
 int32 = _ScalarType.INT32
+
+_FLOAT_TYPES = (float32, float16, float8_e4m3fn, float8_e5m2)
+
+
+def _torch_float_type(dtype, torch):
+    """Map optional PyTorch metadata without importing the dependency."""
+    if dtype is torch.float32:
+        return float32
+    if dtype is not None:
+        for scalar_type in _FLOAT_TYPES:
+            if dtype is getattr(torch, scalar_type.value, None):
+                return scalar_type
+    return None
 
 
 def pointer(element_type):
@@ -83,6 +102,9 @@ def store(pointer_value, value, *, mask):
 __all__ = [
     "arange",
     "constexpr",
+    "float16",
+    "float8_e4m3fn",
+    "float8_e5m2",
     "float32",
     "int32",
     "load",

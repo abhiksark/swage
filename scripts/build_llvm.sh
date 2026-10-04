@@ -6,11 +6,16 @@
 #   SWAGE_LLVM_HOME            source/build/install root (default ~/.swage/llvm)
 #   SWAGE_LLVM_BUILD_TYPE      CMake build type (default RelWithDebInfo)
 #   SWAGE_LLVM_PYTHON_BINDINGS ON/OFF for MLIR Python bindings (default ON)
+#   SWAGE_PYTHON_EXECUTABLE    Python interpreter for the build and the MLIR
+#                              Python bindings (default: see below)
+#   SWAGE_LLVM_TARGETS        LLVM targets (default Native;NVPTX)
+#   SWAGE_LLVM_SANITIZERS     LLVM sanitizer list (default empty)
+#   CMAKE_BUILD_PARALLEL_LEVEL maximum concurrent build jobs (CMake default)
 #   CC / CXX                   host compiler
 #
-# The MLIR Python bindings are built for the `python` found on PATH, the
-# interpreter the documented commands run, or for `python3` where `python`
-# is absent or older than Python 3.10.
+# Without SWAGE_PYTHON_EXECUTABLE, the MLIR Python bindings are built for the
+# `python` found on PATH, the interpreter the documented commands run, or for
+# `python3` where `python` is absent or older than Python 3.10.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +33,11 @@ if [ ! -d "$SRC_DIR" ]; then
 fi
 
 PYTHON=""
-for candidate in python python3; do
+CANDIDATES=(python python3)
+if [ -n "${SWAGE_PYTHON_EXECUTABLE:-}" ]; then
+    CANDIDATES=("$SWAGE_PYTHON_EXECUTABLE")
+fi
+for candidate in "${CANDIDATES[@]}"; do
     if command -v "$candidate" >/dev/null &&
         "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
             >/dev/null 2>&1; then
@@ -37,7 +46,7 @@ for candidate in python python3; do
     fi
 done
 if [ -z "$PYTHON" ]; then
-    echo "error: found no Python 3.10 or newer on PATH as python or python3;" \
+    echo "error: found no Python 3.10 or newer as ${CANDIDATES[*]};" \
         "the LLVM build and the MLIR Python bindings need one" >&2
     exit 1
 fi
@@ -55,13 +64,14 @@ cmake -G Ninja -S "$SRC_DIR/llvm" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
     -DLLVM_ENABLE_PROJECTS=mlir \
-    -DLLVM_TARGETS_TO_BUILD="Native;NVPTX" \
+    -DLLVM_TARGETS_TO_BUILD="${SWAGE_LLVM_TARGETS:-Native;NVPTX}" \
     -DLLVM_ENABLE_ASSERTIONS=ON \
     -DLLVM_INSTALL_GTEST=ON \
     -DLLVM_INSTALL_UTILS=ON \
+    -DLLVM_USE_SANITIZER="${SWAGE_LLVM_SANITIZERS:-}" \
     -DMLIR_ENABLE_BINDINGS_PYTHON="$ENABLE_PYTHON" \
     -DPython3_EXECUTABLE="$PYTHON" \
     "${EXTRA_ARGS[@]}"
 
-ninja -C "$BUILD_DIR" install
+cmake --build "$BUILD_DIR" --target install
 echo "LLVM/MLIR installed: $INSTALL_DIR"

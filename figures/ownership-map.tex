@@ -1,6 +1,6 @@
 % figures/ownership-map.tex
 % Ownership lanes: Swage, upstream MLIR and LLVM, and PyTorch, with
-% one launch traced across the three domains.
+% one CUDA launch traced across the three domains.
 \documentclass[tikz,border=10pt]{standalone}
 \input{common-preamble.tex}
 \begin{document}
@@ -57,9 +57,9 @@
 \node[ownchip, fill=swpurplefill, draw=swpurple, anchor=west]
   at (6.55, -5.9) {the current stream};
 
-% One launch crosses the three domains in order.
+% One CUDA launch crosses the three domains in order.
 \node[anchor=west, font=\small, text=swink] at (0, -7.15)
-  {one launch crosses the domains:};
+  {one CUDA launch crosses the domains:};
 \node[ownchip, fill=swbluefill, draw=swblue, anchor=west]
   at (0, -7.85) {capture, admit, validate};
 \draw[swarrow] (4.35, -7.85) -- (4.75, -7.85);

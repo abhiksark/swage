@@ -48,6 +48,10 @@ gates belong in the roadmap.
 
 - [ADR-0021: Ahead-of-time artifact format](../adr/ADR-0021-ahead-of-time-artifact-format.md)
 
+## Runtime and lowered ABI
+
+- [ADR-0025: Compiler-generated kernel launch contracts](../adr/ADR-0025-compiler-generated-kernel-contracts.md)
+
 Start with [Compiler Pipeline](../internals/compiler-pipeline.md) when you
 need current data flow, then use this index to find the decision that owns the
 rationale.

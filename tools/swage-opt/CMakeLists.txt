@@ -3,7 +3,7 @@ set(LIBS
   MLIRSwage
   MLIRSwagePlan
   MLIRSwageTransforms
-  MLIRSwageFixedBlockToGPU
+  MLIRSwageFixedBlock
   MLIRSwagePlanToGPU
   MLIRSwagePlanToSCF
   MLIRSwageToPlan

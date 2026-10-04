@@ -1,0 +1,85 @@
+{
+  "benchmark": "fixed-hot-launch-contract-marshalling",
+  "configuration": {
+    "batch_count": 20,
+    "calls_per_batch": 500,
+    "constexpr_block": 128,
+    "element_count": 129,
+    "grid": [
+      2
+    ],
+    "synchronization": "before and after each batch",
+    "warmup_calls": 200
+  },
+  "environment": {
+    "compute_capability": "sm_86",
+    "cuda_driver": "13.0",
+    "gpu": "NVIDIA RTX A6000",
+    "multiprocessors": 84,
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:19:41) [GCC 14.3.0]",
+    "pytorch": "2.12.0+cu130",
+    "pytorch_cuda": "13.0",
+    "total_memory_bytes": 50887852032
+  },
+  "gate": {
+    "maximum_ratio": 1.05,
+    "passed": true
+  },
+  "generic_to_legacy_ratio": 1.0322960728295787,
+  "measurement_notes": {
+    "generic": "PR2 contract-derived ordered kinds and values through the generic nanobind launcher, recorded before PR5 completion-event bookkeeping.",
+    "legacy": "HEAD runtime source loaded with the pre-migration pointer/scalar nanobind launcher before rebuilding the extension.",
+    "scope": "PR2 host marshalling wall clock including validation and enqueue; kernel timing, compilation, and later module-lifecycle event accounting excluded."
+  },
+  "medians_us_per_call": {
+    "generic": 10.750002,
+    "legacy": 10.413681
+  },
+  "raw_samples_us_per_call": {
+    "generic": [
+      11.03509,
+      10.817762,
+      10.846335999999999,
+      10.771494,
+      10.904484,
+      10.697896,
+      10.739734,
+      10.746746,
+      10.677575999999998,
+      10.724264,
+      10.89771,
+      10.73823,
+      10.878414000000001,
+      10.796942,
+      10.731338,
+      10.726488,
+      10.724206,
+      10.663350000000001,
+      10.753258,
+      10.761816000000001
+    ],
+    "legacy": [
+      11.16035,
+      10.722016,
+      10.393524,
+      10.400338,
+      10.572456,
+      10.77838,
+      10.809858,
+      10.497076,
+      10.393004,
+      10.387672,
+      10.393184,
+      10.347578,
+      10.415664,
+      10.38611,
+      10.395326,
+      10.37491,
+      10.4552,
+      10.506996,
+      10.478924,
+      10.411698
+    ]
+  },
+  "recorded_at": "2026-09-04T00:37:47+05:30"
+}

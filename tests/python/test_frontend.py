@@ -80,6 +80,34 @@ def test_importing_swage_does_not_import_optional_dependencies():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("failure_type", [ModuleNotFoundError, OSError])
+def test_missing_native_bindings_expose_availability_error(failure_type):
+    """Expose import/link failures without requiring build-tree bindings."""
+    failure = failure_type("native binding unavailable")
+    original_import = __import__
+
+    def import_without_native(name, *args, **kwargs):
+        if name == "mlir_swage" or name.startswith("mlir_swage."):
+            raise failure
+        return original_import(name, *args, **kwargs)
+
+    @sw.jit
+    def kernel():
+        return
+
+    with mock.patch("builtins.__import__", side_effect=import_without_native):
+        with pytest.raises(sw.BackendUnavailableError) as caught:
+            kernel.emit_mlir(signature={}, constexprs={})
+
+    error = caught.value
+    assert isinstance(error, sw.SwageError)
+    assert isinstance(error, RuntimeError)
+    assert error.code == "native-unavailable"
+    assert error.backend == "native"
+    assert isinstance(error.remediation, str)
+    assert error.__cause__ is failure
+
+
 @pytest.mark.parametrize(
     "symbolic_call",
     [
@@ -119,6 +147,7 @@ def test_decorating_a_kernel_does_not_execute_its_body():
 
 def test_stacked_decorator_is_rejected():
     """Reject decorator semantics that the frontend would otherwise ignore."""
+
     def passthrough(function):
         return function
 
@@ -126,6 +155,7 @@ def test_stacked_decorator_is_rejected():
         sw.CompilationError,
         match="only @swage.jit may decorate a kernel",
     ):
+
         @sw.jit
         @passthrough
         def kernel():
@@ -143,6 +173,7 @@ def test_stacked_decorator_is_rejected():
 )
 def test_constexpr_values_are_validated_before_native_import(value, reason):
     """Keep unsupported constexpr values inside the diagnostic boundary."""
+
     @sw.jit
     def kernel(VALUE: sl.constexpr):
         return
@@ -163,6 +194,7 @@ def test_constexpr_values_are_validated_before_native_import(value, reason):
 )
 def test_emit_requires_one_runtime_input_mode(keywords, reason):
     """Reject ambiguous runtime type inputs before native imports."""
+
     @sw.jit
     def kernel():
         return
@@ -173,6 +205,7 @@ def test_emit_requires_one_runtime_input_mode(keywords, reason):
 
 def test_argument_keys_are_validated_before_importing_pytorch():
     """Report mapping mistakes without requiring the optional dependency."""
+
     @sw.jit
     def kernel(value):
         return
@@ -181,8 +214,7 @@ def test_argument_keys_are_validated_before_importing_pytorch():
         with pytest.raises(
             sw.CompilationError,
             match=(
-                "arguments keys must match runtime parameters; "
-                "missing: value"
+                "arguments keys must match runtime parameters; missing: value"
             ),
         ):
             kernel.emit_mlir(arguments={}, constexprs={})
@@ -190,6 +222,7 @@ def test_argument_keys_are_validated_before_importing_pytorch():
 
 def test_missing_pytorch_has_an_installation_hint():
     """Keep optional-dependency failures inside the diagnostic boundary."""
+
     @sw.jit
     def kernel(value):
         return
@@ -208,13 +241,13 @@ def test_missing_pytorch_has_an_installation_hint():
     message = str(caught.value)
     assert message.startswith(f"{__file__}:")
     assert message.endswith(
-        "kernel: PyTorch metadata inference requires "
-        "'swage-compiler[pytorch]'"
+        "kernel: PyTorch metadata inference requires 'swage-compiler[pytorch]'"
     )
 
 
 def test_pytorch_metadata_failures_have_an_installation_hint(monkeypatch):
     """Translate dependency metadata errors into stable diagnostics."""
+
     class Tensor:
         @property
         def layout(self):
@@ -246,6 +279,7 @@ def test_pytorch_metadata_failures_have_an_installation_hint(monkeypatch):
 )
 def test_inferred_scalars_reject_unsupported_values(value, monkeypatch):
     """Accept only non-boolean Python integers in the signed i32 range."""
+
     class Tensor:
         pass
 
@@ -267,13 +301,12 @@ def test_inferred_scalars_reject_unsupported_values(value, monkeypatch):
         sw.CompilationError,
         match="unsupported argument for parameter 'runtime_value'",
     ):
-        kernel.emit_mlir(
-            arguments={"runtime_value": value}, constexprs={}
-        )
+        kernel.emit_mlir(arguments={"runtime_value": value}, constexprs={})
 
 
 def test_calling_a_decorated_kernel_points_to_launch():
     """Keep direct calls unavailable after adding the explicit launch API."""
+
     @sw.jit
     def kernel():
         return
@@ -287,6 +320,7 @@ def test_non_ascii_kernel_names_are_rejected_at_capture():
     with pytest.raises(
         sw.CompilationError, match="kernel name must be an ASCII identifier"
     ):
+
         @sw.jit
         def añadir(x_ptr):
             return

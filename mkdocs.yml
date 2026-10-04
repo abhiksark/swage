@@ -77,6 +77,7 @@ nav:
       - Kernel Language: reference/kernel-language.md
       - Runtime and Environment: reference/runtime-environment.md
       - Support Matrix: reference/support-matrix.md
+      - Benchmarking: reference/benchmarking.md
   - Internals:
       - internals/index.md
       - Compiler Pipeline: internals/compiler-pipeline.md
@@ -117,3 +118,4 @@ nav:
       - "ADR-0020: Planned per-function lowering": adr/ADR-0020-planned-per-function-lowering.md
       - "ADR-0021: Artifact format": adr/ADR-0021-ahead-of-time-artifact-format.md
       - "ADR-0022: Wider data model": adr/ADR-0022-wider-data-model-for-segmented-reductions.md
+      - "ADR-0025: Compiler-generated launch contracts": adr/ADR-0025-compiler-generated-kernel-contracts.md

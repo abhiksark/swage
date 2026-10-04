@@ -56,6 +56,13 @@ containing the classification operation. The existing SCF and GPU paths reuse
 the same analysis, with optional region detachment occurring only after
 admission succeeds.
 
+Compatibility note: the generated-contract boundary later removed the two
+runtime counts from the semantic function signature. Current semantic inputs
+are only values, offsets, and output; the planning companion derives both
+counts from memref dimensions, while host classification continues to receive
+explicit wide counts for validation. The admitted operations and read-only
+failure boundary above are otherwise unchanged.
+
 ### Compile-time and runtime responsibilities
 
 Compile time:
