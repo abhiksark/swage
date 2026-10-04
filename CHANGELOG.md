@@ -8,6 +8,43 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- Installed-wheel `python -m swage.bench vector-add --output PATH [--enforce]`
+  entry point, with dependency-free help and the unchanged frozen float32
+  vector-add schema, correctness checks, and inclusive A6000 gates.
+- Public canonical vector addition and multiplication now support matching
+  `float16`, `float8_e4m3fn`, and `float8_e5m2` tensors on CPU and CUDA,
+  alongside `float32`. Low-precision arithmetic rounds an FP32 sum or product
+  to the storage format; software FP8 conversion works on RTX A6000 `sm_86`.
+- Dtype-aware specialization and native warm-launch validation, public
+  low-precision signature markers/stubs, and `--dtype` in the vector-add
+  example. Numerical coverage exhausts both FP8 formats' encoding pairs
+  on CPU/CUDA and checks FP16 encodings, rounding, tails, and dtype switches.
+- v0.5.2 fixed-vector release hardening: self-contained Linux x86-64 native
+  wheels for regular CPython 3.10–3.13, fixed-contract type stubs, bundled LLVM
+  licensing and validated build provenance.
+- Public `SwageError`, `CompilationError`, and `BackendUnavailableError`
+  hierarchy, structured `swage.env --json --check native|cpu|cuda` diagnostics,
+  and opt-in sanitized `swage.runtime` DEBUG events.
+- Native artifact, minimum-PyTorch CPU, source/sdist reproducibility, sanitizer,
+  CodeQL, dependency-review, and installed A6000 runtime SLO release gates.
+  Manual release dispatch produces evidence without attestation or publication.
+- Generated TikZ figure atlas covering the GPU execution approaches, and a
+  benchmarks page backed by a committed RTX 5090 snapshot.
+- Version-2 backend-neutral compiler launch contracts with strict canonical
+  JSON validation, CUDA and Native CPU launch models, complete physical scalar
+  kinds, typed runtime binding, and retained RTX A6000 host-marshalling gate
+  evidence.
+- A source-only independent-process Swage/Triton campaign runner with
+  interleaved candidate timing, fresh-cache compile-only phase accounting,
+  separate per-input planning and warm end-to-end measurements, and a padded
+  PyTorch storage baseline. Strict schema-v1 evidence validates native/source
+  identity, raw samples, child hashes, aggregates, and NVIDIA telemetry.
+  Parameterized chart calculations use only raw child samples; archival
+  figures require a successful exclusive campaign. The pinned,
+  provenance-checked `soc-Epinions1` outgoing-degree trace is retained.
+- Explicit `backend="cuda"` or `backend="cpu"` public launch selection for the
+  canonical fixed vector add. The Native CPU path uses a synchronous,
+  process-local LLVM JIT executable and never falls back to CUDA.
 - `swage.segment_reduce` takes `kind="min"` and `kind="mean"`. An empty
   segment gives positive infinity for `min` and NaN for `mean`; a NaN
   element gives NaN. A mean is the sum of the same call divided by the
@@ -43,9 +80,7 @@ semantic versioning (`0.x`; anything may change).
   are built and installed beside the bindings, for Linux x86-64 only.
 - ADR-0021 records artifact format version 1: what the manifest holds, what
   the loader verifies, the trust rule, and what is out of scope.
-- `scripts/build_native_wheel.sh` builds a `swage-compiler-native` wheel of
-  `mlir_swage` from a checkout; no native wheel is published. The bindings
-  record the `swage` version and source revision they were built from,
+- The bindings record the `swage` version and source revision they were built from,
   `swage` refuses bindings built for another version, and
   `python -m swage.env` prints both.
 - Committed records of the segmented-sum campaign at `453c56e` on the RTX
@@ -65,8 +100,6 @@ semantic versioning (`0.x`; anything may change).
   `sequential`), `block-threads`, and `function`. The C API gains
   `swageGetTargetDescription` and `swageEstimateElementWork`. No kernel text
   changed: the committed digests of all 552 kernels are unchanged.
-- Generated TikZ figure atlas covering the GPU execution approaches, and a
-  benchmarks page backed by a committed RTX 5090 snapshot.
 - Private persistent task queue for the canonical identity segmented sum
   (ADR-0018). It is experimental: its predeclared performance gate failed and
   the path stays private.
@@ -86,7 +119,6 @@ semantic versioning (`0.x`; anything may change).
   Triton baseline in the comparison harness, and
   `benchmarks/benchmark_fresh_offsets.py`, which times segmented sum on a new
   offsets layout every iteration with preparation inside the timed region.
-
 - A support matrix page, an emit-only example that runs with the native
   build and no GPU or PyTorch, and user-guide sections for the offsets
   contract, layout conversions, and the empty and NaN results of the private
@@ -118,9 +150,73 @@ semantic versioning (`0.x`; anything may change).
 - `THIRD_PARTY_NOTICES.md` lists what a native build contains.
 - An opt-in NVIDIA Compute Sanitizer racecheck of the private segmented
   kernels (`SWAGE_RACECHECK=1`); no workflow runs it.
+- `scripts/qualify_installed_segments.sh` qualifies the public segmented
+  calls of an installed wheel on a CUDA GPU. It runs the public-call,
+  column, and artifact tests from a copy, with `PYTHONPATH` unset, against
+  the installed packages and a CPU oracle build, and fails when a test is
+  skipped. The release `gpu` job and the `fixed-runtime-slo` GPU job run it
+  on the RTX A6000.
+- The `sanitizers` workflow (`sanitizers-instrumented-llvm`) runs
+  AddressSanitizer and UndefinedBehaviorSanitizer over Swage linked against
+  an LLVM built with the same sanitizers, on pushes to main and weekly.
+  Pull requests keep the `sanitizers` job of `ci-cpp`, which instruments
+  Swage alone against the cached Release LLVM.
+- ADR-0025 records the compiler-generated kernel launch contracts; ADR-0019
+  keeps the composable private reductions.
+- `benchmarks/results/fixed-runtime-gate-a6000-sm86.json` and its page hold
+  the alternating runs of the release benchmark command behind the
+  recalibrated `2^18` throughput ceiling.
 
 ### Changed
 
+- Native Python test subprocesses retain the active checkout's source package
+  path, preventing an unrelated editable install from contaminating
+  second-process persistent-cache verification in linked worktrees.
+- Replaced the standalone fixed-runtime benchmark script with the installed
+  module command. CI and release callers require the wheel-shipped parser and
+  benchmark implementation; no compatibility wrapper or segmented selector
+  is provided.
+- Native wheel builds use pinned scikit-build-core and exact LLVM 22.1.8;
+  source distributions and frontend-only editable installs remain CMake-free.
+  The wheel also ships the segmented modules and `libSwageRuntime.so`, which
+  the public segmented calls and the artifact path need.
+- Validated packaged build identity now takes precedence over checkout identity
+  for persistent CUDA caching. Malformed identity disables persistence without
+  preventing process-local compilation.
+- The optimizer driver registers the same upstream LLVM conversion
+  interfaces as runtime codegen, so complete fixed GPU-to-NVVM pipelines
+  do not abort on an unimplemented promised dialect interface.
+- The documentation site is restructured into getting started, user guide,
+  API reference, internals, and decisions sections; milestone codenames
+  moved out of user-facing prose, and every previously published URL
+  redirects to its new location.
+- The research paper now treats the fixed mixed policy separately from its
+  offline oracle, narrows public/private claims, expands related-work
+  positioning, records byte-exact frozen artifact pins, distinguishes
+  archival headline evidence from current-tree engineering campaigns, and
+  replaces the redundant admission figure with a capability table.
+- Split partial and merge kernels use 512 threads, sized so one
+  4096-element chunk fully occupies a CTA at eight elements per thread.
+- Warm CUDA launches dispatch through a compiled nanobind entry point that
+  resolves `libcuda.so.1` with `dlopen`; ctypes remains the fallback.
+  Canonical fixed warm dispatch now checks live tensor, device, stream, context,
+  and cache state natively while retaining full validation on shortcut misses
+  and PyTorch allocator stream recording.
+- Legacy-default-stream module completion fences are deferred until retirement;
+  caller-owned streams retain per-submission fences. Capture launches skip
+  retirement polling so cache eviction cannot inject completion events into
+  a captured graph.
+- Fixed and segmented CUDA kernels share one ordered typed launcher,
+  backend-aware artifact cache, and context-keyed module lifecycle; compiler
+  contracts replace parameter names and positional pointer/scalar groups as
+  physical ABI authority.
+- Runtime orchestration is backend-neutral. CPU artifacts remain process-local;
+  only verified CUDA PTX is persisted.
+- Segmented compiler and Python internals are decomposed by admission,
+  emission, validation, planning, execution, and oracle responsibilities.
+  Process caches are bounded, compilation coalesces per specialization, and
+  completed evicted modules unload through nonblocking same-context event
+  polling while graph-captured modules remain context-owned.
 - `swage.segment_reduce` validates, classifies, and enqueues in one step. It
   compiles and loads only the kernels its batch launches, creates no CUDA
   event, accepts tensors created under `torch.inference_mode()`, and
@@ -177,14 +273,6 @@ semantic versioning (`0.x`; anything may change).
   comparator; process ratios against any named candidates and
   re-summarizing of existing records; the CPU frequency governor in every
   record.
-- The documentation site is restructured into getting started, user guide,
-  API reference, internals, and decisions sections; milestone codenames
-  moved out of user-facing prose, and every previously published URL
-  redirects to its new location.
-- Split partial and merge kernels use 512 threads, sized so one
-  4096-element chunk fully occupies a CTA at eight elements per thread.
-- Warm launches dispatch through a compiled nanobind entry point that
-  resolves `libcuda.so.1` with `dlopen`; ctypes remains the fallback.
 - Segmented GPU kernels clamp each segment range loaded from device memory
   to the value count before indexing the values buffer, and each merge
   range to the partial count before indexing scratch. The softmax launch
@@ -278,16 +366,13 @@ semantic versioning (`0.x`; anything may change).
 - The `swage.reduce` description, ADR-0008, and the design invariants state
   that the combining order is unspecified and that an f32 sum depends on the
   schedule within rounding. No op syntax, trait, or verifier changed.
-- The README states before the install instructions that segments are not
-  usable from Python.
 - Hosted CI, the release workflow, and the docs build install one
   hash-locked tool set (`requirements-ci.txt`); the build backend is pinned;
   the release workflow runs the pure-Python tier before it builds; the
   `ci-cpp` LLVM cache key covers the build script, tarball digest, and
   runner image.
 - `build_llvm.sh` and `build_swage.sh` build the bindings for the `python`
-  on `PATH` and fall back to `python3`. The package description states that
-  the wheel is pure Python.
+  on `PATH` and fall back to `python3`.
 - Every segmented lowering diagnostic has a negative lit test and states
   what it found. A rejected region operation is named with the accepted
   list, where it used to say "exponentials must use math.exp2". The lowering
@@ -302,7 +387,7 @@ semantic versioning (`0.x`; anything may change).
   with and refuse a rebound tensor, and task IDs must not overlap the
   output. Interpreter exit and `os.fork()` wait for a compile in flight.
   `launch()` works on a thread that has not used CUDA. A failed module
-  unload is retried and never fails a load.
+  unload never fails a load.
 - `launch()` rejects a tensor that requires grad with a `ValueError`; a
   launch records no gradient, so pass `tensor.detach()`. Every launch,
   public and private, advances the version counter of its output after the
@@ -320,9 +405,96 @@ semantic versioning (`0.x`; anything may change).
   source-located error, and kernel names that PTX cannot represent are
   rejected at capture and in PTX compilation. Both changes postdate
   `v0.5.1` and were missing from this list.
+- `swage.segment_reduce` and `swage.segment_softmax` are public API, beside
+  the fixed vector add and multiply. They run on CUDA only, record no
+  gradient, are refused under CUDA graph capture, and prepare their offsets
+  on the host at every call; every other segmented path stays private. The
+  README, the documentation, and the package description say so.
+- The `swage-compiler` wheel is the one native wheel. It holds `swage`, the
+  `mlir_swage` bindings, `libSwageRuntime.so`, and the segmented modules,
+  and it carries `LICENSE`, `LICENSES/LLVM.txt`, and
+  `THIRD_PARTY_NOTICES.md` under a license expression that names every
+  bundled license.
+- Segment functions keep five arguments, declared with `swage.role` in any
+  order: values, offsets, output, value count, and segment count
+  (ADR-0020). Kernel contracts (ADR-0025) now describe every planned
+  segmented kernel: a user argument names the parameter position of its
+  role, and a derived, plan, or scratch argument names its layout key. The
+  host binds every segmented launch through its contract and checks each
+  contract once per driver; the positional launch tuples are gone.
+- The kernel checks apply to every kernel of the language, including
+  float16, FP8, and multiply kernels. `sl.load` requires `mask=` and
+  `other=`, `sl.store` requires `mask=`, and the type stubs say so. An
+  `other=` literal rounds to the element type of the loaded pointer and is
+  rejected when the result is not finite, when a nonzero literal rounds to
+  zero, or when an integer literal is not exact.
+- `launch()` admits an output that is exactly one of its inputs, as main
+  did, and rejects any partial overlap, so in-place use that the stack
+  refused now runs. On both backends it refuses a tensor that requires grad
+  and advances the version counter of its output.
+- The errors raised without the native bindings by `launch()`,
+  `emit_mlir()`, the segmented calls, and `python -m swage.compile` say that
+  this installation does not have the bindings, instead of saying that the
+  `swage-compiler` wheel does not include them.
+- A launch holds a lease on its loaded CUDA module, and the loaded modules
+  form an LRU bounded by `SWAGE_MEMORY_CACHE_ENTRIES` (default 128). A
+  retired module is unloaded only after no lease holds it, no CUDA graph
+  captured it, and an event recorded on every stream that launched it has
+  completed. A failed unload is reported as a `RuntimeWarning`, never
+  raised into an unrelated load or launch, and the module stays loaded for
+  the rest of the process instead of being retried. Warm lookups take no
+  process-wide lock. Interpreter exit waits a few seconds at most for the
+  compiles in flight, and `os.fork()` waits for them.
+- Compiles of different kernels run at the same time, and each kernel is
+  compiled once: a second caller waits for the compile in flight. Kernels
+  served from `SWAGE_ARTIFACT_DIR` never wait for a compile.
+- Persistent cache entries are format version 4. An entry records the
+  backend, the artifact format, the target, and the launch contract, and
+  the key also covers the backend and the format. Earlier entries are not
+  reused. As in the stack, a dirty or unversioned checkout uses the
+  persistent cache: the key identifies the frontend sources and the native
+  libraries by content, and the revision and clean flag are reported for
+  diagnostics only.
+- `python -m swage.env --json` reports schema 2. It adds `source` (`file`,
+  `revision`), `native.bindings` (`version`, `revision`, `llvm_linked`,
+  `file`, `problem`), `cache` (`directory`, `state`, `compile_on_miss`),
+  and `artifact` to main's schema 1 report, which gives the CUDA target as
+  `backends.cuda.target`. The facts that the stack reported at the top
+  level (`revision`, `swage_file`, `mlir_swage_file`, `llvm_linked`,
+  `target`, `cache_dir`, `cache`, `compile_on_miss`) are in those places
+  now. The build record of the bindings is schema 2 and adds
+  `frontend_digest`, the digest of the frontend sources the bindings were
+  built with.
+- The comparison harness writes record schema 2, and its campaign driver
+  `benchmarks/run_triton_comparison_campaign.py` takes the options of the
+  stack's driver: `--harness` runs another harness, such as
+  `benchmarks/benchmark_fresh_offsets.py`, `--reference` names the
+  candidates that ratios are taken against, and `--summarize` summarizes
+  existing records again. Main's `torch_padded` baseline stays; it is not
+  the stack's pad-to-max baseline, so records of the two are not compared
+  row for row.
+- The release gate on the Swage/PyTorch median throughput ratio at `2^18`
+  elements is 1.85 instead of 1.50. At that size PyTorch's add takes about
+  2.9 microseconds, less than one Swage launch, so the ratio measures the
+  host cost of a launch. In alternating runs of the release command on the
+  RTX A6000 host, main's own wheel measured 1.60 to 1.64 and failed 1.50 in
+  all 18 runs, a clean build of `b7ce907`, which set 1.50, measured 1.48 to
+  1.50, and this tree's wheel measured 1.71 to 1.74. This tree adds 0.34
+  microseconds per launch over main; the version counter advance that every
+  launch now makes for autograd correctness takes 0.135 microseconds of it.
+  The ceiling is the smallest multiple of 0.05 at least 5% above the largest
+  ratio of this tree's wheel; it fails a launch slower than 5.45
+  microseconds, 7% above this tree's median of 5.07. The `2^20` ceiling and
+  the other gates are unchanged, and every wheel passed them.
 
 ### Removed
 
+- `scripts/build_native_wheel.sh` and the `swage-compiler-native`
+  distribution, which was never published. The one native `swage-compiler`
+  wheel replaces them.
+- `benchmarks/benchmark_processes.py`. The campaign driver
+  `benchmarks/run_triton_comparison_campaign.py` runs any harness with
+  `--harness`.
 - `swage_plan.classify`, `!swage_plan.task_range`, the planning companion
   function, and the limit options of `--swage-to-plan`. ADR-0014's dialect
   boundary is superseded by ADR-0020.
@@ -354,6 +526,20 @@ semantic versioning (`0.x`; anything may change).
   the binding prerequisites, the `sm_80` minimum, and the hosted build cost;
   the cache, target-floor, and benchmark-baseline descriptions match the code
   and records.
+
+### Release qualification
+
+The v0.5.2 changes above are unreleased. Publication requires the repaired
+four-ABI artifact set, byte-identical cp313 source/sdist wheels, security gates,
+and trusted installed-wheel A6000 correctness and performance evidence,
+including the installed-wheel qualification of the public segmented calls.
+FP32 behavior and the canonical kernel shape are unchanged; the newly
+supported storage formats expand the public dtype contract. Existing frozen
+FP32 performance evidence does not qualify low-precision performance.
+The public segmented calls have correctness qualification and no
+performance gate. The `2^18` throughput ceiling changed as described above;
+no other fixed-runtime gate and no persistent segmented performance gate
+was changed.
 
 ## [0.5.1] - 2026-08-24
 
