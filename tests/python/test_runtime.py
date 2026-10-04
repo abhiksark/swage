@@ -3884,6 +3884,42 @@ def _ctypes_launch(arguments, values, grid, block=128):
     return name, call[1:7], decoded["ptr"], decoded["i32"]
 
 
+def test_driver_checks_a_contract_once_and_every_launch_against_it(
+    monkeypatch,
+):
+    """Check a contract at its first launch, and each launch's own values.
+
+    A later launch of the same contract skips the contract check but still
+    refuses kinds the contract does not have and a malformed grid.
+    """
+    driver = object.__new__(_cuda_backend._CudaDriver)
+    launches = []
+    driver._call = lambda name, *args: launches.append(name)
+    checks = []
+    check = _cuda_backend._CudaDriver._check_contract
+    monkeypatch.setattr(
+        _cuda_backend._CudaDriver,
+        "_check_contract",
+        lambda self, contract: checks.append(contract) or check(self, contract),
+    )
+    monkeypatch.setattr(_cuda_backend, "_checked_contracts", {})
+    contract = _contract("kernel", 128, _FIXED_ARGUMENTS)
+    kinds = tuple(argument.kind for argument in _FIXED_ARGUMENTS)
+    values = (0x10, 0x20, 0x30, 129)
+
+    for _ in range(3):
+        driver.launch_entry(0xF00D, contract, (kinds, values), (2, 1, 1), 0)
+    with pytest.raises(ValueError, match="kinds do not match contract"):
+        driver.launch_entry(
+            0xF00D, contract, (kinds[:-1] + ("i64",), values), (2, 1, 1), 0
+        )
+    with pytest.raises(ValueError, match="grid must contain exactly three"):
+        driver.launch_entry(0xF00D, contract, (kinds, values), (2, 0, 1), 0)
+
+    assert checks == [contract]
+    assert launches == ["cuLaunchKernel"] * 3
+
+
 def test_driver_marshals_pointer_and_i32_parameters():
     """Pass raw pointers and an i32 through the CUDA Driver ABI."""
     name, geometry, pointers, scalars = _ctypes_launch(

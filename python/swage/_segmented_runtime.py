@@ -293,7 +293,17 @@ def _bind(kernel, user, named):
     )
 
 
-def _enqueue(torch, lease, kernel, arguments, blocks, stream):
+def _enqueue(
+    torch,
+    lease,
+    kernel,
+    arguments,
+    blocks,
+    stream,
+    *,
+    capturing=None,
+    context=None,
+):
     """Enqueue one launch of a leased kernel on `stream`.
 
     Args:
@@ -303,12 +313,19 @@ def _enqueue(torch, lease, kernel, arguments, blocks, stream):
         arguments: What `_bind` returned for this launch.
         blocks: The number of blocks of the one-dimensional grid.
         stream: The PyTorch stream to enqueue on.
+        capturing: Whether this thread captures a CUDA graph, when the
+            caller has just asked, or None to ask here.
+        context: The current CUDA context, when the caller has just read
+            it, or None to read it here.
     """
+    if capturing is None:
+        capturing = _cuda_backend.is_current_stream_capturing(torch)
     _cuda_backend._launch_loaded(
         lease.entry,
         kernel.contract,
         arguments,
         (blocks, 1, 1),
         stream.cuda_stream,
-        capturing=_cuda_backend.is_current_stream_capturing(torch),
+        capturing=capturing,
+        context=context,
     )

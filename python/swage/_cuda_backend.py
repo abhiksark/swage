@@ -42,6 +42,12 @@ _stream_objects = weakref.WeakKeyDictionary()
 _NOT_READY = 600
 # CUDA_ERROR_STREAM_CAPTURE_IMPLICIT from cuStreamIsCapturing.
 _CAPTURE_IMPLICIT = 906
+_U32_MAX = (1 << 32) - 1
+# The launch contracts checked so far, by identity, with what a launch
+# reads from them; see `_CudaDriver.launch_entry`. The entry keeps the
+# contract alive, so its identity is not reused while it is kept.
+_checked_contracts = {}
+_CHECKED_CONTRACTS = 1024
 
 
 class _LoadedModule:
@@ -521,10 +527,23 @@ def _launch_loaded(
     stream,
     *,
     capturing=False,
+    context=None,
 ):
-    """Enqueue one launch of a leased module and fence its stream."""
+    """Enqueue one launch of a leased module and fence its stream.
+
+    Args:
+        entry: The leased module.
+        contract: Its launch contract.
+        bindings: The argument kinds and raw values of the launch.
+        grid: The three grid axes.
+        stream: The raw CUDA stream handle.
+        capturing: Whether this thread captures a CUDA graph.
+        context: The current context, when the caller has just read it, or
+            None to read it here.
+    """
     driver = entry.driver
-    context = driver.current_context()
+    if context is None:
+        context = driver.current_context()
     if context != entry.context:
         raise RuntimeError(
             "loaded CUDA module must launch in its original current context"
@@ -842,29 +861,71 @@ class _CudaDriver:
         self._call("cuModuleUnload", ctypes.c_void_p(module))
 
     def launch_entry(self, function, contract, bindings, grid, stream):
-        """Launch one compiler-described ordered physical CUDA entry."""
+        """Launch one compiler-described ordered physical CUDA entry.
+
+        The contract is checked once and its argument kinds and block are
+        kept by its identity, so a later launch of the same kernel checks
+        only its own arguments and grid.
+        """
+        checked = _checked_contracts.get(id(contract))
+        if checked is None or checked[0] is not contract:
+            checked = self._check_contract(contract)
+        _, expected_kinds, block = checked
+        kinds, arguments = bindings
+        kinds = tuple(kinds)
+        if kinds != expected_kinds:
+            raise ValueError("launch argument kinds do not match contract")
+        if type(grid) is not tuple or len(grid) != 3:
+            raise ValueError(
+                "grid must contain exactly three positive u32 axes"
+            )
+        x, y, z = grid
+        if not (
+            type(x) is int
+            and type(y) is int
+            and type(z) is int
+            and 0 < x <= _U32_MAX
+            and 0 < y <= _U32_MAX
+            and 0 < z <= _U32_MAX
+        ):
+            raise ValueError(
+                "grid must contain exactly three positive u32 axes"
+            )
+        self._launch_ordered(
+            function,
+            grid,
+            block,
+            stream,
+            kinds,
+            tuple(arguments),
+        )
+
+    def _check_contract(self, contract):
+        """Check a launch contract and keep what a launch reads from it.
+
+        Returns:
+            The contract, its argument kinds, and its block.
+        """
         if not isinstance(contract, _abi.KernelContract):
             raise TypeError("contract must be a KernelContract")
         if contract.backend != "cuda" or contract.launch.model != "spmd-grid":
             raise ValueError("CUDA launch requires a CUDA spmd-grid contract")
         if contract.launch.block is None:
             raise ValueError("CUDA contract is missing block geometry")
-        kinds, arguments = bindings
-        expected_kinds = tuple(argument.kind for argument in contract.arguments)
-        if tuple(kinds) != expected_kinds:
-            raise ValueError("launch argument kinds do not match contract")
-        grid = self._validate_geometry(grid, "grid")
         block = self._validate_geometry(contract.launch.block, "block")
         if block[0] * block[1] * block[2] > 1024:
             raise ValueError("block may contain at most 1024 threads")
-        self._launch_ordered(
-            function,
-            grid,
+        checked = (
+            contract,
+            tuple(argument.kind for argument in contract.arguments),
             block,
-            stream,
-            tuple(kinds),
-            tuple(arguments),
         )
+        # ponytail: forget every checked contract at the bound, which only a
+        # process cycling through thousands of kernels reaches.
+        if len(_checked_contracts) >= _CHECKED_CONTRACTS:
+            _checked_contracts.clear()
+        _checked_contracts[id(contract)] = checked
+        return checked
 
     @staticmethod
     def _validate_geometry(value, label):
@@ -872,7 +933,7 @@ class _CudaDriver:
             not isinstance(value, tuple)
             or len(value) != 3
             or any(
-                type(axis) is not int or not 0 < axis <= (1 << 32) - 1
+                type(axis) is not int or not 0 < axis <= _U32_MAX
                 for axis in value
             )
         ):

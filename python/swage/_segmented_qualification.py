@@ -124,11 +124,13 @@ def _launch_one(torch, kernel, module_text, tensors, counts, blocks, named):
         **counts,
     )
     arguments = _execution._bind(kernel, user, named)
-    _cuda_backend.ensure_context(torch, torch.cuda.current_device())
+    context = _cuda_backend.ensure_context(torch, torch.cuda.current_device())
     lease = _execution._lease(torch, kernel)
     stream = torch.cuda.current_stream()
     try:
-        _execution._enqueue(torch, lease, kernel, arguments, blocks, stream)
+        _execution._enqueue(
+            torch, lease, kernel, arguments, blocks, stream, context=context
+        )
     finally:
         lease.release()
     for tensor in tensors:
@@ -611,7 +613,14 @@ def _prepare_planned_reduction(
         )
         wait_for_tasks(stream)
         _execution._enqueue(
-            torch, lease, kernel, arguments, segment_count, stream
+            torch,
+            lease,
+            kernel,
+            arguments,
+            segment_count,
+            stream,
+            capturing=_cuda_backend.is_current_stream_capturing(torch),
+            context=prepared_context,
         )
         for tensor in (values, offsets, output, all_tasks):
             tensor.record_stream(stream)
@@ -630,6 +639,11 @@ def _prepare_planned_reduction(
             torch, device_index, prepared_context, "reduction"
         )
         wait_for_tasks(stream)
+        # Asked once for the call; the launches below share the answer.
+        known = {
+            "capturing": _cuda_backend.is_current_stream_capturing(torch),
+            "context": prepared_context,
+        }
         if direct_count:
             _execution._enqueue(
                 torch,
@@ -639,6 +653,7 @@ def _prepare_planned_reduction(
                 (direct_warp_count + warp_slots - 1) // warp_slots
                 + direct_cta_count,
                 stream,
+                **known,
             )
             for tensor in (values, offsets, output, task_records):
                 tensor.record_stream(stream)
@@ -650,6 +665,7 @@ def _prepare_planned_reduction(
                 partial_arguments,
                 partial_count,
                 stream,
+                **known,
             )
             for tensor in (values, offsets, task_records, scratch):
                 tensor.record_stream(stream)
@@ -660,6 +676,7 @@ def _prepare_planned_reduction(
                 merge_arguments,
                 merge_count,
                 stream,
+                **known,
             )
             for tensor in (offsets, output, task_records, scratch):
                 tensor.record_stream(stream)
@@ -826,7 +843,7 @@ def _launch_planned_reduction(
                 merge_count,
             )
         )
-    _cuda_backend.ensure_context(torch, device.index)
+    context = _cuda_backend.ensure_context(torch, device.index)
     leases = [_execution._lease(torch, kernel) for kernel, _ in launched]
     try:
         # One upload carries every record: the warp ids, the CTA ids, the
@@ -876,7 +893,9 @@ def _launch_planned_reduction(
         ]
         stream = torch.cuda.current_stream()
         for lease, (kernel, grid), bound in zip(leases, launched, arguments):
-            _execution._enqueue(torch, lease, kernel, bound, grid, stream)
+            _execution._enqueue(
+                torch, lease, kernel, bound, grid, stream, context=context
+            )
     finally:
         for lease in leases:
             lease.release()
@@ -1088,7 +1107,14 @@ def _prepare_persistent_sum(
             wait_for_tasks(stream)
             counters.zero_()
             _execution._enqueue(
-                torch, lease, kernel, arguments, active_blocks, stream
+                torch,
+                lease,
+                kernel,
+                arguments,
+                active_blocks,
+                stream,
+                capturing=capturing,
+                context=prepared_context,
             )
             for tensor in (
                 values,
