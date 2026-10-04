@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "swage-compiler"
 dynamic = ["version"]
-description = "MLIR/LLVM fixed vector add/multiply compiler with explicit CPU and CUDA backends"
+description = "MLIR/LLVM compiler for fixed vector add and multiply on CPU and CUDA, and segmented reduce and softmax on CUDA"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 # Swage is MIT. The native wheel embeds LLVM and MLIR, the code LLVM Support

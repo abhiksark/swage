@@ -2,69 +2,155 @@
 
 # Installation
 
-Swage has two installation boundaries. The published `swage-compiler` wheel
-contains the pure Python `swage` package. Compiler emission and execution also
-require the native `mlir_swage` package, from a build tree or from a native
-wheel built on the same machine. No native wheel is published. The two
-segmented calls can also run without that package, from an artifact
-directory that a host with the native package wrote ahead of time.
+!!! warning "v0.5.2 publication pending"
 
-## Install the Python package
+    This page describes the implemented `v0.5.2` native-wheel contract, not
+    an already published or production-qualified release. The latest
+    released tag is `v0.5.1`, a pure Python wheel that does not provide this
+    contract; [What the released 0.5.1 wheel lacks](#what-the-released-051-wheel-lacks)
+    lists the differences. The version-pinned PyPI commands below apply
+    only after `v0.5.2` passes the release gates and is published. Until
+    then, [build a local native wheel](#build-a-local-native-wheel) or use
+    the [source build](#build-from-source).
 
-Python 3.10 or newer is required. The
-[Support Matrix](../reference/support-matrix.md) lists which Python,
-PyTorch, driver, and GPU combinations are tested and which are only
-admitted. Install the base package from PyPI:
+The distribution `swage-compiler` is one native wheel per CPython version.
+Each wheel holds public `swage`, the private `mlir_swage` compiler bindings,
+the `libSwageRuntime.so` runtime library, and the private segmented modules
+that `swage.segment_reduce` and `swage.segment_softmax` import. There is no
+separate native distribution. Building a source distribution and the
+frontend-only editable install of a checkout need no CMake; neither provides
+the native bindings.
+
+## Install a native wheel
+
+On a supported interpreter and platform, install the native package without
+a source checkout or a local LLVM installation:
 
 ```bash
-python -m pip install swage-compiler
+python -m pip install --only-binary=:all: "swage-compiler==0.5.2"
+python -m swage.env --json --check native
 ```
 
-The base package imports without PyTorch. Install the optional PyTorch
-dependency when using metadata inference, CUDA launch, or the segmented
-calls. The extra also declares `numpy`, which the segmented calls need:
+The wheel needs no independently installed `mlir` package, and such a
+package is no substitute for the bundled bindings. The base package imports
+and emits MLIR with an explicit signature without PyTorch. For metadata
+inference, either launch backend, or the segmented calls, install the
+optional runtime extra, which declares `torch>=2.6,<3` and `numpy`:
 
 ```bash
-python -m pip install "swage-compiler[pytorch]"
+python -m pip install --only-binary=:all: "swage-compiler[pytorch]==0.5.2"
+python -m swage.env --json --check cpu
 ```
 
-For repository development, install the editable package and developer tools:
+The release targets Linux x86-64 with glibc 2.28 or newer
+(`manylinux_2_28`) and regular-GIL CPython 3.10 to 3.13. PyTorch is
+optional and never bundled. If you use CUDA, choose a CUDA-enabled PyTorch
+build with the
+[PyTorch installation selector](https://pytorch.org/get-started/locally/);
+the extra alone does not promise a CUDA-enabled build. Then run:
+
+```bash
+python -m swage.env --json --check cuda
+```
+
+The [Support Matrix](../reference/support-matrix.md) lists the ABI
+exclusions, the tested driver, and the A6000 (`sm_86`) qualification
+boundary. Other admitted CUDA targets are best effort, not release
+qualified. CPU and CUDA are explicit choices, and a failure never switches
+backends. Compiler executables such as `swage-opt` remain source-build
+tools; the wheel does not hold them.
+
+## What the released 0.5.1 wheel lacks
+
+The `0.5.1` wheel on PyPI was built from the `v0.5.1` tag. It is pure
+Python, and it predates most of these pages:
+
+- It has no `mlir_swage` bindings, so it cannot emit MLIR or launch a
+  kernel.
+- It launches only the vector add on CUDA. It has no `backend=` argument,
+  no CPU backend, no multiply, and no `float16`, `float8_e4m3fn`, or
+  `float8_e5m2` support.
+- It has no `swage.segment_reduce`, no `swage.segment_softmax`, no
+  `python -m swage.compile`, and no `SWAGE_ARTIFACT_DIR`.
+- It exports `swage.jit` and `swage.CompilationError` only: no
+  `swage.SwageError` and no `swage.BackendUnavailableError`.
+- Its `python -m swage.env` prints a short text report and has no `--json`
+  and no `--check`.
+- Its `emit_mlir()` imports the native package before it checks the
+  parameter list and the body, so without bindings it reports the missing
+  bindings instead of a kernel-language error.
+- It rejects a kernel that has a docstring.
+- Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
+
+The [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
+lists every change since that release under Unreleased.
+
+## Verify downloaded artifacts
+
+After publication, download a wheel without installing or building it:
+
+```bash
+python -m pip download --only-binary=:all: --no-deps \
+    --dest verified-wheel "swage-compiler==0.5.2"
+```
+
+Use the successful **signed-tag** `publish-pypi` run for `v0.5.2`, checking
+its repository and commit identity. Set `RELEASE_RUN_ID` to that run's
+numeric ID. Download its checksums and attestation bundles with an
+authenticated GitHub CLI:
+
+```bash
+gh run list --repo abhiksark/swage --workflow publish-pypi.yml --event push
+gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
+    --name release-artifact-evidence --dir verified-wheel
+gh run download "$RELEASE_RUN_ID" --repo abhiksark/swage \
+    --name release-attestations --dir verified-wheel/attestations
+cd verified-wheel
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+This checks the downloaded wheel against the aggregate's manifest; the other
+four distributions are intentionally absent. Set `PROVENANCE_BUNDLE` to the
+build-provenance bundle in `attestations` (not the SPDX SBOM bundle), then
+verify each downloaded wheel's signed provenance:
+
+```bash
+for wheel in ./*.whl; do
+    gh attestation verify "$wheel" --repo abhiksark/swage \
+        --bundle "$PROVENANCE_BUNDLE"
+done
+```
+
+Inspect the verified source revision and signer workflow; they must identify
+the intended release commit and `.github/workflows/publish-pypi.yml`. The
+evidence also includes one SPDX JSON SBOM. Manual dry runs produce artifact
+evidence but never publish or attest; no signed-tag attestation exists until
+the release gates pass. Checksums alone are integrity checks, not proof of a
+trusted publisher. Do not install on failed or mismatched verification.
+
+Swage compiles native code from trusted inputs and is **not a sandbox** for
+untrusted kernels or compiler artifacts. See the
+[security policy](https://github.com/abhiksark/swage/blob/main/SECURITY.md).
+
+## Build from source
+
+A checkout supports two native builds: a build tree for compiler work, and
+a local native wheel. Both require Linux x86-64, CMake 3.20 or newer, Ninja,
+and a C++17 compiler, and both build against exactly LLVM/MLIR **22.1.8**
+(`llvmorg-22.1.8`), as recorded in `cmake/llvm-version.txt`. CMake compares
+the LLVM version of the install it finds with that file and stops with an
+error for any other release. `scripts/fetch_llvm.sh` also uses `curl`,
+`sha256sum` or `shasum`, and a `tar` that can extract `.tar.xz` archives.
+
+First install the frontend and the developer tools without triggering a
+native wheel build:
 
 ```bash
 git clone https://github.com/abhiksark/swage
 cd swage
-python -m pip install -e ".[dev]"
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]" -Cwheel.cmake=false
 ```
-
-The wheel does not contain compiler libraries, `swage-opt`, generated MLIR
-bindings, or the native `mlir_swage` package. No native wheel is published;
-[Build a native wheel](#build-a-native-wheel) describes how to build one
-from a checkout. A wheel-only install can import `swage`, report package and
-environment facts, capture kernel source, and check a kernel against the
-kernel language. It cannot emit MLIR or launch a kernel, and it runs a
-segmented call only from an artifact directory;
-[Run from an artifact](#run-from-an-artifact) describes that install.
-
-These pages describe the current source tree. The released `0.5.1` wheel
-predates part of them:
-
-- It checks the inputs of `emit_mlir()` and then imports the native package
-  before it checks the parameter list and the body, so a wheel-only install
-  reports the missing bindings instead of a kernel-language error.
-- It rejects a kernel that has a docstring.
-- Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
-- Its environment report has fewer fields.
-- It has no `swage.segment_reduce` and no `swage.segment_softmax`.
-
-The [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
-lists every change since that release under Unreleased. To match these
-pages, install the package from a checkout with the editable install above.
-
-## Build LLVM, MLIR, and Swage
-
-The native build requires Linux x86-64, CMake 3.20 or newer, Ninja, and a
-C++17 compiler. `scripts/fetch_llvm.sh` also uses `curl`, `sha256sum` or
-`shasum`, and a `tar` that can extract `.tar.xz` archives.
 
 The MLIR Python bindings are built by default and need Python packages to
 build and to run. The pinned LLVM release lists them in its
@@ -76,10 +162,18 @@ build and to run. The pinned LLVM release lists them in its
 - `numpy>=1.19.5,<=2.1.2`
 - `ml_dtypes>=0.1.0,<=0.6.0`, or `>=0.5.0,<=0.6.0` on Python 3.13 or newer
 
-LLVM configuration stops if `nanobind` cannot be imported. `build_swage.sh`
-runs the lit suite with the `lit` found on `PATH`, and the binding tests run
-under `pytest`. The `dev` extra above provides `lit` and `pytest` but not the
-binding requirements.
+LLVM configuration stops if `nanobind` cannot be imported. The `dev` extra
+provides `lit`, `pytest`, `build`, and the pinned `scikit-build-core` and
+`nanobind`, but not the other binding requirements. Fetch the source,
+install the requirements, and build LLVM and Swage:
+
+```bash
+./scripts/fetch_llvm.sh
+LLVM_SRC="${SWAGE_LLVM_HOME:-$HOME/.swage/llvm}/src-$(cat cmake/llvm-version.txt)"
+python -m pip install -r "$LLVM_SRC/mlir/python/requirements.txt"
+./scripts/build_llvm.sh
+./scripts/build_swage.sh
+```
 
 `build_llvm.sh` and `build_swage.sh` build the bindings for the `python`
 found on `PATH`, which is the interpreter the commands on this page run.
@@ -87,32 +181,14 @@ Where `python` is absent or older than Python 3.10, they fall back to
 `python3`. Each script prints the interpreter it chose as
 `Python interpreter: <path>` and stops with an error when neither name is
 Python 3.10 or newer. Install the binding requirements into that
-interpreter.
+interpreter. The final command configures Swage, builds `swage-opt` and the
+native bindings, and runs the lit suite.
 
-With the default `RelWithDebInfo` build type, the pinned LLVM/MLIR build uses
-about 25 GB. Build time depends on the machine. The hosted CI workflow uses
-the smaller `Release` build type and notes about three hours for the first
-LLVM build on a new pin, under a 350-minute limit. Later runs reuse the cached
-install tree.
-
-GPU execution additionally requires a CUDA-enabled PyTorch build, the NVIDIA
-driver, and an NVIDIA GPU of compute capability 8.0 (`sm_80`) or newer. An
-older device is rejected during compilation. Exact target-admission and
-zero-work rules live in
-[Runtime and Environment](../reference/runtime-environment.md).
-
-```bash
-./scripts/fetch_llvm.sh
-LLVM_SRC="${SWAGE_LLVM_HOME:-$HOME/.swage/llvm}/src-$(cat cmake/llvm-version.txt)"
-python -m pip install -r "$LLVM_SRC/mlir/python/requirements.txt" lit pytest
-./scripts/build_llvm.sh
-./scripts/build_swage.sh
-```
-
-The final command configures Swage, builds `swage-opt` and the native Python
-bindings, and runs the lit suite. The LLVM pin is recorded in
-`cmake/llvm-version.txt` and must not be changed as part of an unrelated
-change.
+With the default `RelWithDebInfo` build type, the pinned LLVM/MLIR build
+uses about 25 GB. Build time depends on the machine. The hosted CI workflow
+uses the smaller `Release` build type and notes about three hours for the
+first LLVM build on a new pin, under a 350-minute limit. Later runs reuse the
+cached install tree.
 
 `fetch_llvm.sh` downloads the source tarball of the pinned release from the
 llvm-project GitHub releases and checks its SHA-256 against
@@ -122,14 +198,12 @@ nothing. Set `SWAGE_LLVM_URL` to the full URL of that tarball to download it
 from a mirror; the same digest check applies. The verified tarball is
 unpacked into a temporary directory and renamed into place, so an
 interrupted run leaves no source directory, and the script stops if a
-leftover `llvm-project-<version>.src` directory is present.
-
-The script records the verified digest in a `.swage-source-sha256` file
-inside the source directory. When the source directory already exists, a
-matching record is accepted without a download, a record with another digest
-or an empty directory is an error, and a directory without the record is
-used with a notice that the script did not verify it. Remove the source
-directory and run the script again to replace it with a verified tree.
+leftover `llvm-project-<version>.src` directory is present. The script
+records the verified digest in a `.swage-source-sha256` file inside the
+source directory. When the source directory already exists, a matching
+record is accepted without a download, a record with another digest or an
+empty directory is an error, and a directory without the record is used
+with a notice that the script did not verify it.
 
 An existing install of the exact pinned LLVM/MLIR release can be selected
 instead:
@@ -140,134 +214,107 @@ LLVM_DIR=/path/to/lib/cmake/llvm \
     ./scripts/build_swage.sh
 ```
 
-CMake configuration compares the LLVM version of the install it finds with
-`cmake/llvm-version.txt` and stops with an error for any other release.
+The helpers accept these build-location and configuration overrides:
 
-The helper accepts these build-location and configuration overrides:
+- `SWAGE_LLVM_HOME`: the LLVM source, build, and install root (default
+  `~/.swage/llvm`).
+- `SWAGE_LLVM_BUILD_TYPE=Release`: a smaller release build of LLVM instead
+  of the default `RelWithDebInfo`; assertions remain enabled.
+- `SWAGE_PYTHON_EXECUTABLE`: the interpreter whose MLIR Python bindings
+  `build_llvm.sh` builds; it must match the interpreter that uses them.
+- `SWAGE_LLVM_PYTHON_BINDINGS=OFF`: omit the MLIR Python bindings. Such an
+  install cannot build `mlir_swage`.
+- `SWAGE_BUILD_TYPE` and `SWAGE_BUILD_DIR`: the build type (default
+  `RelWithDebInfo`) and the directory (default `build`) of the Swage build
+  tree.
 
-- `SWAGE_LLVM_HOME` changes the LLVM source, build, and install root.
-- `SWAGE_LLVM_BUILD_TYPE=Release` selects a smaller release build. The default
-  is `RelWithDebInfo`; assertions remain enabled.
-- `SWAGE_LLVM_PYTHON_BINDINGS=OFF` omits MLIR Python bindings. Such an install
-  cannot build `mlir_swage`.
+GPU execution additionally requires a CUDA-enabled PyTorch build, the
+NVIDIA driver, and an NVIDIA GPU of compute capability 8.0 (`sm_80`) or
+newer. An older device is rejected during compilation.
+[Runtime and Environment](../reference/runtime-environment.md) states the
+exact target-admission and zero-work rules.
 
-## Use the native Python package
+### Use the build tree
 
-The native package is imported from `build/python_packages`, not from the
-published wheel:
+A build tree keeps `build/python_packages/mlir_swage`. Only this route needs
+a build-tree `PYTHONPATH`:
 
 ```bash
 ninja -C build check-swage-python
-PYTHONPATH=build/python_packages python -m pytest -q python/tests/mlir
+PYTHONPATH=build/python_packages python -m swage.env --json --check native
+PYTHONPATH=build/python_packages python examples/fixed_vector_add.py --backend cpu
+PYTHONPATH=build/python_packages python examples/fixed_vector_multiply.py --backend cpu
 ```
 
-`check-swage-python` supplies the build-tree `PYTHONPATH` itself. Both
-commands need `pytest` and PyTorch, because several binding test modules
-import `torch`. The hosted CI job installs a CPU-only PyTorch build for them,
-and the CUDA tests skip without a GPU. The segmented calls and the private
-qualification helpers behind them also import `numpy`, which the `pytorch`
-extra declares and the binding requirements above already install. A
-segmented call without it raises a `RuntimeError` that names it. Importing `swage`, capturing a kernel,
-emitting MLIR, and launching the fixed vector add do not need it. The
-second command imports `swage`
-from the installed package, so it needs the editable install from the same
-checkout. The released `0.5.1` wheel does not match the tests of the
-current source tree.
+`check-swage-python` supplies the build-tree path itself. Several binding
+test modules import `torch`; the hosted CI job installs a CPU-only PyTorch
+build for them, and the CUDA tests skip without a GPU. The segmented calls
+and the private qualification helpers behind them also import `numpy`,
+which the binding requirements above install. The `swage` that these
+commands import is the editable install of the same checkout. If CMake is
+asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install without Python
+bindings, configuration fails instead of silently omitting the package.
 
-If CMake is asked for `SWAGE_PYTHON_BINDINGS=ON` against an MLIR install
-without Python bindings, configuration fails instead of silently omitting the
-package.
+A build tree is not relocatable: `build/python_packages/mlir_swage` holds
+absolute symbolic links into the LLVM install and into the checkout. Build a
+wheel to move the bindings to another environment.
 
-## Build a native wheel
+### Build a local native wheel
 
-No native wheel is published. `scripts/build_native_wheel.sh` builds one
-from a checkout, against the same LLVM/MLIR install that `build_swage.sh`
-uses and for the same `python`:
+A local wheel is built the way the `fixed-runtime-slo` job of
+`.github/workflows/ci-gpu.yml` builds it: from a clean committed checkout,
+without build isolation, against the pinned LLVM install that
+`build_llvm.sh` wrote for the same `python`. Keep generated output outside
+the checkout:
 
 ```bash
-python -m build --wheel
-./scripts/build_native_wheel.sh
+test -z "$(git status --porcelain)"
+work="$(mktemp -d)"
+llvm="${SWAGE_LLVM_HOME:-$HOME/.swage/llvm}/install-$(cat cmake/llvm-version.txt)"
+python -m build --wheel --no-isolation --outdir "$work/dist" \
+    -Cbuild-dir="$work/build" \
+    -Ccmake.define.MLIR_DIR="$llvm/lib/cmake/mlir" \
+    -Ccmake.define.LLVM_DIR="$llvm/lib/cmake/llvm" \
+    -Ccmake.define.SWAGE_SOURCE_REVISION="$(git rev-parse HEAD)" \
+    -Ccmake.define.SWAGE_SOURCE_CLEAN=true
+python -m venv "$work/venv"
+"$work/venv/bin/python" -m pip install "$work"/dist/*.whl
+(cd "$work" && env -u PYTHONPATH "$work/venv/bin/python" -m swage.env --json --check native)
 ```
 
-Both wheels land in `dist/`. The first command needs the `dev` extra and
-writes `swage_compiler-<version>-py3-none-any.whl`. The second writes
-`swage_compiler_native-<version>-cp313-cp313-linux_x86_64.whl` for CPython
-3.13. It builds in `build-native-wheel`, or in the directory named by
-`SWAGE_WHEEL_BUILD_DIR`, and accepts `SWAGE_LLVM_HOME`, `MLIR_DIR`, and
-`LLVM_DIR` as `build_swage.sh` does. `CMAKE_BUILD_PARALLEL_LEVEL` sets the
-number of build jobs.
+The `dev` extra supplies the build tools that `--no-isolation` needs, at
+the pinned versions `scikit-build-core==1.0.3` and `nanobind==2.15.0`. A
+wheel build requires the `Release` build type, which `pyproject.toml` sets,
+a `SWAGE_SOURCE_REVISION` of 40 lowercase hexadecimal digits, and an
+explicit `SWAGE_SOURCE_CLEAN` of `true` or `false`; CMake stops without
+them. Record `false` for a modified tree and never label it clean: such a
+wheel cannot qualify a release. Install
+PyTorch into the new environment separately when a launch or a segmented
+call needs it, and run checks from outside the checkout with `PYTHONPATH`
+unset, so that the installed packages are the ones imported.
 
-Install the pair into a fresh virtual environment of the same Python
-version, from that directory only:
-
-```bash
-python -m pip install --no-index --find-links dist swage-compiler-native
-python -m swage.env
-```
-
-The native wheel requires the `swage-compiler` wheel of the same version.
-`--no-index` makes pip take that wheel from `dist/`: the `0.5.1` on PyPI is
-the released package, which carries the same version number as the current
-source tree and older code. PyTorch is installed separately when a launch
-needs it.
-
-The native wheel has these properties:
-
-- It holds the `mlir_swage` package: the MLIR Python bindings, the Swage
-  dialect bindings, the compiler library they share, and the runtime
-  library that `python -m swage.compile` ships in an artifact. It also holds
-  `LICENSE` and
-  [`THIRD_PARTY_NOTICES.md`](https://github.com/abhiksark/swage/blob/main/THIRD_PARTY_NOTICES.md),
-  because the libraries contain LLVM, MLIR, and nanobind code.
-- It records the `swage` version, the source revision, and the LLVM version
-  it was built from. `python -m swage.env` prints them as `native_version`,
-  `native_revision`, and `llvm_linked`. `swage` refuses bindings that were
-  built for another version or that record none;
-  [Runtime and Environment](../reference/runtime-environment.md#frontend-and-bindings)
-  states the rule.
-- It contains no link and no library search path into the build tree, the
-  LLVM install, or the checkout. The script stops when the staged package
-  has an absolute symbolic link, a library that searches outside its own
-  directory, or a library that needs a shared library found neither in the
-  wheel nor among the C and C++ runtime, `libz`, and `libzstd`.
-- With the pinned LLVM in the `Release` build type, the wheel is about
-  43 MB and installs to about 120 MB.
-
-These limits apply:
-
-- The wheel is built for one Python version, the `python` on `PATH`. Only a
-  CPython 3.13 wheel has been built and installed.
-- The wheel carries the plain `linux_x86_64` platform tag. Its libraries are
-  linked on the build host and load the C and C++ runtime, `libz.so.1`, and
-  `libzstd.so.1` from the system, so the installing system must provide
-  them and must not be older than the build host. Nothing checks the wheel
-  against a `manylinux` policy.
-- The wheel was installed and exercised on the machine that built it: the
-  environment report, both committed examples, and `python/tests/mlir` ran
-  in a virtual environment with no checkout and no build tree on any path.
-  It was not tried on another machine.
-- The native libraries contain source file paths of the build host in
-  their assertion messages.
-- The `native-wheel` job of the `ci-cpp` workflow builds the wheel on a
-  hosted runner, uploads it as a workflow artifact, and runs the checks
-  that need no GPU against an install of it. That job has never run. No
-  workflow publishes the wheel.
-
-A build-tree package can still be used in place as the previous section
-describes. It is not relocatable: `build/python_packages/mlir_swage` holds
-absolute symbolic links into the LLVM install and into the checkout.
+A wheel built this way carries the plain `linux_x86_64` platform tag and is
+local evidence, not a `manylinux` release artifact. The release workflow
+builds and repairs its wheels inside the digest-pinned
+`manylinux_2_28_x86_64` image of `.github/workflows/publish-pypi.yml`. The
+`build-and-test` job of `ci-cpp` builds and installs a local CPython 3.13
+wheel the same way on every pull request, and runs the CPU checks and the
+whole `python/tests/mlir` suite against it, with every CUDA test skipped.
 
 ## Run from an artifact
 
 A host that only serves `swage.segment_reduce` and `swage.segment_softmax`
-needs no native package. It needs three things:
+can run them from an artifact directory with no compiler loaded. It needs
+three things:
 
-- The pure `swage` package, from the same source revision as the host that
-  wrote the artifact. The released `0.5.1` wheel has no segmented calls and
-  does not read artifacts.
+- `swage` from the same source revision as the host that wrote the
+  artifact: the native wheel, whose bindings a process with an artifact
+  selected does not import, or the frontend-only install of that checkout.
+  The released `0.5.1` wheel has no segmented calls and does not read
+  artifacts.
 - PyTorch 2.6 or newer with CUDA, and `numpy`.
 - An artifact directory for the processor of its GPU, written on a host
-  with the native package:
+  with the native bindings:
 
     ```bash
     python -m swage.compile --target sm_86 --output /path/to/artifact
@@ -281,12 +328,13 @@ python -m swage.env
 ```
 
 The report ends with an `artifact` line that names the directory, or gives
-the reason it is rejected. Emitting MLIR and launching the fixed vector add
-still need the native package.
+the reason it is rejected. Emitting MLIR and launching the fixed kernels
+still need the native bindings.
 [Running Without the Compiler](../user-guide/deployment.md) states what an
 artifact holds, the rule for its permissions, and its limits, among them
 that its runtime library has been built for Linux x86-64 only.
 
-Installation is complete when the relevant build and test commands succeed.
-Continue with the [Quickstart](quickstart.md), or use
-[Troubleshooting](troubleshooting.md) when a tool or package cannot be found.
+Installation is complete when the relevant health checks and test commands
+succeed. Continue with the [Quickstart](quickstart.md), or use
+[Troubleshooting](troubleshooting.md) when a tool or package cannot be
+found.

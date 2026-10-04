@@ -89,9 +89,9 @@ allows a future planner to change task structure without changing program
 meaning.
 
 The public kernel language uses a logical fixed-block coordinate for
-canonical vector add. The segmented paths prove selected Segment to Task to
-Tile mappings, and the two public segmented calls run through them. They do
-not yet provide a public general planner.
+canonical vector add or multiply. The segmented paths prove selected
+Segment to Task to Tile mappings, and the two public segmented calls run
+through them. They do not yet provide a public general planner.
 
 ## What a schedule may change
 

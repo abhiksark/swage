@@ -10,68 +10,82 @@
 
 Swage is an experimental Python-embedded MLIR/LLVM GPU compiler. It studies
 how one segment-local program can keep its meaning while task derivation
-changes with runtime segment lengths.
+changes with runtime segment lengths. Its public surface is narrow: the
+canonical fixed vector add and multiply on an explicitly selected CPU or
+CUDA backend, and two segmented calls, `swage.segment_reduce` and
+`swage.segment_softmax`, which run fixed programs over segments on one CUDA
+device. The wider segment compiler is private research or planned work.
 
-Segments are usable from Python through two calls with fixed programs:
-`swage.segment_reduce` for a sum, a maximum, a minimum, or a mean per
-segment, and
-`swage.segment_softmax` for a softmax within each segment. There is no
-public segment syntax, and the kernel language compiles one canonical fixed
-vector-add kernel. The wider segment compiler exists as private
-qualification machinery or planned work.
+!!! warning "Release boundary"
 
-!!! warning "Pre-alpha boundary"
-
-    Read status labels literally. Public today is supported application
-    surface. Private qualification is tested contributor machinery. Planned
-    describes work that has not passed a public gate.
+    These pages describe the `v0.5.2` source tree and its native-wheel
+    contract. That release is not published: publication and production
+    qualification are pending, and the latest released tag is `v0.5.1`, a
+    pure Python wheel that lacks most of what these pages describe.
+    [Installation](getting-started/installation.md) lists the differences.
+    Public denotes application API, not evidence that a pending release has
+    passed its gates. Private qualification is tested contributor
+    machinery, and planned work has not passed a public gate.
 
 ## Public today
 
-- The pure Python `swage` package, distributed as `swage-compiler`. On its
-  own it captures a kernel and checks it against the kernel language.
-- Compile-only `emit_mlir()` for the restricted fixed-block vector-add
-  subset, when build-tree native bindings are present.
-- Keyword-only CUDA launch for the canonical fixed vector add.
-- `swage.segment_reduce` for `"sum"`, `"max"`, `"min"`, and `"mean"`, and
-  `swage.segment_softmax`, over int32 or int64 offsets on one CUDA device,
-  when build-tree native bindings are present. Both take values of rank
-  one or of rank two, `[N, D]` rows that are reduced or normalized per
-  column. A reduction takes f32 or f64 values, and the softmax takes f32
-  values. The calls admit
-  no other dtype, kind, or rank, record no gradient, and prepare their
-  offsets on the host at every call.
-  [Segmented Calls](user-guide/segmented-calls.md) states the contract and
-  the cost.
-- `python -m swage.compile`, which writes the kernels of those two calls
-  ahead of time, and `SWAGE_ARTIFACT_DIR`, which makes a process run the
-  calls from such a directory without the native bindings.
-  [Running Without the Compiler](user-guide/deployment.md) states what
-  that delivers and what it does not.
-- `python -m swage.env` environment diagnostics.
-- Native `swage` MLIR parsing, verification, and registered compiler tools.
+- Public `swage` and the self-contained private `mlir_swage` bindings in one
+  native wheel per CPython version, distributed as `swage-compiler`.
+- `@swage.jit` capture and compile-only `emit_mlir()` for the restricted
+  fixed-block elementwise subset, without a source tree or a local LLVM
+  install.
+- Keyword-only launch of the canonical fixed vector add or multiply over
+  `float32`, `float16`, `float8_e4m3fn`, or `float8_e5m2` tensors, on an
+  explicitly selected CUDA or Native CPU backend.
+- `swage.segment_reduce` for `"sum"`, `"max"`, `"min"`, and `"mean"` over
+  `float32` or `float64` values, and `swage.segment_softmax` over `float32`
+  values, with `int32` or `int64` offsets on the current CUDA device.
+- `python -m swage.compile`, which writes the kernels of the two segmented
+  calls ahead of time without a GPU, and `SWAGE_ARTIFACT_DIR`, which makes a
+  process run the calls from such a directory with no compiler loaded.
+- `python -m swage.env --json` diagnostics and explicit native, CPU, and
+  CUDA health checks.
+- `python -m swage.bench vector-add --output result.json` from the installed
+  wheel, for the [frozen CUDA vector-add benchmark](reference/benchmarking.md);
+  it is not independent release qualification.
+- Native `swage` MLIR parsing and verification; compiler tools through
+  source builds.
 
-The published wheel does not include the native `mlir_swage` package or
-compiler build output. Native wheel packaging remains deferred. These pages
-describe the current source tree, and
-[Installation](getting-started/installation.md) lists what the released
-`0.5.1` wheel lacks, which includes the two segmented calls.
+The two segmented calls take values of rank one or `[N, D]` rows that they
+reduce or normalize per column. They record no gradient, are refused under
+CUDA graph capture, and prepare their offsets on the host at every call.
+[Segmented Calls](user-guide/segmented-calls.md) states the contract and
+the cost, and [Running Without the Compiler](user-guide/deployment.md)
+states what an artifact delivers and what it does not.
+
+The semantics of the fixed kernel are unchanged by native packaging. CPU and
+CUDA selection never falls back to the other backend. The
+[Support Matrix](reference/support-matrix.md) lists the supported wheels,
+the optional PyTorch, and the difference between admitted CUDA targets and
+the A6000 (`sm_86`) release gate.
 
 ## Private qualification
 
-- Segmented sum, max, and min through a sequential CPU oracle and one CTA per
-  segment on NVIDIA GPUs.
+Everything below is private research: it is not public API, and it may
+change or go away.
+
+- Segmented sum, max, and min through a sequential CPU oracle and one CTA
+  per segment on NVIDIA GPUs.
 - Stable ragged softmax through the same private CPU and one-CTA GPU
   boundary.
 - Planning, direct warp and CTA execution, fused mixed execution, and
-  split-CTA partial and merge execution for capture-free, single-stage
-  sum, max, and min programs over f32 or f64 values.
+  split-CTA partial and merge execution for capture-free, single-stage sum,
+  max, and min programs over f32 or f64 values, with prepared launches and
+  schedules chosen by hand.
+- A persistent task queue for the identity sum, which drains device task
+  queues and publishes split completion correctly, but whose predeclared
+  A6000 performance gate failed.
 
 These paths have tests and recorded qualification evidence. The two
-segmented calls run a fixed sum, max, and softmax through them with default
-limits. Other programs, the prepared launches, the scheduling policies, and
-the planning limits stay private, and none of it widens the public kernel
-language or the `launch()` contract.
+segmented calls run a fixed sum, max, min, mean, and softmax through them
+with default limits. Other programs, the prepared launches, the scheduling
+policies, and the planning limits stay private, and none of it widens the
+public kernel language or the `launch()` contract.
 
 ## Planned
 
@@ -79,11 +93,10 @@ language or the `launch()` contract.
   caller writes.
 - Packing several short segments into one warp allocation.
 - Split softmax.
-- Device queues, persistent scheduling, and broader policy selection. One
-  persistent queue exists as a private experiment whose predeclared
-  performance gate failed.
+- Reusable device queues, qualified persistent scheduling, and broader
+  policy selection.
 
-The three lanes are status boundaries, not fallback paths.
+These capability sections are status boundaries, not fallback paths.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -101,8 +114,8 @@ The three lanes are status boundaries, not fallback paths.
 
     ---
 
-    Install the package, build the pinned toolchain, and run the
-    supported example end to end.
+    Install a native wheel and run the supported examples end to end,
+    or build from source against the exact pinned toolchain.
 
     [Installation](getting-started/installation.md)
 
@@ -110,8 +123,8 @@ The three lanes are status boundaries, not fallback paths.
 
     ---
 
-    The ideas behind Swage: ragged data, writing and launching kernels,
-    and the execution model.
+    The ideas behind Swage: ragged data, the segmented calls, writing and
+    launching kernels, and the execution model.
 
     [Start the guide](user-guide/index.md)
 

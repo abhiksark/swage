@@ -7,10 +7,10 @@ A process normally compiles the kernels of `swage.segment_reduce` and
 `mlir_swage` package and loads LLVM into the process. This page describes
 the other way to run the two calls: a build host compiles the kernels ahead
 of time into an artifact directory, and the process that serves the calls
-loads that directory. The serving process needs neither `mlir_swage` nor
-LLVM.
+loads that directory. The serving process does not import `mlir_swage` and
+loads no LLVM, whether or not the bindings are installed.
 
-Like the two calls, this is newer than the released `0.5.1` wheel.
+Like the two calls, this is not part of the released `0.5.1` wheel.
 
 ## What this delivers and what it does not
 
@@ -18,10 +18,10 @@ It delivers three things:
 
 - A command, `python -m swage.compile`, that compiles every kernel the two
   calls can launch for one named NVPTX processor and writes them to a new
-  directory with a manifest. It needs the native build. It needs no GPU and
-  no PyTorch, and the target does not have to be the processor of the build
-  host.
-- A loader in the pure Python package. With `SWAGE_ARTIFACT_DIR` set, the
+  directory with a manifest. It needs the native bindings, from the native
+  wheel or a source build, and `numpy`. It needs no GPU and no PyTorch, and
+  the target does not have to be the processor of the build host.
+- A loader in the `swage` package. With `SWAGE_ARTIFACT_DIR` set, the
   two calls take their kernels from the directory, compile nothing, and do
   not import `mlir_swage`.
 - The same results. On the same device, a call from an artifact returns the
@@ -38,8 +38,8 @@ It does not deliver these:
 - Machine code for the GPU. An artifact holds PTX text, and the CUDA driver
   compiles PTX when a module is loaded, as it does on the compiled path.
 - Any other kernel. An artifact holds the fixed programs of the two
-  calls. The public `launch()` of the fixed vector add is not served from an
-  artifact, and neither is any private helper.
+  calls. The public `launch()` of the fixed vector add and multiply is not
+  served from an artifact, and neither is any private helper.
 - A lower cost per call. A call from an artifact does the host work of a
   compiled call: it copies the offsets to the host and classifies them.
 - A host of another architecture. The runtime library has been built and
@@ -48,13 +48,16 @@ It does not deliver these:
 
 ## Write an artifact on the build host
 
-Run the command where the native package is importable, for the processor
-of the device that will run the kernels:
+Run the command where the native bindings are importable, for the
+processor of the device that will run the kernels. With the native wheel
+installed:
 
 ```bash
-PYTHONPATH=build/python_packages \
-    python -m swage.compile --target sm_86 --output /srv/swage/sm_86
+python -m swage.compile --target sm_86 --output /srv/swage/sm_86
 ```
+
+From a source build, put `PYTHONPATH=build/python_packages` in front of the
+same command. The command prints a summary:
 
 ```text
 artifact: /srv/swage/sm_86
@@ -73,13 +76,13 @@ The command takes these options:
 | `--target` | The NVPTX processor to compile for, one of the processors [Runtime and Environment](../reference/runtime-environment.md#launch-lifecycle) lists. Required. |
 | `--output` | The directory to create. It must not exist, and its parent must. Required. |
 | `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with `_r2` appended, `softmax`, or `softmax_r2`. A kind alone names the reduction over rank-one float32 values, `_f64` the one over float64 values, and `_r2` the program over rank-two values. Repeat it to include several. Without it, all eighteen are included. |
-| `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one of the native build. See [The runtime library](#the-runtime-library). |
+| `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one that the native bindings carry. See [The runtime library](#the-runtime-library). |
 
 These rules hold for every run:
 
 - The target must be the processor of the serving device. On that host,
-  `python -m swage.env` prints it as `target`. One artifact holds the
-  kernels of one target.
+  `python -m swage.env --json` reports it as `backends.cuda.target`. One
+  artifact holds the kernels of one target.
 - The directory is written once. The command stages it beside `--output`
   and renames it into place, so a failed run leaves nothing behind and no
   reader sees part of an artifact.
@@ -93,10 +96,12 @@ These rules hold for every run:
 
 ## Run from an artifact on the serving host
 
-The serving environment holds the pure `swage` package of the same source
-revision as the build host, PyTorch 2.6 or newer with CUDA, and `numpy`. It
-does not need `mlir_swage`. Copy the directory with a tool that keeps the
-permission bits, and select it:
+The serving environment holds `swage` of the same source revision as the
+build host, PyTorch 2.6 or newer with CUDA, and `numpy`. The `swage` can be
+the native wheel, whose bindings a process with an artifact selected does
+not import, or the frontend-only install of that checkout, which has no
+bindings. Copy the directory with a tool that keeps the permission bits, and
+select it:
 
 ```bash
 export SWAGE_ARTIFACT_DIR=/srv/swage/sm_86
@@ -106,7 +111,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 42 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, ragged_softmax_r2, written by swage 0.5.1 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 42 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, ragged_softmax_r2, written by swage 0.5.2 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -133,8 +138,9 @@ does the launcher: the CUDA driver wrapper takes it from the runtime
 library of the artifact and does not import `mlir_swage`. A process that
 runs only the two calls therefore loads no LLVM whether or not `mlir_swage`
 is installed, provided `SWAGE_ARTIFACT_DIR` is set before the process first
-uses the driver. A `launch()` of the fixed vector add in the same process
-still compiles, so it imports `mlir_swage` and loads LLVM at that point.
+uses the driver. A `launch()` of the fixed vector add or multiply in the
+same process still compiles, so it imports `mlir_swage` and loads LLVM at
+that point.
 
 ## What the directory holds
 
@@ -162,7 +168,7 @@ The manifest is JSON. This one is shortened to the first kernel:
 ```json
 {
   "format_version": 2,
-  "swage_version": "0.5.1",
+  "swage_version": "0.5.2",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "llvm_version": "22.1.8",
   "target": "sm_86",
@@ -298,9 +304,9 @@ states the rule with the rest of the threat model.
 only. It holds a second implementation of the compiler's task classifier
 and one function that enqueues a kernel through `libcuda.so.1`, which it
 loads at the first launch. The loader calls it through `ctypes`, so one
-library serves every Python version. The native build places the library
-in the `mlir_swage` package, and `python -m swage.compile` copies it from
-there. Its interface is `include/swage-c/Runtime.h`.
+library serves every Python version. The native wheel and a source build
+place the library in the `mlir_swage` package, and `python -m swage.compile`
+copies it from there. Its interface is `include/swage-c/Runtime.h`.
 
 The library is machine code for the host, not for the GPU, so an artifact
 runs only on hosts of the machine its library was built for. The manifest
@@ -333,18 +339,23 @@ For a serving host of another machine, such as an AArch64 host with an
   calls from the artifact with no LLVM or MLIR library mapped and then
   launches the fixed vector add.
 - `tests/python/test_artifact.py` covers selection, every refusal, and the
-  trust rule, without the native build.
+  trust rule, without the native bindings.
 - `unittests/RuntimeTest.cpp` and
   `python/tests/mlir/test_segmented_classification.py` hold the classifier
   of the runtime library to the compiler's classifier, on seeded layouts
   and on every refusal.
 
-These tests ran on the branch that added the feature. The trusted GPU
-workflow has not executed them. The [Support Matrix](../reference/support-matrix.md#artifacts)
+The GPU cases of the first file ran on the RTX A6000 on the branch that
+added the feature. `scripts/qualify_installed_segments.sh` runs that file
+against an installed native wheel, from a copy of the tests and with
+`PYTHONPATH` unset, and the release `gpu` job and the `fixed-runtime-slo`
+job of `ci-gpu` are configured to run it on the A6000. The
+`build-and-test` job of `ci-cpp` runs the cases that need no GPU against an
+installed CPython 3.13 wheel. The [Support Matrix](../reference/support-matrix.md#artifacts)
 lists what is tested, what was checked by hand, and what is unknown.
 
 Continue with [Writing Kernels](writing-kernels.md). That page turns to the
-kernel language, which has no segment syntax: the one kernel it accepts is
-a fixed-block vector add. For the order of the checks a call makes on an
-artifact, see
+kernel language, which has no segment syntax: the kernels it launches are a
+fixed-block vector add and multiply. For the order of the checks a call
+makes on an artifact, see
 [Runtime and Environment](../reference/runtime-environment.md#artifacts).

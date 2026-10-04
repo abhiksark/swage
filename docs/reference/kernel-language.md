@@ -16,10 +16,11 @@ decorator. Everything else on this page is checked by `emit_mlir()`.
 compiles the kernel.
 
 `emit_mlir()` checks the parameter list and the body before it imports the
-native `mlir_swage` package. With only the pure Python package installed,
-a kernel outside this page raises the same `CompilationError` as it does
-with the native build. A kernel inside it raises a `RuntimeError` that says
-the check passed and names the
+native `mlir_swage` package. Without the bindings, as in a frontend-only
+editable install, a kernel outside this page raises the same
+`CompilationError` as it does with them. A kernel inside it raises a
+`BackendUnavailableError` with the code `native-unavailable` that says the
+check passed and names the
 [Installation](../getting-started/installation.md) page. The released
 `0.5.1` wheel predates this order, as that page states.
 

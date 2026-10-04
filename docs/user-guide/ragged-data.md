@@ -31,9 +31,11 @@ The public calls `swage.segment_reduce` and `swage.segment_softmax`, which
 qualification path behind them validate one contract. They check it on a
 host copy of the offsets before they compile or launch anything. An input
 that breaks a rule is rejected with an error. Nothing is cast, moved to
-another device, or repaired. Both surfaces need the native build, PyTorch,
-and `numpy`, which the binding requirements in
-[Installation](../getting-started/installation.md) already include.
+another device, or repaired. Both surfaces need the native bindings, from
+the native wheel or a source build, PyTorch, and `numpy`, which the
+`pytorch` extra in [Installation](../getting-started/installation.md)
+declares. The public calls can instead take their kernels from an artifact
+directory, as [Running Without the Compiler](deployment.md) describes.
 
 For `N` segments over one values buffer:
 

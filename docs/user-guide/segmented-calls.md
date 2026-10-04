@@ -20,13 +20,13 @@ or above cannot be written. The calls record no gradient.
 shows a call, states what it returns and what it costs, and lists where it
 is refused.
 
-Both calls need the CUDA GPU tier: the native build, PyTorch 2.6 or newer,
-`numpy`, which the `pytorch` extra of the package and the binding
-requirements in [Installation](../getting-started/installation.md) include,
-and an NVIDIA GPU. They are not part of the released `0.5.1` wheel. The
+Both calls need the CUDA GPU tier: the native wheel or a source build,
+PyTorch 2.6 or newer, `numpy`, which the `pytorch` extra of the package
+declares, and an NVIDIA GPU. The released `0.5.1` wheel has neither call;
+[Installation](../getting-started/installation.md) lists what it lacks. The
 [Support Matrix](../reference/support-matrix.md) lists the versions and the
-GPU the tests run on. An artifact directory that a native build wrote ahead
-of time can take the place of the native build;
+GPU the tests run on. An artifact directory that `python -m swage.compile`
+wrote ahead of time can take the place of the native bindings;
 [Running Without the Compiler](deployment.md) describes that.
 
 ## A first call
@@ -47,10 +47,11 @@ weights = swage.segment_softmax(values, offsets)       # six weights
 ```
 
 The committed script `examples/segment_reduce.py` runs these calls and
-compares each result with PyTorch:
+compares each result with PyTorch. Run it with the installed wheel, or from
+a source build with `PYTHONPATH=build/python_packages` in front:
 
 ```bash
-PYTHONPATH=build/python_packages python examples/segment_reduce.py
+python examples/segment_reduce.py
 ```
 
 A call returns after it enqueued its kernels on the current PyTorch CUDA
@@ -380,25 +381,29 @@ Every refusal below raises before anything is enqueued.
   a capturing stream cannot do, and a replay would not repeat the
   preparation. The check comes first, so the capture stays usable for the
   PyTorch work around the call.
-- **A missing `numpy`.** A call raises a `RuntimeError` that names `numpy`
-  and the installation page. The calls copy the offsets into a `numpy`
-  array on the host, with the native build and with an artifact.
+- **A missing `numpy`.** A call raises a `BackendUnavailableError`, a
+  `RuntimeError`, with the code `numpy-unavailable`, that names `numpy` and
+  the installation page. The calls copy the offsets into a `numpy` array on
+  the host, with the native bindings and with an artifact.
 - **`SWAGE_NO_COMPILE=1`.** A call whose kernels the process does not hold
   raises a `RuntimeError`, because the segmented kernels are not in the
   persistent cache. A process that starts with the switch set cannot run a
   segmented call that has work to do, unless an artifact is selected: a
   kernel taken from an artifact is not compiled. A batch without segments
   needs no kernel and returns.
-- **A wheel-only install without an artifact.** A call raises a
-  `RuntimeError` that names the installation page, after the argument
-  checks that need no native build.
+- **No native bindings and no artifact.** In a frontend-only install, or
+  any process that cannot import `mlir_swage`, a call without a selected
+  artifact raises a `BackendUnavailableError` with the code
+  `native-unavailable` that names the installation page, after the
+  argument checks that need no bindings.
 - **An artifact that cannot serve the call.** With `SWAGE_ARTIFACT_DIR`
   set, a call raises a `RuntimeError` when the directory is damaged, unsafe,
   or written for another target, and when it does not hold the program of
   the call. It does not compile instead.
   [Running Without the Compiler](deployment.md#refusals) lists the cases.
-- **PyTorch older than 2.6.** A call raises the `RuntimeError` of
-  `launch()`, before it looks at an argument.
+- **PyTorch older than 2.6.** A call raises the `BackendUnavailableError`
+  of `launch()`, with the code `pytorch-unsupported`, before it looks at an
+  argument.
 
 Three more rules follow from how PyTorch handles streams, threads, and
 inference mode:
