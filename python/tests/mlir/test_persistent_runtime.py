@@ -25,9 +25,7 @@ def _integer_case(lengths):
     offsets = _offsets(lengths)
     values = torch.empty(offsets[-1], dtype=torch.float32)
     expected = []
-    for segment_id, (begin, end) in enumerate(
-        zip(offsets, offsets[1:])
-    ):
+    for segment_id, (begin, end) in enumerate(zip(offsets, offsets[1:])):
         value = float(segment_id % 7 + 1)
         values[begin:end] = value
         expected.append((end - begin) * value)
@@ -58,9 +56,7 @@ def test_persistent_batch_boundaries_across_residencies(resident_blocks):
     base_values = host_values.cuda()
     values = base_values.clone()
     offsets = torch.tensor(host_offsets, device="cuda", dtype=torch.int32)
-    guarded_output = torch.full(
-        (len(lengths) + 2,), -123456.0, device="cuda"
-    )
+    guarded_output = torch.full((len(lengths) + 2,), -123456.0, device="cuda")
     output = guarded_output[1:-1]
     prepared = _prepare_persistent_sum(
         values, offsets, output, resident_blocks=resident_blocks
@@ -180,9 +176,7 @@ def test_persistent_randomized_plans_and_values():
         host_values, host_offsets, expected = _integer_case(lengths)
         base_values = host_values.cuda()
         values = base_values.clone()
-        offsets = torch.tensor(
-            host_offsets, device="cuda", dtype=torch.int32
-        )
+        offsets = torch.tensor(host_offsets, device="cuda", dtype=torch.int32)
         output = torch.full((len(lengths),), float("nan"), device="cuda")
         prepared = _prepare_persistent_sum(
             values,
@@ -233,9 +227,7 @@ def test_persistent_capture_requires_initialized_task_storage(monkeypatch):
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
     prepared = _prepare_persistent_sum(values, offsets, output)
-    monkeypatch.setattr(
-        torch.cuda, "is_current_stream_capturing", lambda: True
-    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
 
     with pytest.raises(RuntimeError, match="must launch once"):
         prepared.launch()

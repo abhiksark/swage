@@ -131,7 +131,9 @@ _REDUCTION_VARIANTS = (
     ("split-merge", "_compile_split_merge_reduction_ptx", {}),
 )
 _PERSISTENT_VARIANT = (
-    "persistent", "_compile_persistent_segmented_reduction_ptx", {},
+    "persistent",
+    "_compile_persistent_segmented_reduction_ptx",
+    {},
 )
 
 # The reduction programs: a kind of `segment_reduce`, an element transform of
@@ -294,7 +296,8 @@ def _compile(program, processor):
                 module, kernel_name=kernel_name, target=target, **options
             )
             digests[f"{program}/{variant}/{target}"] = [
-                _sha256(lowered), _sha256(ptx),
+                _sha256(lowered),
+                _sha256(ptx),
             ]
     return digests
 
@@ -430,10 +433,10 @@ def _main(arguments):
     recorded = _recorded()
     digests = _compile_matrix()
     old = recorded["digests"]
-    lowered = sum(key in old and old[key][0] != digests[key][0]
-                  for key in digests)
-    ptx = sum(key in old and old[key][1] != digests[key][1]
-              for key in digests)
+    lowered = sum(
+        key in old and old[key][0] != digests[key][0] for key in digests
+    )
+    ptx = sum(key in old and old[key][1] != digests[key][1] for key in digests)
     added = len(set(digests) - set(old))
     removed = len(set(old) - set(digests))
     print(f"native extension: {extension.__file__}")

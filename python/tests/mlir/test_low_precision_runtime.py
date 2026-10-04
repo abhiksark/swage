@@ -303,9 +303,7 @@ def test_multiply_offset_views_guards_and_aliases(backend, dtype, n, alias):
     capacity = n + 3
     x_storage = torch.full((capacity + 4,), -7.0, dtype=dtype, device=backend)
     x = x_storage[1 : capacity + 1]
-    x.copy_(
-        (torch.arange(capacity, device=backend).float() % 9 - 4).to(dtype)
-    )
+    x.copy_((torch.arange(capacity, device=backend).float() % 9 - 4).to(dtype))
     storages = [x_storage]
     if alias == "both":
         y = x
@@ -328,9 +326,7 @@ def test_multiply_offset_views_guards_and_aliases(backend, dtype, n, alias):
         output = x
     else:
         output = y
-    expected_values = _multiply_oracle(
-        x[:n].cpu().clone(), y[:n].cpu().clone()
-    )
+    expected_values = _multiply_oracle(x[:n].cpu().clone(), y[:n].cpu().clone())
     guarded = output._base
     expected_storages = [storage.cpu().clone() for storage in storages]
     start = output.storage_offset()

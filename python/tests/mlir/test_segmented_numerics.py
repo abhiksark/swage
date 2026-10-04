@@ -875,7 +875,12 @@ def test_float_arithmetic_scan_holds_a_kernel_to_its_element_type():
     ptx = "".join(
         f"\t{spelling} \t%r1, %r2, %r3;\n"
         for spelling in (
-            *narrow, *wide, *unsafe_wide, *between, *from_integer, *integer
+            *narrow,
+            *wide,
+            *unsafe_wide,
+            *between,
+            *from_integer,
+            *integer,
         )
     )
 
@@ -891,8 +896,12 @@ def test_float_arithmetic_scan_holds_a_kernel_to_its_element_type():
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])
 @pytest.mark.parametrize(
     ("kind", "transform"),
-    [("sum", "identity"), ("sum", "square"), ("max", "identity"),
-     ("min", "identity")],
+    [
+        ("sum", "identity"),
+        ("sum", "square"),
+        ("max", "identity"),
+        ("min", "identity"),
+    ],
 )
 def test_f64_kernels_hold_f64_round_to_nearest_arithmetic_only(
     kind, transform, target
@@ -1049,9 +1058,7 @@ def test_mean_is_the_sum_of_its_schedule_divided_by_the_length(path, dtype):
 
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])
 @pytest.mark.parametrize("element", ["f32", "f64"])
-def test_mean_kernels_divide_once_per_task_and_never_per_chunk(
-    element, target
-):
+def test_mean_kernels_divide_once_per_task_and_never_per_chunk(element, target):
     """A mean kernel adds one conversion and one division per task region.
 
     The count of the segment is converted with `cvt.rn` from i32, and the
@@ -1159,9 +1166,7 @@ def test_f64_reductions_do_not_round_through_f32(kind, policy):
 
 
 @pytest.mark.parametrize("target", ["sm_80", "sm_86"])
-@pytest.mark.parametrize(
-    "transform", ["identity", "square", "maps", "affine4"]
-)
+@pytest.mark.parametrize("transform", ["identity", "square", "maps", "affine4"])
 def test_sum_kernels_add_in_round_to_nearest_without_contraction(
     transform, target
 ):

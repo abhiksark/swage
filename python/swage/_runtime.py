@@ -251,9 +251,9 @@ def launch(kernel, *, arguments, constexprs, grid):
                 kernel.__name__,
             )
         _, function = loaded
-        abi_arguments = tuple(
-            tensor.data_ptr() for tensor in spec.tensors
-        ) + (spec.n,)
+        abi_arguments = tuple(tensor.data_ptr() for tensor in spec.tensors) + (
+            spec.n,
+        )
         driver.launch(
             function,
             spec.grid,
@@ -269,9 +269,9 @@ def launch(kernel, *, arguments, constexprs, grid):
         # A subclass may take more than a message, so it is left as it is.
         if type(error) not in (TypeError, ValueError):
             raise
-        raise type(error)(
-            f"{error}{_launch_location(kernel)}"
-        ).with_traceback(error.__traceback__) from None
+        raise type(error)(f"{error}{_launch_location(kernel)}").with_traceback(
+            error.__traceback__
+        ) from None
 
 
 def _advance_version(torch, tensor):
@@ -314,8 +314,7 @@ def _import_torch():
         import torch
     except Exception as error:
         raise RuntimeError(
-            "Swage launch requires PyTorch; install "
-            "'swage-compiler[pytorch]'"
+            "Swage launch requires PyTorch; install 'swage-compiler[pytorch]'"
         ) from error
     if torch is not _supported_torch:
         _require_supported_torch(torch)
@@ -1230,9 +1229,7 @@ def _cache_settings():
 
 def _cache_writable():
     """Return whether this process may still change the cache root."""
-    return "write" not in _cache_off and not _switch_on(
-        "SWAGE_CACHE_READ_ONLY"
-    )
+    return "write" not in _cache_off and not _switch_on("SWAGE_CACHE_READ_ONLY")
 
 
 def _warn_cache_off(use, reason):
@@ -1381,8 +1378,7 @@ def _compile_refusal(kernel_name, reason):
     )
 
 
-def _compile_cached(specialization, kernel_name, block_size, emit, *,
-                    key=None):
+def _compile_cached(specialization, kernel_name, block_size, emit, *, key=None):
     """Return the artifact for one specialization, emitting only on a miss.
 
     `emit` is a zero-argument callable producing the semantic module; it is
@@ -1425,9 +1421,7 @@ def _compile_cached(specialization, kernel_name, block_size, emit, *,
         target = specialization.get(
             "compute_capability", specialization.get("target")
         )
-        lowered, ptx = _compile_native(
-            emit(), kernel_name, block_size, target
-        )
+        lowered, ptx = _compile_native(emit(), kernel_name, block_size, target)
         artifact = _Artifact(key, lowered, ptx)
         # Retained before any disk write, so no failure below costs it.
         _ptx_cache[key] = artifact
@@ -2079,8 +2073,12 @@ class _CudaDriver:
             self._pin_if_capturing(function, stream)
         if self._native_launch is not None:
             self._native_launch(
-                function, grid[0], block, stream,
-                arguments[:3], (arguments[3],),
+                function,
+                grid[0],
+                block,
+                stream,
+                arguments[:3],
+                (arguments[3],),
             )
             return
         values = [ctypes.c_void_p(value) for value in arguments[:3]]
@@ -2095,31 +2093,35 @@ class _CudaDriver:
         """
         if self._native_launch is not None:
             self._native_launch(
-                function, grid[0], block, stream,
-                arguments[:3], arguments[3:],
+                function,
+                grid[0],
+                block,
+                stream,
+                arguments[:3],
+                arguments[3:],
             )
             return
         values = [ctypes.c_void_p(value) for value in arguments[:3]]
         values.extend(ctypes.c_int32(value) for value in arguments[3:])
         self._launch(function, grid, block, stream, values)
 
-    def launch_segmented_tasks(
-        self, function, grid, block, stream, arguments
-    ):
+    def launch_segmented_tasks(self, function, grid, block, stream, arguments):
         """Launch the private four-pointer, three-count task-ID ABI."""
         if self._native_launch is not None:
             self._native_launch(
-                function, grid[0], block, stream,
-                arguments[:4], arguments[4:],
+                function,
+                grid[0],
+                block,
+                stream,
+                arguments[:4],
+                arguments[4:],
             )
             return
         values = [ctypes.c_void_p(value) for value in arguments[:4]]
         values.extend(ctypes.c_int32(value) for value in arguments[4:])
         self._launch(function, grid, block, stream, values)
 
-    def launch_segmented_mixed(
-        self, function, grid, block, stream, arguments
-    ):
+    def launch_segmented_mixed(self, function, grid, block, stream, arguments):
         """Launch the private four-pointer, four-count fused ABI."""
         self.launch_segmented_tasks(function, grid, block, stream, arguments)
 
@@ -2127,8 +2129,12 @@ class _CudaDriver:
         """Launch the private ten-pointer, six-count persistent ABI."""
         if self._native_launch is not None:
             self._native_launch(
-                function, grid[0], block, stream,
-                arguments[:10], arguments[10:],
+                function,
+                grid[0],
+                block,
+                stream,
+                arguments[:10],
+                arguments[10:],
             )
             return
         values = [ctypes.c_void_p(value) for value in arguments[:10]]

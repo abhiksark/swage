@@ -89,19 +89,23 @@ STRAY_IDS = [
 BOUNDED_ID_KERNELS = [
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 32, "use_task_ids": True}, {6: 1},
+        {"block_size": 32, "use_task_ids": True},
+        {6: 1},
         id="task-ids-warp",
     ),
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 128, "use_task_ids": True}, {6: 1},
+        {"block_size": 128, "use_task_ids": True},
+        {6: 1},
         id="task-ids-cta",
     ),
     pytest.param(
         "_compile_fused_segmented_reduction_ptx", {}, {7: 2}, id="fused"
     ),
     pytest.param(
-        "_compile_persistent_segmented_reduction_ptx", {}, {14: 1, 15: 3},
+        "_compile_persistent_segmented_reduction_ptx",
+        {},
+        {14: 1, 15: 3},
         id="persistent",
     ),
     pytest.param(
@@ -116,28 +120,36 @@ BOUNDED_ID_KERNELS = [
 # it is the fourth i32 of the persistent ABI and the first of the merge ABI.
 CLAMPED_KERNELS = [
     pytest.param(
-        "_compile_segmented_reduction_ptx", {"block_size": 32}, {3: 1},
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32},
+        {3: 1},
         id="direct-32",
     ),
     pytest.param(
-        "_compile_segmented_reduction_ptx", {"block_size": 128}, {3: 1},
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128},
+        {3: 1},
         id="direct-128",
     ),
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 32, "use_task_ids": True}, {4: 1},
+        {"block_size": 32, "use_task_ids": True},
+        {4: 1},
         id="task-ids-warp",
     ),
     pytest.param(
         "_compile_segmented_reduction_ptx",
-        {"block_size": 128, "use_task_ids": True}, {4: 1},
+        {"block_size": 128, "use_task_ids": True},
+        {4: 1},
         id="task-ids-cta",
     ),
     pytest.param(
         "_compile_fused_segmented_reduction_ptx", {}, {4: 2}, id="fused"
     ),
     pytest.param(
-        "_compile_persistent_segmented_reduction_ptx", {}, {10: 3, 13: 1},
+        "_compile_persistent_segmented_reduction_ptx",
+        {},
+        {10: 3, 13: 1},
         id="persistent",
     ),
     pytest.param(
@@ -1310,9 +1322,7 @@ def test_fused_kernel_skips_ids_outside_the_segment_count(stray_ids):
     )
 
     sums = _clamped_sums(host_values, pairwise(offsets))
-    _assert_only_stored(
-        output_buffer, {0: sums[0], 2: sums[2], 3: sums[3]}
-    )
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[2], 3: sums[3]})
 
 
 @requires_cuda
@@ -1336,11 +1346,14 @@ def test_persistent_kernel_skips_ids_outside_their_counts(stray_ids):
     warp_tasks = _device_i32([0, *stray, 2])
     cta_tasks = _device_i32([1, *stray, 3])
     partial_ranges = [
-        (400, 550), (550, 700),  # merge 0, segment 4
-        (700, 850), (850, 1000),  # merge 1, segment 5
+        (400, 550),
+        (550, 700),  # merge 0, segment 4
+        (700, 850),
+        (850, 1000),  # merge 1, segment 5
         (100, 200),  # merge 2, stray output segment
         (200, 300),  # merge 3, stray output segment
-        (0, 50), (50, 100),  # stray merge IDs
+        (0, 50),
+        (50, 100),  # stray merge IDs
     ]
     merge_records = [(4, 0, 2), (5, 2, 4), (stray[0], 4, 5), (stray[1], 5, 6)]
     merge_count = len(merge_records)

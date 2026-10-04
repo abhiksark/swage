@@ -108,9 +108,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
     _require_numpy("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
     if element is None:
-        raise TypeError(
-            "values must have dtype torch.float32 or torch.float64"
-        )
+        raise TypeError("values must have dtype torch.float32 or torch.float64")
     output = _result(torch, out, shape, values, values.dtype)
     if rank == 2 and values.shape[1] != 1:
         _qualification._launch_columns(
@@ -224,14 +222,12 @@ def segment_softmax(values, offsets, *, out=None):
     kernel_values, kernel_output = values, output
     if rank == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
-    value_count, segment_count, host_offsets = (
-        _qualification._validate_shapes(
-            kernel_values,
-            offsets,
-            kernel_output,
-            _validate_covering_offsets,
-            int64_offsets=True,
-        )
+    value_count, segment_count, host_offsets = _qualification._validate_shapes(
+        kernel_values,
+        offsets,
+        kernel_output,
+        _validate_covering_offsets,
+        int64_offsets=True,
     )
     # A batch without segments enqueues nothing and uploads nothing.
     kernel_offsets = offsets

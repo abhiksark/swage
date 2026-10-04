@@ -274,9 +274,7 @@ def test_each_kernel_is_what_the_runner_compiles(
 ):
     """Ship the PTX that the compiled path would load for the same request."""
     known = next(
-        kernel
-        for kernel in _artifact._PROGRAMS[program]
-        if kernel.role == role
+        kernel for kernel in _artifact._PROGRAMS[program] if kernel.role == role
     )
     entry = next(
         kernel
@@ -466,9 +464,9 @@ def test_an_artifact_can_be_read_and_not_changed_by_other_accounts(tmp_path):
         os.umask(previous)
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o755
-    assert {
-        stat.S_IMODE(path.stat().st_mode) for path in output.iterdir()
-    } == {0o644}
+    assert {stat.S_IMODE(path.stat().st_mode) for path in output.iterdir()} == {
+        0o644
+    }
 
 
 def test_the_command_follows_a_restrictive_umask(tmp_path):
@@ -480,9 +478,9 @@ def test_the_command_follows_a_restrictive_umask(tmp_path):
         os.umask(previous)
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
-    assert {
-        stat.S_IMODE(path.stat().st_mode) for path in output.iterdir()
-    } == {0o600}
+    assert {stat.S_IMODE(path.stat().st_mode) for path in output.iterdir()} == {
+        0o600
+    }
 
 
 def _refused(tmp_path, *arguments):
@@ -999,9 +997,7 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
         if kind == "softmax":
             compiled = swage.segment_softmax(values.cuda(), offsets.cuda())
         else:
-            compiled = swage.segment_reduce(
-                values.cuda(), offsets.cuda(), kind
-            )
+            compiled = swage.segment_reduce(values.cuda(), offsets.cuda(), kind)
         assert _bits(report["results"][name]) == _bits(compiled.cpu())
 
 
@@ -1112,9 +1108,7 @@ def test_an_artifact_serves_calls_while_compiling_is_switched_off(
     assert _bits(swage.segment_reduce(values, offsets, "sum").cpu()) == _bits(
         expected
     )
-    assert _bits(swage.segment_softmax(values, offsets).cpu()) == _bits(
-        weights
-    )
+    assert _bits(swage.segment_softmax(values, offsets).cpu()) == _bits(weights)
 
 
 @_needs_cuda

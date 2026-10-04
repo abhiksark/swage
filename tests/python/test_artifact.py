@@ -193,9 +193,7 @@ def _load(monkeypatch, directory):
 def _request(program="segmented_sum", role="cta", target="sm_86"):
     """Return what the runner passes for one kernel of one program."""
     kernel = next(
-        kernel
-        for kernel in _artifact._PROGRAMS[program]
-        if kernel.role == role
+        kernel for kernel in _artifact._PROGRAMS[program] if kernel.role == role
     )
     return (
         kernel.compiler,
@@ -409,7 +407,7 @@ def _compiler_target_description():
     source = (
         pathlib.Path(__file__).parents[2] / "lib/Target/NVIDIATarget.cpp"
     ).read_text()
-    record = source[source.index("TargetDescription description = {"):]
+    record = source[source.index("TargetDescription description = {") :]
     return {
         name: int(value)
         for name, value in re.findall(r"/\*(\w+)=\*/(\d+),", record)
@@ -1034,8 +1032,10 @@ def test_an_artifact_owned_by_another_account_loads(artifact_dir, monkeypatch):
     assert _load(monkeypatch, artifact_dir).target == "sm_86"
 
 
-@pytest.mark.parametrize("name", [".", "manifest.json", "segmented_sum.cta.ptx",
-                                  "libSwageRuntime.so"])
+@pytest.mark.parametrize(
+    "name",
+    [".", "manifest.json", "segmented_sum.cta.ptx", "libSwageRuntime.so"],
+)
 @pytest.mark.parametrize("bit", [stat.S_IWGRP, stat.S_IWOTH])
 def test_an_artifact_that_others_can_write_is_refused(
     name, bit, artifact_dir, monkeypatch
@@ -1110,9 +1110,7 @@ def test_a_kernel_for_another_target_is_refused(artifact_dir, monkeypatch):
     )
 
 
-def test_a_program_the_artifact_does_not_hold_is_refused(
-    tmp_path, monkeypatch
-):
+def test_a_program_the_artifact_does_not_hold_is_refused(tmp_path, monkeypatch):
     """Name the missing kernel and what the artifact holds instead."""
     root = _write(tmp_path / "artifact", _manifest(programs=["segmented_sum"]))
     artifact = _load(monkeypatch, root)
@@ -1204,9 +1202,7 @@ def test_admission_refuses_other_planning_limits(artifact_dir, monkeypatch):
     )
 
 
-@pytest.mark.parametrize(
-    "text", ["module {}", PROGRAM_TEXTS["ragged_softmax"]]
-)
+@pytest.mark.parametrize("text", ["module {}", PROGRAM_TEXTS["ragged_softmax"]])
 def test_admission_refuses_a_program_the_build_host_did_not_plan(
     text, artifact_dir, monkeypatch
 ):
@@ -1332,12 +1328,15 @@ def test_an_artifact_serves_kernels_while_compiling_is_switched_off(
     artifact = _load(monkeypatch, artifact_dir)
     monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
 
-    assert qualification._compile_once(
-        artifact._compile_fused_segmented_reduction_ptx,
-        PROGRAM_TEXTS["segmented_max"],
-        kernel_name="segmented_max",
-        target="sm_86",
-    ) == "// segmented_max mixed\n"
+    assert (
+        qualification._compile_once(
+            artifact._compile_fused_segmented_reduction_ptx,
+            PROGRAM_TEXTS["segmented_max"],
+            kernel_name="segmented_max",
+            target="sm_86",
+        )
+        == "// segmented_max mixed\n"
+    )
 
 
 def test_the_runner_compiles_nothing_while_an_artifact_is_selected(
@@ -1555,8 +1554,15 @@ def test_the_compile_command_stays_light_and_needs_the_bindings(tmp_path):
     )
 
     completed = subprocess.run(
-        [sys.executable, "-c", script, "--target", "sm_86", "--output",
-         str(output)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            "--target",
+            "sm_86",
+            "--output",
+            str(output),
+        ],
         capture_output=True,
         text=True,
         check=False,

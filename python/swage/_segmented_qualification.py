@@ -65,6 +65,8 @@ def _planning_limits(warp_max_elements, cta_chunk_elements):
     if cta_chunk_elements is None:
         cta_chunk_elements = target.default_cta_chunk_elements
     return warp_max_elements, cta_chunk_elements
+
+
 _LOWERING_PIPELINE = (
     "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
     "convert-arith-to-llvm),"
@@ -326,9 +328,7 @@ def _validate_shapes(
         # below 2**31, so the narrowing below is exact.
         _validate_offset_sequence(host_offsets, value_count)
         host_offsets = host_offsets.astype(numpy.int32)
-    segment_count = validate_offsets(
-        host_offsets, value_count, output.shape[0]
-    )
+    segment_count = validate_offsets(host_offsets, value_count, output.shape[0])
     _validate_disjoint("values", values, output)
     _validate_disjoint("offsets", offsets, output)
     if not require_cuda:
@@ -364,9 +364,7 @@ def _kernel_offsets(torch, offsets, host_offsets):
     """
     if offsets.dtype == torch.int32:
         return offsets
-    return torch.tensor(
-        host_offsets, dtype=torch.int32, device=offsets.device
-    )
+    return torch.tensor(host_offsets, dtype=torch.int32, device=offsets.device)
 
 
 def _validate_tensors(values, offsets, output, *, require_cuda=True):
@@ -494,8 +492,8 @@ def _refuse_rebound_storage(binding, prepared):
         prepared: The one recorded at preparation, which differs.
     """
     for index, name in enumerate(("values", "offsets", "output")):
-        pointer, count, dtype = binding[3 * index:3 * index + 3]
-        was = prepared[3 * index:3 * index + 3]
+        pointer, count, dtype = binding[3 * index : 3 * index + 3]
+        was = prepared[3 * index : 3 * index + 3]
         if (pointer, count, dtype) != was:
             raise RuntimeError(
                 f"{name} is bound to other storage than at preparation: "
@@ -2157,9 +2155,9 @@ def _prepare_persistent_sum(
         )
     # One buffer holds the warp ids, the CTA ids, the partial ranges, the
     # merge records, and the merge of every partial task, in that order.
-    records, warp_count, cta_count, partial_count, merge_count = (
-        classification[0]
-    )
+    records, warp_count, cta_count, partial_count, merge_count = classification[
+        0
+    ]
     if segment_count == 0:
 
         def no_launch():
@@ -2543,10 +2541,7 @@ def _runner_module(values, offsets, semantic, kernel_name, output_length):
                 f"memref<?xi32>, memref<?x{element}>, i32, i32) -> ()"
             ),
             "    scf.for %bi = %from to %to step %step {",
-            (
-                "      %result = memref.load %output[%bi] : "
-                f"memref<?x{element}>"
-            ),
+            (f"      %result = memref.load %output[%bi] : memref<?x{element}>"),
             f"      %pattern = arith.bitcast %result : {element} to {word}",
             f"      memref.store %pattern, %bits[%bi] : {bits_type}",
             "    }",

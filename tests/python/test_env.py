@@ -576,6 +576,5 @@ def test_module_entrypoint_without_optional_components(tmp_path):
         proc.stdout
     )
     assert (
-        "backends: {'mlir': 'unavailable (mlir_swage bindings not "
-        "importable)'}"
+        "backends: {'mlir': 'unavailable (mlir_swage bindings not importable)'}"
     ) in proc.stdout

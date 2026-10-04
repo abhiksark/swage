@@ -420,8 +420,13 @@ def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
 @pytest.mark.parametrize(
     "transform",
     [
-        "square", "maps", "exp2", "exp2_chain", "rational8",
-        "affine4", "affine32",
+        "square",
+        "maps",
+        "exp2",
+        "exp2_chain",
+        "rational8",
+        "affine4",
+        "affine32",
     ],
 )
 def test_composable_reduction_nontrivial_f32(kind, transform):
@@ -487,7 +492,9 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
             native, f"_compile_split_{name}_reduction_ptx", unexpected_split
         )
     prepared = _prepare_planned_reduction(
-        host_values.cuda(), host_offsets.cuda(), output,
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
         module_text=reduction_module(kind, transform),
         kernel_name=f"segmented_{kind}",
     )
@@ -495,7 +502,8 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
     prepared.mixed()
     tolerance = (
         {"rtol": _TRANSFORM_RTOL, "atol": _TRANSFORM_ATOL}
-        if toleranced else {"rtol": 0, "atol": 0}
+        if toleranced
+        else {"rtol": 0, "atol": 0}
     )
     torch.testing.assert_close(output[:-1], expected, **tolerance)
     # The first launch may only queue the wait for task storage. Capture
@@ -514,9 +522,7 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("kind", ["sum", "max", "min"])
-@pytest.mark.parametrize(
-    "transform", ["exp2_chain", "rational8"]
-)
+@pytest.mark.parametrize("transform", ["exp2_chain", "rational8"])
 def test_expensive_regular_batch_retains_split_execution(kind, transform):
     """A shape eligible for CTA still splits an expensive element program."""
     count = torch.cuda.get_device_properties(0).multi_processor_count
@@ -526,7 +532,9 @@ def test_expensive_regular_batch_retains_split_execution(kind, transform):
     expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(count, device="cuda")
     prepared = _prepare_planned_reduction(
-        values.cuda(), offsets.cuda(), output,
+        values.cuda(),
+        offsets.cuda(),
+        output,
         module_text=reduction_module(kind, transform),
         kernel_name=f"segmented_{kind}",
     )
@@ -561,15 +569,20 @@ def test_direct_cta_selection_retains_other_schedules(case):
     values, offsets = _case(lengths)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_planned_reduction(
-        values.cuda(), offsets.cuda(), output,
+        values.cuda(),
+        offsets.cuda(),
+        output,
         module_text=reduction_module("sum", "identity"),
-        kernel_name="segmented_sum", **options,
+        kernel_name="segmented_sum",
+        **options,
     )
     assert prepared.mixed is not prepared.cta
     prepared.mixed()
     torch.testing.assert_close(
-        output.cpu(), _pytorch_reference(values, offsets, "sum"),
-        rtol=0, atol=0,
+        output.cpu(),
+        _pytorch_reference(values, offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -577,7 +590,11 @@ def test_schedule_selection_requires_a_boolean():
     """Reject accidental string configuration before preparing any work."""
     with pytest.raises(TypeError, match="select_schedule must be a bool"):
         _prepare_planned_reduction(
-            None, None, None, module_text="", kernel_name="",
+            None,
+            None,
+            None,
+            module_text="",
+            kernel_name="",
             select_schedule="false",
         )
 
@@ -874,9 +891,7 @@ def test_cpu_oracle_takes_its_build_directory_from_the_environment(
     real = _checkout_build()
     named = tmp_path / "another-build"
     (named / "bin").mkdir(parents=True)
-    (named / "CMakeCache.txt").write_text(
-        (real / "CMakeCache.txt").read_text()
-    )
+    (named / "CMakeCache.txt").write_text((real / "CMakeCache.txt").read_text())
     marker = tmp_path / "used"
     tool = named / "bin" / "swage-opt"
     tool.write_text(
@@ -1072,9 +1087,7 @@ def test_program_element_reads_the_declared_values_type():
     assert _program_element(reduction_module("max", "maps")) == "f32"
     assert _program_element(reduction_module("max", "maps", "f64")) == "f64"
     with pytest.raises(ValueError, match="declares no swage.role<values>"):
-        _program_element(
-            reduction_module("max", "maps").replace("f32", "f16")
-        )
+        _program_element(reduction_module("max", "maps").replace("f32", "f16"))
 
 
 def _f64_case(lengths):
@@ -1867,8 +1880,10 @@ def test_prepared_split_sum_matches_nontrivial_oracles(lengths):
     expected = _pytorch_reference(host_values, host_offsets, "sum")
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(
-        output.cpu(), cpu_oracle(host_values, host_offsets, "sum"),
-        rtol=0, atol=0,
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -2113,9 +2128,7 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
                 ("direct", function, grid, block, stream, arguments)
             )
 
-        def launch_segmented(
-            self, function, grid, block, stream, arguments
-        ):
+        def launch_segmented(self, function, grid, block, stream, arguments):
             self.launches.append(
                 ("split", function, grid, block, stream, arguments)
             )
@@ -2219,9 +2232,7 @@ def test_prepared_sum_rejects_invalid_limits_before_work(monkeypatch):
     def fail(*_args, **_kwargs):
         pytest.fail("invalid limits must not continue")
 
-    monkeypatch.setattr(
-        native_swage, "_compile_segmented_reduction_ptx", fail
-    )
+    monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
     monkeypatch.setattr(torch, "arange", fail)
     monkeypatch.setattr(_runtime, "_get_driver", fail)
     values = torch.ones(33, device="cuda")
@@ -2457,9 +2468,7 @@ def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
     def fail(*_args, **_kwargs):
         pytest.fail("empty work must not compile, allocate, or access driver")
 
-    monkeypatch.setattr(
-        native_swage, "_compile_segmented_reduction_ptx", fail
-    )
+    monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
     monkeypatch.setattr(
         native_swage, "_compile_fused_segmented_reduction_ptx", fail
     )
@@ -2999,8 +3008,6 @@ def test_mismatched_blockdim_fails_at_launch_instead_of_wrong_sums():
             function, (1,), 64, stream.cuda_stream, arguments
         )
 
-    driver.launch_segmented(
-        function, (1,), 128, stream.cuda_stream, arguments
-    )
+    driver.launch_segmented(function, (1,), 128, stream.cuda_stream, arguments)
     torch.cuda.synchronize()
     assert output.item() == 256.0

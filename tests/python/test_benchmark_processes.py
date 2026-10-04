@@ -391,9 +391,12 @@ def test_a_reference_missing_from_a_row_is_listed_not_defaulted(processes):
 
     rows, _, missing = processes._summarize(series, ["torch_pad_to_max"])
 
-    assert rows["uniform"]["end_to_end"]["swage_mixed"][
-        "ratio_to_torch_pad_to_max"
-    ]["median"] == 0.25
+    assert (
+        rows["uniform"]["end_to_end"]["swage_mixed"][
+            "ratio_to_torch_pad_to_max"
+        ]["median"]
+        == 0.25
+    )
     assert set(rows["power-law"]["end_to_end"]["swage_mixed"]) == {
         "median_us",
         "effective_gb_per_s",
@@ -416,8 +419,9 @@ def test_a_reference_that_one_process_did_not_time_gives_no_ratio(
         ["torch_pad_to_max"],
     )
 
-    assert "ratio_to_torch_pad_to_max" not in (
-        rows["power-law"]["end_to_end"]["swage_mixed"]
+    assert (
+        "ratio_to_torch_pad_to_max"
+        not in (rows["power-law"]["end_to_end"]["swage_mixed"])
     )
     assert missing == {"torch_pad_to_max": {"power-law": ["end_to_end"]}}
     assert incomplete == {
@@ -442,8 +446,11 @@ def test_a_reference_that_no_row_timed_is_an_error(processes):
     ("path", "value", "field"),
     [
         (("source", "revision"), "def456", "revision"),
-        (("provenance", "native_sha256"), {"/build/lib.so": "c" * 64},
-         "native_sha256"),
+        (
+            ("provenance", "native_sha256"),
+            {"/build/lib.so": "c" * 64},
+            "native_sha256",
+        ),
         (("provenance", "loaded_ptx"), [], "loaded_ptx"),
         (("provenance", "gpu_uuid"), "GPU-2", "gpu_uuid"),
         (("provenance", "pytorch"), "2.13.0", "pytorch"),
@@ -523,9 +530,12 @@ def test_main_writes_the_process_records_and_one_summary(
         entry["other_compute_process_seen"]
         for entry in summary["process_records"]
     ] == [False, True, False]
-    assert summary["process_records"][0]["sha256"] == hashlib.sha256(
-        (output_dir / "process-1.json").read_bytes()
-    ).hexdigest()
+    assert (
+        summary["process_records"][0]["sha256"]
+        == hashlib.sha256(
+            (output_dir / "process-1.json").read_bytes()
+        ).hexdigest()
+    )
     assert summary["process_records"][0]["gpu_state_before"] == {
         "gpu": {"temperature.gpu": "50"}
     }

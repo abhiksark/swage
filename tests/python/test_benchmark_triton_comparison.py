@@ -84,8 +84,18 @@ class _Kernels:
     def packed(self):
         """Warp tasks: one window of WARP elements per task."""
 
-        def body(programs, values, offsets, output, ids, count, *, TASKS,
-                 WARP, num_warps):
+        def body(
+            programs,
+            values,
+            offsets,
+            output,
+            ids,
+            count,
+            *,
+            TASKS,
+            WARP,
+            num_warps,
+        ):
             for sid in ids.tolist():
                 begin, end = int(offsets[sid]), int(offsets[sid + 1])
                 output[sid] = values[begin : min(end, begin + WARP)].sum()
@@ -96,14 +106,14 @@ class _Kernels:
     def cta(self):
         """CTA tasks: one masked block per task, as the fixed kernel."""
 
-        def body(programs, values, offsets, output, ids, count, *, BLOCK,
-                 num_warps):
+        def body(
+            programs, values, offsets, output, ids, count, *, BLOCK, num_warps
+        ):
             for sid in ids.tolist():
                 begin, end = int(offsets[sid]), int(offsets[sid + 1])
                 output[sid] = values[begin : min(end, begin + BLOCK)].sum()
 
         return self._launcher(body)
-
 
     @property
     def cta_looped(self):
@@ -384,8 +394,7 @@ def test_batch_doubles_until_the_tick_is_below_one_percent(comparison):
     assert comparison._resolved_samples(elapsed_us, 3, None)[1] == 32
     # Exactly one percent is not below one percent.
     assert (
-        comparison._resolved_samples(lambda n: 100.0 * n / 32, 3, 1.0)[1]
-        == 64
+        comparison._resolved_samples(lambda n: 100.0 * n / 32, 3, 1.0)[1] == 64
     )
 
 
@@ -516,17 +525,17 @@ def test_capped_rows_run_and_check_every_candidate(comparison, name):
     assert sum(name.startswith("triton_looped_b") for name in names) == 15
     assert sum(name.startswith("triton_planned_w") for name in names) == 4
     assert (
-        sum(name.startswith("triton_planned_looped_b") for name in names)
-        == 15
+        sum(name.startswith("triton_planned_looped_b") for name in names) == 15
     )
     assert any(name.startswith("triton_b") for name in names)
     assert row["useful_bytes"] == 4 * (row["statistics"]["total"] + 97 + 96)
     assert measured == [row["useful_bytes"]] * len(names)
     assert row["candidate_order"] == names
     assert row["excluded"] == []
-    assert row["triton_planned"]["warp_tasks"] + row["triton_planned"][
-        "cta_tasks"
-    ] == 96
+    assert (
+        row["triton_planned"]["warp_tasks"] + row["triton_planned"]["cta_tasks"]
+        == 96
+    )
 
 
 def test_power_law_row_skips_the_baselines_that_cannot_cover_it(comparison):
@@ -551,8 +560,7 @@ def test_power_law_row_skips_the_baselines_that_cannot_cover_it(comparison):
     # The looping matched comparator covers the row its one-block sibling
     # cannot: it packs the short tasks and loops over the long ones.
     assert (
-        sum(name.startswith("triton_planned_looped_b") for name in names)
-        == 15
+        sum(name.startswith("triton_planned_looped_b") for name in names) == 15
     )
     assert set(row["skipped"]) == {
         "triton_fixed",
@@ -720,9 +728,7 @@ def test_arguments_take_a_candidate_filter_for_the_segmented_suite(
         with pytest.raises(SystemExit):
             comparison._arguments([*base, *extra])
     with pytest.raises(SystemExit):
-        comparison._arguments(
-            ["--output", "x.json", "--candidates", "torch"]
-        )
+        comparison._arguments(["--output", "x.json", "--candidates", "torch"])
 
 
 def test_partition_matches_the_length_threshold(comparison):
@@ -756,9 +762,7 @@ def test_filtered_row_prepares_and_times_only_what_was_named(comparison):
     names = list(row["timings"])
     assert names[:2] == ["swage_mixed", "torch"]
     assert len(names) == 2 + 14
-    assert all(
-        name.startswith("triton_planned_looped_b") for name in names[2:]
-    )
+    assert all(name.startswith("triton_planned_looped_b") for name in names[2:])
     assert "triton_planned_looped_b128_w1" not in names
     assert row["candidate_order"] == names
     assert len(measured) == len(names)

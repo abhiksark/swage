@@ -43,9 +43,14 @@ def _plan(module, kernel_name, offsets, **arguments):
 @pytest.mark.parametrize(
     ("transform", "eligible"),
     [
-        ("identity", True), ("square", True), ("maps", True),
-        ("affine4", True), ("affine32", True), ("exp2", True),
-        ("exp2_chain", False), ("rational8", False),
+        ("identity", True),
+        ("square", True),
+        ("maps", True),
+        ("affine4", True),
+        ("affine32", True),
+        ("exp2", True),
+        ("exp2_chain", False),
+        ("rational8", False),
     ],
 )
 def test_direct_cta_element_work_guard(transform, eligible):
@@ -73,8 +78,13 @@ def test_the_division_of_a_mean_is_no_element_work():
 @pytest.mark.parametrize(
     ("transform", "work"),
     [
-        ("identity", 0), ("square", 1), ("affine4", 4), ("affine32", 32),
-        ("exp2", 8), ("exp2_chain", 72), ("rational8", 160),
+        ("identity", 0),
+        ("square", 1),
+        ("affine4", 4),
+        ("affine32", 32),
+        ("exp2", 8),
+        ("exp2_chain", 72),
+        ("rational8", 160),
     ],
 )
 def test_native_element_work_estimate(transform, work):
@@ -112,6 +122,7 @@ def test_direct_cta_work_budget_spans_maps_and_reduction():
     with ir.Context() as context:
         swage.register_dialects(context)
         assert not _has_small_element_program(ir.Module.parse(text))
+
 
 SEGMENTED_SUM = """
 module {
@@ -541,14 +552,10 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
             if expression == "llvm.mlir.constant(32 : index) : i64"
         )
         rounded_warp_count = result_of(f"llvm.add {warp_count}, {three} : i64")
-        warp_blocks = result_of(
-            f"llvm.udiv {rounded_warp_count}, {four} : i64"
-        )
+        warp_blocks = result_of(f"llvm.udiv {rounded_warp_count}, {four} : i64")
         result_of(f'llvm.icmp "ult" {block_id}, {warp_blocks} : i64')
 
-        physical_warp = result_of(
-            f"llvm.udiv {thread_id}, {warp_width} : i64"
-        )
+        physical_warp = result_of(f"llvm.udiv {thread_id}, {warp_width} : i64")
         lane = result_of(f"llvm.urem {thread_id}, {warp_width} : i64")
         first_warp_task = result_of(f"llvm.mul {block_id}, {four} : i64")
         warp_task = result_of(
@@ -564,9 +571,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
             for expression in definitions.values()
         )
         assert any(
-            re.fullmatch(
-                rf"llvm.add %\d+, {warp_width} : i64", expression
-            )
+            re.fullmatch(rf"llvm.add %\d+, {warp_width} : i64", expression)
             for expression in definitions.values()
         )
 
@@ -912,9 +917,7 @@ _EVERY_COMPILER = [
 
 
 @pytest.mark.parametrize(("compiler", "arguments"), _EVERY_COMPILER)
-def test_an_f64_exponential_is_refused_before_the_backend(
-    compiler, arguments
-):
+def test_an_f64_exponential_is_refused_before_the_backend(compiler, arguments):
     """An f64 `math.exp2` raises a diagnostic from every compile function.
 
     The device has an f32 `ex2.approx` and no f64 one. The pinned NVPTX
@@ -1084,12 +1087,15 @@ def test_fixed_width_kernels_carry_their_reqntid(compiler, width):
         assert f".reqntid {width}, 1, 1" in ptx
 
 
-BYSTANDER_MODULE = SEGMENTED_SUM.rstrip().removesuffix("}") + """
+BYSTANDER_MODULE = (
+    SEGMENTED_SUM.rstrip().removesuffix("}")
+    + """
   func.func @bystander(%x: i32) -> i32 {
     return %x : i32
   }
 }
 """
+)
 
 
 def test_kernel_name_must_name_a_segment_function():

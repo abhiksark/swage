@@ -278,7 +278,13 @@ def test_empty_layout_returns_four_empty_arrays(sum_module):
         [0, 1],
     ],
     ids=[
-        "int64", "uint32", "float32", "rank-two", "strided", "tuple", "list",
+        "int64",
+        "uint32",
+        "float32",
+        "rank-two",
+        "strided",
+        "tuple",
+        "list",
     ],
 )
 def test_other_offset_buffers_are_rejected_without_conversion(
@@ -349,9 +355,7 @@ def test_classification_without_a_module_handles_no_segments():
 def test_classification_without_a_module_never_converts_offsets(offsets):
     """Refuse what the plan binding refuses: only a host i32 buffer fits."""
     with pytest.raises(TypeError):
-        native_swage._classify_segments(
-            offsets, value_count=1, segment_count=1
-        )
+        native_swage._classify_segments(offsets, value_count=1, segment_count=1)
 
 
 @pytest.mark.parametrize(
@@ -1134,13 +1138,15 @@ def test_segment_ids_are_uploaded_once_and_shared_by_preparations(monkeypatch):
     prepared = []
     for values, offsets, expected in cases:
         output = torch.full((len(expected),), float("nan"), device="cuda")
-        prepared.append((
-            qualification._prepare_planned_sum(
-                values.cuda(), offsets.cuda(), output
-            ),
-            output,
-            expected,
-        ))
+        prepared.append(
+            (
+                qualification._prepare_planned_sum(
+                    values.cuda(), offsets.cuda(), output
+                ),
+                output,
+                expected,
+            )
+        )
     monkeypatch.undo()
 
     limit = qualification._IDENTITY_LIMIT
@@ -1244,4 +1250,3 @@ def test_preparation_keeps_the_order_of_its_errors():
         prepare(valid, **bad_limits)
     with pytest.raises(TypeError):
         prepare(valid, warp_max_elements=32.5)
-

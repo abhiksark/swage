@@ -495,9 +495,7 @@ def test_launch_rejects_lazy_views(monkeypatch, name, view, reason):
     torch, _ = _fake_torch()
     driver = _install_launch_fakes(monkeypatch, torch)
     arguments = _arguments(torch)
-    arguments[name] = _Tensor(
-        torch, pointer=arguments[name].data_ptr(), **view
-    )
+    arguments[name] = _Tensor(torch, pointer=arguments[name].data_ptr(), **view)
 
     with pytest.raises(ValueError, match=f"'{name}' must not be a {reason}"):
         add_kernel.launch(
@@ -749,9 +747,7 @@ def test_launch_rejects_defaults_and_foreign_annotations(
     arguments = _arguments(torch)
 
     with pytest.raises(sw.CompilationError) as rejection:
-        kernel.launch(
-            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
-        )
+        kernel.launch(arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,))
 
     message = str(rejection.value)
     assert message.startswith(f"{__file__}:")
@@ -1363,9 +1359,7 @@ def test_unwritable_cache_never_fails_a_launch(tmp_path, monkeypatch, how):
     assert leftovers == []
 
 
-def test_read_only_cache_still_serves_published_entries(
-    tmp_path, monkeypatch
-):
+def test_read_only_cache_still_serves_published_entries(tmp_path, monkeypatch):
     """Keep reading a warm cache after a write to it has failed."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
@@ -2148,9 +2142,7 @@ def test_hung_workers_are_terminated_and_reaped():
     assert never_started.exitcode is None
 
 
-def test_writer_killed_mid_entry_does_not_poison_the_key(
-    tmp_path, monkeypatch
-):
+def test_writer_killed_mid_entry_does_not_poison_the_key(tmp_path, monkeypatch):
     """Recompile after a writer was killed between entry files."""
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(tmp_path))
     _runtime, calls = _stub_compiler(monkeypatch)
@@ -2350,9 +2342,7 @@ def test_persistence_does_not_need_a_git_checkout(tmp_path, monkeypatch):
     _assert_complete_entry(cache / artifact.key)
 
 
-def test_frontend_digest_skips_what_python_cannot_import(
-    tmp_path, monkeypatch
-):
+def test_frontend_digest_skips_what_python_cannot_import(tmp_path, monkeypatch):
     """Ignore lock files, dangling links, hidden names, and directories."""
     from swage import _runtime
 
@@ -2377,9 +2367,7 @@ def test_frontend_digest_skips_what_python_cannot_import(
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
-def test_unreadable_frontend_file_turns_persistence_off(
-    tmp_path, monkeypatch
-):
+def test_unreadable_frontend_file_turns_persistence_off(tmp_path, monkeypatch):
     """Lose the frontend identity, not the launch, to an unreadable file."""
     package = _fake_package(tmp_path, monkeypatch)
     _start_process_after_every_file(monkeypatch)
@@ -2628,8 +2616,8 @@ def test_forked_child_does_not_publish_code_its_parent_loaded_earlier(
     assert result["key"] == result["key_of_the_files_on_disk"]
     assert result["started"] < result["forked"]
     assert len(result["warnings"]) == 1
-    assert "_frontend.py is not older than this process" in (
-        result["warnings"][0]
+    assert (
+        "_frontend.py is not older than this process" in (result["warnings"][0])
     )
     assert result["same"]
     assert result["compiles"] == 1
@@ -2784,9 +2772,7 @@ def test_identity_of_files_older_than_the_process_is_current(
     _assert_complete_entry(cache / artifact.key)
 
 
-def test_identity_is_stale_without_a_process_start_time(
-    tmp_path, monkeypatch
-):
+def test_identity_is_stale_without_a_process_start_time(tmp_path, monkeypatch):
     """Do not trust files on disk when the start time is unknown."""
     _runtime, calls, identity, _, _, cache = _identified_process(
         tmp_path, monkeypatch
@@ -2807,8 +2793,8 @@ def test_identity_is_stale_when_a_file_changed_after_start(
     tmp_path, monkeypatch, changed
 ):
     """Distrust a file as new as the process, even with unchanged bytes."""
-    _runtime, calls, identity, package, versioned, cache = (
-        _identified_process(tmp_path, monkeypatch)
+    _runtime, calls, identity, package, versioned, cache = _identified_process(
+        tmp_path, monkeypatch
     )
     path = package / "_frontend.py" if changed == "frontend" else versioned
     if changed == "native":
@@ -2835,8 +2821,8 @@ def test_identity_changed_during_a_compile_is_not_published(
     tmp_path, monkeypatch, changed
 ):
     """Keep the artifact in the process when the disk moved under it."""
-    _runtime, calls, identity, package, versioned, cache = (
-        _identified_process(tmp_path, monkeypatch)
+    _runtime, calls, identity, package, versioned, cache = _identified_process(
+        tmp_path, monkeypatch
     )
 
     def compile_while_the_disk_changes(*_args):
@@ -2977,8 +2963,9 @@ def test_driver_marshals_pointer_and_i32_parameters():
     name, call = calls[0]
     parameters = call[-2]
     pointer_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_void_p)
+        ).contents.value
         for index in range(3)
     ]
     scalar = ctypes.cast(
@@ -3008,13 +2995,15 @@ def test_driver_marshals_four_pointer_segmented_task_abi():
     name, call = calls[0]
     parameters = call[-2]
     pointer_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_void_p)
+        ).contents.value
         for index in range(4)
     ]
     scalar_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_int32))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_int32)
+        ).contents.value
         for index in range(4, 6)
     ]
     assert name == "cuLaunchKernel"
@@ -3041,13 +3030,15 @@ def test_driver_marshals_four_pointer_fused_segmented_abi():
     name, call = calls[0]
     parameters = call[-2]
     pointer_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_void_p)
+        ).contents.value
         for index in range(4)
     ]
     scalar_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_int32))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_int32)
+        ).contents.value
         for index in range(4, 7)
     ]
     assert name == "cuLaunchKernel"
@@ -3090,13 +3081,15 @@ def test_driver_marshals_ten_pointer_persistent_abi():
     name, call = calls[0]
     parameters = call[-2]
     pointer_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_void_p))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_void_p)
+        ).contents.value
         for index in range(10)
     ]
     scalar_values = [
-        ctypes.cast(parameters[index], ctypes.POINTER(ctypes.c_int32))
-        .contents.value
+        ctypes.cast(
+            parameters[index], ctypes.POINTER(ctypes.c_int32)
+        ).contents.value
         for index in range(10, 15)
     ]
     assert name == "cuLaunchKernel"
@@ -3154,8 +3147,9 @@ def test_compiler_identity_is_cached_per_process(tmp_path, monkeypatch):
 
     def fake_run(command, **kwargs):
         commands.append((command, kwargs["cwd"]))
-        return subprocess.CompletedProcess(command, 0, stdout="abc\n",
-                                           stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout="abc\n", stderr=""
+        )
 
     package = _fake_package(tmp_path, monkeypatch)
     checkout = package.parents[1]
@@ -3376,9 +3370,7 @@ def _stub_cuda_library(monkeypatch):
     monkeypatch.setattr(
         _runtime.ctypes,
         "CDLL",
-        lambda _name: mock.MagicMock(
-            **{"cuLaunchKernel.return_value": 0}
-        ),
+        lambda _name: mock.MagicMock(**{"cuLaunchKernel.return_value": 0}),
     )
 
 

@@ -233,8 +233,7 @@ def _write_artifact(output, target, programs, runtime_library):
         )
     if os.path.lexists(output):
         raise RuntimeError(
-            f"{output} exists; an artifact is written once, to a new "
-            "directory"
+            f"{output} exists; an artifact is written once, to a new directory"
         )
     try:
         native = _runtime._native_bindings()
@@ -284,9 +283,7 @@ def _write_artifact(output, target, programs, runtime_library):
     files[_artifact._MANIFEST] = encoded
 
     stage = pathlib.Path(
-        tempfile.mkdtemp(
-            prefix=f".{output.name}.staging-", dir=output.parent
-        )
+        tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent)
     )
     try:
         for name, contents in files.items():

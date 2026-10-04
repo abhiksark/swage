@@ -27,7 +27,9 @@ _SYNTACTIC = range(80, 130)
 # the suffix it gives the kernel name in the PTX.
 _SEGMENTED = {
     "direct": (
-        "_compile_segmented_reduction_ptx", {"block_size": 128}, "",
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128},
+        "",
     ),
     "task-ids": (
         "_compile_segmented_reduction_ptx",
@@ -37,7 +39,9 @@ _SEGMENTED = {
     "fused": ("_compile_fused_segmented_reduction_ptx", {}, ""),
     "persistent": ("_compile_persistent_segmented_reduction_ptx", {}, ""),
     "split-partial": (
-        "_compile_split_partial_reduction_ptx", {}, "__partial",
+        "_compile_split_partial_reduction_ptx",
+        {},
+        "__partial",
     ),
     "split-merge": ("_compile_split_merge_reduction_ptx", {}, "__merge"),
 }
@@ -114,9 +118,7 @@ def test_every_other_processor_is_refused():
                 target=f"sm_{sm}",
             )
         except ValueError as error:
-            assert "not a processor supported by the pinned LLVM" in str(
-                error
-            )
+            assert "not a processor supported by the pinned LLVM" in str(error)
         else:
             admitted.append(sm)
 

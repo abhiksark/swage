@@ -733,8 +733,10 @@ def _second_context(driver):
     pointer = ctypes.c_void_p
     for name, argtypes in (
         ("cuDeviceGet", [ctypes.POINTER(ctypes.c_int), ctypes.c_int]),
-        ("cuCtxCreate_v2", [ctypes.POINTER(pointer), ctypes.c_uint,
-                            ctypes.c_int]),
+        (
+            "cuCtxCreate_v2",
+            [ctypes.POINTER(pointer), ctypes.c_uint, ctypes.c_int],
+        ),
         ("cuCtxPopCurrent_v2", [ctypes.POINTER(pointer)]),
         ("cuCtxDestroy_v2", [pointer]),
     ):

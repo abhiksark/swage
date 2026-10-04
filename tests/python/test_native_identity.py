@@ -221,9 +221,7 @@ def test_library_rewritten_in_place_is_read_again(tmp_path, monkeypatch):
     assert after[1] == [_LIBRARY, f"sha256:{_sha256(b'COMPILER LIBRARY')}"]
 
 
-def test_build_id_identifies_a_library_across_stripping(
-    tmp_path, monkeypatch
-):
+def test_build_id_identifies_a_library_across_stripping(tmp_path, monkeypatch):
     """Name an ELF library by its build id, not by the rest of its bytes."""
     build_id = bytes(range(20))
     linked = _install(

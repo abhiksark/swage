@@ -59,8 +59,11 @@ _COMPILES = (
     (
         "_compile_segmented_reduction_ptx",
         reduction_module("sum", "identity"),
-        {"kernel_name": "segmented_sum", "block_size": 32,
-         "use_task_ids": True},
+        {
+            "kernel_name": "segmented_sum",
+            "block_size": 32,
+            "use_task_ids": True,
+        },
     ),
     (
         "_compile_fused_segmented_reduction_ptx",
@@ -173,15 +176,11 @@ def test_builds_and_round_trips_every_swage_operation():
         segment = swage.SegmentType.get(f32)
         dynamic = ir.ShapedType.get_dynamic_size()
         values = ir.MemRefType.get([dynamic], f32)
-        offsets = ir.MemRefType.get(
-            [dynamic], ir.IntegerType.get_signless(32)
-        )
+        offsets = ir.MemRefType.get([dynamic], ir.IntegerType.get_signless(32))
         module = builtin.ModuleOp()
 
         with ir.InsertionPoint(module.body):
-            kernel = func.FuncOp(
-                "kernel", ([values, offsets, values, f32], [])
-            )
+            kernel = func.FuncOp("kernel", ([values, offsets, values, f32], []))
         with ir.InsertionPoint(kernel.add_entry_block()):
             values_arg, offsets_arg, output, scale = kernel.arguments
             swage.ProgramIdOp(index, 0)
@@ -397,8 +396,9 @@ def test_a_plan_call_keeps_off_a_context_that_is_compiling():
             compiling = threading.Event()
             compiled = []
 
-            def compile_once(module=module, compiling=compiling,
-                             compiled=compiled):
+            def compile_once(
+                module=module, compiling=compiling, compiled=compiled
+            ):
                 compiling.set()
                 compiled.append(compile_ptx(module, target="sm_86", **options))
 

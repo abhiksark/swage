@@ -50,4 +50,3 @@ def _shared_identity_ids():
         from swage import _segmented_qualification as qualification
 
         qualification._identity_ids(torch, torch.device("cuda", 0), 1)
-

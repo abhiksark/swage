@@ -83,6 +83,7 @@ def _for_element(counts, element):
     words = {"f32": 1, "f64": 2}[element]
     return dict(counts, shuffles=words * counts["shuffles"])
 
+
 _DIRECT = "_compile_segmented_reduction_ptx"
 _FUSED_COMPILER = "_compile_fused_segmented_reduction_ptx"
 _PARTIAL = "_compile_split_partial_reduction_ptx"
@@ -112,16 +113,28 @@ def _segmented_kernels():
             # partial warp.
             for block_size in (1, 32, 40, 100, 128, 256, 512, 1024):
                 yield pytest.param(
-                    text, _DIRECT, name, {"block_size": block_size},
-                    block, id=f"direct-{label}-{block_size}",
+                    text,
+                    _DIRECT,
+                    name,
+                    {"block_size": block_size},
+                    block,
+                    id=f"direct-{label}-{block_size}",
                 )
             yield pytest.param(
-                text, _DIRECT, name, {"block_size": 32, "use_task_ids": True},
-                warp, id=f"task-ids-warp-{label}",
+                text,
+                _DIRECT,
+                name,
+                {"block_size": 32, "use_task_ids": True},
+                warp,
+                id=f"task-ids-warp-{label}",
             )
             yield pytest.param(
-                text, _DIRECT, name, {"block_size": 128, "use_task_ids": True},
-                block, id=f"task-ids-cta-{label}",
+                text,
+                _DIRECT,
+                name,
+                {"block_size": 128, "use_task_ids": True},
+                block,
+                id=f"task-ids-cta-{label}",
             )
             yield pytest.param(
                 text, _FUSED_COMPILER, name, {}, fused, id=f"fused-{label}"
@@ -135,34 +148,54 @@ def _segmented_kernels():
     # Element programs add arithmetic to the loops and must add nothing to
     # the synchronization.
     for kind, transform in (
-        ("sum", "square"), ("max", "maps"), ("sum", "exp2_pair"),
-        ("sum", "rational8"), ("sum", "affine32"),
+        ("sum", "square"),
+        ("max", "maps"),
+        ("sum", "exp2_pair"),
+        ("sum", "rational8"),
+        ("sum", "affine32"),
     ):
         text = reduction_module(kind, transform)
         name = f"segmented_{kind}"
         yield pytest.param(
-            text, _FUSED_COMPILER, name, {}, _FUSED,
+            text,
+            _FUSED_COMPILER,
+            name,
+            {},
+            _FUSED,
             id=f"fused-{kind}-{transform}",
         )
         yield pytest.param(
-            text, _PARTIAL, name, {}, _ONE_BLOCK_REDUCTION,
+            text,
+            _PARTIAL,
+            name,
+            {},
+            _ONE_BLOCK_REDUCTION,
             id=f"split-partial-{kind}-{transform}",
         )
     yield pytest.param(
-        _semantic_module("sum"), _PERSISTENT_COMPILER, "segmented_sum", {},
-        _PERSISTENT, id="persistent",
+        _semantic_module("sum"),
+        _PERSISTENT_COMPILER,
+        "segmented_sum",
+        {},
+        _PERSISTENT,
+        id="persistent",
     )
     # The column kernel of rank-two values combines nothing across threads:
     # no barrier and no shuffle, at any block width and for any kind.
     for kind, element in (
-        ("sum", "f32"), ("max", "f32"), ("mean", "f32"), ("min", "f64"),
+        ("sum", "f32"),
+        ("max", "f32"),
+        ("mean", "f32"),
+        ("min", "f64"),
         ("mean", "f64"),
     ):
         for block_size in (32, 128, 1024):
             yield pytest.param(
-                _semantic_module(kind, element, 2), _DIRECT,
+                _semantic_module(kind, element, 2),
+                _DIRECT,
                 _reduction_kernel(kind, element, 2),
-                {"block_size": block_size}, _NONE,
+                {"block_size": block_size},
+                _NONE,
                 id=f"columns-{kind}-{element}-{block_size}",
             )
     # The softmax over rank-two values runs its two reductions and its
@@ -170,14 +203,20 @@ def _segmented_kernels():
     # shuffles of the rank-one softmax below.
     for block_size in (32, 128, 1024):
         yield pytest.param(
-            _softmax_text(2), _DIRECT, "ragged_softmax_r2",
-            {"block_size": block_size}, _NONE,
+            _softmax_text(2),
+            _DIRECT,
+            "ragged_softmax_r2",
+            {"block_size": block_size},
+            _NONE,
             id=f"columns-softmax-{block_size}",
         )
     for block_size in (32, 128, 512):
         yield pytest.param(
-            _SOFTMAX_MODULE, _DIRECT, "ragged_softmax",
-            {"block_size": block_size}, _TWO_BLOCK_REDUCTIONS,
+            _SOFTMAX_MODULE,
+            _DIRECT,
+            "ragged_softmax",
+            {"block_size": block_size},
+            _TWO_BLOCK_REDUCTIONS,
             id=f"softmax-{block_size}",
         )
 
@@ -324,8 +363,11 @@ def test_the_row_loop_of_a_column_kernel_is_rotated(kind, element):
     the end of the column loop, once per column.
     """
     ptx = _compile(
-        _semantic_module(kind, element, 2), _DIRECT,
-        _reduction_kernel(kind, element, 2), {"block_size": 128}, "sm_86",
+        _semantic_module(kind, element, 2),
+        _DIRECT,
+        _reduction_kernel(kind, element, 2),
+        {"block_size": 128},
+        "sm_86",
     )
     combine = {"sum": "add.rn", "mean": "add.rn", "max": "max"}[kind]
 
@@ -365,7 +407,10 @@ def test_the_three_row_loops_of_a_softmax_column_are_rotated():
     segment without rows.
     """
     ptx = _compile(
-        _softmax_text(2), _DIRECT, "ragged_softmax_r2", {"block_size": 128},
+        _softmax_text(2),
+        _DIRECT,
+        "ragged_softmax_r2",
+        {"block_size": 128},
         "sm_86",
     )
 

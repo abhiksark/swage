@@ -69,6 +69,7 @@ def test_launch_uses_non_default_current_stream():
 
 def test_repeated_launches_and_argument_release():
     """Reuse compiled state without retaining tensor arguments."""
+
     def launch_local():
         x = torch.randn(129, device="cuda")
         y = torch.randn(129, device="cuda")
@@ -243,7 +244,7 @@ def test_launch_rejects_an_output_that_overlaps_an_input(overlapped, shift):
     buffer = torch.arange(512, device="cuda", dtype=torch.float32)
     expected = buffer.clone()
     shared = buffer[128:257]
-    output = buffer[128 + shift:257 + shift]
+    output = buffer[128 + shift : 257 + shift]
     other = torch.ones(129, device="cuda")
     x, y = (shared, other) if overlapped == "x_ptr" else (other, shared)
 
@@ -454,7 +455,9 @@ def test_native_launcher_runs_the_fixed_kernel():
     )
     major, minor = torch.cuda.get_device_capability()
     _, ptx, _ = native_swage._compile_ptx(
-        module, kernel_name="add_kernel", block_size=block,
+        module,
+        kernel_name="add_kernel",
+        block_size=block,
         target=f"sm_{major}{minor}",
     )
     driver = _runtime._get_driver()

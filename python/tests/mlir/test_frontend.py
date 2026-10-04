@@ -139,6 +139,7 @@ def test_inferred_and_explicit_signatures_emit_identical_mlir():
 
 def test_tensor_inference_never_reads_data_pointers(monkeypatch):
     """Infer from metadata without entering the future runtime boundary."""
+
     def fail_data_ptr(self):
         raise AssertionError("data_ptr must not be called")
 
@@ -201,6 +202,7 @@ def test_cuda_tensor_metadata_is_accepted():
 
 def test_inferred_emission_does_not_retain_arguments():
     """Discard metadata providers before returning the live module."""
+
     def emit_with_local_tensor():
         tensor = torch.empty(8)
         reference = weakref.ref(tensor)
@@ -250,6 +252,7 @@ def test_arbitrary_python_call_is_rejected_without_invoking_it():
 
 def test_control_flow_has_a_stable_source_diagnostic():
     """Reject unsupported control flow at its Python source location."""
+
     @sw.jit
     def bad_kernel():
         if True:
@@ -268,6 +271,7 @@ def test_control_flow_has_a_stable_source_diagnostic():
 
 def test_nested_kernel_mlir_location_uses_real_source_column():
     """Restore indentation removed before parsing to emitted locations."""
+
     @sw.jit
     def nested_kernel():
         pid = sl.program_id(0)  # noqa: F841
@@ -282,6 +286,7 @@ def test_nested_kernel_mlir_location_uses_real_source_column():
 
 def test_rejects_every_unsupported_parameter_kind():
     """Never silently omit Python parameter kinds from the MLIR ABI."""
+
     @sw.jit
     def positional_only(value, /):
         return
@@ -338,6 +343,7 @@ def test_rejects_every_unsupported_parameter_kind():
 
 def test_store_is_rejected_on_an_assignment_rhs():
     """Permit the effectful store only in expression-statement position."""
+
     @sw.jit
     def bad_kernel(output_ptr, n, BLOCK: sl.constexpr):
         pid = sl.program_id(0)
@@ -361,6 +367,7 @@ def test_store_is_rejected_on_an_assignment_rhs():
 
 def test_empty_return_must_be_the_final_statement():
     """Reject statements after return before constructing an invalid block."""
+
     @sw.jit
     def bad_kernel():
         return
@@ -375,6 +382,7 @@ def test_empty_return_must_be_the_final_statement():
 
 def test_unsupported_types_are_reported_in_source_parameter_order():
     """Choose the first invalid parameter independently of set ordering."""
+
     @sw.jit
     def alpha_first(alpha, beta):
         return
@@ -453,9 +461,7 @@ def test_unsupported_runtime_types_have_stable_diagnostics(bad_type):
 def test_constexpr_parameter_cannot_be_rebound():
     """Keep constexpr arithmetic consistent with the emitted vector width."""
     with pytest.raises(sw.CompilationError) as caught:
-        rebound_block_kernel.emit_mlir(
-            signature={}, constexprs={"BLOCK": 8}
-        )
+        rebound_block_kernel.emit_mlir(signature={}, constexprs={"BLOCK": 8})
 
     assert str(caught.value).endswith(
         "rebound_block_kernel: cannot assign to constexpr parameter 'BLOCK'"
@@ -591,9 +597,9 @@ def test_oversized_integer_literals_have_source_located_diagnostics():
             constexprs={"BLOCK": 8},
         )
 
-    line = inspect.getsourcelines(
-        oversized_literal_kernel.python_function
-    )[1] + 4
+    line = (
+        inspect.getsourcelines(oversized_literal_kernel.python_function)[1] + 4
+    )
     assert f"{__file__}:{line}:" in str(caught.value)
 
 
@@ -656,6 +662,7 @@ def test_signed_load_other_literals_are_emitted_as_float32_constants():
 
 def _aliased_add_kernel():
     """Return the vector-add kernel written against another module name."""
+
     @sw.jit
     def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: lang.constexpr):
         pid = lang.program_id(0)
@@ -680,6 +687,7 @@ def test_language_module_alias_emits_the_same_mlir():
 
 def test_the_none_return_annotation_emits_the_same_mlir():
     """Treat `-> None` as no annotation; it says what a kernel returns."""
+
     @sw.jit
     def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr) -> None:
         pid = sl.program_id(0)

@@ -95,9 +95,7 @@ def test_family_does_not_mix_planned_and_looping_planned(tables):
     }
 
     assert tables._family(candidates, "triton") == ["triton_b128_w1"]
-    assert tables._family(candidates, "triton_planned") == [
-        "triton_planned_w2"
-    ]
+    assert tables._family(candidates, "triton_planned") == ["triton_planned_w2"]
     assert tables._family(candidates, "triton_planned_looped") == [
         "triton_planned_looped_b256_w4"
     ]

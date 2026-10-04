@@ -203,9 +203,10 @@ def test_same_name_operations_reuse_eight_persistent_artifacts_in_child(
                 output.float(), torch.full_like(x.float(), expected)
             )
 
-    assert sum(
-        record.message.startswith("compile ") for record in caplog.records
-    ) == 8
+    assert (
+        sum(record.message.startswith("compile ") for record in caplog.records)
+        == 8
+    )
     assert len(list(cache_dir.glob("*/metadata.json"))) == 8
     script = textwrap.dedent(
         """

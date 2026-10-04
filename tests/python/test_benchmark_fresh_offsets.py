@@ -186,8 +186,17 @@ class _EmulatedTaskKernel:
         self._shift = shift
 
     def __getitem__(self, grid):
-        def launch(values, offsets, output, ids, *counts, num_warps,
-                   BLOCK=None, WARP=None, TASKS=None):
+        def launch(
+            values,
+            offsets,
+            output,
+            ids,
+            *counts,
+            num_warps,
+            BLOCK=None,
+            WARP=None,
+            TASKS=None,
+        ):
             data = values.tolist()
             bounds = offsets.tolist()
             for sid in ids.tolist():
@@ -523,14 +532,18 @@ def test_measure_times_the_candidate_and_its_device_work_only(fresh_offsets):
         clock=clock,
     )
 
-    assert log == [
-        "synchronize",
-        "clock",
-        "candidate",
-        "synchronize",
-        "clock",
-        "check",
-    ] * 3
+    assert (
+        log
+        == [
+            "synchronize",
+            "clock",
+            "candidate",
+            "synchronize",
+            "clock",
+            "check",
+        ]
+        * 3
+    )
     # The candidate and the device work it left behind: 5 us plus 3 us. The
     # wait before the timer and the correctness check are outside.
     assert [iteration["samples_us"] for iteration in iterations] == [
@@ -827,9 +840,7 @@ def test_rows_follow_the_seed_and_the_value_kind(fresh_offsets):
     """Draw other layouts for another seed and bound random values."""
     torch = pytest.importorskip("torch")
 
-    row = _run(
-        fresh_offsets, torch, "bimodal", seed=100, values_kind="normal"
-    )
+    row = _run(fresh_offsets, torch, "bimodal", seed=100, values_kind="normal")
 
     assert row["seed"] == 100
     assert row["values"] == "normal"
@@ -955,9 +966,7 @@ def test_smoke_record_states_that_the_worktree_was_dirty(
         _git_results("?? scratch.txt\n", calls),
     )
 
-    assert fresh_offsets._git_metadata(
-        pathlib.Path("."), allow_dirty=True
-    ) == {
+    assert fresh_offsets._git_metadata(pathlib.Path("."), allow_dirty=True) == {
         "revision": "abc123",
         "worktree_clean": False,
         "dirty": ["?? scratch.txt"],
@@ -1092,9 +1101,10 @@ def test_record_carries_provenance_and_the_smoke_label(fresh_offsets):
     assert record["environment"]["triton"] == "3.7.0"
     assert record["configuration"]["layouts_per_distribution"] == 4
     assert record["configuration"]["distributions"][-1] == "power-law"
-    assert "classification" in record["configuration"]["timed_region"][
-        "swage_mixed"
-    ]
+    assert (
+        "classification"
+        in record["configuration"]["timed_region"]["swage_mixed"]
+    )
     assert record["results"] == []
     assert record["recorded_at"]
 
@@ -1260,9 +1270,7 @@ def test_record_carries_the_imported_code(fresh_offsets):
         ({"llvm_linked": None}, "llvm_linked"),
     ],
 )
-def test_full_record_requires_identified_code(
-    fresh_offsets, changes, message
-):
+def test_full_record_requires_identified_code(fresh_offsets, changes, message):
     """Refuse a full record whose measured code cannot be identified."""
     imported_code = _imported_code(fresh_offsets, **changes)
     arguments = {
@@ -1701,8 +1709,9 @@ def test_one_block_planned_triton_is_skipped_by_the_longest_pool_segment(
     # Skipped, not excluded: the filter asked for it.
     assert "triton_planned_w1" not in row["excluded"]
     assert "4096" in row["skipped"]["triton_planned"]
-    assert str(row["pad_to_max"]["longest_segment"]) in (
-        row["skipped"]["triton_planned"]
+    assert (
+        str(row["pad_to_max"]["longest_segment"])
+        in (row["skipped"]["triton_planned"])
     )
     assert row["pad_to_max"]["longest_segment"] > 4096
     assert list(row["triton_planned_partition_samples_us"]) == [

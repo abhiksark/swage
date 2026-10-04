@@ -318,9 +318,7 @@ def test_segmented_calls_reject_an_input_that_is_not_a_tensor(
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
-def test_segmented_calls_reject_values_that_require_grad(
-    function, monkeypatch
-):
+def test_segmented_calls_reject_values_that_require_grad(function, monkeypatch):
     """Refuse a gradient the call cannot record, and name the remedy."""
     torch = _fake_torch(monkeypatch)
     _, offsets = _inputs(torch)

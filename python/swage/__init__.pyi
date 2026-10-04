@@ -8,6 +8,7 @@ __version__: str
 
 class SwageError(RuntimeError): ...
 class CompilationError(SwageError): ...
+
 class BackendUnavailableError(SwageError):
     code: str
     backend: str

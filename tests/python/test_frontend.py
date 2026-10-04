@@ -347,6 +347,7 @@ ADD_SIGNATURE = {
 
 def test_body_outside_the_language_is_diagnosed_without_native_bindings():
     """Check a body with the pure package alone, as a wheel install does."""
+
     @sw.jit
     def bad(x_ptr, n, BLOCK: sl.constexpr):
         for i in range(3):
@@ -365,9 +366,7 @@ def test_body_outside_the_language_is_diagnosed_without_native_bindings():
 def test_accepted_body_without_native_bindings_names_the_installation_page():
     """Say the body passed and where the native build is described."""
     with pytest.raises(RuntimeError) as caught:
-        add_kernel.emit_mlir(
-            signature=ADD_SIGNATURE, constexprs={"BLOCK": 128}
-        )
+        add_kernel.emit_mlir(signature=ADD_SIGNATURE, constexprs={"BLOCK": 128})
 
     message = str(caught.value)
     assert not isinstance(caught.value, sw.CompilationError)
@@ -476,8 +475,7 @@ _REJECTED_OTHERS = [
     ("-1e-50", "sl.load other=-1e-50 rounds to zero in float32"),
     (
         "16777217",
-        "sl.load other=16777217 is an integer that float32 cannot hold "
-        "exactly",
+        "sl.load other=16777217 is an integer that float32 cannot hold exactly",
     ),
     (
         "-16777217",
@@ -534,6 +532,7 @@ def test_load_other_accepts_what_float32_represents(tmp_path, other):
 
 def test_parameter_defaults_are_rejected():
     """Refuse a default the frontend would otherwise silently ignore."""
+
     @sw.jit
     def runtime_default(x_ptr, n=5):
         return
@@ -559,6 +558,7 @@ def test_parameter_defaults_are_rejected():
 
 def test_foreign_parameter_annotations_are_rejected():
     """Refuse an annotation that reads as a type the kernel does not get."""
+
     @sw.jit
     def float_annotation(x_ptr, n: float):
         return
@@ -648,6 +648,7 @@ def test_the_none_return_annotation_is_accepted(tmp_path):
 
 def test_index_arithmetic_on_compile_time_operands_is_range_checked():
     """Refuse a product that wraps in 64 bits where Python would not."""
+
     @sw.jit
     def lane_product(x_ptr, n, BLOCK: sl.constexpr):
         lanes = sl.arange(0, BLOCK)
@@ -687,6 +688,7 @@ def test_index_arithmetic_on_compile_time_operands_is_range_checked():
 
 def test_index_arithmetic_on_a_program_coordinate_is_not_range_checked():
     """Leave run-time products to the documented 64-bit wrapping."""
+
     @sw.jit
     def runtime_product(x_ptr, n, BLOCK: sl.constexpr):
         _ = sl.program_id(0) * 9223372036854775807 + sl.arange(0, BLOCK)
@@ -696,6 +698,7 @@ def test_index_arithmetic_on_a_program_coordinate_is_not_range_checked():
 
 def test_language_module_is_matched_by_object_under_any_name():
     """Accept the module under an alias for the marker and for the calls."""
+
     @sw.jit
     def aliased(x_ptr, n, BLOCK: lang.constexpr):
         offsets = lang.program_id(0) * BLOCK + lang.arange(0, BLOCK)
@@ -717,6 +720,7 @@ def test_language_module_is_matched_by_object_under_any_name():
 
 def test_aliased_language_calls_are_named_as_written():
     """Report a call by the name the kernel source uses."""
+
     @sw.jit
     def aliased(x_ptr, n, BLOCK: lang.constexpr):
         offsets = lang.program_id(0) * BLOCK + lang.arange(0, BLOCK)
@@ -730,6 +734,7 @@ def test_aliased_language_calls_are_named_as_written():
 
 def test_a_different_object_spelled_sl_is_not_the_language_module():
     """Match the module object, not the conventional spelling."""
+
     def capture():
         sl = types.SimpleNamespace(program_id=None)
 
@@ -757,9 +762,10 @@ def test_a_different_object_spelled_sl_is_not_the_language_module():
     assert _reason(capture(), signature=signature, constexprs={}) == (
         f"unsupported call 'sl.program_id'; {suffix}"
     )
-    assert _reason(
-        parameter_shadow, signature={"lang": sl.int32}, constexprs={}
-    ) == f"unsupported call 'lang.program_id'; {suffix}"
+    assert (
+        _reason(parameter_shadow, signature={"lang": sl.int32}, constexprs={})
+        == f"unsupported call 'lang.program_id'; {suffix}"
+    )
     assert _reason(local_shadow, signature=signature) == (
         "cannot assign to 'lang'; the name is bound to the swage.language "
         "module"
@@ -834,6 +840,7 @@ def test_source_digest_tracks_what_the_language_name_is_bound_to(tmp_path):
 
 def test_unsupported_calls_list_the_accepted_calls():
     """Name the call as written and say what a kernel may call."""
+
     @sw.jit
     def unknown_attribute(x_ptr, n, BLOCK: sl.constexpr):
         offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
@@ -901,6 +908,7 @@ def test_f32_diagnostics_name_what_the_kernel_wrote(
 
 def test_index_operator_diagnostics_name_the_operator_as_written():
     """Report an unsupported index operator by its source symbol."""
+
     @sw.jit
     def subtraction(x_ptr, n, BLOCK: sl.constexpr):
         _ = sl.arange(0, BLOCK) - 1
@@ -918,6 +926,7 @@ def test_index_operator_diagnostics_name_the_operator_as_written():
 
 def test_arange_diagnostic_says_which_argument_is_fixed():
     """Tell a kernel that used another width name what the form requires."""
+
     @sw.jit
     def other_width(x_ptr, n, WIDTH: sl.constexpr):
         _ = sl.program_id(0) * WIDTH + sl.arange(0, WIDTH)
@@ -938,6 +947,7 @@ def test_arange_diagnostic_says_which_argument_is_fixed():
 
 def test_load_diagnostic_says_both_keywords_are_required():
     """Do not suggest that mask and other can be omitted."""
+
     @sw.jit
     def no_keywords(x_ptr, n, BLOCK: sl.constexpr):
         offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)

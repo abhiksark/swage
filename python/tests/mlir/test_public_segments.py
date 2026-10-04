@@ -87,9 +87,9 @@ def _host_case(lengths, generator, dtype=torch.float32):
     exponents = torch.empty(count, dtype=dtype).uniform_(
         -8, 8, generator=generator
     )
-    values = torch.randn(
-        count, dtype=dtype, generator=generator
-    ) * torch.exp2(exponents)
+    values = torch.randn(count, dtype=dtype, generator=generator) * torch.exp2(
+        exponents
+    )
     return values, torch.tensor(_offsets(lengths), dtype=torch.int32)
 
 
@@ -183,16 +183,15 @@ def _assert_mean_matches(host_values, host_offsets, actual):
     error = (actual.double() - reference).abs()[kept]
     bound = ((depth + 1) * eps * magnitude / count + underflow)[kept]
     assert (error <= bound).all(), (
-        f"largest error {(error / bound).nan_to_num().max()} of the mean "
-        "bound"
+        f"largest error {(error / bound).nan_to_num().max()} of the mean bound"
     )
     sequential = (lengths - 1).clamp(min=0).double()
     difference = (actual.double() - theirs.double()).abs()[kept]
     assert (
         difference
-        <= (
-            (depth + sequential + 2) * eps * magnitude / count + 2 * underflow
-        )[kept]
+        <= ((depth + sequential + 2) * eps * magnitude / count + 2 * underflow)[
+            kept
+        ]
     ).all()
 
 
@@ -741,9 +740,7 @@ def test_segment_reduce_matches_pytorch_and_float64(name, kind, seed, dtype):
 
     A float64 sum is compared with the exactly rounded sum of its segment.
     """
-    lengths = _distributions.generate_lengths(
-        name, _SEGMENT_COUNTS[name], seed
-    )
+    lengths = _distributions.generate_lengths(name, _SEGMENT_COUNTS[name], seed)
     generator = torch.Generator().manual_seed(seed)
     host_values, host_offsets = _host_case(lengths, generator, dtype)
 
@@ -897,7 +894,8 @@ def test_a_kernel_reads_a_retained_private_copy_of_int64_offsets(
         assert not caller[0] <= pointer < caller[1]
         size = 4 * offsets.numel()
         assert any(
-            begin <= pointer and pointer + size <= end
+            begin <= pointer
+            and pointer + size <= end
             and stream.cuda_stream == side.cuda_stream
             for begin, end, stream in retained
         )
@@ -1160,9 +1158,7 @@ def test_segment_reduce_sums_special_values_as_ieee_addition_does(case, dtype):
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("length", SPECIAL_LENGTHS)
-def test_segment_reduce_max_propagates_nan_and_orders_infinities(
-    length, dtype
-):
+def test_segment_reduce_max_propagates_nan_and_orders_infinities(length, dtype):
     """Return NaN for a segment that holds one, wherever it sits."""
     ramp = torch.arange(length, dtype=dtype)
     segments = {
@@ -1205,9 +1201,7 @@ def test_segment_reduce_max_propagates_nan_and_orders_infinities(
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("length", SPECIAL_LENGTHS)
-def test_segment_reduce_min_propagates_nan_and_orders_infinities(
-    length, dtype
-):
+def test_segment_reduce_min_propagates_nan_and_orders_infinities(length, dtype):
     """Return NaN for a segment that holds one, wherever it sits.
 
     The finite values descend, so the minimum of a segment is its last
@@ -1284,9 +1278,7 @@ def _assert_softmax_matches(host_values, host_offsets, actual):
 @pytest.mark.parametrize("name", DISTRIBUTIONS)
 def test_segment_softmax_matches_float64_pytorch(name, seed):
     """Normalize the shape of every benchmark distribution at a small size."""
-    lengths = _distributions.generate_lengths(
-        name, _SEGMENT_COUNTS[name], seed
-    )
+    lengths = _distributions.generate_lengths(name, _SEGMENT_COUNTS[name], seed)
     generator = torch.Generator().manual_seed(seed)
     host_values = 4 * torch.randn(sum(lengths), generator=generator)
     host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
@@ -1453,9 +1445,7 @@ def test_segment_reduce_equals_the_prepared_mixed_launch(
     differential suite it returns the bits of `mixed` of a preparation with
     the default limits and automatic selection.
     """
-    lengths = _distributions.generate_lengths(
-        name, _SEGMENT_COUNTS[name], seed
-    )
+    lengths = _distributions.generate_lengths(name, _SEGMENT_COUNTS[name], seed)
     generator = torch.Generator().manual_seed(seed)
 
     _assert_equals_the_prepared_launch(

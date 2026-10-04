@@ -253,8 +253,7 @@ def test_a_column_mean_is_within_its_bound_of_the_exact_mean(dtype):
         [
             [
                 float(
-                    sum(column[begin:end], fractions.Fraction())
-                    / (end - begin)
+                    sum(column[begin:end], fractions.Fraction()) / (end - begin)
                 )
                 for column in columns
             ]
@@ -322,9 +321,7 @@ def test_empty_segments_give_every_column_the_value_of_the_kind(dtype):
     host_values, host_offsets = _rows(lengths, 130, 2, dtype)
     empty = torch.tensor(lengths) == 0
 
-    results = {
-        kind: _reduce(kind, host_values, host_offsets) for kind in KINDS
-    }
+    results = {kind: _reduce(kind, host_values, host_offsets) for kind in KINDS}
 
     assert _bits(results["sum"][empty]) == _bits(
         torch.zeros(3, 130, dtype=dtype)
@@ -724,9 +721,7 @@ def test_softmax_columns_follow_pytorch_on_special_values(length):
 
     actual = _softmax(host_values, host_offsets).reshape(3, length, 6)
 
-    reference = torch.softmax(
-        host_values.double().reshape(3, length, 6), 1
-    )
+    reference = torch.softmax(host_values.double().reshape(3, length, 6), 1)
     assert torch.equal(actual.isnan(), reference.isnan())
     assert actual[1][:, 1:4].isnan().all()
     assert actual.isnan().sum() == 3 * length
@@ -916,9 +911,7 @@ def test_logits_of_another_rank_are_refused():
         ((6, 2), r"\(6, 2\)"),
     ],
 )
-def test_softmax_out_of_another_shape_is_refused_with_both_shapes(
-    shape, found
-):
+def test_softmax_out_of_another_shape_is_refused_with_both_shapes(shape, found):
     """Require the shape of the values, exactly."""
     values, offsets = _host_rows()
 

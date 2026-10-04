@@ -729,9 +729,7 @@ def test_compile_memo_rejects_a_mistyped_no_compile_switch(monkeypatch, value):
 
 
 @_requires_cuda
-def test_no_compile_mode_stops_every_private_entry_point(
-    counts, monkeypatch
-):
+def test_no_compile_mode_stops_every_private_entry_point(counts, monkeypatch):
     """Launch kernels the process holds and refuse the ones it does not."""
     values, offsets, expected = _case([3, 5, 40])
     output = torch.full((3,), _SENTINEL, device="cuda")
@@ -1144,7 +1142,7 @@ def _rebind_into_an_arena(tensor, length):
         dtype=tensor.dtype,
         device=tensor.device,
     )
-    tensor.data = arena[_GUARD:_GUARD + length]
+    tensor.data = arena[_GUARD : _GUARD + length]
     return arena, prepared
 
 
@@ -1241,9 +1239,7 @@ def _one_shot_launch(path, values, offsets, output):
     if path == "one-cta":
         return lambda: qualification.launch_gpu(values, offsets, output, "sum")
     if path == "softmax":
-        return lambda: qualification.launch_softmax_gpu(
-            values, offsets, output
-        )
+        return lambda: qualification.launch_softmax_gpu(values, offsets, output)
     assert path == "tasks"
     task_ids = torch.arange(
         offsets.numel() - 1, dtype=torch.int32, device="cuda"
@@ -1453,8 +1449,7 @@ def test_rejects_a_block_size_without_a_power_of_two_warp_count(
     with pytest.raises(
         ValueError,
         match=(
-            "block size must give a power-of-two warp count, "
-            f"got {block_size}$"
+            f"block size must give a power-of-two warp count, got {block_size}$"
         ),
     ):
         launch(values, offsets, output, block_size)
@@ -1469,9 +1464,7 @@ def test_rejects_a_block_size_without_a_power_of_two_warp_count(
 @pytest.mark.parametrize(
     "block_size", [1, 31, 32, 33, 40, 64, 97, 100, 128, 256, 512, 1024]
 )
-def test_admits_a_block_size_with_a_power_of_two_warp_count(
-    launch, block_size
-):
+def test_admits_a_block_size_with_a_power_of_two_warp_count(launch, block_size):
     """Accept one, two, four, and more warps, including a partial last warp.
 
     An empty batch returns before compilation, so this checks the guard

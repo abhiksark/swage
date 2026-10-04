@@ -77,8 +77,7 @@ def test_recorded_a6000_result_preserves_the_failed_gate():
     )
     assert result["gate"] == {"maximum_ratio": 0.95, "passed": False}
     assert all(
-        len(samples) == 100
-        for samples in result["raw_samples_ms"].values()
+        len(samples) == 100 for samples in result["raw_samples_ms"].values()
     )
 
 

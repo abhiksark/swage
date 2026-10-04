@@ -253,8 +253,9 @@ def test_frontend_touched_after_start_is_neither_read_nor_published(
     assert touched["compiles"] == 2
     assert touched["entries"] == [key]
     assert len(touched["warnings"]) == 1
-    assert "_frontend.py is not older than this process" in (
-        touched["warnings"][0]
+    assert (
+        "_frontend.py is not older than this process"
+        in (touched["warnings"][0])
     )
 
     time.sleep(0.05)

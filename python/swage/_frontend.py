@@ -31,8 +31,7 @@ _OPERATORS = {
     ast.BitAnd: "&",
 }
 _INSTALLATION = (
-    "docs/getting-started/installation.md in "
-    "https://github.com/abhiksark/swage"
+    "docs/getting-started/installation.md in https://github.com/abhiksark/swage"
 )
 
 
@@ -96,9 +95,7 @@ class _Kernel:
         # Annotations are evaluated where the kernel is defined, so they see
         # the module under a name that the kernel also takes as a parameter.
         # Inside the body that name is the parameter.
-        self.enclosing_language_names = _language_names(
-            function, self.function
-        )
+        self.enclosing_language_names = _language_names(function, self.function)
         self.language_names = self.enclosing_language_names - {
             node.arg
             for node in ast.walk(self.function.args)
@@ -131,8 +128,7 @@ class _Kernel:
             is_jit = (
                 isinstance(decorator, ast.Name) and decorator.id == "jit"
             ) or (
-                isinstance(decorator, ast.Attribute)
-                and decorator.attr == "jit"
+                isinstance(decorator, ast.Attribute) and decorator.attr == "jit"
             )
             if not is_jit:
                 self._raise(
@@ -201,9 +197,7 @@ class _Kernel:
         runtime_values, runtime_label = self._select_runtime_inputs(
             signature, arguments
         )
-        self._validate_input_mappings(
-            runtime_values, runtime_label, constexprs
-        )
+        self._validate_input_mappings(runtime_values, runtime_label, constexprs)
         parameters, constexpr_names, runtime_parameters = (
             self._partition_parameters(
                 runtime_values, runtime_label, constexprs
@@ -214,9 +208,7 @@ class _Kernel:
                 signature, runtime_parameters
             )
         else:
-            runtime_types = self._infer_signature(
-                arguments, runtime_parameters
-            )
+            runtime_types = self._infer_signature(arguments, runtime_parameters)
         self._validate_constexprs(parameters, constexpr_names, constexprs)
         return runtime_types, dict(constexprs)
 
@@ -236,21 +228,15 @@ class _Kernel:
     ):
         """Validate mapping containers and key types in diagnostic order."""
         if not isinstance(runtime_values, Mapping):
-            self._raise(
-                self.function, f"{runtime_label} must be a mapping"
-            )
+            self._raise(self.function, f"{runtime_label} must be a mapping")
         if not isinstance(constexprs, Mapping):
             self._raise(self.function, "constexprs must be a mapping")
         if any(not isinstance(key, str) for key in runtime_values):
-            self._raise(
-                self.function, f"{runtime_label} keys must be strings"
-            )
+            self._raise(self.function, f"{runtime_label} keys must be strings")
         if any(not isinstance(key, str) for key in constexprs):
             self._raise(self.function, "constexprs keys must be strings")
 
-    def _partition_parameters(
-        self, runtime_values, runtime_label, constexprs
-    ):
+    def _partition_parameters(self, runtime_values, runtime_label, constexprs):
         """Validate and return the declared runtime/constexpr partition."""
         self._require_plain_parameters()
         parameters = self.parameter_names
@@ -274,15 +260,10 @@ class _Kernel:
             name = sorted(misplaced)[0]
             self._raise(
                 self.function,
-                f"runtime parameter '{name}' must be passed in "
-                f"{runtime_label}",
+                f"runtime parameter '{name}' must be passed in {runtime_label}",
             )
-        self._require_keys(
-            runtime_label, runtime_value_names, runtime_names
-        )
-        self._require_keys(
-            "constexprs", supplied_constexprs, constexpr_names
-        )
+        self._require_keys(runtime_label, runtime_value_names, runtime_names)
+        self._require_keys("constexprs", supplied_constexprs, constexpr_names)
         return parameters, constexpr_names, runtime_parameters
 
     def _validate_constexprs(self, parameters, constexpr_names, constexprs):
@@ -333,14 +314,14 @@ class _Kernel:
     def _infer_signature(self, arguments, runtime_parameters):
         try:
             import torch
+
             float32 = torch.float32
             strided = torch.strided
             tensor_type = torch.Tensor
         except Exception:
             self._raise(
                 self.function,
-                "PyTorch metadata inference requires "
-                "'swage-compiler[pytorch]'",
+                "PyTorch metadata inference requires 'swage-compiler[pytorch]'",
             )
 
         signature = {}
@@ -467,8 +448,9 @@ class _Kernel:
         if extra:
             details.append(f"extra: {', '.join(extra)}")
         parameter_kind = (
-            "runtime parameters" if label in {"signature", "arguments"} else
-            "constexpr parameters"
+            "runtime parameters"
+            if label in {"signature", "arguments"}
+            else "constexpr parameters"
         )
         self._raise(
             self.function,
@@ -809,10 +791,10 @@ class _Checker:
         )
         if negative:
             literal = node.operand
-        if (
-            not isinstance(literal, ast.Constant)
-            or type(literal.value) not in {int, float}
-        ):
+        if not isinstance(literal, ast.Constant) or type(literal.value) not in {
+            int,
+            float,
+        }:
             self._error(node, f"{callee} other must be a numeric literal")
         value = -literal.value if negative else literal.value
         written = f"{callee} other={ast.unparse(node)}"
@@ -838,9 +820,7 @@ class _Checker:
         callee = ast.unparse(node.func)
         keywords = self._keywords(node)
         if len(node.args) != 2 or set(keywords) != {"mask"}:
-            self._error(
-                node, f"{callee} expects address, value, and mask=..."
-            )
+            self._error(node, f"{callee} expects address, value, and mask=...")
         address = self._expression(node.args[0])
         reason = f"{callee} requires float values and a mask"
         value = self._require_value(
@@ -1115,9 +1095,7 @@ def _language_names(function, syntax):
     Returns:
         A frozenset of names.
     """
-    cells = dict(
-        zip(function.__code__.co_freevars, function.__closure__ or ())
-    )
+    cells = dict(zip(function.__code__.co_freevars, function.__closure__ or ()))
     names = set()
     for name in {
         node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)

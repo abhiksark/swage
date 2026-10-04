@@ -74,9 +74,7 @@ def _sysfs(root, governors, driver="amd-pstate-epp"):
     for name in ("cpufreq", "cpuidle"):
         (root / name).mkdir(exist_ok=True)
     if driver is not None and governors:
-        (root / "cpu0" / "cpufreq" / "scaling_driver").write_text(
-            f"{driver}\n"
-        )
+        (root / "cpu0" / "cpufreq" / "scaling_driver").write_text(f"{driver}\n")
         (
             root / "cpu0" / "cpufreq" / "energy_performance_preference"
         ).write_text("balance_performance\n")
@@ -129,9 +127,7 @@ def test_cpu_frequency_policy_records_what_it_cannot_read_as_unknown(
         ({"powersave": 4}, {}, None),
     ],
 )
-def test_governor_unchanged_is_tri_state(
-    provenance, before, after, unchanged
-):
+def test_governor_unchanged_is_tri_state(provenance, before, after, unchanged):
     """Say the governor held, changed, or could not be read."""
     assert (
         provenance.cpu_governor_unchanged(
@@ -378,9 +374,9 @@ def test_smallest_step_is_the_finest_gap_between_distinct_values(provenance):
     assert provenance.smallest_step([5.0, 5.0]) is None
     assert provenance.smallest_step([]) is None
     # Two float spellings of one reading are not a gap.
-    assert provenance.smallest_step(
-        [0.1 + 0.2, 0.3, 0.332]
-    ) == pytest.approx(0.032)
+    assert provenance.smallest_step([0.1 + 0.2, 0.3, 0.332]) == pytest.approx(
+        0.032
+    )
 
 
 def test_timer_tick_is_the_coarse_step_most_readings_sit_on(provenance):

@@ -73,6 +73,8 @@ _BLOCK_WIDTHS = {
     "cta_block_threads": _CTA_BLOCK,
     "split_block_threads": _SPLIT_BLOCK,
 }
+
+
 def _reduction_kernels(scalar, reads_extent=False):
     """Return the kernels `segment_reduce` can request for one program.
 
@@ -382,8 +384,7 @@ class _Artifact:
             details = os.stat(self.directory)
         except FileNotFoundError:
             raise RuntimeError(
-                f"{_ENVIRONMENT} names {self.directory}, which does not "
-                "exist"
+                f"{_ENVIRONMENT} names {self.directory}, which does not exist"
             ) from None
         except OSError as error:
             raise RuntimeError(

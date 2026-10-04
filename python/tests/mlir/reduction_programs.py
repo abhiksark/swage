@@ -25,8 +25,14 @@ def reduction_module(kind, transform, element="f32"):
         )
     module = _semantic_module(kind)
     if transform in (
-        "exp2", "exp2_chain", "exp2_pair", "rational4", "rational8",
-        "affine4", "affine16", "affine32",
+        "exp2",
+        "exp2_chain",
+        "exp2_pair",
+        "rational4",
+        "rational8",
+        "affine4",
+        "affine16",
+        "affine32",
     ):
         lines = [
             "%half = arith.constant -0.5 : f32",
@@ -36,32 +42,44 @@ def reduction_module(kind, transform, element="f32"):
         ]
         value = "%value"
         steps = {
-            "exp2": 1, "exp2_pair": 2, "rational4": 4,
-            "affine4": 2, "affine16": 8, "affine32": 16,
+            "exp2": 1,
+            "exp2_pair": 2,
+            "rational4": 4,
+            "affine4": 2,
+            "affine16": 8,
+            "affine32": 16,
         }.get(transform, 8)
         for index in range(steps):
             result = f"%result{index}"
             if transform == "exp2":
                 lines.append(f"{result} = math.exp2 {value} : f32")
             elif transform in ("exp2_chain", "exp2_pair"):
-                lines.extend([
-                    f"%scaled{index} = arith.mulf {value}, %half : f32",
-                    f"{result} = math.exp2 %scaled{index} : f32",
-                ])
+                lines.extend(
+                    [
+                        f"%scaled{index} = arith.mulf {value}, %half : f32",
+                        f"{result} = math.exp2 %scaled{index} : f32",
+                    ]
+                )
             elif transform.startswith("affine"):
-                lines.extend([
-                    f"%scaled{index} = arith.mulf {value}, %half : f32",
-                    f"{result} = arith.addf %scaled{index}, %eighth : f32",
-                ])
+                lines.extend(
+                    [
+                        f"%scaled{index} = arith.mulf {value}, %half : f32",
+                        f"{result} = arith.addf %scaled{index}, %eighth : f32",
+                    ]
+                )
             else:
-                lines.extend([
-                    f"%square{index} = arith.mulf {value}, {value} : f32",
-                    f"%scaled{index} = arith.mulf %square{index}, "
-                    "%quarter : f32",
-                    f"%denom{index} = arith.addf %scaled{index}, %one : f32",
-                    f"%numer{index} = arith.addf {value}, %eighth : f32",
-                    f"{result} = arith.divf %numer{index}, %denom{index} : f32",
-                ])
+                lines.extend(
+                    [
+                        f"%square{index} = arith.mulf {value}, {value} : f32",
+                        f"%scaled{index} = arith.mulf %square{index}, "
+                        "%quarter : f32",
+                        f"%denom{index} = arith.addf %scaled{index}, "
+                        "%one : f32",
+                        f"%numer{index} = arith.addf {value}, %eighth : f32",
+                        f"{result} = arith.divf %numer{index}, "
+                        f"%denom{index} : f32",
+                    ]
+                )
             value = result
         lines.append(f"swage.yield {value} : f32")
         return module.replace(
