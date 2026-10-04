@@ -28,7 +28,9 @@ import sys
 import tempfile
 
 from . import __version__, _artifact, _runtime
-from . import _segmented_qualification as _qualification
+from . import _segmented_plan as _plan
+from . import _segmented_programs as _programs
+from . import _segmented_runtime as _execution
 
 _RUNTIME_LIBRARY = "libSwageRuntime.so"
 # The `e_machine` values of an ELF header this command can name, as
@@ -63,7 +65,7 @@ def _planning_limits():
     a caller change: the warp limit and the CTA chunk limit of the native
     target description. Reading them needs the native bindings.
     """
-    return _qualification._planning_limits(None, None)
+    return _plan._planning_limits(None, None)
 
 
 def _program(name):
@@ -84,11 +86,11 @@ def _program(name):
     rank = 2 if "r2" in suffixes else 1
     if kind == "softmax":
         kernel = "ragged_softmax" + "_r2" * (rank == 2)
-        return kernel, _qualification._softmax_text(rank), False
+        return kernel, _programs._softmax_text(rank), False
     element = "f64" if "f64" in suffixes else "f32"
     return (
-        _qualification._reduction_kernel(kind, element, rank),
-        _qualification._semantic_module(kind, element, rank),
+        _programs._reduction_kernel(kind, element, rank),
+        _programs._semantic_module(kind, element, rank),
         rank == 1,
     )
 
@@ -136,8 +138,8 @@ def _compile_program(native, name, target):
 
     Raises:
         ValueError: The compiler rejects the program or the target.
-        RuntimeError: A kernel does not have the entry name or the launch
-            width that the loader launches it with.
+        RuntimeError: A kernel does not have the entry name, the launch
+            width, or the launch contract that the loader launches it with.
     """
     program, text, planned = _program(name)
     description = {
@@ -145,18 +147,28 @@ def _compile_program(native, name, target):
         "sha256": hashlib.sha256(text.encode()).hexdigest(),
     }
     if planned:
-        description["small_element_program"] = _qualification._admit_program(
+        description["small_element_program"] = _plan._admit_program(
             text, program, *_planning_limits()
         )
     kernels = []
     for kernel in _artifact._PROGRAMS[program]:
-        ptx = _qualification._compile_once(
+        compiled = _execution._compile_once(
             getattr(native, kernel.compiler),
             text,
             kernel_name=program,
             target=target,
             **dict(kernel.options),
         )
+        ptx = compiled.image
+        # The loader derives the contract of a kernel from its manifest
+        # entry, so the compiler must have given it that contract.
+        if compiled.contract_json != _artifact._contract_json(program, kernel):
+            raise RuntimeError(
+                f"the {kernel.role} kernel of {program} has the launch "
+                f"contract {compiled.contract_json}, and the loader derives "
+                f"{_artifact._contract_json(program, kernel)} from its "
+                "manifest entry; the artifact was not written"
+            )
         entry = program + kernel.entry_suffix
         width = re.search(r"^\s*\.reqntid (\d+)", ptx, re.MULTILINE)
         if f".entry {entry}(" not in ptx or width is None:
@@ -248,7 +260,7 @@ def _write_artifact(output, target, programs, runtime_library):
     library = pathlib.Path(runtime_library or _packaged_runtime())
     runtime = library.read_bytes()
     warp_max_elements, cta_chunk_elements = _planning_limits()
-    description = _qualification._target_description()
+    description = _execution._target_description()
     manifest = {
         "format_version": _artifact._FORMAT_VERSION,
         "swage_version": __version__,

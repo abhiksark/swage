@@ -283,15 +283,15 @@ def swage_build():
     """
     import swage
     from mlir_swage._mlir_libs import _swageDialectsNanobind as extension
-    from swage import _runtime
+    from swage import _cuda_backend, _runtime
 
     return {
         "swage": swage.__version__,
         "llvm_pin": _runtime._compiler_identity()["llvm"],
         "llvm_linked": getattr(extension.swage, "__llvm_version__", None),
-        "cuda_driver": _runtime.driver_version(),
+        "cuda_driver": _cuda_backend.driver_version(),
         "native_sha256": native_sha256(_runtime._native_libraries()),
-        "loaded_ptx": record_loaded_ptx(_runtime._get_driver()),
+        "loaded_ptx": record_loaded_ptx(_cuda_backend._get_driver()),
     }
 
 

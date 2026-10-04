@@ -1367,7 +1367,7 @@ def main():
 
     import torch
     from mlir_swage._mlir_libs import _swageDialectsNanobind as native_extension
-    from swage import _runtime
+    from swage import _cuda_backend, _runtime
     from swage._segmented_qualification import (
         _prepare_planned_sum,
         launch_gpu,
@@ -1405,7 +1405,7 @@ def main():
     triton = _optional_triton()
     environment = _environment(
         torch,
-        cuda_driver=_runtime.driver_version(),
+        cuda_driver=_cuda_backend.driver_version(),
         nvidia_driver=_nvidia_driver(),
         triton_version=triton.__version__ if triton else None,
     )

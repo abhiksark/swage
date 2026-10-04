@@ -1,968 +1,32 @@
 # python/swage/_segmented_qualification.py
-"""Private qualification runner for native segmented programs."""
+"""Private launches of segment programs: one-shot, prepared, and persistent.
 
-import os
-import pathlib
-import re
-import shutil
-import struct
-import subprocess
+A launch validates its tensors (`_segmented_validation`), plans its batch
+when it is planned (`_segmented_plan`), compiles and leases its kernels and
+binds their arguments by the launch contracts (`_segmented_runtime`), and
+enqueues them on the current stream. The public calls of `_segments` run on
+these entry points; `_segmented_oracle` holds the CPU references.
+"""
+
 import threading
-import types
-import weakref
 from collections.abc import Callable
 from typing import NamedTuple
 
-from . import _artifact, _runtime
-
-_I32_LIMIT = 1 << 31
-_target_record = None
-
-
-def _target_description():
-    """Return the target description of the compiler, read once per process.
-
-    Block widths, the subgroup width, claim batches, and the planning
-    defaults live in the native target description, which the lowerings and
-    the code generation C API read too, so the host cannot disagree with a
-    kernel. The native package is imported here and not when this module is,
-    which keeps `import swage` free of it.
-
-    A selected artifact answers instead of the native package, which is then
-    not imported: it gives the widths its kernels were compiled for and the
-    planning limits its programs were admitted under.
-
-    Returns:
-        A namespace with one attribute per field of the description, for
-        example `subgroup_width`, `cta_block_threads`, and
-        `default_cta_chunk_elements`. An artifact gives the fields the
-        kernels it holds are launched with, and no others.
-
-    Raises:
-        RuntimeError: `SWAGE_ARTIFACT_DIR` names an artifact that cannot be
-            used. The bindings are not tried instead.
-    """
-    artifact = _artifact.selected()
-    if artifact is not None:
-        return artifact.target_description
-    global _target_record
-    if _target_record is None:
-        from mlir_swage._mlir_libs._swageDialectsNanobind import (
-            swage as native_swage,
-        )
-
-        _target_record = types.SimpleNamespace(
-            **native_swage._target_description()
-        )
-    return _target_record
-
-
-def _planning_limits(warp_max_elements, cta_chunk_elements):
-    """Replace each omitted planning limit with the default of the target."""
-    target = _target_description()
-    if warp_max_elements is None:
-        warp_max_elements = target.default_warp_max_elements
-    if cta_chunk_elements is None:
-        cta_chunk_elements = target.default_cta_chunk_elements
-    return warp_max_elements, cta_chunk_elements
-
-
-_LOWERING_PIPELINE = (
-    "builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,"
-    "convert-arith-to-llvm),"
-    "finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,"
-    "reconcile-unrealized-casts)"
-)
-# One memo for every kernel this module compiles and loads. PTX is keyed by
-# the native compile function, the semantic module text, and every code
-# generation option (kernel name, block size, target). Loaded handles are
-# keyed per driver by CUDA context, PTX text, and kernel name, so a hit
-# never crosses a context or a target. Python keeps the hash of a string, and
-# the PTX memo returns the same string for the same kernel, so neither lookup
-# reads the PTX text again.
-#
-# Both memos are bounded: each keeps `_runtime._CACHE_LIMIT` kernels and then
-# forgets its oldest. A forgotten kernel is compiled or loaded again on its
-# next use. Its module is unloaded once no prepared launch holds its function
-# handle any more; see `_runtime._Function`.
-#
-# A hit takes no lock. A miss takes the process-wide cold-path lock, which
-# serializes native compiles; see `_runtime._compile_lock`.
-_memo_lock = _runtime._compile_lock
-_ptx_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
-_load_memo = weakref.WeakKeyDictionary()
-
-
-def _validate_counts(value_count, segment_count):
-    """Validate the two explicit signed-i32 CUDA ABI counts."""
-    for name, count in (
-        ("value count", value_count),
-        ("segment count", segment_count),
-    ):
-        if type(count) is not int or not 0 <= count < _I32_LIMIT:
-            raise ValueError(f"{name} must be a nonnegative i32")
-
-
-def _validate_offset_sequence(offsets, value_count):
-    """Validate the offset array itself and return the segment count.
-
-    Args:
-        offsets: Host offsets. An int32 or int64 array, the host copy of a
-            tensor, is checked with array operations. Any other sequence is
-            checked one element at a time, which also rejects a value that
-            is not a signed i32 integer. An array that passes holds no value
-            outside the signed i32 range either: every offset lies between
-            the initial zero and the final offset, which is at most the
-            value count.
-        value_count: Number of values the offsets index.
-
-    Returns:
-        The segment count, one less than the number of offsets.
-
-    Raises:
-        ValueError: If the offsets are empty, do not start at zero, hold a
-            value that is not a signed i32 integer, a negative value, or a
-            decrease, or end past the value count. The first invalid offset
-            decides the message, in both forms.
-    """
-    import numpy
-
-    if not len(offsets):
-        raise ValueError("offsets must contain at least the initial zero")
-    segment_count = len(offsets) - 1
-    _validate_counts(value_count, segment_count)
-    if offsets[0] != 0:
-        raise ValueError("offsets must start at zero")
-    if isinstance(offsets, numpy.ndarray) and offsets.dtype in (
-        numpy.int32,
-        numpy.int64,
-    ):
-        # The first decrease is the first invalid offset: every offset
-        # before it is at least the initial zero, so a negative offset is
-        # always a decrease.
-        decreasing = offsets[1:] < offsets[:-1]
-        if decreasing.any():
-            if offsets[1:][decreasing.argmax()] < 0:
-                raise ValueError("offsets must not be negative")
-            raise ValueError("offsets must be nondecreasing")
-    else:
-        previous = 0
-        for offset in offsets:
-            if type(offset) is not int or not -(1 << 31) <= offset < _I32_LIMIT:
-                raise ValueError("offsets must contain signed i32 values")
-            if offset < 0:
-                raise ValueError("offsets must not be negative")
-            if offset < previous:
-                raise ValueError("offsets must be nondecreasing")
-            previous = offset
-    final = int(offsets[-1])
-    if final > value_count:
-        raise ValueError(
-            f"final offset {final} exceeds value count {value_count}"
-        )
-    return segment_count
-
-
-def _validate_offsets(offsets, value_count, output_count):
-    """Require one output element per segment, the reduction ABI."""
-    segment_count = _validate_offset_sequence(offsets, value_count)
-    if type(output_count) is not int or output_count < segment_count:
-        raise ValueError(
-            f"output has {output_count} elements for {segment_count} segments"
-        )
-    return segment_count
-
-
-def _validate_softmax_offsets(offsets, value_count, output_count):
-    """Require one output element per covered value, the map_store ABI.
-
-    The bound is the final offset rather than the value count, because
-    offsets may cover fewer values than the buffer holds and binding to the
-    value count would reject a correctly sized output.
-    """
-    segment_count = _validate_offset_sequence(offsets, value_count)
-    required = int(offsets[-1])
-    if type(output_count) is not int or output_count < required:
-        raise ValueError(
-            f"output has {output_count} elements for {required} values"
-        )
-    return segment_count
-
-
-def _validate_disjoint(name, buffer, output):
-    """Reject an output that overlaps a buffer the kernel reads.
-
-    ADR-0008 names only the values buffer, but the offsets buffer needs the
-    same treatment: the kernel re-reads offsets from device memory after
-    other CTAs have already stored through an aliased output, which voids
-    the host-side offset walk entirely.
-
-    Both tensors are known contiguous and rank one by this point, so the
-    byte extent is exact and a half-open intersection is exact. It cannot
-    see two virtual mappings of one physical allocation, nor aliasing
-    created after this returns.
-    """
-    buffer_start = buffer.data_ptr()
-    buffer_end = buffer_start + buffer.numel() * buffer.element_size()
-    output_start = output.data_ptr()
-    output_end = output_start + output.numel() * output.element_size()
-    if buffer_start < output_end and output_start < buffer_end:
-        raise ValueError(f"output must not overlap the {name} buffer")
-
-
-def _validate_storage(name, tensor):
-    """Reject a lazy view, whose storage does not hold the values it shows.
-
-    The kernels read and write tensor storage through raw pointers, so for
-    a negation or conjugate view they would compute with the base. The
-    public launch applies the same rule.
-    """
-    if tensor.is_neg():
-        raise ValueError(
-            f"{name} must not be a lazy negation view; pass "
-            "tensor.resolve_neg()"
-        )
-    if tensor.is_conj():
-        raise ValueError(
-            f"{name} must not be a lazy conjugate view; pass "
-            "tensor.resolve_conj()"
-        )
-
-
-def _validate_shapes(
-    values,
-    offsets,
-    output,
-    validate_offsets,
-    *,
-    require_cuda=True,
-    int64_offsets=False,
-    element="f32",
-    rank=1,
-):
-    """Validate tensor shapes against one of the two output ABIs.
-
-    Args:
-        values: The values tensor.
-        offsets: The offsets tensor.
-        output: The result tensor.
-        validate_offsets: The validator of the output ABI, called with the
-            host offsets as an int32 array, the value count, and the number
-            of output elements.
-        require_cuda: Whether the tensors must be on the current CUDA
-            device.
-        int64_offsets: Whether `torch.int64` offsets are admitted beside
-            `torch.int32` ones. A caller that sets it must give its kernels
-            `_kernel_offsets`: a kernel reads int32 words.
-        element: The element type of the program the caller runs, `"f32"`
-            or `"f64"`. The values and the output must have its dtype: a
-            kernel reads and writes elements of one width.
-        rank: The rank of the values and of the output of the program, one
-            or two. Rank-two values are `[rows, columns]`, the offsets
-            delimit rows, and the output has the columns of the values.
-            The validator then receives the row counts.
-
-    Returns:
-        The value count, which is the number of rows for rank two, the
-        segment count, and the offsets on the host as
-        one int32 array. Copying a CUDA tensor to the host waits for the
-        work queued on it; that copy is the only device synchronization
-        here, and no Python integer is created per offset. int64 offsets
-        are validated as they are and narrowed afterwards, so a value that
-        would wrap into a valid offset is refused.
-    """
-    torch = _runtime._import_torch()
-    for name, tensor in (
-        ("values", values),
-        ("offsets", offsets),
-        ("output", output),
-    ):
-        if not isinstance(tensor, torch.Tensor):
-            raise TypeError(f"{name} must be a torch.Tensor")
-    dtype = _element_dtype(torch, element)
-    for name, tensor in (("values", values), ("output", output)):
-        if tensor.dtype != dtype:
-            raise TypeError(f"{name} must have dtype {dtype}")
-    if offsets.dtype != torch.int32 and not (
-        int64_offsets and offsets.dtype == torch.int64
-    ):
-        raise TypeError(
-            "offsets must have dtype torch.int32"
-            + (" or torch.int64" if int64_offsets else "")
-        )
-    for name, tensor, required in (
-        ("values", values, rank),
-        ("offsets", offsets, 1),
-        ("output", output, rank),
-    ):
-        if tensor.dim() != required:
-            raise TypeError(
-                f"{name} must have rank {'one' if required == 1 else 'two'}"
-            )
-        if not tensor.is_contiguous():
-            raise ValueError(f"{name} must be contiguous")
-        _validate_storage(name, tensor)
-    for name, tensor in (("values", values), ("output", output)):
-        if tensor.requires_grad:
-            raise ValueError(
-                f"{name} must not require grad; segmented kernels write "
-                "through raw pointers"
-            )
-    if rank == 2:
-        if output.shape[1] != values.shape[1]:
-            raise ValueError(
-                f"output has {output.shape[1]} columns for "
-                f"{values.shape[1]} columns of values"
-            )
-        if values.shape[1] >= _I32_LIMIT:
-            raise ValueError("feature count must be a nonnegative i32")
-
-    # The offsets delimit the first axis: elements of rank-one values and
-    # rows of rank-two values.
-    value_count = values.shape[0]
-    host_offsets = offsets.detach().cpu().numpy()
-    if offsets.dtype == torch.int64:
-        import numpy
-
-        # Valid offsets lie between zero and the value count, which is
-        # below 2**31, so the narrowing below is exact.
-        _validate_offset_sequence(host_offsets, value_count)
-        host_offsets = host_offsets.astype(numpy.int32)
-    segment_count = validate_offsets(host_offsets, value_count, output.shape[0])
-    _validate_disjoint("values", values, output)
-    _validate_disjoint("offsets", offsets, output)
-    if not require_cuda:
-        return value_count, segment_count, host_offsets
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable in PyTorch")
-    current_device = torch.cuda.current_device()
-    for name, tensor in (
-        ("values", values),
-        ("offsets", offsets),
-        ("output", output),
-    ):
-        if tensor.device.type != "cuda":
-            raise TypeError(f"{name} must be a CUDA tensor")
-        if tensor.device.index != current_device:
-            raise ValueError(f"{name} must be on the current CUDA device")
-    return value_count, segment_count, host_offsets
-
-
-def _kernel_offsets(torch, offsets, host_offsets):
-    """Return the int32 offsets tensor a kernel reads.
-
-    A kernel loads each offset as an i32 word. int32 offsets are read where
-    the caller keeps them. Validated int64 offsets are uploaded as a
-    private int32 tensor on the current stream, and the caller's tensor is
-    never a kernel argument. The caller of this function retains the
-    result on the launch stream.
-
-    Args:
-        torch: The PyTorch module.
-        offsets: The validated offsets tensor of the caller.
-        host_offsets: Its int32 host copy, as `_validate_shapes` returns.
-    """
-    if offsets.dtype == torch.int32:
-        return offsets
-    return torch.tensor(host_offsets, dtype=torch.int32, device=offsets.device)
-
-
-def _validate_tensors(values, offsets, output, *, require_cuda=True):
-    """Validate the reduction tensors and return their explicit counts."""
-    value_count, segment_count, _ = _validate_shapes(
-        values, offsets, output, _validate_offsets, require_cuda=require_cuda
-    )
-    return value_count, segment_count
-
-
-def _validate_softmax_tensors(values, offsets, output, *, require_cuda=True):
-    """Validate the softmax tensors, including the aliasing obligation.
-
-    Returns:
-        The element bound the kernel receives in its value-count slot, and
-        the segment count. The map_store kernel reads values and writes
-        output at the same element index, and clamps every range it loads
-        from the device to that bound, so the bound is the length of the
-        shorter buffer. Validated offsets end at or below both lengths, so
-        the bound never shortens a validated segment.
-    """
-    value_count, segment_count, _ = _validate_shapes(
-        values,
-        offsets,
-        output,
-        _validate_softmax_offsets,
-        require_cuda=require_cuda,
-    )
-    return min(value_count, output.numel()), segment_count
-
-
-def _validate_warp_count(block_size):
-    """Require a block size whose warp count is a power of two.
-
-    The block-wide reduction combines one partial result per warp, and that
-    combination is complete in every participating lane only for a
-    power-of-two number of warps. A partly filled last warp is admitted.
-    """
-    width = _target_description().subgroup_width
-    warp_count = (block_size + width - 1) // width
-    if warp_count & (warp_count - 1):
-        raise ValueError(
-            f"block size must give a power-of-two warp count, got {block_size}"
-        )
-
-
-def _offsets_version(offsets):
-    """Return the version counter a prepared launch compares at launch.
-
-    PyTorch advances the counter on every in-place write through the tensor
-    or one of its views, so the comparison is one host attribute read and
-    never waits for the device. It cannot see a write through `.data`, a raw
-    pointer, memory shared with another library, or another kernel, and a
-    replayed CUDA graph does not run it.
-    """
-    if offsets.is_inference():
-        raise ValueError(
-            "offsets must not be an inference tensor; a prepared launch "
-            "compares its version counter"
-        )
-    return offsets._version
-
-
-def _require_unchanged_offsets(offsets, version):
-    """Refuse to launch a plan whose offsets changed in place."""
-    if offsets._version != version:
-        raise RuntimeError("offsets changed after preparation; prepare again")
-
-
-def _output_version_step(torch, offsets, output):
-    """Return how far one advance of the output version moves offsets.
-
-    Every launch advances the version counter of its output. Views of one
-    tensor share one counter, also views of another dtype that share no
-    byte, so that advance can move the offsets version as well. A prepared
-    launch would then read its own output write as changed offsets.
-
-    Returns:
-        1 when offsets and output share a version counter and 0 otherwise,
-        found by advancing the output version once. A prepared launch adds
-        it to the offsets version it expects each time it launches.
-    """
-    before = offsets._version
-    _runtime._advance_version(torch, output)
-    return offsets._version - before
-
-
-def _storage_binding(values, offsets, output):
-    """Return what ties a prepared launch to the storage of its tensors.
-
-    A prepared launch passes the counts taken at preparation with the data
-    pointers read at launch. PyTorch can give a tensor object other storage
-    without advancing its version counter, for example through
-    `tensor.data = other`, so the counts would then describe memory the
-    tensor no longer has. The data pointer, the element count, and the
-    dtype of each tensor together fix the bytes a kernel may touch, and a
-    launch compares them with this record. Reading them is host work only.
-
-    It cannot see a tensor that was rebound and then bound back to the
-    prepared address, count, and dtype over storage that was freed and
-    allocated again in between.
-
-    Returns:
-        The data pointer, element count, and dtype of values, then of
-        offsets, then of output, so every third entry is a data pointer.
-    """
-    return (
-        values.data_ptr(),
-        values.numel(),
-        values.dtype,
-        offsets.data_ptr(),
-        offsets.numel(),
-        offsets.dtype,
-        output.data_ptr(),
-        output.numel(),
-        output.dtype,
-    )
-
-
-def _refuse_rebound_storage(binding, prepared):
-    """Raise for the first tensor whose storage is not the prepared one.
-
-    Args:
-        binding: The `_storage_binding` of the tensors now.
-        prepared: The one recorded at preparation, which differs.
-    """
-    for index, name in enumerate(("values", "offsets", "output")):
-        pointer, count, dtype = binding[3 * index : 3 * index + 3]
-        was = prepared[3 * index : 3 * index + 3]
-        if (pointer, count, dtype) != was:
-            raise RuntimeError(
-                f"{name} is bound to other storage than at preparation: "
-                f"found {count} {dtype} elements at {pointer:#x}, prepared "
-                f"with {was[1]} {was[2]} elements at {was[0]:#x}; prepare "
-                "again"
-            )
-
-
-# The NVPTX processor of each CUDA device index. A device keeps its compute
-# capability for as long as the process runs.
-_targets = {}
-
-
-def _target(torch, device_index):
-    """Return the NVPTX processor name of one CUDA device, looked up once."""
-    target = _targets.get(device_index)
-    if target is None:
-        major, minor = torch.cuda.get_device_capability(device_index)
-        target = _targets[device_index] = f"sm_{major}{minor}"
-    return target
-
-
-# The segment ids 0, 1, 2, ... of each CUDA device index, which a launch of
-# one task per segment reads as its task list. They depend on the segment
-# count only, so one tensor per device serves every preparation: it is
-# uploaded once, complete when the upload returns, and only read afterwards.
-# It holds 4 MiB of device memory per device for as long as the process runs.
-_IDENTITY_LIMIT = 1 << 20
-_identity_memo = {}
-
-
-def _identity_ids(torch, device, count):
-    """Return a tensor that starts with the segment ids 0 to `count - 1`.
-
-    Args:
-        torch: The PyTorch module.
-        device: CUDA device of the prepared tensors.
-        count: Number of ids a launch reads, the segment count of the
-            preparation.
-
-    Returns:
-        An int32 tensor on the device with at least `count` ascending ids.
-        Up to `_IDENTITY_LIMIT` ids it is the shared tensor of the device,
-        which needs no kernel and no wait. A longer list is filled on the
-        device for this preparation alone, asynchronously, on the current
-        stream.
-    """
-    if count > _IDENTITY_LIMIT:
-        return torch.arange(count, dtype=torch.int32, device=device)
-    ids = _identity_memo.get(device.index)
-    if ids is None:
-        import numpy
-
-        ids = _identity_memo[device.index] = torch.tensor(
-            numpy.arange(_IDENTITY_LIMIT, dtype=numpy.int32),
-            dtype=torch.int32,
-            device=device,
-        )
-    return ids
-
-
-def _native_swage():
-    """Return what classifies, admits, and compiles for the planned path.
-
-    A selected artifact stands in for the native `swage` bindings, which
-    are then not imported: the artifact answers with kernels that were
-    compiled ahead of time. Without one, the bindings are imported.
-
-    Raises:
-        RuntimeError: `SWAGE_ARTIFACT_DIR` names an artifact that cannot be
-            used. The bindings are not tried instead.
-    """
-    artifact = _artifact.selected()
-    if artifact is not None:
-        return artifact
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    return native_swage
-
-
-def _compile_once(compile_ptx, module_text, *, module=None, **options):
-    """Compile one kernel at most once per process and return its PTX.
-
-    Args:
-        compile_ptx: Native compile function, looked up by the caller at call
-            time. It is part of the key, so a replaced function is called
-            instead of being served an earlier result.
-        module_text: Semantic module text that identifies the program.
-        module: The same program already parsed in an active MLIR context.
-            When omitted, the text is parsed only on a miss.
-        **options: Keyword arguments of the compile function: the kernel
-            name, the target, the block size, and any other code generation
-            option. Each one is part of the key.
-
-    Returns:
-        The PTX text of the compiled kernel. A failed compile is not kept.
-        A kernel compiled before is returned without taking a lock, so it
-        never waits for another thread's compile. While an artifact is
-        selected, the kernel comes from the artifact and nothing is
-        compiled.
-
-    Raises:
-        RuntimeError: SWAGE_NO_COMPILE=1 is set and this process does not
-            hold the kernel, or the selected artifact cannot answer the
-            request. Nothing is parsed or compiled.
-        ValueError: SWAGE_NO_COMPILE has a value other than 0 or 1.
-    """
-    key = (compile_ptx, module_text, tuple(sorted(options.items())))
-    ptx = _ptx_memo.get(key)
-    if ptx is not None:
-        return ptx
-    with _memo_lock:
-        ptx = _ptx_memo.get(key)
-        if ptx is None:
-            artifact = _artifact.selected()
-            if artifact is not None:
-                ptx = _ptx_memo[key] = artifact.kernel(
-                    compile_ptx.__name__, module_text, options
-                )
-                return ptx
-            if _runtime._switch_on("SWAGE_NO_COMPILE"):
-                raise _compile_refusal(options)
-            if module is None:
-                from mlir_swage import ir
-                from mlir_swage.dialects import swage
-
-                with ir.Context() as context:
-                    swage.register_dialects(context)
-                    _, ptx, _ = compile_ptx(
-                        ir.Module.parse(module_text), **options
-                    )
-            else:
-                _, ptx, _ = compile_ptx(module, **options)
-            _ptx_memo[key] = ptx
-    return ptx
-
-
-def _compile_refusal(options):
-    """Return the error for a kernel this process may not compile.
-
-    The public launch can answer a miss from the persistent cache. This
-    path keeps its kernels in the process only, so a kernel it does not
-    hold stays unavailable while compiling is switched off.
-
-    Args:
-        options: The code generation options of the refused compile.
-    """
-    held_for = " and ".join(
-        f"{label} {options[name]}"
-        for name, label in (("block_size", "block size"), ("target", "target"))
-        if name in options
-    )
-    return _runtime._compile_refusal(
-        options.get("kernel_name"),
-        f"this process does not hold it for {held_for}, and the private "
-        "segmented path has no persistent cache",
-    )
-
-
-def _load_once(driver, ptx, kernel_name):
-    """Load one kernel at most once per CUDA context.
-
-    Args:
-        driver: CUDA driver wrapper that owns the returned handles.
-        ptx: PTX text of the compiled kernel.
-        kernel_name: Name of the function to resolve in the loaded module.
-
-    Returns:
-        The module and function handles, as returned by `driver.load`. A
-        driver that cannot name its current context is never memoized,
-        because a handle is valid only in the context that loaded it. A
-        kernel loaded before is returned without taking a lock.
-
-        The caller must keep the function handle for as long as it may
-        launch it: the memo forgets its oldest kernel at its bound, and a
-        module is unloaded once nothing holds its function handle.
-    """
-    current_context = getattr(driver, "current_context", None)
-    if current_context is None:
-        return driver.load(ptx, kernel_name)
-    key = (current_context(), ptx, kernel_name)
-    loaded = _load_memo.get(driver)
-    if loaded is None:
-        with _memo_lock:
-            loaded = _load_memo.setdefault(
-                driver, _runtime._BoundedCache(_runtime._CACHE_LIMIT)
-            )
-    handles = loaded.get(key)
-    if handles is None:
-        handles = _runtime._load_cold(loaded, key, driver, ptx, kernel_name)
-    return handles
-
-
-# The element types a reduction admits, as the MLIR type of an element.
-_ELEMENTS = ("f32", "f64")
-
-
-def _element_dtype(torch, element):
-    """Return the tensor dtype of one element type of `_ELEMENTS`."""
-    return {"f32": torch.float32, "f64": torch.float64}[element]
-
-
-def _element_of(torch, values):
-    """Return the element type of a values tensor, or None.
-
-    None stands for a dtype that no reduction admits, and for a `values`
-    that is not a tensor. The caller validates both.
-    """
-    dtype = getattr(values, "dtype", None)
-    return {torch.float32: "f32", torch.float64: "f64"}.get(dtype)
-
-
-def _reduction_kernel(kind, element="f32", rank=1):
-    """Return the name of the kernel function of one reduction program.
-
-    The name is `segmented_<kind>[_f64][_r2]`. The f32 programs over
-    rank-one values are unsuffixed, which keeps the names and the program
-    texts they had before f64 and rank two were admitted.
-    """
-    return (
-        f"segmented_{kind}"
-        + ("" if element == "f32" else f"_{element}")
-        + ("" if rank == 1 else "_r2")
-    )
-
-
-def _program_element(module_text):
-    """Return the element type a segment program declares for its values.
-
-    The private prepared and one-shot launches take a program as text. The
-    values and the output a caller passes must have the element type of
-    that program, so it is read from the declaration of the values.
-
-    Raises:
-        ValueError: The text declares no values argument of an element type
-            in `_ELEMENTS`.
-    """
-    match = re.search(
-        r"memref<(?:\?x)+(\w+)> \{swage\.role = #swage\.role<values>\}",
-        module_text,
-    )
-    if match is None or match[1] not in _ELEMENTS:
-        raise ValueError(
-            "the segment program declares no swage.role<values> argument of "
-            "an element type in " + ", ".join(_ELEMENTS)
-        )
-    return match[1]
-
-
-def _reads_extent(module_text):
-    """Return whether a segment program reads the extent of its segment.
-
-    Such a program divides its reduction by the extent, so the merge kernel
-    of its split segments takes the partial range records as a fourth
-    buffer and reads the extent of each segment from them.
-    """
-    return "swage.extent" in module_text
-
-
-def _semantic_module(kind, element="f32", rank=1):
-    """Return the canonical private qualification module.
-
-    A mean is a sum, the extent of the segment, and one division: the
-    reduction kind of its program is `sum`, and the division runs once per
-    segment, after the reduction.
-
-    A program over rank-two values reduces one column of one segment per
-    instance: `swage.segment_id 1` is the column, `make_segment` binds it,
-    and the function declares the number of columns as `feature_count`.
-
-    Args:
-        kind: `"sum"`, `"max"`, `"min"`, or `"mean"`.
-        element: The element type of the values and the result, `"f32"` or
-            `"f64"`.
-        rank: The rank of the values and of the output, one or two.
-    """
-    if kind not in {"sum", "max", "min", "mean"}:
-        raise ValueError(
-            "reduction kind must be 'sum', 'max', 'min', or 'mean'"
-        )
-    if element not in _ELEMENTS:
-        raise ValueError("reduction element type must be 'f32' or 'f64'")
-    if rank not in (1, 2):
-        raise ValueError("reduction rank must be one or two")
-    reduced, epilogue, stored = kind, "", "%result"
-    if kind == "mean":
-        reduced, stored = "sum", "%mean"
-        epilogue = f"""
-    %extent = swage.extent %segment : !swage.segment<{element}>
-    %count = arith.index_cast %extent : index to i32
-    %divisor = arith.sitofp %count : i32 to {element}
-    %mean = arith.divf %result, %divisor : {element}"""
-    if rank == 2:
-        return f"""
-module {{
-  func.func @{_reduction_kernel(kind, element, rank)}(
-      %values: memref<?x?x{element}> {{swage.role = #swage.role<values>}},
-      %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
-      %output: memref<?x?x{element}> {{swage.role = #swage.role<output>}},
-      %value_count: i32 {{swage.role = #swage.role<value_count>}},
-      %segment_count: i32 {{swage.role = #swage.role<segment_count>}},
-      %feature_count: i32 {{swage.role = #swage.role<feature_count>}}) {{
-    %sid = swage.segment_id 0
-    %column = swage.segment_id 1
-    %segment = swage.make_segment %values, %offsets, %sid column(%column)
-        : memref<?x?x{element}>, memref<?xi32>, index, index
-          -> !swage.segment<{element}>
-    %result = swage.reduce %segment kind<{reduced}>
-        : !swage.segment<{element}> -> {element} {{
-    ^bb0(%value: {element}):
-      swage.yield %value : {element}
-    }}{epilogue}
-    memref.store {stored}, %output[%sid, %column] : memref<?x?x{element}>
-    return
-  }}
-}}
-"""
-    return f"""
-module {{
-  func.func @{_reduction_kernel(kind, element)}(
-      %values: memref<?x{element}> {{swage.role = #swage.role<values>}},
-      %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
-      %output: memref<?x{element}> {{swage.role = #swage.role<output>}},
-      %value_count: i32 {{swage.role = #swage.role<value_count>}},
-      %segment_count: i32 {{swage.role = #swage.role<segment_count>}}) {{
-    %sid = swage.segment_id 0
-    %segment = swage.make_segment %values, %offsets, %sid
-        : memref<?x{element}>, memref<?xi32>, index -> !swage.segment<{element}>
-    %result = swage.reduce %segment kind<{reduced}>
-        : !swage.segment<{element}> -> {element} {{
-    ^bb0(%value: {element}):
-      swage.yield %value : {element}
-    }}{epilogue}
-    memref.store {stored}, %output[%sid] : memref<?x{element}>
-    return
-  }}
-}}
-"""
-
-
-def _enqueue_merge(
-    driver,
-    function,
-    block_threads,
-    stream,
-    *,
-    scratch,
-    output,
-    merges,
-    ranges,
-    partial_count,
-    merge_count,
-    segment_count,
-):
-    """Enqueue the merge kernel of the split segments of one batch.
-
-    Args:
-        driver: The CUDA driver wrapper.
-        function: The loaded merge kernel.
-        block_threads: The launch width of the split kernels.
-        stream: The CUDA stream handle to enqueue on.
-        scratch: Pointer of the partial results.
-        output: Pointer of the output.
-        merges: Pointer of the merge records.
-        ranges: Pointer of the partial range records for a program that
-            reads the extent of its segment, and None for any other. The
-            merge kernel of such a program takes the records as a fourth
-            buffer, after the merge records.
-        partial_count: Number of partial tasks.
-        merge_count: Number of split segments.
-        segment_count: Number of segments of the batch.
-    """
-    counts = (partial_count, merge_count, segment_count)
-    if ranges is None:
-        driver.launch_segmented(
-            function,
-            (merge_count,),
-            block_threads,
-            stream,
-            (scratch, output, merges, *counts),
-        )
-    else:
-        driver.launch_segmented_tasks(
-            function,
-            (merge_count,),
-            block_threads,
-            stream,
-            (scratch, output, merges, ranges, *counts),
-        )
-
-
-def _softmax_text(rank):
-    """Return the softmax program over values of rank one or two.
-
-    Over rank-two values a program instance is one segment and one column,
-    as for a reduction: the softmax normalizes each column over the rows of
-    its segment and writes it to the same rows and column of the output.
-    """
-    rows = "memref<?xf32>" if rank == 1 else "memref<?x?xf32>"
-    name = "ragged_softmax" if rank == 1 else "ragged_softmax_r2"
-    features = column = bound = index = ""
-    if rank == 2:
-        features = (
-            ",\n      %feature_count: i32 "
-            "{swage.role = #swage.role<feature_count>}"
-        )
-        column = "\n    %column = swage.segment_id 1"
-        bound, index = " column(%column)", ", index"
-    closing = features + ") {"
-    return f"""
-module {{
-  func.func @{name}(
-      %values: {rows} {{swage.role = #swage.role<values>}},
-      %offsets: memref<?xi32> {{swage.role = #swage.role<offsets>}},
-      %output: {rows} {{swage.role = #swage.role<output>}},
-      %value_count: i32 {{swage.role = #swage.role<value_count>}},
-      %segment_count: i32 {{swage.role = #swage.role<segment_count>}}{closing}
-    %sid = swage.segment_id 0{column}
-    %segment = swage.make_segment %values, %offsets, %sid{bound}
-        : {rows}, memref<?xi32>, index{index} -> !swage.segment<f32>
-    %max = swage.reduce %segment kind<max> : !swage.segment<f32> -> f32 {{
-    ^bb0(%value: f32):
-      swage.yield %value : f32
-    }}
-    %shifted = swage.map %segment captures(%max : f32)
-        : !swage.segment<f32> -> !swage.segment<f32> {{
-    ^bb0(%value: f32, %m: f32):
-      %log2e = arith.constant 1.44269502 : f32
-      %centered = arith.subf %value, %m : f32
-      %scaled = arith.mulf %centered, %log2e : f32
-      %exponential = math.exp2 %scaled : f32
-      swage.yield %exponential : f32
-    }}
-    %total = swage.reduce %shifted kind<sum> : !swage.segment<f32> -> f32 {{
-    ^bb0(%element: f32):
-      swage.yield %element : f32
-    }}
-    swage.map_store %segment, %output captures(%max, %total : f32, f32)
-        : !swage.segment<f32>, {rows} {{
-    ^bb0(%value: f32, %m: f32, %t: f32):
-      %log2e = arith.constant 1.44269502 : f32
-      %centered = arith.subf %value, %m : f32
-      %scaled = arith.mulf %centered, %log2e : f32
-      %exponential = math.exp2 %scaled : f32
-      %normalized = arith.divf %exponential, %t : f32
-      swage.yield %normalized : f32
-    }}
-    return
-  }}
-}}
-"""
-
-
-# The rank-one program, whose text every artifact and digest records.
-_SOFTMAX_MODULE = _softmax_text(1)
-
-_SENTINEL = -1.0
+from . import _cuda_backend, _runtime
+from . import _segmented_plan as _plan
+from . import _segmented_programs as _programs
+from . import _segmented_runtime as _execution
+from . import _segmented_validation as _validation
 
 
 class _PreparedReduction(NamedTuple):
     """Prepared pure and classified launch policies.
 
-    Each callable owns what it launches: it keeps its kernels loaded and its
-    task storage allocated for as long as it is referenced, also after the
-    kernel memo has forgotten them. A CUDA graph that captured a launch
-    borrows both, so the callable must outlive the graph.
+    Each callable owns what it launches: it holds a lease on each of its
+    kernels and keeps its task storage allocated for as long as it is
+    referenced, also after the kernel memo has forgotten them. A CUDA graph
+    that captured a launch keeps the module of the kernel loaded, and
+    borrows the task storage, so the callable must outlive the graph.
 
     A callable raises RuntimeError instead of launching when the current
     CUDA context is not the one it was prepared in.
@@ -976,9 +40,10 @@ class _PreparedReduction(NamedTuple):
 class _PreparedPersistentSum(NamedTuple):
     """One prepared persistent launch and its fixed task metadata.
 
-    `launch` owns its kernel, its task storage, and one queue: it keeps them
-    for as long as it is referenced, and a CUDA graph that captured a launch
-    borrows them, so `launch` must outlive the graph.
+    `launch` owns its kernel lease, its task storage, and one queue: it
+    keeps them for as long as it is referenced, and a CUDA graph that
+    captured a launch borrows the storage, so `launch` must outlive the
+    graph.
 
     One queue admits one launch at a time. `launch` raises RuntimeError
     instead of launching when another thread is inside it, when an earlier
@@ -995,6 +60,80 @@ class _PreparedPersistentSum(NamedTuple):
     cta_tasks: int
     partial_tasks: int
     merge_tasks: int
+
+
+def _native_bindings():
+    """Return the native bindings, which the private-only paths compile with.
+
+    No artifact holds the kernels of these paths, so they never ask one.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    return native_swage
+
+
+def _block_size(torch, block_size):
+    """Validate the block size of a direct kernel and return it.
+
+    Args:
+        torch: The PyTorch module.
+        block_size: Threads per block, or None for the CTA block of the
+            target description.
+
+    Raises:
+        ValueError: The size is not a positive integer, its warp count is
+            not a power of two, or it exceeds the device limit.
+    """
+    if block_size is None:
+        block_size = _execution._target_description().cta_block_threads
+    if type(block_size) is not int or block_size <= 0:
+        raise ValueError("block size must be a positive integer")
+    _validation._validate_warp_count(block_size)
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if block_size > properties.max_threads_per_block:
+        raise ValueError(
+            f"block size {block_size} exceeds device limit "
+            f"{properties.max_threads_per_block}"
+        )
+    return block_size
+
+
+def _launch_one(torch, kernel, module_text, tensors, counts, blocks, named):
+    """Bind, lease, and enqueue one kernel on the current stream.
+
+    Args:
+        torch: The PyTorch module.
+        kernel: The compiled `_Kernel`.
+        module_text: Its program, whose parameter roles order the user
+            values.
+        tensors: The values, the offsets the kernel reads, and the output,
+            then any task tensor the launch reads. The stream keeps each
+            alive until the kernel has run.
+        counts: The counts of the program by role.
+        blocks: Blocks of the one-dimensional grid.
+        named: Derived counts and plan pointers by contract key.
+    """
+    values, offsets, output = tensors[:3]
+    user = _execution._user_arguments(
+        module_text,
+        values=values.data_ptr(),
+        offsets=offsets.data_ptr(),
+        output=output.data_ptr(),
+        **counts,
+    )
+    arguments = _execution._bind(kernel, user, named)
+    _cuda_backend.ensure_context(torch, torch.cuda.current_device())
+    lease = _execution._lease(torch, kernel)
+    stream = torch.cuda.current_stream()
+    try:
+        _execution._enqueue(torch, lease, kernel, arguments, blocks, stream)
+    finally:
+        lease.release()
+    for tensor in tensors:
+        tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
 
 
 def _launch_columns(
@@ -1037,63 +176,44 @@ def _launch_columns(
             `_validate_softmax_tensors` returns it for rank one.
     """
     torch = _runtime._import_torch()
-    value_count, segment_count, host_offsets = _validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         values,
         offsets,
         output,
         validate_offsets,
         int64_offsets=int64_offsets,
-        element=_program_element(module_text),
+        element=_programs._program_element(module_text),
         rank=2,
     )
     if clamp_rows_to_output:
         value_count = min(value_count, output.shape[0])
     feature_count = values.shape[1]
-    if block_size is None:
-        block_size = _target_description().cta_block_threads
-    if type(block_size) is not int or block_size <= 0:
-        raise ValueError("block size must be a positive integer")
-    _validate_warp_count(block_size)
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if block_size > properties.max_threads_per_block:
-        raise ValueError(
-            f"block size {block_size} exceeds device limit "
-            f"{properties.max_threads_per_block}"
-        )
+    block_size = _block_size(torch, block_size)
     # Without a segment or without a column there is nothing to write.
     if segment_count == 0 or feature_count == 0:
         return None
 
-    native_swage = _native_swage()
-    target = _target(torch, torch.cuda.current_device())
-    ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
+    kernel = _execution._compile_once(
+        _execution._native_swage()._compile_segmented_reduction_ptx,
         module_text,
         kernel_name=kernel_name,
         block_size=block_size,
-        target=target,
+        target=_execution._target(torch, torch.cuda.current_device()),
     )
-    driver = _runtime._get_driver()
-    _, function = _load_once(driver, ptx, kernel_name)
-    kernel_offsets = _kernel_offsets(torch, offsets, host_offsets)
-    stream = torch.cuda.current_stream()
-    driver.launch_segmented(
-        function,
-        (segment_count,),
-        block_size,
-        stream.cuda_stream,
-        (
-            values.data_ptr(),
-            kernel_offsets.data_ptr(),
-            output.data_ptr(),
-            value_count,
-            segment_count,
-            feature_count,
-        ),
+    kernel_offsets = _validation._kernel_offsets(torch, offsets, host_offsets)
+    _launch_one(
+        torch,
+        kernel,
+        module_text,
+        (values, kernel_offsets, output),
+        {
+            "value_count": value_count,
+            "segment_count": segment_count,
+            "feature_count": feature_count,
+        },
+        segment_count,
+        {},
     )
-    for tensor in (values, kernel_offsets, output):
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
     return None
 
 
@@ -1107,67 +227,41 @@ def launch_gpu(values, offsets, output, kind, block_size=None):
     values run the column kernel of the kind, one block per segment.
     """
     torch = _runtime._import_torch()
-    element = _element_of(torch, values) or "f32"
+    element = _programs._element_of(torch, values) or "f32"
     if getattr(values, "ndim", 1) == 2:
         return _launch_columns(
             values,
             offsets,
             output,
-            module_text=_semantic_module(kind, element, 2),
-            kernel_name=_reduction_kernel(kind, element, 2),
-            validate_offsets=_validate_offsets,
+            module_text=_programs._semantic_module(kind, element, 2),
+            kernel_name=_programs._reduction_kernel(kind, element, 2),
+            validate_offsets=_validation._validate_offsets,
             block_size=block_size,
         )
-    value_count, segment_count, _ = _validate_shapes(
-        values, offsets, output, _validate_offsets, element=element
+    value_count, segment_count, _ = _validation._validate_shapes(
+        values, offsets, output, _validation._validate_offsets, element=element
     )
-    if block_size is None:
-        block_size = _target_description().cta_block_threads
-    if type(block_size) is not int or block_size <= 0:
-        raise ValueError("block size must be a positive integer")
-    _validate_warp_count(block_size)
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if block_size > properties.max_threads_per_block:
-        raise ValueError(
-            f"block size {block_size} exceeds device limit "
-            f"{properties.max_threads_per_block}"
-        )
+    block_size = _block_size(torch, block_size)
     if segment_count == 0:
         return None
 
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    target = _target(torch, torch.cuda.current_device())
-    kernel_name = _reduction_kernel(kind, element)
-    ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
-        _semantic_module(kind, element),
-        kernel_name=kernel_name,
+    module_text = _programs._semantic_module(kind, element)
+    kernel = _execution._compile_once(
+        _native_bindings()._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name=_programs._reduction_kernel(kind, element),
         block_size=block_size,
-        target=target,
+        target=_execution._target(torch, torch.cuda.current_device()),
     )
-
-    driver = _runtime._get_driver()
-    _, function = _load_once(driver, ptx, kernel_name)
-    stream = torch.cuda.current_stream()
-    driver.launch_segmented(
-        function,
-        (segment_count,),
-        block_size,
-        stream.cuda_stream,
-        (
-            values.data_ptr(),
-            offsets.data_ptr(),
-            output.data_ptr(),
-            value_count,
-            segment_count,
-        ),
+    _launch_one(
+        torch,
+        kernel,
+        module_text,
+        (values, offsets, output),
+        {"value_count": value_count, "segment_count": segment_count},
+        segment_count,
+        {},
     )
-    for tensor in (values, offsets, output):
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
     return None
 
 
@@ -1176,7 +270,9 @@ def _launch_segmented_sum_tasks(
 ):
     """Launch one internal identity-sum task list with a warp or CTA block."""
     torch = _runtime._import_torch()
-    value_count, segment_count = _validate_tensors(values, offsets, output)
+    value_count, segment_count = _validation._validate_tensors(
+        values, offsets, output
+    )
     if not isinstance(task_ids, torch.Tensor):
         raise TypeError("task_ids must be a torch.Tensor")
     if task_ids.dtype != torch.int32:
@@ -1185,23 +281,23 @@ def _launch_segmented_sum_tasks(
         raise TypeError("task_ids must have rank one")
     if not task_ids.is_contiguous():
         raise ValueError("task_ids must be contiguous")
-    _validate_storage("task_ids", task_ids)
+    _validation._validate_storage("task_ids", task_ids)
     # A kernel loads a task ID after other CTAs have stored through the
     # output, so IDs that share its memory are read after they were
     # overwritten.
-    _validate_disjoint("task_ids", task_ids, output)
+    _validation._validate_disjoint("task_ids", task_ids, output)
     if task_ids.device.type != "cuda":
         raise TypeError("task_ids must be a CUDA tensor")
     if task_ids.device.index != torch.cuda.current_device():
         raise ValueError("task_ids must be on the current CUDA device")
     host_task_ids = task_ids.detach().cpu().numpy()
     task_count = len(host_task_ids)
-    _validate_counts(value_count, task_count)
+    _validation._validate_counts(value_count, task_count)
     if task_count and not (
         0 <= host_task_ids.min() and host_task_ids.max() < segment_count
     ):
         raise ValueError("task_ids must contain valid segment IDs")
-    blocks = _target_description()
+    blocks = _execution._target_description()
     if block_size not in {blocks.subgroup_width, blocks.cta_block_threads}:
         raise ValueError(
             f"task block size must be {blocks.subgroup_width} or "
@@ -1216,42 +312,24 @@ def _launch_segmented_sum_tasks(
     if task_count == 0:
         return None
 
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    target = _target(torch, torch.cuda.current_device())
-    kernel_name = "segmented_sum"
-    ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
-        _semantic_module("sum"),
-        kernel_name=kernel_name,
+    module_text = _programs._semantic_module("sum")
+    kernel = _execution._compile_once(
+        _native_bindings()._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name="segmented_sum",
         block_size=block_size,
-        target=target,
+        target=_execution._target(torch, torch.cuda.current_device()),
         use_task_ids=True,
     )
-
-    driver = _runtime._get_driver()
-    _, function = _load_once(driver, ptx, kernel_name)
-    stream = torch.cuda.current_stream()
-    driver.launch_segmented_tasks(
-        function,
-        (task_count,),
-        block_size,
-        stream.cuda_stream,
-        (
-            values.data_ptr(),
-            offsets.data_ptr(),
-            output.data_ptr(),
-            task_ids.data_ptr(),
-            value_count,
-            task_count,
-            segment_count,
-        ),
+    _launch_one(
+        torch,
+        kernel,
+        module_text,
+        (values, offsets, output, task_ids),
+        {"value_count": value_count, "segment_count": segment_count},
+        task_count,
+        {"task_ids": task_ids.data_ptr(), "task_count": task_count},
     )
-    for tensor in (values, offsets, output, task_ids):
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
     return None
 
 
@@ -1268,7 +346,7 @@ def _prepare_planned_sum(
         values,
         offsets,
         output,
-        module_text=_semantic_module("sum"),
+        module_text=_programs._semantic_module("sum"),
         kernel_name="segmented_sum",
         warp_max_elements=warp_max_elements,
         cta_chunk_elements=cta_chunk_elements,
@@ -1276,213 +354,23 @@ def _prepare_planned_sum(
     )
 
 
-# The element programs of a batch that selection may send to the pure CTA
-# kernel cost at most this many relative work units, as the native estimate
-# counts them.
-_ELEMENT_WORK_BUDGET = 32
+def _prepared_stream(torch, device_index, prepared_context, label):
+    """Return the current stream of a prepared launch, or refuse to launch.
 
-
-def _has_small_element_program(module):
-    """Conservatively bound work in already-admitted element regions.
-
-    The native estimate holds the weight of each operation. It gives no
-    estimate for a region that holds an operation without a weight, and
-    such a program is not small.
-    """
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    work = native_swage._element_work(module)
-    return work is not None and work <= _ELEMENT_WORK_BUDGET
-
-
-# What a preparation needs to know about a program, none of which depends on
-# the offsets. `_module_memo` keeps one parsed module per semantic module
-# text with the result of inspecting its element program. `_admitted` keeps
-# that result per program text and pair of planning limits that planning
-# admission has accepted, so admission runs once per program and limits and
-# a later preparation only classifies its offsets.
-#
-# Threads share a parsed module, which is safe because planning admission
-# holds the GIL and leaves the module unchanged. Compiles do not use these
-# modules: on a miss `_compile_once` parses the text in a context of its
-# own, so a compile never runs on a context shared here.
-#
-# Both memos are bounded like the kernel memos: each keeps
-# `_runtime._CACHE_LIMIT` entries and then forgets its oldest, which is
-# parsed or admitted again on its next use. A hit takes no lock.
-_module_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
-_admitted = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
-
-
-def _parsed_module(module_text):
-    """Parse and inspect one semantic module at most once per process.
-
-    Args:
-        module_text: Semantic module text that identifies the program.
-
-    Returns:
-        The module, parsed in a context that it keeps alive, and whether
-        `_has_small_element_program` holds for it. A text that does not
-        parse is not kept.
-    """
-    entry = _module_memo.get(module_text)
-    if entry is None:
-        from mlir_swage import ir
-        from mlir_swage.dialects import swage
-
-        context = ir.Context()
-        swage.register_dialects(context)
-        module = ir.Module.parse(module_text, context=context)
-        entry = (module, _has_small_element_program(module))
-        with _memo_lock:
-            _module_memo[module_text] = entry
-    return entry
-
-
-def _admit_program(
-    module_text, kernel_name, warp_max_elements, cta_chunk_elements
-):
-    """Admit one program for planning under one pair of limits, once.
-
-    Planning admission decides whether a program can be classified and
-    whether the limits are valid. Neither depends on the offsets, so
-    admission runs at the first preparation of a program with a pair of
-    limits, on a layout without segments. Later preparations classify their
-    offsets without the module.
-
-    Args:
-        module_text: Semantic module text that identifies the program.
-        kernel_name: Name of the segment function in the module to admit.
-        warp_max_elements: Largest segment assigned to direct warp work.
-        cta_chunk_elements: Largest input range assigned to one CTA task.
-
-    Returns:
-        Whether `_has_small_element_program` holds for the program.
+    The kernels are loaded in one CUDA context and are not valid in
+    another, also on the same device.
 
     Raises:
-        ValueError: Planning admission rejects the program or the limits. A
-            rejection is not kept, so every preparation raises it again.
-        RuntimeError: The selected artifact does not hold the program
-            under these limits.
+        ValueError: The current device is not the prepared one.
+        RuntimeError: The current CUDA context is not the prepared one.
     """
-    artifact = _artifact.selected()
-    if artifact is not None:
-        # The build host ran planning admission and recorded its answer.
-        return artifact.admit(
-            module_text, warp_max_elements, cta_chunk_elements
+    if torch.cuda.current_device() != device_index:
+        raise ValueError(f"prepared {label} must launch on its prepared device")
+    if _cuda_backend.ensure_context(torch, device_index) != prepared_context:
+        raise RuntimeError(
+            f"prepared {label} must launch in its prepared CUDA context"
         )
-    key = (module_text, kernel_name, warp_max_elements, cta_chunk_elements)
-    small_element_program = _admitted.get(key)
-    if small_element_program is None:
-        import numpy
-        from mlir_swage._mlir_libs._swageDialectsNanobind import (
-            swage as native_swage,
-        )
-
-        module, small_element_program = _parsed_module(module_text)
-        native_swage._materialize_segmented_plan(
-            module,
-            kernel_name,
-            offsets=numpy.zeros(1, dtype=numpy.int32),
-            value_count=0,
-            segment_count=0,
-            warp_max_elements=warp_max_elements,
-            cta_chunk_elements=cta_chunk_elements,
-        )
-        with _memo_lock:
-            _admitted[key] = small_element_program
-    return small_element_program
-
-
-def _classifying_validator(warp_max_elements, cta_chunk_elements):
-    """Return an offsets validator that classifies the offsets it admits.
-
-    The native classifier checks everything `_validate_offsets` checks about
-    a host int32 array, so a preparation walks valid offsets once, there,
-    instead of once to validate and once to classify. The classifier runs at
-    the point where `_validate_shapes` validates the offsets, which keeps
-    the order of every error.
-
-    When the classifier refuses, `_validate_offsets` runs and raises its own
-    message for offsets it refuses too. Offsets it admits were refused for
-    the planning limits or for the size of the plan; the classification is
-    then left out, and the caller classifies again after it has admitted
-    the program, which reports the limits first.
-
-    Args:
-        warp_max_elements: Largest segment assigned to direct warp work.
-        cta_chunk_elements: Largest input range assigned to one CTA task.
-
-    Returns:
-        The validator, with the signature of `_validate_offsets`, and a list
-        that holds the result of `_classify_segments` once the validator
-        has admitted and classified the offsets.
-    """
-    classification = []
-
-    def validate(host_offsets, value_count, output_count):
-        native_swage = _native_swage()
-        segment_count = len(host_offsets) - 1
-        try:
-            classification.append(
-                native_swage._classify_segments(
-                    host_offsets,
-                    value_count=value_count,
-                    segment_count=segment_count,
-                    warp_max_elements=warp_max_elements,
-                    cta_chunk_elements=cta_chunk_elements,
-                )
-            )
-        except (TypeError, ValueError):
-            return _validate_offsets(host_offsets, value_count, output_count)
-        if type(output_count) is not int or output_count < segment_count:
-            classification.clear()
-            return _validate_offsets(host_offsets, value_count, output_count)
-        return segment_count
-
-    return validate, classification
-
-
-def _selects_direct_cta(
-    torch,
-    device,
-    host_offsets,
-    segment_count,
-    merge_count,
-    cta_chunk_elements,
-    small_element_program,
-):
-    """Return whether a batch runs the pure CTA kernel instead of splitting.
-
-    The prepared path and the one-shot path both ask here, so a batch gets
-    the same schedule, and a sum the same bits, on either.
-
-    Args:
-        torch: The PyTorch module.
-        device: CUDA device of the batch.
-        host_offsets: The validated offsets on the host.
-        segment_count: Number of segments of the batch.
-        merge_count: Number of merge tasks of its classification.
-        cta_chunk_elements: Largest input range assigned to one CTA task.
-        small_element_program: What `_admit_program` returned.
-    """
-    # ponytail: a measured two-chunk rule, not a general cost model.
-    # Retain splitting for sparse batches, larger tails, or mixed lengths.
-    # Every segment is split when the merge count equals the segment count,
-    # so the longest segment is read only then.
-    return bool(
-        segment_count > 0
-        and cta_chunk_elements
-        == _target_description().default_cta_chunk_elements
-        and merge_count == segment_count
-        and int((host_offsets[1:] - host_offsets[:-1]).max())
-        <= 2 * cta_chunk_elements
-        and segment_count
-        >= torch.cuda.get_device_properties(device).multi_processor_count
-        and small_element_program
-    )
+    return torch.cuda.current_stream()
 
 
 def _prepare_planned_reduction(
@@ -1532,47 +420,35 @@ def _prepare_planned_reduction(
     if type(select_schedule) is not bool:
         raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
-    warp_max_elements, cta_chunk_elements = _planning_limits(
+    warp_max_elements, cta_chunk_elements = _plan._planning_limits(
         warp_max_elements, cta_chunk_elements
     )
-    blocks = _target_description()
+    blocks = _execution._target_description()
     # A fused block serves one warp task per subgroup.
     warp_slots = blocks.cta_block_threads // blocks.subgroup_width
-    validate, classification = _classifying_validator(
+    validate, found = _plan._classifying_validator(
         warp_max_elements, cta_chunk_elements
     )
-    value_count, segment_count, host_offsets = _validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         values,
         offsets,
         output,
         validate,
-        element=_program_element(module_text),
+        element=_programs._program_element(module_text),
     )
-    offsets_version = _offsets_version(offsets)
+    offsets_version = _validation._offsets_version(offsets)
     # A launch advances the output version, which the offsets may share.
-    version_step = _output_version_step(torch, offsets, output)
+    version_step = _validation._output_version_step(torch, offsets, output)
     offsets_version += version_step
     # Each launch builds this record again and compares the two. The record
-    # also carries the data pointers that the launch passes to the kernel.
-    prepared_storage = _storage_binding(values, offsets, output)
+    # also carries the data pointers that the kernels were bound to.
+    prepared_storage = _validation._storage_binding(values, offsets, output)
 
-    native_swage = _native_swage()
-    target = _target(torch, torch.cuda.current_device())
-    small_element_program = _admit_program(
+    native_swage = _execution._native_swage()
+    target = _execution._target(torch, torch.cuda.current_device())
+    small_element_program = _plan._admit_program(
         module_text, kernel_name, warp_max_elements, cta_chunk_elements
     )
-    if not classification:
-        # The classifier refused offsets that are valid. The program and
-        # the limits are admitted, so this raises its reason.
-        classification.append(
-            native_swage._classify_segments(
-                host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
-        )
     # One buffer holds the warp ids, the CTA ids, the partial ranges, the
     # merge records, and the merge of every partial task, in that order.
     (
@@ -1581,9 +457,16 @@ def _prepare_planned_reduction(
         direct_cta_count,
         partial_count,
         merge_count,
-    ) = classification[0]
+    ) = _plan._classification(
+        found,
+        host_offsets,
+        value_count=value_count,
+        segment_count=segment_count,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+    )
     direct_count = direct_warp_count + direct_cta_count
-    use_direct_cta = select_schedule and _selects_direct_cta(
+    use_direct_cta = select_schedule and _plan._selects_direct_cta(
         torch,
         values.device,
         host_offsets,
@@ -1592,94 +475,110 @@ def _prepare_planned_reduction(
         cta_chunk_elements,
         small_element_program,
     )
+
+    def unchanged():
+        _validation._require_unchanged_offsets(offsets, offsets_version)
+        storage = _validation._storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _validation._refuse_rebound_storage(storage, prepared_storage)
+
     if segment_count == 0:
 
         def no_launch():
-            _require_unchanged_offsets(offsets, offsets_version)
-            storage = _storage_binding(values, offsets, output)
-            if storage != prepared_storage:
-                _refuse_rebound_storage(storage, prepared_storage)
+            unchanged()
             return None
 
         return _PreparedReduction(no_launch, no_launch, no_launch)
-    warp_ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
-        module_text,
-        kernel_name=kernel_name,
-        block_size=blocks.subgroup_width,
-        target=target,
-        use_task_ids=True,
-    )
-    cta_ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
-        module_text,
-        kernel_name=kernel_name,
-        block_size=blocks.cta_block_threads,
-        target=target,
-        use_task_ids=True,
-    )
-    mixed_ptx = None
-    if direct_count:
-        mixed_ptx = _compile_once(
-            native_swage._compile_fused_segmented_reduction_ptx,
+
+    def compile_kernel(compiler, **options):
+        return _execution._compile_once(
+            getattr(native_swage, compiler),
             module_text,
             kernel_name=kernel_name,
             target=target,
-        )
-    partial_ptx = None
-    merge_ptx = None
-    if partial_count and not use_direct_cta:
-        partial_ptx = _compile_once(
-            native_swage._compile_split_partial_reduction_ptx,
-            module_text,
-            kernel_name=kernel_name,
-            target=target,
-        )
-        merge_ptx = _compile_once(
-            native_swage._compile_split_merge_reduction_ptx,
-            module_text,
-            kernel_name=kernel_name,
-            target=target,
+            **options,
         )
 
-    driver = _runtime._get_driver()
-    _, warp_function = _load_once(driver, warp_ptx, kernel_name)
-    _, cta_function = _load_once(driver, cta_ptx, kernel_name)
-    mixed_function = None
-    if mixed_ptx is not None:
-        _, mixed_function = _load_once(driver, mixed_ptx, kernel_name)
-    partial_function = None
-    merge_function = None
-    if partial_ptx is not None:
-        _, partial_function = _load_once(
-            driver, partial_ptx, f"{kernel_name}__partial"
-        )
-        _, merge_function = _load_once(
-            driver, merge_ptx, f"{kernel_name}__merge"
-        )
+    warp_kernel = compile_kernel(
+        "_compile_segmented_reduction_ptx",
+        block_size=blocks.subgroup_width,
+        use_task_ids=True,
+    )
+    cta_kernel = compile_kernel(
+        "_compile_segmented_reduction_ptx",
+        block_size=blocks.cta_block_threads,
+        use_task_ids=True,
+    )
+    mixed_kernel = None
+    if direct_count:
+        mixed_kernel = compile_kernel("_compile_fused_segmented_reduction_ptx")
+    split = partial_count and not use_direct_cta
+    if split:
+        partial_kernel = compile_kernel("_compile_split_partial_reduction_ptx")
+        merge_kernel = compile_kernel("_compile_split_merge_reduction_ptx")
+
     device = offsets.device
     device_index = device.index
-    reads_extent = _reads_extent(module_text)
-    all_tasks = _identity_ids(torch, device, segment_count)
+    prepared_context = _cuda_backend.ensure_context(torch, device_index)
+    warp_lease = _execution._lease(torch, warp_kernel)
+    cta_lease = _execution._lease(torch, cta_kernel)
+    if mixed_kernel is not None:
+        mixed_lease = _execution._lease(torch, mixed_kernel)
+    if split:
+        partial_lease = _execution._lease(torch, partial_kernel)
+        merge_lease = _execution._lease(torch, merge_kernel)
+    all_tasks = _plan._identity_ids(torch, device, segment_count)
     # One upload carries every record the mixed policy launches. The fused
     # kernel reads the warp ids and then the CTA ids at the start of the
     # buffer; the partial ranges and the merge records follow them. The
     # direct-CTA selection launches none of them: every segment is split
     # then, so there is no direct id either.
-    task_records = None
-    mixed_pointer = partial_pointer = merge_pointer = scratch = None
+    task_records = scratch = None
+    named = {}
     if len(records) and not use_direct_cta:
         task_records = torch.tensor(records, dtype=torch.int32, device=device)
         mixed_pointer = task_records.data_ptr()
         partial_pointer = mixed_pointer + 4 * direct_count
-        merge_pointer = partial_pointer + 8 * partial_count
+        named = {
+            "task_ids": mixed_pointer,
+            "warp_task_count": direct_warp_count,
+            "cta_task_count": direct_cta_count,
+            "partial_ranges": partial_pointer,
+            "merge_records": partial_pointer + 8 * partial_count,
+            "partial_count": partial_count,
+            "merge_count": merge_count,
+        }
         if partial_count:
             # One partial result per chunk, of the element type.
             scratch = torch.empty(
                 partial_count, dtype=values.dtype, device=device
             )
+            named["scratch"] = scratch.data_ptr()
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream(device_index))
+
+    values_pointer, offsets_pointer, output_pointer = prepared_storage[::3]
+    user = _execution._user_arguments(
+        module_text,
+        values=values_pointer,
+        offsets=offsets_pointer,
+        output=output_pointer,
+        value_count=value_count,
+        segment_count=segment_count,
+    )
+    # One task per segment, in segment order: the task list is the first
+    # `segment_count` ids of `all_tasks`.
+    every_segment = {
+        "task_ids": all_tasks.data_ptr(),
+        "task_count": segment_count,
+    }
+    warp_arguments = _execution._bind(warp_kernel, user, every_segment)
+    cta_arguments = _execution._bind(cta_kernel, user, every_segment)
+    if mixed_kernel is not None:
+        mixed_arguments = _execution._bind(mixed_kernel, user, named)
+    if split:
+        partial_arguments = _execution._bind(partial_kernel, user, named)
+        merge_arguments = _execution._bind(merge_kernel, user, named)
 
     tasks_ready_complete = False
 
@@ -1704,130 +603,62 @@ def _prepare_planned_reduction(
         else:
             stream.wait_event(tasks_ready)
 
-    def submit(function, block_size, stream, storage):
-        # One task per segment, in segment order: the task list is the
-        # first `segment_count` ids of `all_tasks`.
+    def submit(lease, kernel, arguments):
+        unchanged()
+        stream = _prepared_stream(
+            torch, device_index, prepared_context, "reduction"
+        )
         wait_for_tasks(stream)
-        driver.launch_segmented_tasks(
-            function,
-            (segment_count,),
-            block_size,
-            stream.cuda_stream,
-            (
-                storage[0],
-                storage[3],
-                storage[6],
-                all_tasks.data_ptr(),
-                value_count,
-                segment_count,
-                segment_count,
-            ),
+        _execution._enqueue(
+            torch, lease, kernel, arguments, segment_count, stream
         )
         for tensor in (values, offsets, output, all_tasks):
             tensor.record_stream(stream)
         wrote_output()
         return None
 
-    current_context = getattr(driver, "current_context", None)
-    prepared_context = None if current_context is None else current_context()
-
-    def current_stream():
-        if torch.cuda.current_device() != device_index:
-            raise ValueError(
-                "prepared reduction must launch on its prepared device"
-            )
-        # The kernels are loaded in one CUDA context and are not valid in
-        # another, also on the same device.
-        if current_context is not None:
-            try:
-                context = current_context()
-            except RuntimeError:
-                context = _runtime._make_context_current(
-                    torch, current_context, device_index
-                )
-            if context != prepared_context:
-                raise RuntimeError(
-                    "prepared reduction must launch in its prepared CUDA "
-                    "context"
-                )
-        return torch.cuda.current_stream()
-
     def warp():
-        _require_unchanged_offsets(offsets, offsets_version)
-        storage = _storage_binding(values, offsets, output)
-        if storage != prepared_storage:
-            _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            warp_function, blocks.subgroup_width, current_stream(), storage
-        )
+        return submit(warp_lease, warp_kernel, warp_arguments)
 
     def cta():
-        _require_unchanged_offsets(offsets, offsets_version)
-        storage = _storage_binding(values, offsets, output)
-        if storage != prepared_storage:
-            _refuse_rebound_storage(storage, prepared_storage)
-        return submit(
-            cta_function, blocks.cta_block_threads, current_stream(), storage
-        )
+        return submit(cta_lease, cta_kernel, cta_arguments)
 
     def mixed():
-        _require_unchanged_offsets(offsets, offsets_version)
-        storage = _storage_binding(values, offsets, output)
-        if storage != prepared_storage:
-            _refuse_rebound_storage(storage, prepared_storage)
-        values_pointer, offsets_pointer, output_pointer = storage[::3]
-        stream = current_stream()
+        unchanged()
+        stream = _prepared_stream(
+            torch, device_index, prepared_context, "reduction"
+        )
         wait_for_tasks(stream)
         if direct_count:
-            driver.launch_segmented_mixed(
-                mixed_function,
-                (
-                    (direct_warp_count + warp_slots - 1) // warp_slots
-                    + direct_cta_count,
-                ),
-                blocks.cta_block_threads,
-                stream.cuda_stream,
-                (
-                    values_pointer,
-                    offsets_pointer,
-                    output_pointer,
-                    mixed_pointer,
-                    value_count,
-                    direct_warp_count,
-                    direct_cta_count,
-                    segment_count,
-                ),
+            _execution._enqueue(
+                torch,
+                mixed_lease,
+                mixed_kernel,
+                mixed_arguments,
+                (direct_warp_count + warp_slots - 1) // warp_slots
+                + direct_cta_count,
+                stream,
             )
             for tensor in (values, offsets, output, task_records):
                 tensor.record_stream(stream)
         if partial_count:
-            driver.launch_segmented(
-                partial_function,
-                (partial_count,),
-                blocks.split_block_threads,
-                stream.cuda_stream,
-                (
-                    values_pointer,
-                    partial_pointer,
-                    scratch.data_ptr(),
-                    value_count,
-                    partial_count,
-                ),
+            _execution._enqueue(
+                torch,
+                partial_lease,
+                partial_kernel,
+                partial_arguments,
+                partial_count,
+                stream,
             )
             for tensor in (values, offsets, task_records, scratch):
                 tensor.record_stream(stream)
-            _enqueue_merge(
-                driver,
-                merge_function,
-                blocks.split_block_threads,
-                stream.cuda_stream,
-                scratch=scratch.data_ptr(),
-                output=output_pointer,
-                merges=merge_pointer,
-                ranges=partial_pointer if reads_extent else None,
-                partial_count=partial_count,
-                merge_count=merge_count,
-                segment_count=segment_count,
+            _execution._enqueue(
+                torch,
+                merge_lease,
+                merge_kernel,
+                merge_arguments,
+                merge_count,
+                stream,
             )
             for tensor in (offsets, output, task_records, scratch):
                 tensor.record_stream(stream)
@@ -1889,51 +720,53 @@ def _launch_planned_reduction(
         enqueue; a batch without segments enqueues nothing and leaves it.
     """
     torch = _runtime._import_torch()
-    warp_max_elements, cta_chunk_elements = _planning_limits(None, None)
-    blocks = _target_description()
-    validate, classification = _classifying_validator(
+    warp_max_elements, cta_chunk_elements = _plan._planning_limits(None, None)
+    blocks = _execution._target_description()
+    validate, found = _plan._classifying_validator(
         warp_max_elements, cta_chunk_elements
     )
-    value_count, segment_count, host_offsets = _validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         values,
         offsets,
         output,
         validate,
         int64_offsets=True,
-        element=_program_element(module_text),
+        element=_programs._program_element(module_text),
     )
-    native_swage = _native_swage()
+    native_swage = _execution._native_swage()
     device = offsets.device
-    target = _target(torch, device.index)
-    small_element_program = _admit_program(
+    target = _execution._target(torch, device.index)
+    small_element_program = _plan._admit_program(
         module_text, kernel_name, warp_max_elements, cta_chunk_elements
     )
-    if not classification:
-        # The classifier refused offsets that are valid. The program and
-        # the limits are admitted, so this raises its reason.
-        classification.append(
-            native_swage._classify_segments(
-                host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
-        )
     (
         records,
         direct_warp_count,
         direct_cta_count,
         partial_count,
         merge_count,
-    ) = classification[0]
+    ) = _plan._classification(
+        found,
+        host_offsets,
+        value_count=value_count,
+        segment_count=segment_count,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+    )
     if segment_count == 0:
         return None
-    driver = _runtime._get_driver()
-    values_pointer = values.data_ptr()
-    output_pointer = output.data_ptr()
+
+    def compile_kernel(compiler, **options):
+        return _execution._compile_once(
+            getattr(native_swage, compiler),
+            module_text,
+            kernel_name=kernel_name,
+            target=target,
+            **options,
+        )
+
     narrowed = offsets.dtype != torch.int32
-    if _selects_direct_cta(
+    if _plan._selects_direct_cta(
         torch,
         device,
         host_offsets,
@@ -1943,66 +776,58 @@ def _launch_planned_reduction(
         small_element_program,
     ):
         # One task per segment, in segment order, on the pure CTA kernel.
-        cta_ptx = _compile_once(
-            native_swage._compile_segmented_reduction_ptx,
-            module_text,
-            kernel_name=kernel_name,
+        cta_kernel = compile_kernel(
+            "_compile_segmented_reduction_ptx",
             block_size=blocks.cta_block_threads,
-            target=target,
             use_task_ids=True,
         )
-        _, cta_function = _load_once(driver, cta_ptx, kernel_name)
-        all_tasks = _identity_ids(torch, device, segment_count)
-        kernel_offsets = _kernel_offsets(torch, offsets, host_offsets)
-        stream = torch.cuda.current_stream()
-        driver.launch_segmented_tasks(
-            cta_function,
-            (segment_count,),
-            blocks.cta_block_threads,
-            stream.cuda_stream,
+        all_tasks = _plan._identity_ids(torch, device, segment_count)
+        _launch_one(
+            torch,
+            cta_kernel,
+            module_text,
             (
-                values_pointer,
-                kernel_offsets.data_ptr(),
-                output_pointer,
-                all_tasks.data_ptr(),
-                value_count,
-                segment_count,
-                segment_count,
+                values,
+                _validation._kernel_offsets(torch, offsets, host_offsets),
+                output,
+                all_tasks,
             ),
+            {"value_count": value_count, "segment_count": segment_count},
+            segment_count,
+            {"task_ids": all_tasks.data_ptr(), "task_count": segment_count},
         )
-        retained = (values, kernel_offsets, output, all_tasks)
-    else:
-        # Every kernel is held before anything is uploaded or enqueued, so
-        # a refused compile leaves the device untouched.
-        direct_count = direct_warp_count + direct_cta_count
-        mixed_function = partial_function = merge_function = None
-        if direct_count:
-            mixed_ptx = _compile_once(
-                native_swage._compile_fused_segmented_reduction_ptx,
-                module_text,
-                kernel_name=kernel_name,
-                target=target,
+        return None
+
+    # Every kernel is held before anything is uploaded or enqueued, so a
+    # refused compile leaves the device untouched.
+    direct_count = direct_warp_count + direct_cta_count
+    launched = []
+    if direct_count:
+        # A fused block serves one warp task per subgroup.
+        warp_slots = blocks.cta_block_threads // blocks.subgroup_width
+        launched.append(
+            (
+                compile_kernel("_compile_fused_segmented_reduction_ptx"),
+                (direct_warp_count + warp_slots - 1) // warp_slots
+                + direct_cta_count,
             )
-            _, mixed_function = _load_once(driver, mixed_ptx, kernel_name)
-        if partial_count:
-            partial_ptx = _compile_once(
-                native_swage._compile_split_partial_reduction_ptx,
-                module_text,
-                kernel_name=kernel_name,
-                target=target,
+        )
+    if partial_count:
+        launched.append(
+            (
+                compile_kernel("_compile_split_partial_reduction_ptx"),
+                partial_count,
             )
-            merge_ptx = _compile_once(
-                native_swage._compile_split_merge_reduction_ptx,
-                module_text,
-                kernel_name=kernel_name,
-                target=target,
+        )
+        launched.append(
+            (
+                compile_kernel("_compile_split_merge_reduction_ptx"),
+                merge_count,
             )
-            _, partial_function = _load_once(
-                driver, partial_ptx, f"{kernel_name}__partial"
-            )
-            _, merge_function = _load_once(
-                driver, merge_ptx, f"{kernel_name}__merge"
-            )
+        )
+    _cuda_backend.ensure_context(torch, device.index)
+    leases = [_execution._lease(torch, kernel) for kernel, _ in launched]
+    try:
         # One upload carries every record: the warp ids, the CTA ids, the
         # partial ranges, and the merge records, in that order. The private
         # copy of int64 offsets follows them in the same tensor.
@@ -2016,69 +841,44 @@ def _launch_planned_reduction(
         task_records = torch.tensor(records, dtype=torch.int32, device=device)
         mixed_pointer = task_records.data_ptr()
         partial_pointer = mixed_pointer + 4 * direct_count
-        merge_pointer = partial_pointer + 8 * partial_count
         if narrowed:
             offsets_pointer = mixed_pointer + 4 * record_words
             retained = (values, output, task_records)
         else:
             offsets_pointer = offsets.data_ptr()
             retained = (values, offsets, output, task_records)
-        stream = torch.cuda.current_stream()
-        if direct_count:
-            # A fused block serves one warp task per subgroup.
-            warp_slots = blocks.cta_block_threads // blocks.subgroup_width
-            driver.launch_segmented_mixed(
-                mixed_function,
-                (
-                    (direct_warp_count + warp_slots - 1) // warp_slots
-                    + direct_cta_count,
-                ),
-                blocks.cta_block_threads,
-                stream.cuda_stream,
-                (
-                    values_pointer,
-                    offsets_pointer,
-                    output_pointer,
-                    mixed_pointer,
-                    value_count,
-                    direct_warp_count,
-                    direct_cta_count,
-                    segment_count,
-                ),
-            )
+        named = {
+            "task_ids": mixed_pointer,
+            "warp_task_count": direct_warp_count,
+            "cta_task_count": direct_cta_count,
+            "partial_ranges": partial_pointer,
+            "merge_records": partial_pointer + 8 * partial_count,
+            "partial_count": partial_count,
+            "merge_count": merge_count,
+        }
         if partial_count:
             scratch = torch.empty(
                 partial_count, dtype=values.dtype, device=device
             )
             retained += (scratch,)
-            driver.launch_segmented(
-                partial_function,
-                (partial_count,),
-                blocks.split_block_threads,
-                stream.cuda_stream,
-                (
-                    values_pointer,
-                    partial_pointer,
-                    scratch.data_ptr(),
-                    value_count,
-                    partial_count,
-                ),
-            )
-            _enqueue_merge(
-                driver,
-                merge_function,
-                blocks.split_block_threads,
-                stream.cuda_stream,
-                scratch=scratch.data_ptr(),
-                output=output_pointer,
-                merges=merge_pointer,
-                ranges=(
-                    partial_pointer if _reads_extent(module_text) else None
-                ),
-                partial_count=partial_count,
-                merge_count=merge_count,
-                segment_count=segment_count,
-            )
+            named["scratch"] = scratch.data_ptr()
+        user = _execution._user_arguments(
+            module_text,
+            values=values.data_ptr(),
+            offsets=offsets_pointer,
+            output=output.data_ptr(),
+            value_count=value_count,
+            segment_count=segment_count,
+        )
+        arguments = [
+            _execution._bind(kernel, user, named) for kernel, _ in launched
+        ]
+        stream = torch.cuda.current_stream()
+        for lease, (kernel, grid), bound in zip(leases, launched, arguments):
+            _execution._enqueue(torch, lease, kernel, bound, grid, stream)
+    finally:
+        for lease in leases:
+            lease.release()
     for tensor in retained:
         tensor.record_stream(stream)
     _runtime._advance_version(torch, output)
@@ -2114,68 +914,63 @@ def _prepare_persistent_sum(
     ):
         raise ValueError("resident_blocks must be a positive u32")
     torch = _runtime._import_torch()
-    warp_max_elements, cta_chunk_elements = _planning_limits(
+    warp_max_elements, cta_chunk_elements = _plan._planning_limits(
         warp_max_elements, cta_chunk_elements
     )
-    validate, classification = _classifying_validator(
+    validate, found = _plan._classifying_validator(
         warp_max_elements, cta_chunk_elements
     )
-    value_count, segment_count, host_offsets = _validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         values, offsets, output, validate
     )
-    offsets_version = _offsets_version(offsets)
+    offsets_version = _validation._offsets_version(offsets)
     # A launch advances the output version, which the offsets may share.
-    version_step = _output_version_step(torch, offsets, output)
+    version_step = _validation._output_version_step(torch, offsets, output)
     offsets_version += version_step
     # Each launch builds this record again and compares the two. The record
-    # also carries the data pointers that the launch passes to the kernel.
-    prepared_storage = _storage_binding(values, offsets, output)
+    # also carries the data pointers that the kernel was bound to.
+    prepared_storage = _validation._storage_binding(values, offsets, output)
 
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    target = _target(torch, torch.cuda.current_device())
+    target = _execution._target(torch, torch.cuda.current_device())
     kernel_name = "segmented_sum"
-    module_text = _semantic_module("sum")
-    _admit_program(
+    module_text = _programs._semantic_module("sum")
+    _plan._admit_program(
         module_text, kernel_name, warp_max_elements, cta_chunk_elements
     )
-    if not classification:
-        # The classifier refused offsets that are valid. The program and
-        # the limits are admitted, so this raises its reason.
-        classification.append(
-            native_swage._classify_segments(
-                host_offsets,
-                value_count=value_count,
-                segment_count=segment_count,
-                warp_max_elements=warp_max_elements,
-                cta_chunk_elements=cta_chunk_elements,
-            )
-        )
     # One buffer holds the warp ids, the CTA ids, the partial ranges, the
     # merge records, and the merge of every partial task, in that order.
-    records, warp_count, cta_count, partial_count, merge_count = classification[
-        0
-    ]
+    records, warp_count, cta_count, partial_count, merge_count = (
+        _plan._classification(
+            found,
+            host_offsets,
+            value_count=value_count,
+            segment_count=segment_count,
+            warp_max_elements=warp_max_elements,
+            cta_chunk_elements=cta_chunk_elements,
+        )
+    )
+
+    def unchanged():
+        _validation._require_unchanged_offsets(offsets, offsets_version)
+        storage = _validation._storage_binding(values, offsets, output)
+        if storage != prepared_storage:
+            _validation._refuse_rebound_storage(storage, prepared_storage)
+
     if segment_count == 0:
 
         def no_launch():
-            _require_unchanged_offsets(offsets, offsets_version)
-            storage = _storage_binding(values, offsets, output)
-            if storage != prepared_storage:
-                _refuse_rebound_storage(storage, prepared_storage)
+            unchanged()
             return None
 
         return _PreparedPersistentSum(no_launch, 0, 0, 0, 0, 0)
-    ptx = _compile_once(
-        native_swage._compile_persistent_segmented_reduction_ptx,
+    kernel = _execution._compile_once(
+        _native_bindings()._compile_persistent_segmented_reduction_ptx,
         module_text,
         kernel_name=kernel_name,
         target=target,
     )
 
-    blocks = _target_description()
+    blocks = _execution._target_description()
     persistent_block = blocks.persistent_block_threads
     warp_slots = persistent_block // blocks.subgroup_width
     work_groups = (
@@ -2191,10 +986,10 @@ def _prepare_persistent_sum(
         resident_blocks = properties.multi_processor_count * 2
     active_blocks = min(resident_blocks, work_groups)
 
-    driver = _runtime._get_driver()
-    _, function = _load_once(driver, ptx, kernel_name)
     device = offsets.device
     device_index = device.index
+    prepared_context = _cuda_backend.ensure_context(torch, device_index)
+    lease = _execution._lease(torch, kernel)
     # One upload carries every record. The kernel takes one pointer per
     # list; the classifier wrote the merge of every partial task behind the
     # merge records.
@@ -2203,16 +998,38 @@ def _prepare_persistent_sum(
     cta_pointer = warp_pointer + 4 * warp_count
     partial_pointer = cta_pointer + 4 * cta_count
     merge_pointer = partial_pointer + 8 * partial_count
-    partial_merges_pointer = merge_pointer + 12 * merge_count
     scratch = torch.empty(partial_count, dtype=torch.float32, device=device)
     # Every launch zeroes the counters before it enqueues the kernel, so
     # they need no initial value.
     counters = torch.empty(3 + merge_count, dtype=torch.int32, device=device)
+    values_pointer, offsets_pointer, output_pointer = prepared_storage[::3]
+    arguments = _execution._bind(
+        kernel,
+        _execution._user_arguments(
+            module_text,
+            values=values_pointer,
+            offsets=offsets_pointer,
+            output=output_pointer,
+            value_count=value_count,
+            segment_count=segment_count,
+        ),
+        {
+            "warp_ids": warp_pointer,
+            "cta_ids": cta_pointer,
+            "partial_ranges": partial_pointer,
+            "partial_merge_ids": merge_pointer + 12 * merge_count,
+            "merge_records": merge_pointer,
+            "scratch": scratch.data_ptr(),
+            "counters": counters.data_ptr(),
+            "warp_task_count": warp_count,
+            "cta_task_count": cta_count,
+            "partial_count": partial_count,
+            "merge_count": merge_count,
+        },
+    )
     tasks_ready = torch.cuda.Event()
     tasks_ready.record(torch.cuda.current_stream(device_index))
     tasks_ready_complete = False
-    current_context = getattr(driver, "current_context", None)
-    prepared_context = None if current_context is None else current_context()
     # One prepared object has one counter array and one scratch buffer, so
     # two launches must not run at once. `launching` keeps a second thread
     # out of `launch`; `in_flight` is recorded behind each launch and tells
@@ -2220,27 +1037,6 @@ def _prepare_persistent_sum(
     launching = threading.Lock()
     in_flight = torch.cuda.Event()
     in_flight_stream = None
-
-    def current_stream():
-        if torch.cuda.current_device() != device_index:
-            raise ValueError(
-                "prepared persistent sum must launch on its prepared device"
-            )
-        # The kernel is loaded in one CUDA context and is not valid in
-        # another, also on the same device.
-        if current_context is not None:
-            try:
-                context = current_context()
-            except RuntimeError:
-                context = _runtime._make_context_current(
-                    torch, current_context, device_index
-                )
-            if context != prepared_context:
-                raise RuntimeError(
-                    "prepared persistent sum must launch in its prepared "
-                    "CUDA context"
-                )
-        return torch.cuda.current_stream()
 
     def require_idle(stream, capturing):
         # A launch on the stream of the previous one is ordered behind it.
@@ -2276,45 +1072,22 @@ def _prepare_persistent_sum(
 
     def launch():
         nonlocal in_flight_stream, offsets_version
-        _require_unchanged_offsets(offsets, offsets_version)
-        storage = _storage_binding(values, offsets, output)
-        if storage != prepared_storage:
-            _refuse_rebound_storage(storage, prepared_storage)
-        values_pointer, offsets_pointer, output_pointer = storage[::3]
+        unchanged()
         if not launching.acquire(blocking=False):
             raise RuntimeError(
                 "prepared persistent sum is already launching on another "
                 "thread; one prepared object admits one launch at a time"
             )
         try:
-            stream = current_stream()
+            stream = _prepared_stream(
+                torch, device_index, prepared_context, "persistent sum"
+            )
             capturing = torch.cuda.is_current_stream_capturing()
             require_idle(stream, capturing)
             wait_for_tasks(stream)
             counters.zero_()
-            driver.launch_persistent(
-                function,
-                (active_blocks,),
-                persistent_block,
-                stream.cuda_stream,
-                (
-                    values_pointer,
-                    offsets_pointer,
-                    output_pointer,
-                    warp_pointer,
-                    cta_pointer,
-                    partial_pointer,
-                    partial_merges_pointer,
-                    merge_pointer,
-                    scratch.data_ptr(),
-                    counters.data_ptr(),
-                    value_count,
-                    warp_count,
-                    cta_count,
-                    partial_count,
-                    merge_count,
-                    segment_count,
-                ),
+            _execution._enqueue(
+                torch, lease, kernel, arguments, active_blocks, stream
             )
             for tensor in (
                 values,
@@ -2358,17 +1131,15 @@ def launch_softmax_gpu(values, offsets, output, block_size=None):
             values,
             offsets,
             output,
-            module_text=_softmax_text(2),
+            module_text=_programs._softmax_text(2),
             kernel_name="ragged_softmax_r2",
-            validate_offsets=_validate_softmax_offsets,
+            validate_offsets=_validation._validate_softmax_offsets,
             block_size=block_size,
             clamp_rows_to_output=True,
         )
-    value_count, segment_count = _validate_softmax_tensors(
+    value_count, segment_count = _validation._validate_softmax_tensors(
         values, offsets, output
     )
-    if block_size is None:
-        block_size = _target_description().cta_block_threads
     return _enqueue_softmax(
         torch, values, offsets, output, value_count, segment_count, block_size
     )
@@ -2387,524 +1158,27 @@ def _enqueue_softmax(
         value_count: Element bound the kernel receives, as
             `_validate_softmax_tensors` returns it.
         segment_count: Number of segments the offsets describe.
-        block_size: Threads per CTA.
+        block_size: Threads per CTA, or None for the CTA block of the
+            target description.
     """
-    if type(block_size) is not int or block_size <= 0:
-        raise ValueError("block size must be a positive integer")
-    _validate_warp_count(block_size)
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if block_size > properties.max_threads_per_block:
-        raise ValueError(
-            f"block size {block_size} exceeds device limit "
-            f"{properties.max_threads_per_block}"
-        )
+    block_size = _block_size(torch, block_size)
     if segment_count == 0:
         return None
 
-    native_swage = _native_swage()
-    target = _target(torch, torch.cuda.current_device())
-    kernel_name = "ragged_softmax"
-    ptx = _compile_once(
-        native_swage._compile_segmented_reduction_ptx,
-        _SOFTMAX_MODULE,
-        kernel_name=kernel_name,
+    kernel = _execution._compile_once(
+        _execution._native_swage()._compile_segmented_reduction_ptx,
+        _programs._SOFTMAX_MODULE,
+        kernel_name="ragged_softmax",
         block_size=block_size,
-        target=target,
+        target=_execution._target(torch, torch.cuda.current_device()),
     )
-
-    driver = _runtime._get_driver()
-    _, function = _load_once(driver, ptx, kernel_name)
-    stream = torch.cuda.current_stream()
-    driver.launch_segmented(
-        function,
-        (segment_count,),
-        block_size,
-        stream.cuda_stream,
-        (
-            values.data_ptr(),
-            offsets.data_ptr(),
-            output.data_ptr(),
-            value_count,
-            segment_count,
-        ),
-    )
-    for tensor in (values, offsets, output):
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
-    return None
-
-
-# How an element of each type travels through the oracle: the struct codes
-# of its value and of its bit pattern, the integer type of the pattern, and
-# the runner function that prints a memref of that integer type.
-_TRANSPORT = {
-    "f32": ("f", "I", "i32", "printMemrefI32"),
-    "f64": ("d", "Q", "i64", "printMemrefI64"),
-}
-
-
-def _float_literal(value, element="f32"):
-    """Emit an exact bit pattern of `element` that the MLIR parser accepts."""
-    code, pattern, bits_type, _ = _TRANSPORT[element]
-    bits = struct.unpack(f"<{pattern}", struct.pack(f"<{code}", value))[0]
-    return f"0x{bits:0{int(bits_type[1:]) // 4}X}"
-
-
-def _dense_literal(code, numbers):
-    """Emit the raw little-endian bytes of a dense MLIR initializer."""
-    payload = struct.pack(f"<{len(numbers)}{code}", *numbers)
-    return f'dense<"0x{payload.hex()}">'
-
-
-def _runner_module(values, offsets, semantic, kernel_name, output_length):
-    """Add a no-argument executable wrapper around the semantic kernel.
-
-    The inputs become constant globals initialized from their exact bytes,
-    one operation per buffer instead of three per element. The result
-    leaves as bit patterns: each output is bitcast to the integer of its
-    width and printed by the integer memref printer, because the float
-    printer keeps only six significant digits. The element type is the one
-    the program declares for its values.
-    """
-    if values.dim() == 2:
-        return _column_runner_module(
-            values, offsets, semantic, kernel_name, output_length
-        )
-    element = _program_element(semantic)
-    code, _, word, printer = _TRANSPORT[element]
-    value_count = values.numel()
-    segment_count = offsets.numel() - 1
-    values_type = f"memref<{value_count}x{element}>"
-    offsets_type = f"memref<{segment_count + 1}xi32>"
-    output_type = f"memref<{output_length}x{element}>"
-    bits_type = f"memref<{output_length}x{word}>"
-    lines = [
-        semantic.rstrip()[:-1],
-        "",
-        (
-            f'  memref.global "private" constant @runner_offsets : '
-            f"{offsets_type} = {_dense_literal('i', offsets.tolist())}"
-        ),
-    ]
-    # A zero-element dense initializer has no bytes to parse, so an empty
-    # values buffer stays a plain allocation that nothing reads.
-    values_storage = f"memref.alloc() : {values_type}"
-    if value_count:
-        lines.append(
-            f'  memref.global "private" constant @runner_values : '
-            f"{values_type} = {_dense_literal(code, values.tolist())}"
-        )
-        values_storage = f"memref.get_global @runner_values : {values_type}"
-    lines.extend(
-        [
-            "",
-            "  func.func @main() {",
-            f"    %values_storage = {values_storage}",
-            (
-                f"    %offsets_storage = memref.get_global @runner_offsets : "
-                f"{offsets_type}"
-            ),
-            f"    %output_storage = memref.alloc() : {output_type}",
-            f"    %bits = memref.alloc() : {bits_type}",
-            (
-                f"    %values = memref.cast %values_storage : {values_type} "
-                f"to memref<?x{element}>"
-            ),
-            (
-                f"    %offsets = memref.cast %offsets_storage : "
-                f"{offsets_type} to memref<?xi32>"
-            ),
-            (
-                f"    %output = memref.cast %output_storage : {output_type} "
-                f"to memref<?x{element}>"
-            ),
-            # Prefill so that a store past the live range is visible in the
-            # parsed result instead of being garbage.
-            (
-                f"    %sentinel = arith.constant "
-                f"{_float_literal(_SENTINEL, element)} : {element}"
-            ),
-            "    %from = arith.constant 0 : index",
-            "    %step = arith.constant 1 : index",
-            f"    %to = arith.constant {output_length} : index",
-            "    scf.for %pi = %from to %to step %step {",
-            (
-                "      memref.store %sentinel, %output[%pi] : "
-                f"memref<?x{element}>"
-            ),
-            "    }",
-            f"    %value_count = arith.constant {value_count} : i32",
-            f"    %segment_count = arith.constant {segment_count} : i32",
-            (
-                f"    call @{kernel_name}(%values, %offsets, %output, "
-                f"%value_count, %segment_count) : (memref<?x{element}>, "
-                f"memref<?xi32>, memref<?x{element}>, i32, i32) -> ()"
-            ),
-            "    scf.for %bi = %from to %to step %step {",
-            (f"      %result = memref.load %output[%bi] : memref<?x{element}>"),
-            f"      %pattern = arith.bitcast %result : {element} to {word}",
-            f"      memref.store %pattern, %bits[%bi] : {bits_type}",
-            "    }",
-            (
-                f"    %unranked = memref.cast %bits : {bits_type} "
-                f"to memref<*x{word}>"
-            ),
-            f"    call @{printer}(%unranked) : (memref<*x{word}>) -> ()",
-        ]
-    )
-    if not value_count:
-        lines.append(f"    memref.dealloc %values_storage : {values_type}")
-    lines.extend(
-        [
-            f"    memref.dealloc %output_storage : {output_type}",
-            f"    memref.dealloc %bits : {bits_type}",
-            "    return",
-            "  }",
-            "",
-            (
-                f"  func.func private @{printer}(memref<*x{word}>) "
-                "attributes {llvm.emit_c_interface}"
-            ),
-            "}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _column_runner_module(values, offsets, semantic, kernel_name, output_rows):
-    """Add an executable wrapper around a kernel over rank-two values.
-
-    The module is the one of `_runner_module` with rows in place of
-    elements: the values are a constant `[rows, columns]` global, the output
-    has `output_rows` rows of the same columns, and its bit patterns are
-    printed in row order.
-    """
-    element = _program_element(semantic)
-    code, _, word, printer = _TRANSPORT[element]
-    row_count, columns = values.shape
-    segment_count = offsets.numel() - 1
-    values_type = f"memref<{row_count}x{columns}x{element}>"
-    offsets_type = f"memref<{segment_count + 1}xi32>"
-    output_type = f"memref<{output_rows}x{columns}x{element}>"
-    rows_type = f"memref<?x?x{element}>"
-    bits_type = f"memref<{output_rows * columns}x{word}>"
-    lines = [
-        semantic.rstrip()[:-1],
-        "",
-        (
-            f'  memref.global "private" constant @runner_offsets : '
-            f"{offsets_type} = {_dense_literal('i', offsets.tolist())}"
-        ),
-    ]
-    values_storage = f"memref.alloc() : {values_type}"
-    if values.numel():
-        lines.append(
-            f'  memref.global "private" constant @runner_values : '
-            f"{values_type} = "
-            f"{_dense_literal(code, values.reshape(-1).tolist())}"
-        )
-        values_storage = f"memref.get_global @runner_values : {values_type}"
-    lines.extend(
-        [
-            "",
-            "  func.func @main() {",
-            f"    %values_storage = {values_storage}",
-            (
-                f"    %offsets_storage = memref.get_global @runner_offsets : "
-                f"{offsets_type}"
-            ),
-            f"    %output_storage = memref.alloc() : {output_type}",
-            f"    %bits = memref.alloc() : {bits_type}",
-            (
-                f"    %values = memref.cast %values_storage : {values_type} "
-                f"to {rows_type}"
-            ),
-            (
-                f"    %offsets = memref.cast %offsets_storage : "
-                f"{offsets_type} to memref<?xi32>"
-            ),
-            (
-                f"    %output = memref.cast %output_storage : {output_type} "
-                f"to {rows_type}"
-            ),
-            (
-                f"    %sentinel = arith.constant "
-                f"{_float_literal(_SENTINEL, element)} : {element}"
-            ),
-            "    %from = arith.constant 0 : index",
-            "    %step = arith.constant 1 : index",
-            f"    %rows = arith.constant {output_rows} : index",
-            f"    %columns = arith.constant {columns} : index",
-            "    scf.for %pr = %from to %rows step %step {",
-            "      scf.for %pc = %from to %columns step %step {",
-            f"        memref.store %sentinel, %output[%pr, %pc] : {rows_type}",
-            "      }",
-            "    }",
-            f"    %value_count = arith.constant {row_count} : i32",
-            f"    %segment_count = arith.constant {segment_count} : i32",
-            f"    %feature_count = arith.constant {columns} : i32",
-            (
-                f"    call @{kernel_name}(%values, %offsets, %output, "
-                f"%value_count, %segment_count, %feature_count) : "
-                f"({rows_type}, memref<?xi32>, {rows_type}, i32, i32, i32) "
-                "-> ()"
-            ),
-            "    scf.for %br = %from to %rows step %step {",
-            "      %row = arith.muli %br, %columns : index",
-            "      scf.for %bc = %from to %columns step %step {",
-            f"        %result = memref.load %output[%br, %bc] : {rows_type}",
-            f"        %pattern = arith.bitcast %result : {element} to {word}",
-            "        %slot = arith.addi %row, %bc : index",
-            f"        memref.store %pattern, %bits[%slot] : {bits_type}",
-            "      }",
-            "    }",
-            (
-                f"    %unranked = memref.cast %bits : {bits_type} "
-                f"to memref<*x{word}>"
-            ),
-            f"    call @{printer}(%unranked) : (memref<*x{word}>) -> ()",
-        ]
-    )
-    if not values.numel():
-        lines.append(f"    memref.dealloc %values_storage : {values_type}")
-    lines.extend(
-        [
-            f"    memref.dealloc %output_storage : {output_type}",
-            f"    memref.dealloc %bits : {bits_type}",
-            "    return",
-            "  }",
-            "",
-            (
-                f"  func.func private @{printer}(memref<*x{word}>) "
-                "attributes {llvm.emit_c_interface}"
-            ),
-            "}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-# Names the Swage build directory the CPU oracle takes its tools from. It is
-# a test and development setting: a `swage` that was installed from a wheel
-# has no build directory beside it.
-_ORACLE_BUILD = "SWAGE_ORACLE_BUILD_DIR"
-_ORACLE_BUILD_FILES = ("CMakeCache.txt", "bin/swage-opt")
-
-
-def _oracle_build():
-    """Return the Swage build directory the CPU oracle takes its tools from.
-
-    The oracle runs `bin/swage-opt` of a build directory and reads its
-    `CMakeCache.txt` to find the LLVM install that build was configured
-    with. `SWAGE_ORACLE_BUILD_DIR` names the directory. Without it, the
-    directory is `build` in the checkout this module was imported from.
-    The variable is read at every call.
-
-    Raises:
-        RuntimeError: The directory lacks one of the two files.
-    """
-    named = os.environ.get(_ORACLE_BUILD)
-    if named:
-        build = pathlib.Path(named)
-        subject, remedy = f"{_ORACLE_BUILD} names {build}, which", ""
-    else:
-        build = pathlib.Path(__file__).resolve().parents[2] / "build"
-        subject, remedy = str(build), f". Set {_ORACLE_BUILD} to one"
-    missing = [
-        name for name in _ORACLE_BUILD_FILES if not (build / name).is_file()
-    ]
-    if missing:
-        raise RuntimeError(
-            f"{subject} lacks {' and '.join(missing)}; the CPU oracle needs "
-            f"a Swage build directory{remedy}"
-        )
-    return build
-
-
-def _llvm_root(build):
-    """Find the pinned install that a Swage build was configured with."""
-    cache = build / "CMakeCache.txt"
-    match = re.search(r"^MLIR_DIR:[^=]*=(.+)$", cache.read_text(), re.MULTILINE)
-    if not match:
-        raise RuntimeError(f"{cache} does not identify MLIR_DIR")
-    return pathlib.Path(match.group(1)).parents[2]
-
-
-def _llvm_tool(llvm_root, name):
-    """Return one LLVM tool, preferring the pinned install over PATH.
-
-    The runner libraries always come from the pinned install. A tool found
-    on PATH may belong to a different LLVM, so it is used only when the
-    install does not provide that tool.
-    """
-    pinned = llvm_root / "bin" / name
-    if pinned.is_file():
-        return pinned
-    found = shutil.which(name)
-    if found is None:
-        raise RuntimeError(
-            f"{name} was found neither at {pinned} nor on PATH; the CPU "
-            "oracle requires it from the pinned LLVM install"
-        )
-    return pathlib.Path(found)
-
-
-def _run(command, source):
-    """Run one compiler stage and return its text output."""
-    result = subprocess.run(
-        [str(argument) for argument in command],
-        input=source,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(
-            f"{' '.join(map(str, command))} failed:\n{result.stderr}"
-        )
-    return result.stdout
-
-
-def _execute(module_text, element="f32"):
-    """Lower and run one executable module, returning its exact results.
-
-    The module prints one signed integer bit pattern per output element, of
-    the width of `element`. Each is reinterpreted as the float it encodes,
-    so the returned Python floats hold the computed values with no decimal
-    rounding in between.
-    """
-    build = _oracle_build()
-    llvm_root = _llvm_root(build)
-    swage_opt = build / "bin" / "swage-opt"
-    mlir_opt = _llvm_tool(llvm_root, "mlir-opt")
-    mlir_runner = _llvm_tool(llvm_root, "mlir-runner")
-    lowered = _run(
-        [
-            swage_opt,
-            "--swage-to-plan=schedule=sequential",
-            "--swage-plan-to-scf",
-        ],
-        module_text,
-    )
-    llvm = _run([mlir_opt, f"--pass-pipeline={_LOWERING_PIPELINE}"], lowered)
-    runner_utils = llvm_root / "lib" / "libmlir_runner_utils.so"
-    c_runner_utils = llvm_root / "lib" / "libmlir_c_runner_utils.so"
-    printed = _run(
-        [
-            mlir_runner,
-            "-e",
-            "main",
-            "-entry-point-result=void",
-            f"-shared-libs={runner_utils}",
-            f"-shared-libs={c_runner_utils}",
-        ],
-        llvm,
-    )
-    match = re.search(r"data =\s*\n\[(.*?)\]", printed, re.DOTALL)
-    if not match:
-        raise RuntimeError(
-            f"mlir-runner returned an unreadable result:\n{printed}"
-        )
-    code, pattern, word, _ = _TRANSPORT[element]
-    mask = (1 << int(word[1:])) - 1
-    patterns = [
-        int(token) & mask
-        for token in match.group(1).split(",")
-        if token.strip()
-    ]
-    payload = struct.pack(f"<{len(patterns)}{pattern}", *patterns)
-    return list(struct.unpack(f"<{len(patterns)}{code}", payload))
-
-
-def _execute_guarded(values, offsets, semantic, kernel_name, live):
-    """Run a kernel with one guard slot after its live output range.
-
-    The extra slot keeps the prefilled sentinel. That makes a zero-length
-    result printable and turns "the kernel never writes past its live
-    range" into a checked invariant of every oracle call.
-    """
-    results = _execute(
-        _runner_module(values, offsets, semantic, kernel_name, live + 1),
-        _program_element(semantic),
-    )
-    # For rank-two values a slot is a row, and the guard is a whole row.
-    width = values.shape[1] if values.dim() == 2 else 1
-    if len(results) != (live + 1) * width:
-        raise RuntimeError(
-            f"oracle printed {len(results)} values for "
-            f"{(live + 1) * width} slots"
-        )
-    guard = results[live * width :]
-    if any(value != _SENTINEL for value in guard):
-        raise RuntimeError(
-            f"{kernel_name} wrote past its live output range: {guard}"
-        )
-    return results[: live * width]
-
-
-def cpu_oracle(values, offsets, kind):
-    """Execute the sequential reduction lowering with the MLIR runner.
-
-    Returns the exact result of each segment, accumulated left to right, in
-    the dtype of `values`: float32 or float64. Rank-two values give one row
-    of results per segment, each column accumulated in row order.
-    """
-    torch = _runtime._import_torch()
-    element = _element_of(torch, values) or "f32"
-    dtype = _element_dtype(torch, element)
-    rank = 2 if getattr(values, "ndim", 1) == 2 else 1
-    segment_count = max(offsets.numel() - 1, 0)
-    shape = (segment_count,) + tuple(values.shape[1:rank])
-    output = torch.empty(shape, dtype=dtype)
-    _validate_shapes(
-        values,
-        offsets,
-        output,
-        _validate_offsets,
-        require_cuda=False,
-        element=element,
-        rank=rank,
-    )
-    # A result without a column holds nothing the runner could print.
-    if output.numel() == 0 and rank == 2:
-        return output
-    results = _execute_guarded(
-        values,
-        offsets,
-        _semantic_module(kind, element, rank),
-        _reduction_kernel(kind, element, rank),
+    _launch_one(
+        torch,
+        kernel,
+        _programs._SOFTMAX_MODULE,
+        (values, offsets, output),
+        {"value_count": value_count, "segment_count": segment_count},
         segment_count,
+        {},
     )
-    return torch.tensor(results, dtype=dtype).reshape(shape)
-
-
-def cpu_softmax_oracle(values, offsets):
-    """Execute the sequential softmax lowering with the MLIR runner.
-
-    Returns the exact f32 value the lowering stored for each covered element,
-    or for each covered row of rank-two values.
-    """
-    torch = _runtime._import_torch()
-    covered = int(offsets[-1]) if offsets.numel() else 0
-    rank = 2 if getattr(values, "ndim", 1) == 2 else 1
-    shape = (covered,) + tuple(values.shape[1:rank])
-    output = torch.empty(shape, dtype=torch.float32)
-    _validate_shapes(
-        values,
-        offsets,
-        output,
-        _validate_softmax_offsets,
-        require_cuda=False,
-        rank=rank,
-    )
-    # A result without a column holds nothing the runner could print.
-    if output.numel() == 0 and rank == 2:
-        return output
-    results = _execute_guarded(
-        values,
-        offsets,
-        _softmax_text(rank),
-        "ragged_softmax" if rank == 1 else "ragged_softmax_r2",
-        covered,
-    )
-    return torch.tensor(results, dtype=torch.float32).reshape(shape)
+    return None

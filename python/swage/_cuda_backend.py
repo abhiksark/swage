@@ -1,25 +1,47 @@
 # python/swage/_cuda_backend.py
-"""CUDA compiler, residency, and asynchronous launch adapter."""
+"""CUDA compiler, residency, and asynchronous launch adapter.
+
+A compiled artifact is loaded once per CUDA context into a `_LoadedModule`.
+A launch holds a `_LoadedModuleLease` on the module for as long as it may
+use it; a prepared segmented execution holds its leases until it is
+collected. The loaded modules form an LRU bounded by
+`SWAGE_MEMORY_CACHE_ENTRIES`. A module that leaves it is retired, and it is
+unloaded only after no lease holds it, no CUDA graph captured it, and an
+event recorded on every stream that launched it has completed. Retired
+modules are unloaded when a later lease or launch finds them idle, never
+while a stream of the context captures a graph.
+
+Locks: a warm lease takes no process-wide lock. It reads the loaded module
+with one `get` and counts itself under the module's own lock. `_cuda_lock`
+guards the residency fields and the two caches, and the cold path (loading
+a module) also holds the cold-path lock of `_runtime`, which interpreter
+exit and `fork` coordinate with. The lock order is module lock, then
+`_cuda_lock`.
+"""
 
 import ctypes
 import os
 import sys
 import threading
+import warnings
 import weakref
 from collections import OrderedDict
 
-from . import _abi, _native
+from . import _abi
 from ._errors import BackendUnavailableError
 
 _DEFAULT_MEMORY_CACHE_ENTRIES = 128
 _cuda_lock = threading.Lock()
-_driver_lock = threading.Lock()
 _loaded_functions = OrderedDict()
 _retired_loaded = {}
 _driver = None
 _memory_cache_entries = None
 _device_facts_cache = weakref.WeakKeyDictionary()
 _stream_objects = weakref.WeakKeyDictionary()
+# CUDA_ERROR_NOT_READY from cuEventQuery.
+_NOT_READY = 600
+# CUDA_ERROR_STREAM_CAPTURE_IMPLICIT from cuStreamIsCapturing.
+_CAPTURE_IMPLICIT = 906
 
 
 class _LoadedModule:
@@ -65,7 +87,11 @@ class _LoadedModule:
 
 
 class _LoadedModuleLease:
-    """A Python-only claim that an entry may be launched again."""
+    """A Python-only claim that keeps one loaded module from unloading.
+
+    `entry.function` is the function handle `cuLaunchKernel` takes. It
+    stays valid for as long as some lease on the module is unreleased.
+    """
 
     __slots__ = ("entry", "released")
 
@@ -74,19 +100,27 @@ class _LoadedModuleLease:
         self.released = False
 
     def release(self):
+        """Give the claim back once; a retired module may then unload."""
         if self.released:
             return
         self.released = True
-        with _cuda_lock:
-            self.entry.leases -= 1
-            _queue_unload_locked(self.entry)
+        entry = self.entry
+        with entry.lock:
+            entry.leases -= 1
+        if not entry.cache_resident:
+            with _cuda_lock:
+                _queue_unload_locked(entry)
 
     def __del__(self):
         self.release()
 
 
 def _memory_cache_limit():
+    """Return the strict positive capacity of the loaded-module LRU."""
     global _memory_cache_entries
+    limit = _memory_cache_entries
+    if limit is not None:
+        return limit
     with _cuda_lock:
         if _memory_cache_entries is None:
             configured = os.environ.get("SWAGE_MEMORY_CACHE_ENTRIES")
@@ -128,6 +162,11 @@ def validate_device(tensors, runtime_names, torch):
 
 
 def _device_facts(torch, index):
+    """Cached (max threads, sm target) per device for this torch module.
+
+    Device facts cannot change within a process, but tests inject fresh
+    fake torch modules, so the cache is scoped to the torch module object.
+    """
     per_torch = _device_facts_cache.get(torch)
     if per_torch is None:
         per_torch = {}
@@ -142,7 +181,10 @@ def _device_facts(torch, index):
 
 
 def current_stream(torch, index):
-    """Reuse bounded stream wrappers within the importing torch module."""
+    """Return the current stream without rebuilding an unchanged object.
+
+    The stream objects are bounded per importing torch module.
+    """
     raw_stream = getattr(
         getattr(torch, "_C", None), "_cuda_getCurrentRawStream", None
     )
@@ -177,8 +219,45 @@ def validate_geometry(block, n, grid, torch, current_device):
 
 
 def is_current_stream_capturing(torch):
+    """Return whether this thread is capturing a CUDA graph in PyTorch."""
     predicate = getattr(torch.cuda, "is_current_stream_capturing", None)
     return False if predicate is None else bool(predicate())
+
+
+def _capturing():
+    """Return whether this thread captures a graph, with torch imported."""
+    torch = sys.modules.get("torch")
+    return torch is not None and is_current_stream_capturing(torch)
+
+
+def ensure_context(torch, device_index):
+    """Return the current context, making the device's context current.
+
+    A thread that has not used CUDA has no current context, and PyTorch
+    makes the device's context current with its first CUDA call there. A
+    launch may make no such call before it reaches the driver, so the
+    context is made current here. No context is created: the device holds
+    validated tensors, so its context exists. This is the path of a
+    thread's first launch only; a context that is already current is never
+    replaced.
+
+    Args:
+        torch: The PyTorch module.
+        device_index: Index of the device of the validated tensors, which
+            the caller has checked to be the current device.
+
+    Returns:
+        The identifier of the context that is current now.
+
+    Raises:
+        BackendUnavailableError: The thread still has no current context.
+    """
+    driver = _get_driver()
+    try:
+        return driver.current_context()
+    except RuntimeError:
+        torch.cuda.set_device(device_index)
+        return driver.current_context()
 
 
 def _compile_native(
@@ -189,7 +268,14 @@ def _compile_native(
     lowering_kind,
     lowering_options,
 ):
-    native_swage = _native.load_extension(backend="cuda")
+    """Compile one kernel with the native bindings.
+
+    Returns:
+        The lowered MLIR, the PTX, and the launch contract as JSON.
+    """
+    from . import _runtime
+
+    native_swage = _runtime._native_compiler(kernel_name)
     compilers = {
         "fixed": "_compile_ptx",
         "segmented": "_compile_segmented_reduction_ptx",
@@ -235,9 +321,42 @@ def _evict_loaded_locked(limit):
         _queue_unload_locked(entry)
 
 
+def _report_modules_left_loaded(count, error):
+    """Report modules that stay loaded, without ever raising.
+
+    The caller is loading or launching an unrelated kernel and the modules
+    stay queued, so nothing is lost by going on. When the warning filters
+    turn the report into an exception, it is written to standard error
+    instead.
+    """
+    noun = "module" if count == 1 else "modules"
+    try:
+        warnings.warn(
+            f"Swage left {count} unused CUDA {noun} loaded: {error}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    except RuntimeWarning as raised:
+        print(f"RuntimeWarning: {raised}", file=sys.stderr)
+
+
 def _poll_deferred(driver, context, *, capturing=False):
-    """Fence, query, and unload retired entries outside graph capture."""
-    if capturing:
+    """Fence, query, and unload the idle retired modules of one context.
+
+    A retired module is unloaded once no lease holds it, no CUDA graph
+    captured it, and the event recorded after its last launch on each
+    stream has completed. The legacy default stream is fenced here with a
+    fresh event record; any other stream was fenced right after its launch,
+    because the caller may destroy it. Nothing is unloaded while this
+    thread or a pending stream captures a graph: CUDA forbids both calls
+    then, and an event recorded during capture is a graph node, not
+    evidence that earlier work completed.
+
+    A driver error leaves the module loaded for the rest of the process and
+    is reported once per call, never raised, because the caller is working
+    on an unrelated kernel.
+    """
+    if capturing or not _retired_loaded:
         return
     with _cuda_lock:
         candidates = [
@@ -255,6 +374,8 @@ def _poll_deferred(driver, context, *, capturing=False):
         for entry in candidates:
             entry.unloading = True
 
+    blocked = 0
+    first_error = None
     for index, entry in enumerate(candidates):
         try:
             with entry.lock:
@@ -267,14 +388,12 @@ def _poll_deferred(driver, context, *, capturing=False):
                     )
                 if not eligible:
                     continue
-                # A fence recorded during capture becomes a graph node, not
-                # evidence that prior eager work has completed.
                 if any(
                     driver.is_stream_capturing(stream)
                     for stream in entry.pending_streams
                 ):
                     continue
-                # Zero leases and the unloading reservation prevent another
+                # Zero leases and the unloading reservation keep another
                 # launch from racing these final per-stream fences.
                 for stream in tuple(entry.pending_streams):
                     driver.event_record(entry.events[stream], stream)
@@ -294,6 +413,11 @@ def _poll_deferred(driver, context, *, capturing=False):
                     entry.unload_queued = False
                     if _retired_loaded.get(entry.key) is entry:
                         _retired_loaded.pop(entry.key)
+        except RuntimeError as error:
+            with _cuda_lock:
+                entry.unload_blocked = True
+            blocked += 1
+            first_error = first_error or error
         except BaseException:
             with _cuda_lock:
                 entry.unload_blocked = True
@@ -303,37 +427,78 @@ def _poll_deferred(driver, context, *, capturing=False):
         finally:
             with _cuda_lock:
                 entry.unloading = False
+    if blocked:
+        _report_modules_left_loaded(blocked, first_error)
+
+
+def _warm_lease(key):
+    """Claim a resident module without any process-wide lock, or None."""
+    loaded = _loaded_functions.get(key)
+    if loaded is None:
+        return None
+    with loaded.lock:
+        if (
+            not loaded.cache_resident
+            or loaded.unloading
+            or loaded.unloaded
+            or loaded.unload_blocked
+        ):
+            return None
+        loaded.leases += 1
+    # Recency is refreshed only when nobody else holds the residency lock,
+    # so a warm lease never waits.
+    if len(_loaded_functions) > 1 and _cuda_lock.acquire(blocking=False):
+        try:
+            if _loaded_functions.get(key) is loaded:
+                _loaded_functions.move_to_end(key)
+        finally:
+            _cuda_lock.release()
+    return _LoadedModuleLease(loaded)
 
 
 def _load_artifact(artifact, driver, *, capturing=False):
+    """Return a lease on the module of `artifact` in the current context."""
     limit = _memory_cache_limit()
     context = driver.current_context()
     _poll_deferred(driver, context, capturing=capturing)
-    key = (artifact.identity, context, artifact.contract.entry)
-    with _cuda_lock:
-        loaded = _loaded_functions.get(key)
-        if loaded is not None:
-            _loaded_functions.move_to_end(key)
-        else:
-            retired = _retired_loaded.get(key)
-            if (
-                retired is not None
-                and not retired.unloading
-                and not retired.unloaded
-                and not retired.unload_blocked
-            ):
-                loaded = _retired_loaded.pop(key)
-                loaded.cache_resident = True
-                loaded.unload_queued = False
-            else:
-                module, function = driver.load(
-                    artifact.image, artifact.contract.entry
-                )
-                loaded = _LoadedModule(key, context, module, function, driver)
+    # The driver is part of the key because a handle is valid only with the
+    # driver that loaded it; a process normally has one driver.
+    key = (artifact.identity, context, artifact.contract.entry, driver)
+    lease = _warm_lease(key)
+    if lease is not None:
+        return lease
+    from . import _runtime
+
+    # The cold path: the module may have to be loaded, which waits for the
+    # cold-path lock that interpreter exit and fork coordinate with.
+    with _runtime._compile_lock:
+        lease = _warm_lease(key)
+        if lease is not None:
+            return lease
+        with _cuda_lock:
+            loaded = _loaded_functions.get(key)
+            if loaded is None:
+                retired = _retired_loaded.get(key)
+                if (
+                    retired is not None
+                    and not retired.unloading
+                    and not retired.unloaded
+                    and not retired.unload_blocked
+                ):
+                    loaded = _retired_loaded.pop(key)
+                    loaded.cache_resident = True
+                    loaded.unload_queued = False
+        if loaded is None:
+            module, function = driver.load(
+                artifact.image, artifact.contract.entry
+            )
+            loaded = _LoadedModule(key, context, module, function, driver)
+        with loaded.lock:
+            loaded.leases += 1
+        with _cuda_lock:
             _loaded_functions[key] = loaded
             _loaded_functions.move_to_end(key)
-        loaded.leases += 1
-        _evict_loaded_locked(limit)
+            _evict_loaded_locked(limit)
     return _LoadedModuleLease(loaded)
 
 
@@ -346,6 +511,7 @@ def _launch_loaded(
     *,
     capturing=False,
 ):
+    """Enqueue one launch of a leased module and fence its stream."""
     driver = entry.driver
     context = driver.current_context()
     if context != entry.context:
@@ -414,6 +580,8 @@ class _CudaDriver:
     """Small lazy wrapper around the Linux CUDA Driver API."""
 
     _native_launch = None
+    _split_launch = None
+    _native_fixed_launcher = None
 
     def __init__(self):
         try:
@@ -468,6 +636,14 @@ class _CudaDriver:
             self._event_destroy = self.library.cuEventDestroy
         self._event_destroy.argtypes = [pointer]
         self._event_destroy.restype = ctypes.c_int
+        # Context ids exist from CUDA 12. An older driver has only handles.
+        self._context_id = getattr(self.library, "cuCtxGetId", None)
+        if self._context_id is not None:
+            self._context_id.argtypes = [
+                pointer,
+                ctypes.POINTER(ctypes.c_ulonglong),
+            ]
+            self._context_id.restype = ctypes.c_int
         self.library.cuLaunchKernel.argtypes = [
             pointer,
             ctypes.c_uint,
@@ -492,16 +668,39 @@ class _CudaDriver:
             ctypes.POINTER(ctypes.c_char_p),
         ]
         self.library.cuGetErrorString.restype = ctypes.c_int
+        self._choose_launchers()
+
+    def _choose_launchers(self):
+        """Select the compiled launchers of this process, if any.
+
+        A process that names an artifact launches through the runtime
+        library of the artifact and never imports the bindings here, which
+        would load LLVM into a process that selected an artifact to stay
+        without it. A directory that cannot be used leaves the launcher
+        open: the call that needs the artifact reports why, and a kernel
+        of an artifact that loads later lends its launcher.
+
+        Without an artifact, the compiled launcher of the bindings skips
+        per-launch ctypes marshalling, and the native fixed launcher serves
+        warm fixed launches; the ctypes path stays as the fallback when the
+        bindings cannot be imported. Bindings built for another swage
+        version are refused here, not replaced by the fallback.
+        """
+        # Imported here because these modules import this one.
+        from . import _artifact, _runtime
+
+        if os.environ.get(_artifact._ENVIRONMENT):
+            try:
+                self._split_launch = _artifact.selected()._launch_kernel
+            except RuntimeError:
+                self._split_launch = None
+            return
         try:
-            native_swage = _native.load_extension(backend="cuda")
-        except BackendUnavailableError as error:
-            if error.code != "native-unavailable":
-                raise
-            self._native_launch = None
-            self._native_fixed_launcher = None
-        else:
-            self._native_launch = native_swage._launch_cuda_kernel
-            self._native_fixed_launcher = native_swage._FixedCUDALaunch
+            native_swage = _runtime._native_bindings()
+        except ImportError:
+            return
+        self._native_launch = native_swage._launch_cuda_kernel
+        self._native_fixed_launcher = native_swage._FixedCUDALaunch
 
     def _check_result(self, name, result):
         if result == 0:
@@ -531,6 +730,25 @@ class _CudaDriver:
         return f"{version.value // 1000}.{(version.value % 1000) // 10}"
 
     def current_context(self):
+        """Identify the CUDA context that is current on this thread.
+
+        Returns:
+            The driver's id of the context, which is unique for the life of
+            the process. A context handle is not: the driver places a new
+            context at the address of a destroyed one, so by its handle a
+            module loaded in the destroyed context would pass for a module
+            of the new one. A driver without context ids returns the
+            handle.
+
+        Raises:
+            BackendUnavailableError: No CUDA context is current on this
+                thread.
+        """
+        if self._context_id is not None:
+            identifier = ctypes.c_ulonglong()
+            # A null context asks for the id of the current context.
+            if not self._context_id(None, ctypes.byref(identifier)):
+                return identifier.value
         context = ctypes.c_void_p()
         self._call("cuCtxGetCurrent", ctypes.byref(context))
         if not context.value:
@@ -546,6 +764,14 @@ class _CudaDriver:
         return context.value
 
     def load(self, ptx, kernel_name):
+        """Load one module and resolve one kernel in it.
+
+        A module whose kernel cannot be resolved is not left loaded.
+
+        Returns:
+            The module and function handles. They are plain handles: the
+            caller decides when the module is unloaded.
+        """
         module = ctypes.c_void_p()
         image = ctypes.create_string_buffer(ptx.encode())
         self._call(
@@ -554,12 +780,19 @@ class _CudaDriver:
             ctypes.cast(image, ctypes.c_void_p),
         )
         function = ctypes.c_void_p()
-        self._call(
-            "cuModuleGetFunction",
-            ctypes.byref(function),
-            module,
-            kernel_name.encode(),
-        )
+        try:
+            self._call(
+                "cuModuleGetFunction",
+                ctypes.byref(function),
+                module,
+                kernel_name.encode(),
+            )
+        except RuntimeError:
+            try:
+                self.module_unload(module.value)
+            except RuntimeError as error:
+                _report_modules_left_loaded(1, error)
+            raise
         return module.value, function.value
 
     def is_stream_capturing(self, stream):
@@ -567,13 +800,14 @@ class _CudaDriver:
         result = self.library.cuStreamIsCapturing(
             ctypes.c_void_p(stream), ctypes.byref(status)
         )
-        if result == 906:  # CUDA_ERROR_STREAM_CAPTURE_IMPLICIT
+        if result == _CAPTURE_IMPLICIT:
             return True
         self._check_result("cuStreamIsCapturing", result)
         return status.value != 0
 
     def event_create(self):
         event = ctypes.c_void_p()
+        # CU_EVENT_DISABLE_TIMING.
         self._call("cuEventCreate", ctypes.byref(event), 2)
         return event.value
 
@@ -584,7 +818,7 @@ class _CudaDriver:
 
     def event_query(self, event):
         result = self.library.cuEventQuery(ctypes.c_void_p(event))
-        if result == 600:
+        if result == _NOT_READY:
             return False
         self._check_result("cuEventQuery", result)
         return True
@@ -668,11 +902,45 @@ class _CudaDriver:
                 kinds, arguments, grid, block, 0, stream, function
             )
             return
+        if self._split_launch is not None:
+            self._launch_split(function, grid, block, stream, kinds, arguments)
+            return
         values = [
             self._ctype_argument(kind, value, index)
             for index, (kind, value) in enumerate(zip(kinds, arguments))
         ]
         self._launch(function, grid, block, stream, values)
+
+    def _launch_split(self, function, grid, block, stream, kinds, arguments):
+        """Launch through a runtime library that takes pointers, then i32s.
+
+        Every kernel the compiler emits takes its buffers first and its
+        counts after them, so the argument list splits in two. A launch
+        that does not fit that shape is refused instead of reordered.
+        """
+        pointers = sum(1 for kind in kinds if kind == "ptr")
+        if (
+            kinds[:pointers] != ("ptr",) * pointers
+            or any(kind != "i32" for kind in kinds[pointers:])
+            or grid[1:] != (1, 1)
+            or block[1:] != (1, 1)
+        ):
+            raise ValueError(
+                "the artifact runtime launches one-dimensional kernels whose "
+                "pointer arguments precede their i32 arguments"
+            )
+        scalars = []
+        for index, value in enumerate(arguments[pointers:], pointers):
+            raw = self._ctype_argument("i32", value, index).value
+            scalars.append(raw - (1 << 32) if raw >= 1 << 31 else raw)
+        self._split_launch(
+            function,
+            grid[0],
+            block[0],
+            stream,
+            tuple(arguments[:pointers]),
+            tuple(scalars),
+        )
 
     def _launch(self, function, grid, block, stream, values):
         parameter_pointers = (ctypes.c_void_p * len(values))(
@@ -698,11 +966,21 @@ class _CudaDriver:
 
 
 def _get_driver():
+    """Return the process-wide driver, creating it on first use.
+
+    Creating the driver may import the native bindings, so it holds the
+    cold-path lock of `_runtime`, which a fork waits for.
+    """
     global _driver
-    with _driver_lock:
-        if _driver is None:
-            _driver = _CudaDriver()
-        return _driver
+    driver = _driver
+    if driver is None:
+        from . import _runtime
+
+        with _runtime._compile_lock:
+            if _driver is None:
+                _driver = _CudaDriver()
+            driver = _driver
+    return driver
 
 
 def driver_version():

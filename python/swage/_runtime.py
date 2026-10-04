@@ -1,14 +1,21 @@
 # python/swage/_runtime.py
-"""Minimal CUDA Driver runtime for the canonical fixed vector-add subset."""
+"""Backend-neutral specialization, artifact, and launch orchestration.
+
+`launch` validates one fixed elementwise launch, finds or compiles its
+artifact through the selected backend adapter (`_backends`), and launches
+it through the compiler's launch contract. The compiler identity, the
+binding check, the process and disk caches, and the cold-path lock that
+interpreter exit and `fork` coordinate with live here too; the private
+segmented runner shares them.
+"""
 
 import ast
 import atexit
-import collections
-import ctypes
 import errno
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import pathlib
 import re
@@ -16,16 +23,17 @@ import shutil
 import stat
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import warnings
-import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from . import language
+from . import _abi, _native, language
+from ._backends import get_backend
+from ._errors import BackendUnavailableError, SwageError
 
 _DIALECT_VERSION = 1
 # Entries an in-process kernel cache keeps before it forgets its oldest.
@@ -165,30 +173,54 @@ if hasattr(os, "register_at_fork"):
         after_in_parent=_compile_lock.release,
         after_in_child=_compile_lock.release,
     )
-_ptx_cache = _BoundedCache(_CACHE_LIMIT)
-# Values are `(module, function)` as `_CudaDriver.load` returns them. A
-# kernel that leaves this cache is unloaded once nothing else holds its
-# function handle; see `_Function`.
-_loaded_functions = _BoundedCache(_CACHE_LIMIT)
-_driver = None
+
+
+# The version of the metadata of a persistent cache entry. Version 4 adds
+# the backend, the artifact format, the target, and the launch contract to
+# the entry, and the cache key covers the backend and format.
+_CACHE_VERSION = 4
+_DEFAULT_MEMORY_CACHE_ENTRIES = 128
+_FIXED_DESCRIPTORS = {
+    language.float32: ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"),
+    language.float16: ("ptr<f16>", "ptr<f16>", "ptr<f16>", "i32"),
+    language.float8_e4m3fn: (
+        "ptr<f8E4M3FN>",
+        "ptr<f8E4M3FN>",
+        "ptr<f8E4M3FN>",
+        "i32",
+    ),
+    language.float8_e5m2: ("ptr<f8E5M2>", "ptr<f8E5M2>", "ptr<f8E5M2>", "i32"),
+}
+_logger = logging.getLogger("swage.runtime")
+# The process cache of verified artifacts, an LRU bounded by
+# SWAGE_MEMORY_CACHE_ENTRIES. A hit takes no lock: it reads one entry with
+# one `get`, and refreshes its recency only when `_cache_lock` is free. A
+# miss holds the cold-path lock, and every change holds `_cache_lock`.
+_cache_lock = threading.Lock()
+_artifact_cache = OrderedDict()
+_memory_cache_entries = None
 _identity_cache = None
-# Device facts cannot change within a process, but tests inject fresh fake
-# torch modules, so the cache is scoped to the torch module object.
-_device_facts_cache = weakref.WeakKeyDictionary()
-_stream_objects = {}
 
 
 class _Artifact(NamedTuple):
-    """A verified specialization artifact."""
+    """A verified backend specialization artifact."""
 
     key: str
+    backend: str
+    artifact_format: str
+    target: str
     lowered: str
-    ptx: str
+    image: object
+    contract_json: str
+    contract: _abi.KernelContract
+    argument_kinds: tuple
+    identity: str
 
 
 class _LaunchSpec(NamedTuple):
     """Validated values needed after the Python trust boundary."""
 
+    adapter: object
     tensors: tuple
     n: int
     block: int
@@ -198,32 +230,130 @@ class _LaunchSpec(NamedTuple):
     descriptors: tuple
 
 
-def launch(kernel, *, arguments, constexprs, grid):
-    """Compile and asynchronously launch one fixed vector-add kernel.
+def _contract_error(reason):
+    raise RuntimeError(f"invalid kernel contract: {reason}")
+
+
+def _parse_compiler_contract(contract_json):
+    try:
+        return _abi.parse_kernel_contract(contract_json)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"invalid kernel contract: {error}") from error
+
+
+def _validate_contract_specialization(
+    contract,
+    specialization,
+    kernel_name,
+    block_size,
+    lowering_kind,
+    adapter,
+):
+    """Ensure compiler metadata agrees with the requested specialization."""
+    if contract.backend != adapter.name:
+        _contract_error("backend does not match the selected adapter")
+    if contract.entry != kernel_name:
+        _contract_error("entry does not match the requested kernel")
+    if adapter.name == "cuda":
+        if contract.launch.model != "spmd-grid":
+            _contract_error("CUDA contract does not use spmd-grid launch")
+        if contract.launch.block != (block_size, 1, 1):
+            _contract_error("block does not match the specialization")
+    elif adapter.name == "cpu":
+        if contract.launch.model != "host-call":
+            _contract_error("CPU contract does not use host-call launch")
+        if contract.launch.block is not None:
+            _contract_error("CPU host-call contract defines a block")
+    else:
+        _contract_error("adapter backend is unsupported")
+
+    if specialization.get("kernel") != kernel_name:
+        _contract_error("kernel does not match the specialization")
+    if specialization.get("backend") != adapter.name:
+        _contract_error("backend does not match specialization metadata")
+    if specialization.get("format") != adapter.artifact_format:
+        _contract_error(
+            "artifact format does not match specialization metadata"
+        )
+    codegen = specialization.get("codegen")
+    if not isinstance(codegen, dict) or codegen.get("block_size") != block_size:
+        _contract_error("block does not match specialization metadata")
+    if codegen.get("lowering", "fixed") != lowering_kind:
+        _contract_error("lowering does not match specialization metadata")
+
+    if lowering_kind != "fixed":
+        return
+    descriptors = specialization.get("descriptors")
+    if not isinstance(descriptors, list):
+        _contract_error("specialization descriptors are missing")
+    kinds = []
+    for descriptor in descriptors:
+        if isinstance(descriptor, str) and descriptor.startswith("ptr<"):
+            kinds.append("ptr")
+        elif descriptor == "i32":
+            kinds.append("i32")
+        else:
+            _contract_error(
+                f"unsupported specialization descriptor {descriptor!r}"
+            )
+    if tuple(argument.kind for argument in contract.arguments) != tuple(kinds):
+        _contract_error("argument kinds do not match the specialization")
+    if any(argument.origin != "user" for argument in contract.arguments):
+        _contract_error("fixed-runtime arguments must have user origin")
+    if tuple(argument.source_index for argument in contract.arguments) != tuple(
+        range(len(contract.arguments))
+    ):
+        _contract_error("fixed-runtime source indexes are inconsistent")
+
+
+def launch(kernel, *, arguments, constexprs, grid, backend="cuda"):
+    """Compile and launch one canonical fixed vector elementwise kernel.
+
+    On the `cuda` backend the kernel is enqueued on the current stream and
+    the call returns without waiting. On the `cpu` backend it runs to
+    completion first. Either way the output's version counter advances
+    once the kernel is enqueued or has run.
 
     A `TypeError` or `ValueError` raised on the way names the kernel and
     where it is defined, after the message of the check that failed.
     """
-    torch = _import_torch()
     try:
-        spec = _validate_launch(kernel, arguments, constexprs, grid, torch)
+        adapter = get_backend(backend)
+        torch = _import_torch(adapter.name)
+        spec = _validate_launch(
+            kernel,
+            arguments,
+            constexprs,
+            grid,
+            torch,
+            adapter,
+        )
         if spec.n == 0:
             return None
 
         memo = kernel.__dict__.setdefault("_specialization_memo", {})
         identity = _cached_identity()
-        entry = memo.get((spec.block, spec.target))
+        memo_key = (
+            adapter.name,
+            adapter.artifact_format,
+            spec.block,
+            spec.target,
+            spec.descriptors,
+        )
+        entry = memo.get(memo_key)
         if entry is None or entry[2] is not identity:
             specialization = _specialization_data(
                 kernel,
                 descriptors=spec.descriptors,
                 constexprs=constexprs,
                 target=spec.target,
+                adapter=adapter,
             )
             entry = (specialization, _cache_key(specialization), identity)
-            memo[(spec.block, spec.target)] = entry
+            memo[memo_key] = entry
         specialization, key, _ = entry
         artifact = _compile_cached(
+            adapter,
             specialization,
             kernel.__name__,
             spec.block,
@@ -231,39 +361,57 @@ def launch(kernel, *, arguments, constexprs, grid):
                 arguments=arguments, constexprs=constexprs
             ),
             key=key,
+            lowering_kind="fixed",
         )
-        _write_dumps(artifact)
-        driver = _get_driver()
+        launch_arguments = _bind_fixed_artifact(artifact, spec.tensors, spec.n)
+        if adapter.name == "cuda":
+            from . import _cuda_backend
+
+            _cuda_backend.ensure_context(torch, spec.tensors[0].device.index)
+            physical_grid = (spec.grid[0], 1, 1)
+            stream_handle = spec.stream.cuda_stream
+            capturing = _is_current_stream_capturing(torch)
+        else:
+            physical_grid = None
+            stream_handle = None
+            capturing = False
+        lease = adapter.lease(artifact, capturing=capturing)
         try:
-            context = driver.current_context()
-        except RuntimeError:
-            context = _make_context_current(
-                torch, driver.current_context, spec.tensors[0].device.index
+            adapter.launch(
+                lease,
+                artifact.contract,
+                launch_arguments,
+                grid=physical_grid,
+                stream=stream_handle,
+                capturing=capturing,
             )
-        loaded_key = (artifact.key, context)
-        loaded = _loaded_functions.get(loaded_key)
-        if loaded is None:
-            loaded = _load_cold(
-                _loaded_functions,
-                loaded_key,
-                driver,
-                artifact.ptx,
+        finally:
+            adapter.release(lease)
+            if adapter.name == "cuda":
+                for tensor in spec.tensors:
+                    tensor.record_stream(spec.stream)
+        _advance_version(torch, spec.tensors[2])
+        if adapter.name == "cuda" and not capturing:
+            _cuda_backend._prepare_fixed_launch(
+                kernel,
+                artifact,
+                lease,
+                spec.stream,
+                torch,
+                spec.tensors[0].dtype,
+            )
+        if _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "%s backend=%s target=%s kernel=%s grid=%s key=%s",
+                "launch complete"
+                if adapter.name == "cpu"
+                else "launch enqueued",
+                adapter.name,
+                spec.target,
                 kernel.__name__,
+                spec.grid,
+                key[:12],
             )
-        _, function = loaded
-        abi_arguments = tuple(tensor.data_ptr() for tensor in spec.tensors) + (
-            spec.n,
-        )
-        driver.launch(
-            function,
-            spec.grid,
-            spec.block,
-            spec.stream.cuda_stream,
-            abi_arguments,
-        )
-        for tensor in spec.tensors:
-            tensor.record_stream(spec.stream)
-        _advance_version(torch, spec.tensors[-1])
         return None
     except (TypeError, ValueError) as error:
         # A subclass may take more than a message, so it is left as it is.
@@ -307,14 +455,23 @@ _MIN_TORCH = (2, 6)
 _supported_torch = None
 
 
-def _import_torch():
-    """Return PyTorch, or raise when it is missing or unsupported."""
+def _import_torch(backend="cuda"):
+    """Return PyTorch, or raise when it is missing or unsupported.
+
+    Raises:
+        BackendUnavailableError: PyTorch cannot be imported.
+        RuntimeError: The PyTorch release or one of the methods a launch
+            needs is missing.
+    """
     global _supported_torch
     try:
         import torch
     except Exception as error:
-        raise RuntimeError(
-            "Swage launch requires PyTorch; install 'swage-compiler[pytorch]'"
+        raise BackendUnavailableError(
+            "Swage launch requires PyTorch",
+            code="pytorch-unavailable",
+            backend=backend,
+            remediation="install 'swage-compiler[pytorch]'",
         ) from error
     if torch is not _supported_torch:
         _require_supported_torch(torch)
@@ -355,14 +512,11 @@ def _require_supported_torch(torch):
 
 
 def _validate_launch_call(kernel, arguments, constexprs, grid):
-    """Validate launch mappings, static block size, and parameter names."""
+    """Validate launch mappings and the canonical ordered parameter shape."""
     if not isinstance(arguments, Mapping):
         raise TypeError("arguments must be a mapping")
     if not isinstance(constexprs, Mapping):
         raise TypeError("constexprs must be a mapping")
-    block = constexprs.get("BLOCK")
-    if type(block) is not int or block <= 0:
-        raise ValueError("constexpr BLOCK must be a positive integer")
     if (
         not isinstance(grid, tuple)
         or len(grid) != 1
@@ -371,26 +525,42 @@ def _validate_launch_call(kernel, arguments, constexprs, grid):
         raise TypeError("grid must be a one-element tuple of integers")
 
     parameter_names = [argument.arg for argument in kernel.function.args.args]
-    if parameter_names != ["x_ptr", "y_ptr", "output_ptr", "n", "BLOCK"]:
+    if len(parameter_names) != 5:
         raise ValueError(
-            "launch requires x_ptr, y_ptr, output_ptr, n, and BLOCK parameters"
+            "launch requires four runtime parameters followed by one "
+            "constexpr block parameter"
         )
     runtime_names = parameter_names[:4]
-    if set(arguments) != set(runtime_names):
+    block_name = parameter_names[4]
+    if kernel.constexpr_names != {block_name}:
         raise ValueError(
-            "arguments must contain exactly x_ptr, y_ptr, output_ptr, and n"
+            "launch requires its final parameter to be the constexpr block"
         )
-    if set(constexprs) != {"BLOCK"}:
-        raise ValueError("constexprs must contain exactly BLOCK")
+    if set(arguments) != set(runtime_names):
+        expected = ", ".join(runtime_names)
+        raise ValueError(f"arguments must contain exactly {expected}")
+    if set(constexprs) != {block_name}:
+        raise ValueError(f"constexprs must contain exactly {block_name}")
+    block = constexprs[block_name]
+    if type(block) is not int or block <= 0:
+        raise ValueError(f"constexpr {block_name} must be a positive integer")
     return runtime_names, block
 
 
-def _validate_launch_tensor(name, tensor, torch):
-    """Validate one tensor before its raw pointer crosses the ABI."""
-    if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
-        raise TypeError(f"argument '{name}' must be a CUDA tensor")
-    if tensor.dtype != torch.float32:
-        raise TypeError(f"argument '{name}' must have dtype torch.float32")
+def _validate_launch_tensor(name, tensor, torch, backend):
+    """Validate one tensor before its raw pointer crosses the ABI.
+
+    Returns:
+        The `swage.language` element type of the tensor.
+    """
+    if not isinstance(tensor, torch.Tensor) or tensor.device.type != backend:
+        raise TypeError(f"argument '{name}' must be a {backend.upper()} tensor")
+    element_type = language._torch_float_type(tensor.dtype, torch)
+    if element_type is None:
+        raise TypeError(
+            f"argument '{name}' must have dtype torch.float32, torch.float16, "
+            "torch.float8_e4m3fn, or torch.float8_e5m2"
+        )
     if tensor.dim() != 1:
         raise TypeError(f"argument '{name}' must have rank one")
     if not tensor.is_contiguous():
@@ -414,106 +584,107 @@ def _validate_launch_tensor(name, tensor, torch):
             f"argument '{name}' must not require grad; a launch records no "
             "gradient, so pass tensor.detach()"
         )
+    return element_type
 
 
-def _validate_output_disjoint(names, tensors):
-    """Reject an output that shares memory with a buffer the kernel reads.
+def _validate_runtime_arguments(arguments, runtime_names, torch, backend):
+    """Validate tensor metadata, scalar bounds, and buffer lengths."""
+    tensors = tuple(arguments[name] for name in runtime_names[:3])
+    element_type = None
+    for name, tensor in zip(runtime_names, tensors):
+        tensor_type = _validate_launch_tensor(name, tensor, torch, backend)
+        if element_type is None:
+            element_type = tensor_type
+        elif tensor_type is not element_type:
+            raise TypeError(
+                f"argument '{name}' must have the same dtype as "
+                f"argument '{runtime_names[0]}'"
+            )
 
-    One thread would store through the output while another loads the same
-    bytes through the input. Every tensor is known contiguous and rank one
-    by this point, so each byte extent is exact and the half-open
-    intersection is exact. It cannot see two virtual mappings of one
+    count_name = runtime_names[3]
+    n = arguments[count_name]
+    if type(n) is not int or not 0 <= n < (1 << 31):
+        raise ValueError(f"{count_name} must be a nonnegative i32")
+    for name, tensor in zip(runtime_names, tensors):
+        if n > tensor.numel():
+            raise ValueError(
+                f"{count_name} exceeds tensor length for argument '{name}'"
+            )
+    return tensors, n, element_type
+
+
+def _validate_output_alias(names, tensors, n):
+    """Reject an output that partially overlaps an input in the active range.
+
+    Every lane reads its inputs and writes its output at one element index,
+    so an output that is exactly an input, or that shares no byte of the
+    first `n` elements with it, is safe. Any other overlap would let one
+    lane store over an element another lane still has to read. Every tensor
+    is known contiguous and rank one by this point, so the byte distance of
+    the two starts decides. It cannot see two virtual mappings of one
     physical allocation, nor aliasing created after this returns.
 
     Args:
         names: Argument names, the inputs first and the output last.
         tensors: The tensors in the same order.
+        n: The number of elements the launch covers.
     """
+    if not n:
+        return
     *inputs, output = tensors
+    active_bytes = n * output.element_size()
     output_start = output.data_ptr()
-    output_end = output_start + output.numel() * output.element_size()
-    for name, buffer in zip(names, inputs):
-        start = buffer.data_ptr()
-        end = start + buffer.numel() * buffer.element_size()
-        if start < output_end and output_start < end:
+    for name, tensor in zip(names, inputs):
+        if 0 < abs(tensor.data_ptr() - output_start) < active_bytes:
             raise ValueError(
-                f"argument '{names[-1]}' must not overlap argument '{name}'"
+                f"argument '{names[-1]}' must not partially overlap argument "
+                f"'{name}' in their active ranges"
             )
 
 
-def _validate_runtime_arguments(arguments, runtime_names, torch):
-    """Validate tensor metadata, scalar bounds, lengths, and disjointness."""
-    tensors = tuple(arguments[name] for name in runtime_names[:3])
-    for name, tensor in zip(runtime_names, tensors):
-        _validate_launch_tensor(name, tensor, torch)
-
-    n = arguments["n"]
-    if type(n) is not int or not 0 <= n < (1 << 31):
-        raise ValueError("n must be a nonnegative i32")
-    for name, tensor in zip(runtime_names, tensors):
-        if n > tensor.numel():
-            raise ValueError(f"n exceeds tensor length for argument '{name}'")
-    # The two inputs may share memory; only the output is written.
-    _validate_output_disjoint(runtime_names[:3], tensors)
-    return tensors, n
-
-
-def _validate_cuda_device(tensors, runtime_names, torch):
-    """Require CUDA availability and tensors on the active device."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable in PyTorch")
-    current_device = torch.cuda.current_device()
-    for name, tensor in zip(runtime_names, tensors):
-        if tensor.device.index != current_device:
-            raise ValueError(
-                f"argument '{name}' must be on the current CUDA device"
-            )
-    return current_device
-
-
-def _launch_descriptors(kernel, arguments, constexprs, runtime_names):
-    """Return and verify the fixed vector-add ABI descriptors."""
-    # Tensor and scalar validation pins the canonical ABI. Re-derive metadata
-    # only when the annotations are not the canonical constexpr shape so its
-    # diagnostics remain authoritative.
+def _launch_descriptors(kernel, element_type):
+    """Return descriptors for the validated public fixed semantic shape."""
     kernel._require_plain_parameters()
-    if kernel.constexpr_names == {"BLOCK"}:
-        return ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32")
-
-    runtime_types, _ = kernel._validate_inputs(None, arguments, constexprs)
-    descriptors = tuple(
-        "i32" if runtime_types[name] is language.int32 else "ptr<f32>"
-        for name in runtime_names
-    )
-    if descriptors != ("ptr<f32>", "ptr<f32>", "ptr<f32>", "i32"):
-        raise TypeError("launch requires three f32 pointers and one i32")
-    return descriptors
+    return _FIXED_DESCRIPTORS[element_type]
 
 
-def _validate_launch_geometry(block, n, grid, torch, current_device):
-    """Validate the requested block and grid against the active device."""
-    max_threads, target = _device_facts(torch, current_device)
-    if block > max_threads:
-        raise ValueError(f"BLOCK {block} exceeds device limit {max_threads}")
-    expected_grid = ((n + block - 1) // block,)
-    if grid != expected_grid:
-        raise ValueError(f"grid must equal {expected_grid} for n and BLOCK")
-    return target, _current_stream(torch, current_device)
-
-
-def _validate_launch(kernel, arguments, constexprs, grid, torch):
+def _validate_launch(kernel, arguments, constexprs, grid, torch, adapter):
     runtime_names, block = _validate_launch_call(
         kernel, arguments, constexprs, grid
     )
-    tensors, n = _validate_runtime_arguments(arguments, runtime_names, torch)
-    current_device = _validate_cuda_device(tensors, runtime_names, torch)
-    descriptors = _launch_descriptors(
-        kernel, arguments, constexprs, runtime_names
+    tensors, n, element_type = _validate_runtime_arguments(
+        arguments,
+        runtime_names,
+        torch,
+        adapter.name,
     )
-    target, stream = _validate_launch_geometry(
-        block, n, grid, torch, current_device
-    )
+    expected_grid = ((n + block - 1) // block,)
+    if grid != expected_grid:
+        raise ValueError(f"grid must equal {expected_grid} for n and BLOCK")
+    descriptors = _launch_descriptors(kernel, element_type)
+    if adapter.name == "cuda":
+        from . import _cuda_backend
+
+        current_device = _cuda_backend.validate_device(
+            tensors,
+            runtime_names,
+            torch,
+        )
+        target, stream = _cuda_backend.validate_geometry(
+            block,
+            n,
+            grid,
+            torch,
+            current_device,
+        )
+    else:
+        if block > 1024:
+            raise ValueError("BLOCK must be at most 1024 for the CPU backend")
+        target = "native"
+        stream = None
+    _validate_output_alias(runtime_names[:3], tensors, n)
     return _LaunchSpec(
+        adapter,
         tensors,
         n,
         block,
@@ -524,77 +695,41 @@ def _validate_launch(kernel, arguments, constexprs, grid, torch):
     )
 
 
-def _make_context_current(torch, current_context, device_index):
-    """Give a thread that has no CUDA context the context of its device.
+def _is_current_stream_capturing(torch):
+    from ._cuda_backend import is_current_stream_capturing
 
-    A thread that has not used CUDA has no current context, and PyTorch
-    makes the device's context current with its first CUDA call there. A
-    launch may make no such call before it reaches the driver, so the
-    context is made current here. No context is created: the device holds
-    validated tensors, so its context exists. This is the path of a
-    thread's first launch only; a context that is already current is never
-    replaced.
-
-    Args:
-        torch: The PyTorch module.
-        current_context: The driver's bound `current_context` method.
-        device_index: Index of the device of the validated tensors, which
-            the caller has checked to be the current device.
-
-    Returns:
-        The context that is current now.
-
-    Raises:
-        RuntimeError: The thread still has no current context.
-    """
-    torch.cuda.set_device(device_index)
-    return current_context()
+    return is_current_stream_capturing(torch)
 
 
-def _device_facts(torch, index):
-    """Cached (max threads, sm target) per device for this torch module."""
-    per_torch = _device_facts_cache.get(torch)
-    if per_torch is None:
-        per_torch = {}
-        _device_facts_cache[torch] = per_torch
-    facts = per_torch.get(index)
-    if facts is None:
-        properties = torch.cuda.get_device_properties(index)
-        major, minor = torch.cuda.get_device_capability(index)
-        facts = (properties.max_threads_per_block, f"sm_{major}{minor}")
-        per_torch[index] = facts
-    return facts
-
-
-def _current_stream(torch, index):
-    """The current stream, without rebuilding the object when unchanged."""
-    raw_stream = getattr(
-        getattr(torch, "_C", None), "_cuda_getCurrentRawStream", None
-    )
-    if raw_stream is None:
-        return torch.cuda.current_stream()
-    handle = raw_stream(index)
-    cached = _stream_objects.get((index, handle))
-    if cached is None:
-        cached = torch.cuda.current_stream(index)
-        _stream_objects[(index, handle)] = cached
-    return cached
-
-
-def _specialization_data(kernel, *, descriptors, constexprs, target):
+def _specialization_data(
+    kernel,
+    *,
+    descriptors,
+    constexprs,
+    target,
+    adapter,
+):
+    """Return the cache identity of one fixed launch specialization."""
     identity = _cached_identity()
     source_digest = getattr(kernel, "source_digest", None)
     if source_digest is None:
         normalized_source = ast.dump(kernel.function, include_attributes=False)
         source_digest = hashlib.sha256(normalized_source.encode()).hexdigest()
-    block = constexprs["BLOCK"]
+    block = next(iter(constexprs.values()))
     return {
         "source": source_digest,
         "kernel": kernel.__name__,
+        "backend": adapter.name,
+        "format": adapter.artifact_format,
+        "target": target,
         "descriptors": list(descriptors),
         "constexprs": [[key, constexprs[key]] for key in sorted(constexprs)],
-        "compute_capability": target,
-        "codegen": {"block_size": block, "index_bits": 64},
+        "codegen": {
+            "lowering": "fixed",
+            "block_size": block,
+            "options": [],
+            "index_bits": 64,
+        },
         "frontend": identity["frontend"],
         # The native identity is derived from the contents of the compiler
         # libraries, so it also covers the LLVM they link. The LLVM pin is
@@ -658,9 +793,13 @@ def _hash_frontend(package, started=None):
             may differ from the code the process already loaded.
 
     Returns:
-        `(digest, None)`, where the SHA-256 hex digest covers each file's
-        relative name, length, and bytes, or `(None, problem)` when a file
-        cannot be read, is too new, or the package holds no source.
+        `(digest, None)`, where the SHA-256 hex digest covers one line per
+        file, `<relative name> <SHA-256 of its bytes>` and a newline, or
+        `(None, problem)` when a file cannot be read, is too new, or the
+        package holds no source. The build computes the same digest of the
+        sources it was built with and records it as `frontend_digest` in
+        the `_build_info.json` of the bindings; see
+        cmake/SwageBuildIdentity.cmake.
     """
     try:
         sources = _frontend_sources(package)
@@ -669,8 +808,9 @@ def _hash_frontend(package, started=None):
             contents = path.read_bytes()
             if started is not None and _changed_ns(path) >= started:
                 return None, _too_new(path)
-            digest.update(f"{name}\0{len(contents)}\0".encode())
-            digest.update(contents)
+            digest.update(
+                f"{name} {hashlib.sha256(contents).hexdigest()}\n".encode()
+            )
     except OSError as error:
         return None, f"cannot read the frontend sources: {error}"
     if not sources:
@@ -988,9 +1128,12 @@ def _compiler_identity():
     `frontend` and `native` identify the code that produces PTX and are the
     compiler fields of the cache key. They describe the files as they are
     now; `_stale_identity` decides whether that is the code this process
-    loaded. `revision` and `clean` describe the Swage git checkout that the
-    package belongs to, for diagnostics; they do not gate the cache, and
-    they are unavailable for a package inside any other repository.
+    loaded. `revision` and `clean` describe the sources, for diagnostics;
+    they do not gate the cache. A package in a Swage git checkout takes
+    them from the checkout. Any other package takes them, with `llvm`, from
+    the `_build_info.json` the native build packaged, and an invalid record
+    gives no revision instead of a guess. A package inside another
+    repository with no build record has none.
 
     Returns:
         A dict with the keys `revision`, `clean`, `llvm`, `frontend`, and
@@ -1000,12 +1143,22 @@ def _compiler_identity():
     root = package.parents[1]
     pin = root / "cmake" / "llvm-version.txt"
     revision, clean = None, False
+    llvm = pin.read_text().strip() if pin.is_file() else None
     if _is_swage_checkout(root, package):
         revision, clean = _git_identity(root)
+    else:
+        try:
+            info = _native.build_info()
+        except ValueError:
+            info = None
+        if info is not None:
+            revision = info["source_revision"]
+            clean = info["source_clean"]
+            llvm = info["llvm_version"]
     return {
         "revision": revision,
         "clean": clean,
-        "llvm": pin.read_text().strip() if pin.is_file() else None,
+        "llvm": llvm,
         "frontend": _frontend_digest(package),
         "native": _native_identity(),
     }
@@ -1025,7 +1178,7 @@ def _cached_identity():
     return _identity_cache[1]
 
 
-class _BindingsMismatch(RuntimeError):
+class _BindingsMismatch(SwageError):
     """The `mlir_swage` bindings were not built for the loaded `swage`."""
 
 
@@ -1378,88 +1531,303 @@ def _compile_refusal(kernel_name, reason):
     )
 
 
-def _compile_cached(specialization, kernel_name, block_size, emit, *, key=None):
+def _memory_cache_limit():
+    """Lazily parse the strict positive process-cache capacity."""
+    global _memory_cache_entries
+    limit = _memory_cache_entries
+    if limit is not None:
+        return limit
+    with _cache_lock:
+        if _memory_cache_entries is None:
+            configured = os.environ.get("SWAGE_MEMORY_CACHE_ENTRIES")
+            if configured is None:
+                _memory_cache_entries = _DEFAULT_MEMORY_CACHE_ENTRIES
+            elif (
+                not configured
+                or not configured.isascii()
+                or not configured.isdigit()
+                or int(configured) <= 0
+            ):
+                raise ValueError(
+                    "SWAGE_MEMORY_CACHE_ENTRIES must be a positive integer"
+                )
+            else:
+                _memory_cache_entries = int(configured)
+        return _memory_cache_entries
+
+
+def _artifact_identity(key, backend, artifact_format, target, contract_json):
+    material = json.dumps(
+        {
+            "key": key,
+            "backend": backend,
+            "format": artifact_format,
+            "target": target,
+            "contract": hashlib.sha256(contract_json.encode()).hexdigest(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _make_artifact(
+    key,
+    adapter,
+    target,
+    lowered,
+    image,
+    contract_json,
+    contract,
+):
+    return _Artifact(
+        key,
+        adapter.name,
+        adapter.artifact_format,
+        target,
+        lowered,
+        image,
+        contract_json,
+        contract,
+        tuple(argument.kind for argument in contract.arguments),
+        _artifact_identity(
+            key,
+            adapter.name,
+            adapter.artifact_format,
+            target,
+            contract_json,
+        ),
+    )
+
+
+def _insert_artifact_locked(key, artifact, limit):
+    _artifact_cache[key] = artifact
+    _artifact_cache.move_to_end(key)
+    while len(_artifact_cache) > limit:
+        _artifact_cache.popitem(last=False)
+
+
+def _cached_artifact(key, adapter, target):
+    """Return the process artifact of `key`, or None, without waiting."""
+    cached = _artifact_cache.get(key)
+    if cached is None:
+        return None
+    if (
+        cached.backend != adapter.name
+        or cached.artifact_format != adapter.artifact_format
+        or cached.target != target
+    ):
+        raise RuntimeError("process artifact cache identity mismatch")
+    # Recency is refreshed only when nobody else holds the cache lock, so a
+    # hit never waits.
+    if len(_artifact_cache) > 1 and _cache_lock.acquire(blocking=False):
+        try:
+            if _artifact_cache.get(key) is cached:
+                _artifact_cache.move_to_end(key)
+        finally:
+            _cache_lock.release()
+    return cached
+
+
+def _compile_cached(
+    adapter,
+    specialization,
+    kernel_name,
+    block_size,
+    emit,
+    *,
+    key=None,
+    lowering_kind="fixed",
+    lowering_options=None,
+):
     """Return the artifact for one specialization, emitting only on a miss.
 
     `emit` is a zero-argument callable producing the semantic module; it is
-    deferred so a warm launch never pays for AST-to-MLIR emission.
+    deferred so a warm launch never pays for AST-to-MLIR emission. A warm
+    launch stops at the process cache and never waits for a compile in
+    progress. A miss holds the cold-path lock, so compiles are serialized,
+    a second caller of the same key finds the first caller's artifact, and
+    interpreter exit and `fork` wait for the compile in flight.
 
     A cache directory that cannot be read or written never fails the call:
     the artifact is kept for the process and one warning names the cause.
-    An unsafe or corrupt entry is tamper evidence and still raises.
+    An unsafe or corrupt entry is tamper evidence and still raises. Only
+    backends with a persistent cache read and publish disk entries.
 
     SWAGE_CACHE_READ_ONLY=1 keeps a new artifact in the process without
     publishing it. SWAGE_NO_COMPILE=1 raises `RuntimeError` on a miss instead
     of compiling. A mistyped cache variable raises `ValueError`.
     """
+    if not isinstance(lowering_kind, str) or not lowering_kind:
+        raise ValueError("lowering kind must be a nonempty string")
+    if lowering_options is None:
+        lowering_options = {}
+    if not isinstance(lowering_options, Mapping):
+        raise TypeError("lowering options must be a mapping")
+    lowering_options = dict(lowering_options)
+    expected_options = [
+        [name, lowering_options[name]] for name in sorted(lowering_options)
+    ]
+    codegen = specialization.get("codegen")
+    target = specialization.get("target")
+    if (
+        specialization.get("backend") != adapter.name
+        or specialization.get("format") != adapter.artifact_format
+        or not isinstance(target, str)
+        or not target
+        or not isinstance(codegen, dict)
+        or codegen.get("lowering", "fixed") != lowering_kind
+        or codegen.get("options", []) != expected_options
+    ):
+        raise ValueError(
+            "backend, format, target, lowering kind, or options do not match "
+            "specialization metadata"
+        )
     if key is None:
         key = _cache_key(specialization)
-    # A warm launch stops here and never waits for a compile in progress.
-    cached = _ptx_cache.get(key)
+    limit = _memory_cache_limit()
+    cached = _cached_artifact(key, adapter, target)
     if cached is not None:
+        if _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "memory-hit backend=%s target=%s kernel=%s key=%s",
+                adapter.name,
+                target,
+                kernel_name,
+                key[:12],
+            )
         return cached
     with _compile_lock:
-        cached = _ptx_cache.get(key)
+        cached = _cached_artifact(key, adapter, target)
         if cached is not None:
             return cached
         # Read before any cache or compiler work, so a mistyped value fails
         # the call instead of being ignored.
         _, no_compile, _ = _cache_settings()
         identity = _cached_identity()
-        persistent = _cache_usable(identity)
+        persistent = adapter.persistent_cache and _cache_usable(identity)
+        artifact = None
         if persistent:
             try:
-                cached = _read_cache_entry(key, specialization)
+                artifact = _read_cache_entry(
+                    key,
+                    specialization,
+                    kernel_name,
+                    block_size,
+                    lowering_kind,
+                    adapter,
+                    target,
+                )
             except OSError as error:
                 _warn_cache_off("read", f"cannot use {_cache_dir()}: {error}")
                 persistent = False
-            if cached is not None:
-                _ptx_cache[key] = cached
-                return cached
-        if no_compile:
-            _refuse_compile(kernel_name, key, looked_up=persistent)
-        target = specialization.get(
-            "compute_capability", specialization.get("target")
-        )
-        lowered, ptx = _compile_native(emit(), kernel_name, block_size, target)
-        artifact = _Artifact(key, lowered, ptx)
-        # Retained before any disk write, so no failure below costs it.
-        _ptx_cache[key] = artifact
-        # The identity is checked again: the compile may have loaded code
-        # that changed on disk since the lookup above.
-        if persistent and _cache_writable() and _cache_usable(identity):
-            try:
-                artifact = _write_cache_entry(artifact, specialization)
-            except OSError as error:
-                _warn_cache_off("write", f"cannot use {_cache_dir()}: {error}")
-            _ptx_cache[key] = artifact
+        if artifact is not None:
+            if _logger.isEnabledFor(logging.DEBUG):
+                _logger.debug(
+                    "persistent-hit backend=%s target=%s kernel=%s key=%s",
+                    adapter.name,
+                    target,
+                    kernel_name,
+                    key[:12],
+                )
+        else:
+            if no_compile:
+                _refuse_compile(kernel_name, key, looked_up=persistent)
+            if _logger.isEnabledFor(logging.DEBUG):
+                _logger.debug(
+                    "compile backend=%s target=%s kernel=%s key=%s",
+                    adapter.name,
+                    target,
+                    kernel_name,
+                    key[:12],
+                )
+            result = adapter.compile(
+                emit(),
+                kernel_name,
+                block_size,
+                target,
+                lowering_kind,
+                lowering_options,
+            )
+            if not isinstance(result, tuple) or len(result) != 3:
+                raise RuntimeError(
+                    "backend compiler must return lowered MLIR, image, and "
+                    "contract"
+                )
+            lowered, image, contract_json = result
+            if not isinstance(lowered, str) or not isinstance(
+                contract_json, str
+            ):
+                raise RuntimeError(
+                    "backend compiler returned invalid artifact data"
+                )
+            if adapter.artifact_format == "ptx" and not isinstance(image, str):
+                raise RuntimeError("CUDA compiler returned non-text PTX")
+            contract = _parse_compiler_contract(contract_json)
+            _validate_contract_specialization(
+                contract,
+                specialization,
+                kernel_name,
+                block_size,
+                lowering_kind,
+                adapter,
+            )
+            artifact = _make_artifact(
+                key,
+                adapter,
+                target,
+                lowered,
+                image,
+                contract_json,
+                contract,
+            )
+            # Retained before any disk write, so no failure below costs it.
+            with _cache_lock:
+                _insert_artifact_locked(key, artifact, limit)
+            # The identity is checked again: the compile may have loaded
+            # code that changed on disk since the lookup above.
+            if persistent and _cache_writable() and _cache_usable(identity):
+                try:
+                    artifact = _write_cache_entry(
+                        artifact,
+                        specialization,
+                        kernel_name,
+                        block_size,
+                        lowering_kind,
+                        adapter,
+                    )
+                except OSError as error:
+                    _warn_cache_off(
+                        "write", f"cannot use {_cache_dir()}: {error}"
+                    )
+        with _cache_lock:
+            _insert_artifact_locked(key, artifact, limit)
+        _write_dumps(artifact)
         return artifact
 
 
-def _compile_native(module, kernel_name, block_size, target):
+def _native_compiler(kernel_name):
+    """Return the native `swage` bindings for a compile of `kernel_name`.
+
+    Raises:
+        BackendUnavailableError: The bindings cannot be imported.
+        _BindingsMismatch: The bindings were built for another `swage`.
+    """
     try:
-        native_swage = _native_bindings()
+        return _native_bindings()
     except _BindingsMismatch:
         raise
     except Exception as error:
         from ._frontend import _INSTALLATION
 
-        raise RuntimeError(
+        raise BackendUnavailableError(
             "Swage launch requires the build-tree mlir_swage bindings, "
             "which the swage-compiler wheel does not include; kernel "
-            f"'{kernel_name}' was not compiled. See {_INSTALLATION} for "
-            "the native build"
+            f"'{kernel_name}' was not compiled",
+            code="native-unavailable",
+            backend="native",
+            remediation=f"see {_INSTALLATION} for the native build",
         ) from error
-    # The bindings also return the launch contract of the kernel, which this
-    # launch path does not read: it passes the fixed kernel's arguments in
-    # their declared order.
-    lowered, ptx, _contract = native_swage._compile_ptx(
-        module,
-        kernel_name=kernel_name,
-        block_size=block_size,
-        target=target,
-    )
-    return lowered, ptx
 
 
 def _cache_dir():
@@ -1484,7 +1852,15 @@ def _check_safe(path):
         raise RuntimeError(f"cache entry is world-writable: {path}")
 
 
-def _read_cache_entry(key, specialization):
+def _read_cache_entry(
+    key,
+    specialization,
+    kernel_name,
+    block_size,
+    lowering_kind,
+    adapter,
+    target,
+):
     """Return the verified entry for `key`, or None on a cache miss.
 
     A missing entry is a miss. An incomplete entry is also a miss: it is
@@ -1493,9 +1869,12 @@ def _read_cache_entry(key, specialization):
     directory cannot be written, the debris stays, publishing is given up
     with a warning, and the miss still concerns this key only. A read-only
     process leaves the debris and does not warn. Unsafe, unreadable,
-    mismatched, and corrupt entries raise `RuntimeError`. A cache directory
-    that cannot be inspected raises `OSError`.
+    mismatched, and corrupt entries raise `RuntimeError`, and so does a
+    stored contract that does not describe the specialization. A cache
+    directory that cannot be inspected raises `OSError`.
     """
+    if (adapter.name, adapter.artifact_format) != ("cuda", "ptx"):
+        raise RuntimeError("persistent cache is only valid for CUDA PTX")
     root = _cache_dir()
     entry = root / key
     paths = {
@@ -1529,16 +1908,64 @@ def _read_cache_entry(key, specialization):
         return None
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"cache entry is unreadable: {entry}") from error
-    if metadata.get("version") != 1 or metadata.get("key") != key:
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != _METADATA_FIELDS
+        or metadata.get("version") != _CACHE_VERSION
+        or metadata.get("key") != key
+        or metadata.get("backend") != adapter.name
+        or metadata.get("format") != adapter.artifact_format
+        or metadata.get("target") != target
+    ):
         raise RuntimeError(f"cache metadata mismatch: {entry}")
     if metadata.get("specialization") != specialization:
         raise RuntimeError(f"cache specialization mismatch: {entry}")
-    digests = metadata.get("digests", {})
-    if digests.get("lowered") != hashlib.sha256(lowered.encode()).hexdigest():
+    contract_json = metadata.get("contract")
+    digests = metadata.get("digests")
+    if (
+        not isinstance(contract_json, str)
+        or not isinstance(digests, dict)
+        or set(digests) != {"lowered", "ptx", "contract"}
+    ):
+        raise RuntimeError(f"cache metadata mismatch: {entry}")
+    if digests["contract"] != _sha256(contract_json):
+        raise RuntimeError(f"cache contract digest mismatch: {entry}")
+    if digests["lowered"] != _sha256(lowered):
         raise RuntimeError(f"cache lowered MLIR digest mismatch: {entry}")
-    if digests.get("ptx") != hashlib.sha256(ptx.encode()).hexdigest():
+    if digests["ptx"] != _sha256(ptx):
         raise RuntimeError(f"cache PTX digest mismatch: {entry}")
-    return _Artifact(key, lowered, ptx)
+    contract = _parse_compiler_contract(contract_json)
+    _validate_contract_specialization(
+        contract,
+        specialization,
+        kernel_name,
+        block_size,
+        lowering_kind,
+        adapter,
+    )
+    return _make_artifact(
+        key, adapter, target, lowered, ptx, contract_json, contract
+    )
+
+
+# The fields of the metadata.json of a cache entry.
+_METADATA_FIELDS = frozenset(
+    {
+        "version",
+        "key",
+        "backend",
+        "format",
+        "target",
+        "specialization",
+        "contract",
+        "digests",
+    }
+)
+
+
+def _sha256(text):
+    """Return the SHA-256 hex digest of the UTF-8 encoding of `text`."""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 _ENTRY_FILES = ("metadata.json", "lowered.mlir", "kernel.ptx")
@@ -1636,7 +2063,9 @@ def _trim_cache(root, keep):
         _discard_entry(root / name)
 
 
-def _write_cache_entry(artifact, specialization):
+def _write_cache_entry(
+    artifact, specialization, kernel_name, block_size, lowering_kind, adapter
+):
     """Publish one cache entry atomically, then keep the root in its bound.
 
     The three files are written into a staging directory inside the cache
@@ -1648,6 +2077,8 @@ def _write_cache_entry(artifact, specialization):
         The artifact to use: `artifact` when this call published it, or the
         verified entry of the writer that published the same key first.
     """
+    if (artifact.backend, artifact.artifact_format) != ("cuda", "ptx"):
+        raise RuntimeError("persistent cache is only valid for CUDA PTX")
     root = _cache_dir()
     try:
         root.mkdir(parents=True, mode=0o700)
@@ -1655,18 +2086,23 @@ def _write_cache_entry(artifact, specialization):
         pass
     _check_safe(root)
     metadata = {
-        "version": 1,
+        "version": _CACHE_VERSION,
         "key": artifact.key,
+        "backend": artifact.backend,
+        "format": artifact.artifact_format,
+        "target": artifact.target,
         "specialization": specialization,
+        "contract": artifact.contract_json,
         "digests": {
-            "lowered": hashlib.sha256(artifact.lowered.encode()).hexdigest(),
-            "ptx": hashlib.sha256(artifact.ptx.encode()).hexdigest(),
+            "lowered": _sha256(artifact.lowered),
+            "ptx": _sha256(artifact.image),
+            "contract": _sha256(artifact.contract_json),
         },
     }
     staging = pathlib.Path(tempfile.mkdtemp(dir=root, prefix=_STAGING_PREFIX))
     try:
         _atomic_write(staging / "lowered.mlir", artifact.lowered)
-        _atomic_write(staging / "kernel.ptx", artifact.ptx)
+        _atomic_write(staging / "kernel.ptx", artifact.image)
         _atomic_write(
             staging / "metadata.json",
             json.dumps(metadata, sort_keys=True, separators=(",", ":")),
@@ -1678,7 +2114,15 @@ def _write_cache_entry(artifact, specialization):
         except OSError as error:
             if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
                 raise
-            published = _read_cache_entry(artifact.key, specialization)
+            published = _read_cache_entry(
+                artifact.key,
+                specialization,
+                kernel_name,
+                block_size,
+                lowering_kind,
+                adapter,
+                artifact.target,
+            )
             return artifact if published is None else published
         _trim_cache(root, artifact.key)
         return artifact
@@ -1712,7 +2156,10 @@ def _atomic_write(path, contents):
 
 def _write_dumps(artifact):
     dump_mlir = os.environ.get("SWAGE_DUMP_MLIR") == "1"
-    dump_ptx = os.environ.get("SWAGE_DUMP_PTX") == "1"
+    dump_ptx = (
+        os.environ.get("SWAGE_DUMP_PTX") == "1"
+        and artifact.artifact_format == "ptx"
+    )
     if not dump_mlir and not dump_ptx:
         return
     root = pathlib.Path(
@@ -1725,460 +2172,62 @@ def _write_dumps(artifact):
     if dump_mlir:
         _atomic_write(root / f"{artifact.key}.mlir", artifact.lowered)
     if dump_ptx:
-        _atomic_write(root / f"{artifact.key}.ptx", artifact.ptx)
+        _atomic_write(root / f"{artifact.key}.ptx", artifact.image)
 
 
-def _load_cold(cache, key, driver, ptx, kernel_name):
-    """Load one kernel into `cache` unless another thread just did.
-
-    This is the miss path of a loaded-kernel cache. It takes the cold-path
-    lock, which a cache hit never takes.
-
-    Returns:
-        The `(module, function)` entry of `key`.
-    """
-    with _compile_lock:
-        loaded = cache.get(key)
-        if loaded is None:
-            loaded = driver.load(ptx, kernel_name)
-            cache[key] = loaded
-    return loaded
+def _bind_fixed_artifact(artifact, tensors, count):
+    """Bind the validated dense fixed contract without rebuilding its plan."""
+    return (
+        artifact.argument_kinds,
+        (
+            tensors[0].data_ptr(),
+            tensors[1].data_ptr(),
+            tensors[2].data_ptr(),
+            count,
+        ),
+    )
 
 
-def _report_modules_left_loaded(count, error):
-    """Report modules that stay loaded, without ever raising.
-
-    The caller is loading an unrelated kernel and the modules are queued
-    again, so nothing is lost by going on. When the warning filters turn
-    the report into an exception, it is written to standard error instead.
-    """
-    noun = "module" if count == 1 else "modules"
-    try:
-        warnings.warn(
-            f"Swage left {count} unused CUDA {noun} loaded: {error}",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-    except RuntimeWarning as raised:
-        print(f"RuntimeWarning: {raised}", file=sys.stderr)
+def bind_artifact(artifact, *, user, derived=None, plan=None, scratch=None):
+    """Bind and materialize one artifact solely from its compiler contract."""
+    bound = _abi.bind_kernel_contract(
+        artifact.contract,
+        user=user,
+        derived=derived,
+        plan=plan,
+        scratch=scratch,
+    )
+    return _abi.materialize_launch_arguments(bound)
 
 
-def _capturing():
-    """Return whether this thread is capturing a CUDA graph in PyTorch."""
-    torch = sys.modules.get("torch")
-    return torch is not None and torch.cuda.is_current_stream_capturing()
-
-
-class _Function(int):
-    """The handle of a loaded kernel, which keeps its CUDA module loaded.
-
-    The value is the function handle that `cuLaunchKernel` takes. Its module
-    is queued for unloading when this object is collected, so the module
-    stays loaded for whoever still holds the handle: a kernel cache, a
-    prepared launch, or a launch in progress. A plain copy of the value,
-    such as `int(function)`, keeps nothing loaded.
-    """
-
-    def __new__(cls, handle, module, retired):
-        """Wrap a function handle resolved from a loaded module.
-
-        Args:
-            handle: Function handle returned by the driver.
-            module: `(context, module handle)` to queue when this object
-                is collected.
-            retired: The driver's queue of modules that nothing references.
-        """
-        function = super().__new__(cls, handle)
-        function._module = module
-        function._retired = retired
-        return function
-
-    def __del__(self):
-        """Queue the module. The driver unloads it before its next load."""
-        self._retired.append(self._module)
-
-
-class _CudaDriver:
-    """Small lazy wrapper around the Linux CUDA Driver API."""
-
-    _native_launch = None
-
-    def __init__(self):
-        try:
-            self.library = ctypes.CDLL("libcuda.so.1")
-        except OSError as error:
-            raise RuntimeError(
-                "CUDA Driver library libcuda.so.1 is unavailable"
-            ) from error
-        pointer = ctypes.c_void_p
-        self.library.cuDriverGetVersion.argtypes = [
-            ctypes.POINTER(ctypes.c_int)
-        ]
-        self.library.cuDriverGetVersion.restype = ctypes.c_int
-        self.library.cuCtxGetCurrent.argtypes = [ctypes.POINTER(pointer)]
-        self.library.cuCtxGetCurrent.restype = ctypes.c_int
-        self.library.cuModuleLoadData.argtypes = [
-            ctypes.POINTER(pointer),
-            pointer,
-        ]
-        self.library.cuModuleLoadData.restype = ctypes.c_int
-        self.library.cuModuleGetFunction.argtypes = [
-            ctypes.POINTER(pointer),
-            pointer,
-            ctypes.c_char_p,
-        ]
-        self.library.cuModuleGetFunction.restype = ctypes.c_int
-        self.library.cuModuleUnload.argtypes = [pointer]
-        self.library.cuModuleUnload.restype = ctypes.c_int
-        self.library.cuCtxSynchronize.argtypes = []
-        self.library.cuCtxSynchronize.restype = ctypes.c_int
-        self.library.cuStreamIsCapturing.argtypes = [
-            pointer,
-            ctypes.POINTER(ctypes.c_int),
-        ]
-        self.library.cuStreamIsCapturing.restype = ctypes.c_int
-        # Context ids exist from CUDA 12. An older driver has only handles.
-        self._context_id = getattr(self.library, "cuCtxGetId", None)
-        if self._context_id is not None:
-            self._context_id.argtypes = [
-                pointer,
-                ctypes.POINTER(ctypes.c_ulonglong),
-            ]
-            self._context_id.restype = ctypes.c_int
-        # `(context, module handle)` of each module whose `_Function` was
-        # collected, waiting for `unload_retired`.
-        self._retired = collections.deque()
-        # Functions that a CUDA graph may replay; their modules stay loaded.
-        self._pinned = set()
-        self.library.cuLaunchKernel.argtypes = [
-            pointer,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            pointer,
-            ctypes.POINTER(pointer),
-            ctypes.POINTER(pointer),
-        ]
-        self.library.cuLaunchKernel.restype = ctypes.c_int
-        self.library.cuGetErrorName.argtypes = [
-            ctypes.c_int,
-            ctypes.POINTER(ctypes.c_char_p),
-        ]
-        self.library.cuGetErrorName.restype = ctypes.c_int
-        self.library.cuGetErrorString.argtypes = [
-            ctypes.c_int,
-            ctypes.POINTER(ctypes.c_char_p),
-        ]
-        self.library.cuGetErrorString.restype = ctypes.c_int
-        self._native_launch = self._choose_launcher()
-
-    @staticmethod
-    def _choose_launcher():
-        """Return the compiled launcher of this process, or None for ctypes.
-
-        A process that names an artifact launches through the runtime
-        library of the artifact and never imports the bindings here, which
-        would load LLVM into a process that selected an artifact to stay
-        without it. A directory that cannot be used leaves the launcher
-        open: the call that needs the artifact reports why, and a kernel
-        of an artifact that loads later lends its launcher.
-
-        Without an artifact the compiled launcher of the bindings skips
-        per-launch ctypes marshalling; the ctypes path stays as the
-        fallback when the build-tree bindings cannot be imported. A
-        wheel-only install cannot launch from a warm cache: with no native
-        libraries to identify, it never reads the persistent cache.
-        Bindings built for another swage version are refused here, not
-        replaced by the fallback.
-        """
-        # Imported here because the artifact module imports this one.
-        from . import _artifact
-
-        if os.environ.get(_artifact._ENVIRONMENT):
-            try:
-                return _artifact.selected()._launch_kernel
-            except RuntimeError:
-                return None
-        try:
-            return _native_bindings()._launch_kernel
-        except ImportError:
-            return None
-
-    def _call(self, name, *arguments):
-        result = getattr(self.library, name)(*arguments)
-        if result == 0:
-            return
-        error_name = ctypes.c_char_p()
-        error_text = ctypes.c_char_p()
-        self.library.cuGetErrorName(result, ctypes.byref(error_name))
-        self.library.cuGetErrorString(result, ctypes.byref(error_text))
-        stable_name = (
-            error_name.value.decode() if error_name.value else "unknown"
-        )
-        stable_text = (
-            error_text.value.decode() if error_text.value else "unknown"
-        )
-        raise RuntimeError(
-            f"CUDA Driver {name} failed: {stable_name} ({result}): "
-            f"{stable_text}"
-        )
-
-    def driver_version(self):
-        version = ctypes.c_int()
-        self._call("cuDriverGetVersion", ctypes.byref(version))
-        return f"{version.value // 1000}.{(version.value % 1000) // 10}"
-
-    def current_context(self):
-        """Identify the CUDA context that is current on this thread.
-
-        Returns:
-            The driver's id of the context, which is unique for the life of
-            the process. A context handle is not: the driver places a new
-            context at the address of a destroyed one, so by its handle a
-            kernel loaded in the destroyed context would pass for a kernel
-            of the new one. A driver without context ids returns the
-            handle.
-
-        Raises:
-            RuntimeError: No CUDA context is current on this thread.
-        """
-        if self._context_id is not None:
-            identifier = ctypes.c_ulonglong()
-            # A null context asks for the id of the current context.
-            if not self._context_id(None, ctypes.byref(identifier)):
-                return identifier.value
-        context = ctypes.c_void_p()
-        self._call("cuCtxGetCurrent", ctypes.byref(context))
-        if not context.value:
-            raise RuntimeError("PyTorch has no current CUDA context")
-        return context.value
-
-    def load(self, ptx, kernel_name):
-        """Load one module and resolve one kernel in it.
-
-        Modules that nothing references any more are unloaded first. A
-        module whose kernel cannot be resolved is not left loaded.
-
-        Returns:
-            `(module, function)`. `function` is a `_Function`: the module
-            stays loaded for as long as that object is referenced, and
-            `module` is only its handle.
-        """
-        self.unload_retired()
-        owner = self.current_context()
-        module = ctypes.c_void_p()
-        image = ctypes.create_string_buffer(ptx.encode())
-        self._call(
-            "cuModuleLoadData",
-            ctypes.byref(module),
-            ctypes.cast(image, ctypes.c_void_p),
-        )
-        function = ctypes.c_void_p()
-        try:
-            self._call(
-                "cuModuleGetFunction",
-                ctypes.byref(function),
-                module,
-                kernel_name.encode(),
-            )
-        except RuntimeError:
-            self._retired.append((owner, module.value))
-            self.unload_retired()
-            raise
-        return module.value, _Function(
-            function.value, (owner, module.value), self._retired
-        )
-
-    def unload_retired(self):
-        """Unload the modules of the current context that nothing holds.
-
-        A module is queued only after its `_Function` was collected, so no
-        thread can launch it again. Launches of it that are still queued on
-        a stream are waited for: the context is synchronized once before
-        the first unload.
-
-        CUDA forbids both calls while a stream of the context captures a
-        graph, and the attempt invalidates the capture. While this thread
-        captures, nothing is unloaded and the modules wait for a later
-        call. A capture open on another thread cannot be seen from here: it
-        is invalidated, the synchronize fails, and the modules stay queued.
-
-        A module of another context stays queued until that context is
-        current. A driver error is reported once per call and is never
-        raised, because the caller is loading an unrelated kernel. Every
-        idle module is tried, and a module that was not unloaded stays
-        queued for the next call.
-        """
-        if not self._retired or _capturing():
-            return
-        context = self.current_context()
-        idle = []
-        for _ in range(len(self._retired)):
-            try:
-                owner, module = self._retired.popleft()
-            except IndexError:
-                break
-            if owner == context:
-                idle.append(module)
-            else:
-                self._retired.append((owner, module))
-        if not idle:
-            return
-        try:
-            self._call("cuCtxSynchronize")
-        except RuntimeError as error:
-            self._retired.extend((context, module) for module in idle)
-            _report_modules_left_loaded(len(idle), error)
-            return
-        kept = []
-        first_error = None
-        try:
-            while idle:
-                try:
-                    self._call("cuModuleUnload", ctypes.c_void_p(idle[-1]))
-                except RuntimeError as error:
-                    kept.append(idle[-1])
-                    first_error = first_error or error
-                idle.pop()
-        finally:
-            # `idle` holds modules only when the loop was interrupted, the
-            # module that was being unloaded among them.
-            self._retired.extend((context, module) for module in kept + idle)
-        if kept:
-            _report_modules_left_loaded(len(kept), first_error)
-
-    def _pin_if_capturing(self, function, stream):
-        """Keep a kernel loaded for good when a CUDA graph captures it.
-
-        A graph replays a captured launch for as long as the graph lives,
-        and nothing ties the graph to the `_Function`.
-        """
-        status = ctypes.c_int()
-        self._call(
-            "cuStreamIsCapturing",
-            ctypes.c_void_p(stream),
-            ctypes.byref(status),
-        )
-        if status.value:
-            self._pinned.add(function)
-
-    def launch(self, function, grid, block, stream, arguments):
-        # The NULL stream cannot capture, which keeps the capture query off
-        # the default-stream path.
-        if stream and type(function) is _Function:
-            self._pin_if_capturing(function, stream)
-        if self._native_launch is not None:
-            self._native_launch(
-                function,
-                grid[0],
-                block,
-                stream,
-                arguments[:3],
-                (arguments[3],),
-            )
-            return
-        values = [ctypes.c_void_p(value) for value in arguments[:3]]
-        values.append(ctypes.c_int32(arguments[3]))
-        self._launch(function, grid, block, stream, values)
-
-    def launch_segmented(self, function, grid, block, stream, arguments):
-        """Launch a private three-pointer segmented ABI.
-
-        The pointers are followed by two i32 counts, or by three for the
-        split merge kernel, whose last count is the segment count.
-        """
-        if self._native_launch is not None:
-            self._native_launch(
-                function,
-                grid[0],
-                block,
-                stream,
-                arguments[:3],
-                arguments[3:],
-            )
-            return
-        values = [ctypes.c_void_p(value) for value in arguments[:3]]
-        values.extend(ctypes.c_int32(value) for value in arguments[3:])
-        self._launch(function, grid, block, stream, values)
-
-    def launch_segmented_tasks(self, function, grid, block, stream, arguments):
-        """Launch the private four-pointer, three-count task-ID ABI."""
-        if self._native_launch is not None:
-            self._native_launch(
-                function,
-                grid[0],
-                block,
-                stream,
-                arguments[:4],
-                arguments[4:],
-            )
-            return
-        values = [ctypes.c_void_p(value) for value in arguments[:4]]
-        values.extend(ctypes.c_int32(value) for value in arguments[4:])
-        self._launch(function, grid, block, stream, values)
-
-    def launch_segmented_mixed(self, function, grid, block, stream, arguments):
-        """Launch the private four-pointer, four-count fused ABI."""
-        self.launch_segmented_tasks(function, grid, block, stream, arguments)
-
-    def launch_persistent(self, function, grid, block, stream, arguments):
-        """Launch the private ten-pointer, six-count persistent ABI."""
-        if self._native_launch is not None:
-            self._native_launch(
-                function,
-                grid[0],
-                block,
-                stream,
-                arguments[:10],
-                arguments[10:],
-            )
-            return
-        values = [ctypes.c_void_p(value) for value in arguments[:10]]
-        values.extend(ctypes.c_int32(value) for value in arguments[10:])
-        self._launch(function, grid, block, stream, values)
-
-    def _launch(self, function, grid, block, stream, values):
-        parameter_pointers = (ctypes.c_void_p * len(values))(
-            *[
-                ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
-                for value in values
-            ]
-        )
-        self._call(
-            "cuLaunchKernel",
-            ctypes.c_void_p(function),
-            grid[0],
-            1,
-            1,
-            block,
-            1,
-            1,
-            0,
-            ctypes.c_void_p(stream),
-            parameter_pointers,
-            None,
-        )
-
-
-def _get_driver():
-    """Return the process-wide driver, creating it on first use."""
-    global _driver
-    driver = _driver
-    if driver is None:
-        with _compile_lock:
-            if _driver is None:
-                _driver = _CudaDriver()
-            driver = _driver
-    return driver
-
-
-def driver_version():
-    """Return the actual CUDA driver version, or ``None`` when unavailable."""
-    try:
-        return _get_driver().driver_version()
-    except RuntimeError:
-        return None
+def segmented_specialization(
+    semantic,
+    *,
+    kernel_name,
+    target,
+    block_size,
+    lowering_kind,
+    adapter,
+    lowering_options=None,
+    schedule=None,
+):
+    """Build complete deterministic cache identity for a segmented entry."""
+    identity = _cached_identity()
+    options = dict(lowering_options or {})
+    return {
+        "source": hashlib.sha256(semantic.encode()).hexdigest(),
+        "kernel": kernel_name,
+        "backend": adapter.name,
+        "format": adapter.artifact_format,
+        "target": target,
+        "codegen": {
+            "lowering": lowering_kind,
+            "block_size": block_size,
+            "options": [[key, options[key]] for key in sorted(options)],
+            "schedule": dict(schedule or {}),
+            "index_bits": 64,
+        },
+        "frontend": identity["frontend"],
+        "native": identity["native"],
+        "dialect_version": _DIALECT_VERSION,
+    }

@@ -9,7 +9,10 @@ process, or taken from the artifact that `SWAGE_ARTIFACT_DIR` selects.
 """
 
 from . import _artifact, _runtime
+from . import _segmented_programs as _programs
 from . import _segmented_qualification as _qualification
+from . import _segmented_runtime as _execution
+from . import _segmented_validation as _validation
 from ._frontend import _INSTALLATION
 
 _KINDS = ("sum", "max", "min", "mean")
@@ -102,7 +105,7 @@ def segment_reduce(values, offsets, kind, *, out=None):
     # One result per segment, and per column for `[N, D]` values.
     shape = (segment_count, *values.shape[1:])
     # The element type of the program, or None for values no program takes.
-    element = _qualification._element_of(torch, values)
+    element = _programs._element_of(torch, values)
     _require_out(torch, out, shape, "segment", values, offsets, element)
     _require_bindings("segment_reduce")
     _require_numpy("segment_reduce")
@@ -115,9 +118,9 @@ def segment_reduce(values, offsets, kind, *, out=None):
             values,
             offsets,
             output,
-            module_text=_qualification._semantic_module(kind, element, 2),
-            kernel_name=_qualification._reduction_kernel(kind, element, 2),
-            validate_offsets=_qualification._validate_offsets,
+            module_text=_programs._semantic_module(kind, element, 2),
+            kernel_name=_programs._reduction_kernel(kind, element, 2),
+            validate_offsets=_validation._validate_offsets,
             int64_offsets=True,
         )
         return output
@@ -128,8 +131,8 @@ def segment_reduce(values, offsets, kind, *, out=None):
         kernel_values,
         offsets,
         kernel_output,
-        module_text=_qualification._semantic_module(kind, element),
-        kernel_name=_qualification._reduction_kernel(kind, element),
+        module_text=_programs._semantic_module(kind, element),
+        kernel_name=_programs._reduction_kernel(kind, element),
     )
     return output
 
@@ -212,7 +215,7 @@ def segment_softmax(values, offsets, *, out=None):
             values,
             offsets,
             output,
-            module_text=_qualification._softmax_text(2),
+            module_text=_programs._softmax_text(2),
             kernel_name="ragged_softmax_r2",
             validate_offsets=_validate_covering_offsets,
             int64_offsets=True,
@@ -222,7 +225,7 @@ def segment_softmax(values, offsets, *, out=None):
     kernel_values, kernel_output = values, output
     if rank == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
-    value_count, segment_count, host_offsets = _qualification._validate_shapes(
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
         kernel_values,
         offsets,
         kernel_output,
@@ -232,7 +235,7 @@ def segment_softmax(values, offsets, *, out=None):
     # A batch without segments enqueues nothing and uploads nothing.
     kernel_offsets = offsets
     if segment_count:
-        kernel_offsets = _qualification._kernel_offsets(
+        kernel_offsets = _validation._kernel_offsets(
             torch, offsets, host_offsets
         )
     _qualification._enqueue_softmax(
@@ -242,7 +245,7 @@ def segment_softmax(values, offsets, *, out=None):
         kernel_output,
         value_count,
         segment_count,
-        _qualification._target_description().cta_block_threads,
+        _execution._target_description().cta_block_threads,
     )
     return output
 
@@ -325,7 +328,7 @@ def _require_out(torch, out, shape, unit, values, offsets, element):
             )
     if not out.is_contiguous():
         raise ValueError("out must be contiguous")
-    _qualification._validate_storage("out", out)
+    _validation._validate_storage("out", out)
     if out.requires_grad:
         raise ValueError(
             "out must not require grad; a segmented call records no gradient"
@@ -429,7 +432,7 @@ def _validate_covering_offsets(offsets, value_count, output_count):
     per value, so an element that belongs to no segment would be returned
     uninitialized.
     """
-    segment_count = _qualification._validate_softmax_offsets(
+    segment_count = _validation._validate_softmax_offsets(
         offsets, value_count, output_count
     )
     final = int(offsets[-1])

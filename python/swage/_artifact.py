@@ -23,7 +23,7 @@ import stat
 import types
 from typing import NamedTuple
 
-from . import _runtime
+from . import _abi, _cuda_backend, _runtime
 
 _ENVIRONMENT = "SWAGE_ARTIFACT_DIR"
 _MANIFEST = "manifest.json"
@@ -273,6 +273,67 @@ def _sha256(text):
 def _signature(arguments):
     """Render one argument list for an error message."""
     return "(" + ", ".join(f"{role}: {kind}" for role, kind in arguments) + ")"
+
+
+# The user arguments of every program an artifact holds, by role: the
+# parameter index of the role in the segment function of `_segmented_programs`.
+_USER_SOURCES = {
+    "values": 0,
+    "offsets": 1,
+    "output": 2,
+    "value_count": 3,
+    "segment_count": 4,
+    "feature_count": 5,
+}
+
+
+def _contract_json(program, kernel):
+    """Return the launch contract of one kernel of the table, as JSON.
+
+    A format 2 manifest records the arguments of a kernel by role and C
+    type, which fixes its contract: a role of `_USER_SOURCES` is a user
+    argument, `scratch` is the scratch buffer, any other pointer is a plan
+    record list, and any other count is derived from the plan. A `const`
+    pointer is read, any other pointer written. `swage.compile` checks that
+    the compiler gives every kernel it writes this contract.
+
+    Args:
+        program: Name of the program, which is the name of its kernel
+            function.
+        kernel: The `_Kernel` of the table.
+    """
+    arguments = []
+    for role, kind in kernel.arguments:
+        pointer = kind.endswith("*")
+        source = _USER_SOURCES.get(role)
+        if source is not None:
+            origin = "user"
+        elif role == "scratch":
+            origin = "scratch"
+        else:
+            origin = "plan" if pointer else "derived"
+        arguments.append(
+            _abi.KernelArgument(
+                kind="ptr" if pointer else "i32",
+                origin=origin,
+                source_index=source,
+                key=None if source is not None else role,
+                access=(
+                    ("read" if kind.startswith("const ") else "write")
+                    if pointer
+                    else None
+                ),
+            )
+        )
+    return _abi.serialize_kernel_contract(
+        _abi.KernelContract(
+            version=_abi._VERSION,
+            backend="cuda",
+            entry=program + kernel.entry_suffix,
+            launch=_abi.KernelLaunch("spmd-grid", (kernel.block_size, 1, 1)),
+            arguments=tuple(arguments),
+        )
+    )
 
 
 class _CompileFunction:
@@ -682,7 +743,7 @@ class _Artifact:
         return library
 
     def kernel(self, compiler, module_text, options):
-        """Return the PTX that answers one kernel request of the runner.
+        """Return the PTX and contract that answer one kernel request.
 
         The first kernel an artifact serves also gives the process driver
         the launcher of the runtime library, when the driver has no
@@ -692,6 +753,10 @@ class _Artifact:
             compiler: Name of the native compile function the runner named.
             module_text: Semantic module text of the program.
             options: The code generation options of the request.
+
+        Returns:
+            The PTX text and the launch contract of the kernel as JSON,
+            which `_contract_json` derives from the kernel table.
 
         Raises:
             RuntimeError: The artifact holds no such kernel, was compiled
@@ -739,10 +804,12 @@ class _Artifact:
                 f"manifest, {found} here); nothing was compiled or launched. "
                 "Write the artifact again with the swage that loads it"
             )
-        driver = _runtime._get_driver()
-        if driver._native_launch is None:
-            driver._native_launch = self._launch_kernel
-        return self._kernels[program, known.role]
+        driver = _cuda_backend._get_driver()
+        if driver._native_launch is None and driver._split_launch is None:
+            driver._split_launch = self._launch_kernel
+        return self._kernels[program, known.role], _contract_json(
+            program, known
+        )
 
     def admit(self, module_text, warp_max_elements, cta_chunk_elements):
         """Admit one program for planning from what the build host recorded.
@@ -858,7 +925,11 @@ class _Artifact:
     def _launch_kernel(
         self, function, grid_x, block_x, stream, pointers, scalars
     ):
-        """Enqueue one kernel as `_launch_kernel` of the bindings does.
+        """Enqueue one kernel whose pointers precede its i32 scalars.
+
+        It takes the split form `_cuda_backend` passes to a launcher that is
+        not the native one, and enqueues as `_launch_cuda_kernel` of the
+        bindings does.
 
         Raises:
             ValueError: The grid, the block, or the argument count is

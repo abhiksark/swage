@@ -136,7 +136,16 @@ def main():
         root / "benchmarks/benchmark_triton_comparison.py",
         root / "benchmarks/distributions.py",
         root / "python/tests/mlir/reduction_programs.py",
-        root / "python/swage/_segmented_qualification.py",
+        *(
+            root / f"python/swage/_segmented_{name}.py"
+            for name in (
+                "plan",
+                "programs",
+                "qualification",
+                "runtime",
+                "validation",
+            )
+        ),
         root / "lib/Conversion/SwageToPlan/SwageToPlan.cpp",
         root / "lib/Conversion/SwagePlanToGPU/SwagePlanToGPU.cpp",
         root / "lib/Conversion/SwagePlanToGPU/Emission.cpp",
