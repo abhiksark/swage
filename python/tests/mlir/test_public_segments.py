@@ -676,11 +676,14 @@ def test_segmented_calls_reject_host_tensors_after_validating_them(function):
         )
     else:
         expected = pytest.raises(
-            RuntimeError, match="^CUDA is unavailable in PyTorch$"
+            swage.BackendUnavailableError,
+            match="^CUDA is unavailable in PyTorch; Install a CUDA-enabled ",
         )
-    with expected:
+    with expected as caught:
         _call(function, values, offsets, out=out)
 
+    if not torch.cuda.is_available():
+        assert caught.value.code == "cuda-unavailable"
     assert torch.all(out == _SENTINEL)
 
 
