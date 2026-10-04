@@ -612,26 +612,9 @@ public:
     torchFunctionMode =
         torch.attr("_C").attr("_is_torch_function_mode_enabled");
     // A kernel store is invisible to autograd, so every launch advances the
-    // version counter of its output, as the Python launch does. The public
-    // increment_version wraps one tensor in a tuple for
-    // torch._C._increment_version; calling that directly saves a Python
-    // frame per launch. It is used only when it takes a tuple, which an empty
-    // one shows without touching any tensor; a single tensor would be read
-    // as the sequence of its elements.
+    // version counter of its output, as the Python launch does.
     incrementVersion =
         torch.attr("autograd").attr("graph").attr("increment_version");
-    nb::object versionCounter =
-        nb::getattr(torch.attr("_C"), "_increment_version", nb::none());
-    if (PyCallable_Check(versionCounter.ptr())) {
-      nb::object empty = checkedObject(PyTuple_New(0));
-      if (PyObject *probed =
-              PyObject_CallOneArg(versionCounter.ptr(), empty.ptr())) {
-        Py_DECREF(probed);
-        incrementVersionTuple = std::move(versionCounter);
-      } else {
-        PyErr_Clear();
-      }
-    }
 
     // Ordinary attribute reads stay live. A changed class invalidates the
     // shortcut rather than silently accepting different lookup semantics.
@@ -838,11 +821,7 @@ public:
     }
     if (failure)
       std::rethrow_exception(failure);
-    if (incrementVersionTuple)
-      callOne(incrementVersionTuple,
-              checkedObject(PyTuple_Pack(1, tensors[2].ptr())));
-    else
-      callOne(incrementVersion, tensors[2]);
+    callOne(incrementVersion, tensors[2]);
     return true;
   }
 
@@ -889,7 +868,6 @@ public:
           value.deviceValue.ptr(),     value.torchFunctionMode.ptr(),
           value.incrementVersion.ptr()})
       Py_VISIT(reference);
-    Py_VISIT(value.incrementVersionTuple.ptr());
     for (const nb::object &name : value.names)
       Py_VISIT(name.ptr());
     for (const nb::object &parameter : value.parameters)
@@ -1023,7 +1001,7 @@ private:
   PyCFunction negativeMethod = nullptr, conjugateMethod = nullptr;
   PyCFunction pointerMethod = nullptr;
   nb::object isInBadFork, currentDevice, currentRawStream, isCapturing;
-  nb::object torchFunctionMode, incrementVersion, incrementVersionTuple;
+  nb::object torchFunctionMode, incrementVersion;
   nb::object logger, loggingEnabled, debugLevel, moveToEnd;
   nb::object artifactKey, loadedKey, contextValue, functionValue;
   nb::object rawStreamValue, deviceValue;
