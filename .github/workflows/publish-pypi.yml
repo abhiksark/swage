@@ -413,6 +413,13 @@ jobs:
             "$RELEASE_WORK/segmented-qualification"
           cp "$RELEASE_WORK/segmented-qualification/segmented-calls.xml" \
             "$RELEASE_WORK/evidence/"
+      # The gates are inclusive and live in the wheel (swage/_benchmark.py).
+      # The 2^18 throughput ceiling is 1.85, set from
+      # benchmarks/results/fixed-runtime-gate-a6000-sm86.json. At that size
+      # the ratio measures the host cost of a launch. Every launch now
+      # advances the version counter of its output for autograd correctness,
+      # and on this host main's own wheel fails the earlier 1.50 in every run
+      # and the commit that set 1.50 measures at it.
       - name: Enforce qualified A6000 runtime SLOs
         working-directory: ${{ runner.temp }}
         run: |
