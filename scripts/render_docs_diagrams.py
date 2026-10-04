@@ -287,8 +287,8 @@ def frontend_boundary() -> bytes:
         "frontend-boundary.svg",
         "Frontend verification and execution boundary",
         "Python source passes restricted AST validation and verified semantic "
-        "MLIR before emit_mlir stops or canonical launch continues to CUDA.",
-        height=680,
+        "MLIR before emit_mlir stops or canonical launch continues to the "
+        "explicitly selected Native CPU or CUDA backend.",
     )
     svg.text(48, 54, "Frontend boundary", size=32, weight=750)
     common = (
@@ -337,12 +337,14 @@ def frontend_boundary() -> bytes:
         1085, 470, "canonical only", size=16, color="purple", anchor="middle"
     )
     svg.arrow(1045, 504, 1045, 558)
-    svg.box(865, 570, 295, 72, fill="orange_fill", stroke="orange")
-    svg.text(1012, 600, "native compile -> CUDA", weight=700, anchor="middle")
+    svg.box(825, 570, 335, 72, fill="orange_fill", stroke="orange")
     svg.text(
-        1012,
+        992, 600, "native compile -> CPU or CUDA", weight=700, anchor="middle"
+    )
+    svg.text(
+        992,
         626,
-        "nonzero target gate: sm_80+",
+        "CPU: host-call | CUDA: sm_80+",
         size=16,
         color="orange",
         anchor="middle",
