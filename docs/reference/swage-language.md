@@ -2,19 +2,18 @@
 
 # swage.language
 
-`swage.language` exports the markers and symbolic operations of the restricted
-kernel language, conventionally imported as `sl`. The symbolic functions are
-valid only inside a captured kernel: outside one they raise
-`RuntimeError` instead of computing. Their exact accepted source forms
-are normative in [Kernel Language](kernel-language.md).
+`swage.language` exports the eight symbols of the restricted kernel
+language, conventionally imported as `sl`. The frontend recognizes the
+module by object, so another import name works as long as the kernel uses
+it for the marker and for every call. The symbolic functions are valid only
+inside a captured kernel: outside one they raise `RuntimeError` instead of
+computing. Their accepted source forms are normative in
+[Kernel Language](kernel-language.md).
 
 ```python
 arange
 constexpr
 float32
-float16
-float8_e4m3fn
-float8_e5m2
 int32
 load
 pointer
@@ -26,21 +25,19 @@ store
 
 ```python
 sl.float32
-sl.float16
-sl.float8_e4m3fn
-sl.float8_e5m2
 sl.int32
 sl.pointer(element_type)
 sl.constexpr
 ```
 
-Tensor pointer elements may use `float32`, `float16`, `float8_e4m3fn`, or
-`float8_e5m2`. `int32` is the supported runtime scalar parameter type.
-`pointer(element_type)` describes a tensor pointer for explicit
-`emit_mlir(signature=...)` calls; it requires a supported floating element.
-`constexpr` is the exact annotation that marks a compile-time kernel
-parameter; annotated parameters are bound through `constexprs` at
-emission and launch, never passed at run time.
+`float32` and `int32` are the scalar types accepted by the current
+frontend. `pointer(element_type)` describes a pointer to a scalar
+element type for explicit `emit_mlir(signature=...)` calls.
+`constexpr` is the annotation that marks a compile-time kernel parameter.
+It is written as an attribute of a name bound to this module, such as
+`sl.constexpr`, and it is the only parameter annotation the frontend
+accepts. Annotated parameters are bound through `constexprs` at emission
+and launch, never passed at run time.
 
 ## sl.program_id
 
@@ -77,30 +74,31 @@ lane its global element index; the geometry is drawn on
 ## sl.load
 
 ```python
-sl.load(pointer_value, *, mask=None, other=None)
+sl.load(pointer_value, *, mask, other)
 ```
 
 Load a masked vector inside a compiled kernel.
 
 Parameters
 :   `pointer_value`: a pointer parameter plus an index-offset vector.
-:   `mask`: required by the accepted grammar; lanes where the mask is
+:   `mask`: required keyword with no default; lanes where the mask is
     false do not read memory.
-:   `other`: required by the accepted grammar; the value produced for
-    masked-off lanes.
+:   `other`: required keyword with no default; the value produced for
+    masked-off lanes. It is an integer or float literal that float32
+    represents, with an optional leading minus sign.
 
 ## sl.store
 
 ```python
-sl.store(pointer_value, value, *, mask=None)
+sl.store(pointer_value, value, *, mask)
 ```
 
 Store a masked vector inside a compiled kernel.
 
 Parameters
 :   `pointer_value`: a pointer parameter plus an index-offset vector.
-:   `value`: a floating vector with the same element dtype as the pointer.
-:   `mask`: required by the accepted grammar; lanes where the mask is
+:   `value`: the f32 vector to store.
+:   `mask`: required keyword with no default; lanes where the mask is
     false write nothing.
 
 `store` appears as an expression statement and is the kernel's only

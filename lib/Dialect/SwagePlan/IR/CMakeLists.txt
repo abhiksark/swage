@@ -11,6 +11,8 @@ add_mlir_dialect_library(MLIRSwagePlan
   MLIRSwagePlanAttributesIncGen
 
   LINK_LIBS PUBLIC
+  MLIRArithDialect
   MLIRFuncDialect
   MLIRIR
+  MLIRSwage
 )

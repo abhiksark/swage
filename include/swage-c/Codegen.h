@@ -5,6 +5,80 @@
 // See LICENSE for license information.
 //
 //===----------------------------------------------------------------------===//
+//
+// Compiles a Swage semantic module to NVPTX assembly or to a native host
+// executable, and classifies segment metadata into task records. The rules
+// below hold for every function in this header that takes a module, except
+// swageEstimateElementWork, which only reads its module.
+// swageClassifySegments and the host executable functions take none; their
+// own comments state what differs.
+//
+// Module and context
+//   The module is read and never modified: a call clones it and lowers the
+//   clone. The clone lives in the context of the module, so a call changes
+//   that context. A compile function appends a dialect registry that carries
+//   the LLVM conversion interfaces, registers the LLVM IR translation
+//   interfaces, and loads the dialects the lowering produces, among them gpu,
+//   scf, llvm, and nvvm, and swage_plan when the kernel is planned before
+//   it is lowered. These changes stay after the call returns and repeating
+//   them is harmless. swageCompileFixedBlockToHost appends the same registry
+//   and loads the func, scf, and llvm dialects. swageMaterializeSegmentedPlan
+//   builds no IR and leaves the context as it was.
+//   The dialects of the input itself (swage, func, arith, math, memref,
+//   vector) must already be loaded, which parsing the module ensures.
+//
+// Code generation
+//   A compile function lowers the clone to the LLVM dialect, translates it
+//   to LLVM IR, runs a fixed list of LLVM passes on that IR, and emits PTX
+//   with the NVPTX backend. The passes keep the kernel name, its parameters,
+//   its launch width, each barrier, warp shuffle, memory fence, and atomic,
+//   and the result bits of its floating-point arithmetic. The lowered module
+//   that loweredCallback receives is the MLIR before the translation, so the
+//   effect of the LLVM passes shows in the PTX and not in that text.
+//
+// Launch contract
+//   The lowering of every kernel describes its parameters in a launch
+//   contract (ADR-0025): for each parameter in order, its kind, whether the
+//   caller passes it (a user argument, bound by its position in the
+//   function `kernelName` names), the host computes it from other bindings
+//   (derived), host classification produces it (plan), or the host allocates
+//   it for the kernel (scratch), and how the kernel accesses it. A compile
+//   function requires the module it lowers for the kernel to hold that
+//   kernel and nothing else, checks the contract against the parameters and
+//   the launch width of the kernel, and removes it before the translation,
+//   so neither the lowered module nor the PTX carries it. contractCallback
+//   receives it as compact JSON with a fixed field order.
+//
+// Threads
+//   A call uses the context of its module the way a pass pipeline does:
+//   no other thread may use that context, or any IR in it, until the call
+//   returns. Calls on modules of different contexts may run at the same time.
+//   The functions keep no state between calls except the one-time NVPTX and
+//   native target initializations, which are safe to race.
+//
+// Callbacks
+//   A callback runs at most once, on the calling thread, before the function
+//   returns, and only when the call succeeds. A failed call runs no callback.
+//   The data a callback receives belongs to the call and is valid only until
+//   the callback returns, so a callback copies what it keeps. Strings are
+//   given by length and are not promised to be null-terminated. The user data
+//   pointer is passed through and not retained.
+//
+// Failure
+//   A failed call returns mlirLogicalResultFailure and has emitted at least
+//   one error diagnostic through the diagnostic handlers of the context of
+//   the module. Attach a handler with mlirContextAttachDiagnosticHandler
+//   before the call to capture the text; without one MLIR prints it to
+//   stderr. The one exception is a null module, which has no context to
+//   report on and fails without a diagnostic.
+//
+//   Invalid input is rejected with a diagnostic, including the two inputs
+//   that would make the LLVM NVPTX backend terminate the process: a function
+//   name that is not a PTX identifier and a processor the pinned LLVM does
+//   not define. No fatal error handler is installed, so an internal LLVM
+//   error outside those cases still terminates the process.
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef SWAGE_C_CODEGEN_H
 #define SWAGE_C_CODEGEN_H
@@ -19,43 +93,60 @@
 extern "C" {
 #endif
 
+/// Receives one result string of a compile function.
 typedef void (*SwageStringCallback)(MlirStringRef value, void *userData);
+/// Receives one flat list of i32 plan records.
 typedef void (*SwageTaskIdsCallback)(const int32_t *taskIds, intptr_t taskCount,
                                      void *userData);
-typedef struct {
-  void *ptr;
-} SwageHostExecutable;
 
-MLIR_CAPI_EXPORTED SwageHostExecutable swageCompileFixedBlockToHost(
-    MlirModule module, MlirStringRef kernelName, int64_t blockSize,
-    SwageStringCallback loweredCallback, void *loweredUserData,
-    SwageStringCallback contractCallback, void *contractUserData);
-MLIR_CAPI_EXPORTED bool
-swageHostExecutableIsNull(SwageHostExecutable executable);
-MLIR_CAPI_EXPORTED MlirLogicalResult swageHostExecutableInvoke(
-    SwageHostExecutable executable, void **arguments, intptr_t argumentCount,
-    SwageStringCallback errorCallback, void *errorUserData);
-MLIR_CAPI_EXPORTED void
-swageHostExecutableDestroy(SwageHostExecutable executable);
+// Arguments shared by the compile functions below.
+//
+//   kernelName      names the function to compile, which must hold Swage
+//                   operations. A segmented compile lowers that function and
+//                   leaves every other function of the module as it is, so a
+//                   module may hold several segment functions. The lowering
+//                   creates a gpu.module named `<kernel>_module`, where
+//                   `<kernel>` is the name of the kernel in the PTX: that
+//                   symbol must be free and nothing in the module may refer
+//                   to the function. The kernel carries the name of the
+//                   function unless noted.
+//   target          is an NVPTX processor: sm_80, sm_86, sm_87, sm_88, sm_89,
+//                   sm_90, sm_100, sm_101, sm_103, sm_110, sm_120, or sm_121.
+//   loweredCallback receives the lowered module as MLIR text.
+//   ptxCallback     receives the PTX text. It runs after loweredCallback.
+//   contractCallback receives the launch contract of the kernel as JSON. It
+//                   runs after ptxCallback.
 
+/// Compiles the fixed elementwise kernel, a vector add or multiply.
+/// `blockSize` is the launch width in threads, from 1 to 1024, and must equal
+/// the vector width of the module.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
+/// Compiles a segmented reduction to a kernel that reduces one segment per
+/// block. `blockSize` is the launch width in threads, from 1 to 1024; its
+/// warp count, `blockSize` divided by 32 and rounded up, must be a power of
+/// two. `useTaskIds` selects the launch ABI that reads segment ids from a
+/// task buffer.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
     void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
+/// Compiles a segmented reduction to the fused kernel that serves warp and
+/// block tasks in one launch. The launch width is fixed at 128 threads.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
+/// Compiles an identity f32 sum to the persistent queue kernel. The launch
+/// width is fixed at 512 threads.
 MLIR_CAPI_EXPORTED MlirLogicalResult
 swageCompilePersistentSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
@@ -63,28 +154,135 @@ swageCompilePersistentSegmentedReductionToPTX(
     SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
+/// Compiles the first stage of a split reduction: one partial result per
+/// chunk of a long segment. The launch width is fixed at 512 threads and the
+/// kernel in the PTX is named `<kernelName>__partial`.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
+/// Compiles the second stage of a split reduction: one result per segment
+/// from its partial results. The launch width is fixed at 512 threads and the
+/// kernel in the PTX is named `<kernelName>__merge`.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
     SwageStringCallback ptxCallback, void *ptxUserData,
     SwageStringCallback contractCallback, void *contractUserData);
 
-// Callback counts below are flat i32 element counts. Partial records use
-// [begin, end] pairs; merge records use
-// [segment_id, partial_begin, partial_end] triples.
+/// A native host executable of the fixed elementwise kernel, owned by the
+/// caller. A null executable holds nothing.
+typedef struct {
+  void *ptr;
+} SwageHostExecutable;
+
+/// Compiles the fixed elementwise kernel to native code for the host CPU,
+/// with one sequential loop over the elements in place of the GPU grid.
+/// `blockSize` is the vector width of the module, from 1 to 1024. The
+/// module and its context are used as by the compile functions above, and
+/// `kernelName` names its one function.
+///
+/// On success the call runs loweredCallback with the module lowered to the
+/// LLVM dialect, then contractCallback with the host-call launch contract
+/// of the kernel, and returns an executable that the caller destroys with
+/// swageHostExecutableDestroy. On failure it runs no callback, returns a
+/// null executable, and has emitted at least one error diagnostic, except
+/// for a null module.
+MLIR_CAPI_EXPORTED SwageHostExecutable swageCompileFixedBlockToHost(
+    MlirModule module, MlirStringRef kernelName, int64_t blockSize,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback contractCallback, void *contractUserData);
+
+/// Whether `executable` is null.
+MLIR_CAPI_EXPORTED bool
+swageHostExecutableIsNull(SwageHostExecutable executable);
+
+/// Runs `executable` once. `arguments` holds `argumentCount` pointers, one
+/// per argument of its launch contract in order, each to the value of that
+/// argument: a buffer argument points at the buffer pointer, a scalar at
+/// the scalar. The call uses no MLIR context.
+///
+/// On failure, which includes a null executable and an argument count that
+/// differs from the contract, `errorCallback` receives the reason. It must
+/// not be null; without it the call fails without running anything.
+MLIR_CAPI_EXPORTED MlirLogicalResult swageHostExecutableInvoke(
+    SwageHostExecutable executable, void **arguments, intptr_t argumentCount,
+    SwageStringCallback errorCallback, void *errorUserData);
+
+/// Destroys `executable`. A null executable is ignored.
+MLIR_CAPI_EXPORTED void
+swageHostExecutableDestroy(SwageHostExecutable executable);
+
+/// Admits the function `kernelName` names for planning and classifies the
+/// offsets into one record list per callback. The function must hold a
+/// capture-free sum, max, or min; other functions of the module are not
+/// looked at.
+/// The limits must satisfy
+/// `0 < warpMaxElements <= ctaChunkElements <= INT32_MAX`. The call reads
+/// the module and runs no pass.
+/// Callback counts are flat i32 element counts. Partial records use
+/// [begin, end] pairs; merge records use
+/// [segment_id, partial_begin, partial_end] triples.
 MLIR_CAPI_EXPORTED MlirLogicalResult swageMaterializeSegmentedPlan(
-    MlirModule module, const int64_t *offsets, intptr_t offsetCount,
-    int64_t valueCount, int64_t segmentCount, int64_t warpMaxElements,
-    int64_t ctaChunkElements, SwageTaskIdsCallback warpCallback,
-    void *warpUserData, SwageTaskIdsCallback ctaCallback, void *ctaUserData,
+    MlirModule module, MlirStringRef kernelName, const int64_t *offsets,
+    intptr_t offsetCount, int64_t valueCount, int64_t segmentCount,
+    int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskIdsCallback warpCallback, void *warpUserData,
+    SwageTaskIdsCallback ctaCallback, void *ctaUserData,
     SwageTaskIdsCallback partialCallback, void *partialUserData,
     SwageTaskIdsCallback mergeCallback, void *mergeUserData);
+
+/// Receives the records of one classification in one buffer: `warpCount`
+/// warp segment ids, then `ctaCount` CTA segment ids, then `partialCount`
+/// [begin, end] pairs, then `mergeCount`
+/// [segment_id, partial_begin, partial_end] triples, then for each of the
+/// `partialCount` partial tasks the index of its merge triple. The counts
+/// are in ids, pairs, and triples, so the buffer holds
+/// `warpCount + ctaCount + 3 * partialCount + 3 * mergeCount` values.
+typedef void (*SwageTaskRecordsCallback)(const int32_t *records,
+                                         intptr_t warpCount, intptr_t ctaCount,
+                                         intptr_t partialCount,
+                                         intptr_t mergeCount, void *userData);
+
+/// Classifies segment offsets into the records swageMaterializeSegmentedPlan
+/// produces for the same offsets and limits, without a module, and adds the
+/// merge index of every partial task, which follows from those records.
+///
+/// A program is admitted for planning by swageMaterializeSegmentedPlan, which
+/// checks the named function of its module and the two limits. That result
+/// depends on the program and the limits only, so a caller
+/// that classifies many layouts of one program admits it once, for example
+/// with a layout of no segments, and classifies each layout here.
+///
+/// The call reads `offsetCount` i32 offsets, which must equal
+/// `segmentCount + 1`, and nothing else: it takes no module, uses no MLIR
+/// context, and keeps no state, so calls may run on any threads at the same
+/// time. The offsets must not change during the call.
+///
+/// On success `recordsCallback` runs once, under the callback rules above,
+/// and `errorCallback` does not run. On failure `recordsCallback` does not
+/// run, and `errorCallback`, which may be null, receives the reason: there
+/// is no context to carry a diagnostic. The metadata reasons are the ones
+/// swageMaterializeSegmentedPlan reports for the same input.
+MLIR_CAPI_EXPORTED MlirLogicalResult swageClassifySegments(
+    const int32_t *offsets, intptr_t offsetCount, int64_t valueCount,
+    int64_t segmentCount, int64_t warpMaxElements, int64_t ctaChunkElements,
+    SwageTaskRecordsCallback recordsCallback, void *recordsUserData,
+    SwageStringCallback errorCallback, void *errorUserData);
+
+/// Estimates the relative work of the element programs of a module: the sum,
+/// over every `swage.map` and `swage.reduce` region, of one unit per add,
+/// subtract, multiply, minimum, and maximum, eight per `math.exp2`, and
+/// sixteen per division. Constants and yields are free. Returns -1 when a
+/// region holds any other operation, and for a null module.
+///
+/// The units are scheduling hints that a caller compares with a budget of
+/// its own. They are not instruction latency estimates. The call reads the
+/// module and changes neither it nor its context, and it emits no
+/// diagnostic.
+MLIR_CAPI_EXPORTED int64_t swageEstimateElementWork(MlirModule module);
 
 #ifdef __cplusplus
 }

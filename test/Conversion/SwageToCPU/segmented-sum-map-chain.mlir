@@ -1,12 +1,16 @@
 // test/Conversion/SwageToCPU/segmented-sum-map-chain.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 // A chain of two maps feeding one reduce. The two stages do not commute, so
 // the emitted order is load-bearing: centering must happen before scaling.
 module {
   func.func @segmented_chain(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>

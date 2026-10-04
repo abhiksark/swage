@@ -118,7 +118,7 @@ module {
     %rhs = vector.gather %y[%c0] [%offsets], %mask, %passthrough
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>
           into vector<128xf32>
-  // expected-error@+1 {{operation is unsupported}}
+    // expected-error@+1 {{operation 'arith.divf' is unsupported by fixed elementwise lowering}}
     %product = arith.divf %lhs, %rhs : vector<128xf32>
     vector.scatter %output[%c0] [%offsets], %mask, %product
         : memref<?xf32>, vector<128xindex>, vector<128xi1>, vector<128xf32>

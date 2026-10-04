@@ -1,161 +1,84 @@
 // test/Dialect/SwagePlan/invalid.mlir
 // RUN: swage-opt --verify-diagnostics --split-input-file %s
 
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @bad_policy(%offsets: memref<?xi32>, %value_count: i32,
-                        %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+2 {{expected ::mlir::swage_plan::TaskPolicy to be one of: warp, cta}}
-    // expected-error@+1 {{failed to parse SwagePlan_TaskPolicyAttr parameter}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<packed_warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
+// The launch width attribute makes a function a plan function, and the
+// dialect verifies the shape of a plan function with it.
+
+// expected-error@+1 {{swage_plan.block_threads belongs on a func.func, got 'builtin.module'}}
+module attributes {swage_plan.block_threads = 128 : i32} {
 }
 
 // -----
 
 module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @negative_threshold(%offsets: memref<?xi32>, %value_count: i32,
-                                %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{attribute 'warp_max_elements' failed to satisfy constraint}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = -1 : i32} : (memref<?xi32>, i32, i32) -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
+  // expected-error@+1 {{'swage_plan.launch_width' is not an operation attribute of the swage_plan dialect; the dialect defines swage_plan.block_threads}}
+  func.func private @unknown_attribute() attributes {swage_plan.launch_width = 128 : i32}
 }
 
 // -----
 
 module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @zero_warp_limit(%offsets: memref<?xi32>, %value_count: i32,
-                             %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{warp_max_elements must be positive}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 0 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @zero_cta_chunk(%offsets: memref<?xi32>, %value_count: i32,
-                            %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{cta_chunk_elements must be positive}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 0 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @warp_above_cta_chunk(
-      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
-      -> !swage_plan.task_range {
-    // expected-error@+1 {{warp_max_elements must not exceed cta_chunk_elements}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 32 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 33 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @wrong_policy_order(%offsets: memref<?xi32>, %value_count: i32,
-                                %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{policies must be ordered warp then CTA}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<cta>, #swage_plan.policy<warp>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @wrong_offsets(%offsets: memref<?xf32>, %value_count: i32,
-                           %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{operand #0 must be 1D memref of 32-bit signless integer values}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xf32>, i32, i32) -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @wrong_count(%offsets: memref<?xi32>, %value_count: i64,
-                         %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{operand #1 must be 32-bit signless integer}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i64, i32) -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @semantic_sum(memref<?xf32>, memref<?xi32>, memref<?xf32>)
-  func.func @wrong_result(%offsets: memref<?xi32>, %value_count: i32,
-                          %segment_count: i32) -> i32 {
-    // expected-error@+1 {{result #0 must be SwagePlan task range}}
-    %tasks = "swage_plan.classify"(%offsets, %value_count, %segment_count) {cta_chunk_elements = 4096 : i32, kernel = @semantic_sum, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : (memref<?xi32>, i32, i32) -> i32
-    return %tasks : i32
-  }
-}
-
-// -----
-
-module {
-  func.func @missing_kernel(%offsets: memref<?xi32>, %value_count: i32,
-                            %segment_count: i32) -> !swage_plan.task_range {
-    // expected-error@+1 {{kernel must reference a func.func semantic kernel}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @absent, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func private @wrong_signature(memref<?xi32>)
-  func.func @wrong_kernel_signature(
-      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
-      -> !swage_plan.task_range {
-    // expected-error@+1 {{kernel must use the canonical three-buffer semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @wrong_signature, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  memref.global "private" @not_a_function : memref<1xi32>
-  func.func @non_function_kernel(
-      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
-      -> !swage_plan.task_range {
-    // expected-error@+1 {{kernel must reference a func.func semantic kernel}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @not_a_function, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
-  }
-}
-
-// -----
-
-module {
-  func.func @self_referencing_kernel(
+  // expected-error@+1 {{swage_plan.block_threads must be a positive i32, got 0 : i32}}
+  func.func @zero_threads(
       %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
-    %value_count = arith.constant 0 : i32
-    %segment_count = arith.constant 0 : i32
-    // expected-error@+1 {{kernel must not reference its containing function}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @self_referencing_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 0 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// The source index of a plan function parameter is the position of the
+// argument it came from in the segment function. The dialect defines no
+// other argument attribute, and the source index belongs on a plan function.
+
+module {
+  // expected-error@+1 {{'swage_plan.position' is not an argument attribute of the swage_plan dialect; the dialect defines swage_plan.source_index}}
+  func.func private @unknown_argument_attribute(
+      %count: i32 {swage_plan.position = 0 : i32})
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.source_index belongs on an argument of a plan function, a func.func with swage_plan.block_threads, got argument #0 of 'func.func'}}
+  func.func private @not_a_plan_function(
+      %count: i32 {swage_plan.source_index = 0 : i32})
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.source_index of argument #3 must be a nonnegative i32, got -1 : i32}}
+  func.func @negative_source_index(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>,
+      %value_count: i32 {swage_plan.source_index = -1 : i32},
+      %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
     return
   }
 }
@@ -163,14 +86,470 @@ module {
 // -----
 
 module {
-  func.func private @non_default_memory_kernel(
-      memref<?xf32, #gpu.address_space<workgroup>>, memref<?xi32>,
-      memref<?xf32>)
-  func.func @non_default_kernel_memory_space(
-      %offsets: memref<?xi32>, %value_count: i32, %segment_count: i32)
-      -> !swage_plan.task_range {
-    // expected-error@+1 {{kernel must use the canonical three-buffer semantic ABI}}
-    %tasks = swage_plan.classify %offsets, %value_count, %segment_count {cta_chunk_elements = 4096 : i32, kernel = @non_default_memory_kernel, policies = [#swage_plan.policy<warp>, #swage_plan.policy<cta>], warp_max_elements = 32 : i32} : memref<?xi32>, i32, i32 -> !swage_plan.task_range
-    return %tasks : !swage_plan.task_range
+  // expected-error@+1 {{swage_plan.source_index of argument #0 must be a nonnegative i32, got 4 : i64}}
+  func.func @wide_source_index(
+      %values: memref<?xf32> {swage_plan.source_index = 4 : i64},
+      %offsets: memref<?xi32>, %output: memref<?xf32>, %value_count: i32,
+      %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.block_threads must be a positive i32, got 128 : i64}}
+  func.func @wide_threads(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i64} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{a plan function has no result, got '(memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> i32'}}
+  func.func @returns_a_value(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) -> i32
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return %value_count : i32
+  }
+}
+
+// -----
+
+// A kernel takes a buffer as a pointer, so the conversion needs a buffer it
+// can address that way.
+module {
+  // expected-error@+1 {{plan function argument #2 must be a signless integer or a memref of rank one or two of signless integers or floats with dynamic sizes, the identity layout, and the default memory space, got 'memref<8xf32>'}}
+  func.func @fixed_size_output(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<8xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<8xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{a plan function has a body of one block}}
+  func.func private @declaration(memref<?xf32>, i32)
+      attributes {swage_plan.block_threads = 128 : i32}
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{a plan function holds one task operation followed by a return, found 1 operations}}
+  func.func @no_task_operation(%value_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    return
+  }
+}
+
+// -----
+
+// The task operation ties the counts and the task buffer to the offsets, so
+// a pattern takes one word type from any of them.
+module {
+  func.func @wide_value_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i64, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op value_count must have the element type of the offsets, 'i32', got 'i64'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i64) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @narrow_segment_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i16) {
+    // expected-error@+1 {{'swage_plan.tasks' op segment_count must have the element type of the offsets, 'i32', got 'i16'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i16)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @ids_without_task_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op ids and task_count are given together: the ids name the segment of each task, and task_count bounds the task index}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi32>)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @task_count_without_ids(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op ids and task_count are given together: the ids name the segment of each task, and task_count bounds the task index}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        task_count(%task_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @wide_ids(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi64>, %value_count: i32,
+      %task_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op an element of ids must have the element type of the offsets, 'i32', got 'i64'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi64>) task_count(%task_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @wide_task_count(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i64, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op task_count must have the element type of the offsets, 'i32', got 'i64'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi32>) task_count(%task_count : i64)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// The region runs on the bound segment, which is its one argument.
+module {
+  func.func @region_without_a_segment(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op region takes the bound segment as its one argument, of type !swage.segment<T>}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32) {
+    ^bb0(%value: f32):
+      swage_plan.yield
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @segment_of_another_type(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op region binds a segment of 'f32', the element type of the values, got '!swage.segment<i32>'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32) {
+    ^bb0(%segment: !swage.segment<i32>):
+      swage_plan.yield
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @other_terminator(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op region must end in swage_plan.yield}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32) {
+    ^bb0(%segment: !swage.segment<f32>):
+      llvm.unreachable
+    }
+    return
+  }
+}
+
+// -----
+
+// A task region holds the consumers of the bound segment and nothing else.
+module {
+  func.func @other_operation(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32) {
+    ^bb0(%segment: !swage.segment<f32>):
+      // expected-error@+1 {{'swage.extent' op is not allowed in the region of 'swage_plan.tasks'; the region holds swage.reduce and swage.map_store operations and ends in swage_plan.yield}}
+      %length = swage.extent %segment : !swage.segment<f32>
+      swage_plan.yield
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @consumer_of_another_segment(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32,
+      %sid: index) {
+    %other = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      // expected-error@+1 {{'swage.reduce' op must read the bound segment, the argument of the task region}}
+      %sum = swage.reduce %other kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// The into buffer receives the yielded scalar, so the two come together.
+module {
+  func.func @into_without_a_scalar(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op into and a yielded scalar are given together: the scalar of each segment is stored in the into buffer}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      swage_plan.yield
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @scalar_without_into(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op into and a yielded scalar are given together: the scalar of each segment is stored in the into buffer}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @scalar_of_another_type(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf64>, %value_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op region must yield 'f64', the element type of the into buffer, got 'f32'}}
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf64>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+// The oracle visits every segment in order on one thread: it has no task
+// buffer and no launch width.
+module {
+  func.func @sequential_with_ids(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.tasks' op policy<sequential> visits every segment in order and takes no ids}}
+    swage_plan.tasks policy<sequential>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        ids(%ids : memref<?xi32>) task_count(%task_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.block_threads gives the launch width of a kernel, and policy<sequential> runs on one thread without a kernel; a function has one or the other}}
+  func.func @sequential_with_a_launch_width(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<sequential>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @yield_outside_a_task_region() {
+    // expected-error@+1 {{'swage_plan.yield' op expects parent op to be one of 'swage_plan.tasks, swage_plan.partial_tasks, swage_plan.merge_tasks, swage_plan.fused_tasks, swage_plan.persistent_tasks'}}
+    swage_plan.yield
   }
 }

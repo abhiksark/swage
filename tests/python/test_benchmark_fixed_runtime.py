@@ -28,9 +28,10 @@ def _evidence():
                 for ms in (100, 250, 250, 250, 400)
             ],
             "warm_host_us": [10.0] * 9 + [15.0] * 2 + [20.0] * 9,
+            # Each size sits exactly at its ratio ceiling.
             "throughput": {
-                str(n): {"swage_us": [15.0] * 100, "torch_us": [10.0] * 100}
-                for n in (1 << 18, 1 << 20)
+                str(n): {"swage_us": [swage] * 100, "torch_us": [10.0] * 100}
+                for n, swage in ((1 << 18, 18.0), (1 << 20, 15.0))
             },
         },
     }
@@ -41,10 +42,17 @@ def test_inclusive_threshold_equality_passes(slo_harness):
     record = _evidence()
     assert slo_harness.evaluate(record)
     assert record["gates"]["warm_host_us"]["statistics"]["p95"] == 20
+    assert {
+        n: gate["maximum_ratio"]
+        for n, gate in record["gates"]["throughput"].items()
+    } == {"262144": 1.80, "1048576": 1.50}
     assert record["valid"] and record["passed"]
 
 
-@pytest.mark.parametrize("gate", ("cold", "warm", "memory", "throughput"))
+@pytest.mark.parametrize(
+    "gate",
+    ("cold", "warm", "memory", "throughput_262144", "throughput_1048576"),
+)
 def test_exceeding_one_threshold_fails_the_record(slo_harness, gate):
     """An otherwise valid campaign cannot hide a single failed release SLO."""
     record = _evidence()
@@ -55,8 +63,10 @@ def test_exceeding_one_threshold_fails_the_record(slo_harness, gate):
         raw["warm_host_us"] = [15.001] * 20
     elif gate == "memory":
         raw["cold"][-1]["rss_delta_bytes"] += 1
+    elif gate == "throughput_262144":
+        raw["throughput"]["262144"]["swage_us"] = [18.001] * 100
     else:
-        raw["throughput"]["262144"]["swage_us"] = [15.001] * 100
+        raw["throughput"]["1048576"]["swage_us"] = [15.001] * 100
     assert not slo_harness.evaluate(record)
     assert record["valid"] and not record["passed"]
 

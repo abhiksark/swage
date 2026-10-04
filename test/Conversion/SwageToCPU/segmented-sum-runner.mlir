@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/segmented-sum-runner.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// REQUIRES: mlir-runner
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | mlir-opt -pass-pipeline='builtin.module(func.func(convert-scf-to-cf,convert-arith-to-llvm),finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner -e main -entry-point-result=void \
 // RUN:       -shared-libs=%llvm_lib_dir/libmlir_runner_utils%shlibext \
@@ -8,8 +9,11 @@
 
 module {
   func.func @segmented_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -50,8 +54,8 @@ module {
     memref.store %o1, %offsets[%c2] : memref<?xi32>
     memref.store %o4, %offsets[%c3] : memref<?xi32>
     memref.store %o4, %offsets[%c4] : memref<?xi32>
-    call @segmented_sum(%values, %offsets, %output)
-        : (memref<?xf32>, memref<?xi32>, memref<?xf32>) -> ()
+    call @segmented_sum(%values, %offsets, %output, %o4, %o4)
+        : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
     %unranked = memref.cast %output : memref<?xf32> to memref<*xf32>
     call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()
     memref.dealloc %values_storage : memref<4xf32>

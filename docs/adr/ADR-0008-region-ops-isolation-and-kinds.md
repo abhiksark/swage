@@ -1,7 +1,10 @@
+<!-- docs/adr/ADR-0008-region-ops-isolation-and-kinds.md -->
 # ADR-0008: Region ops with explicit captures and kind-based reduction
 
 - Status: accepted
 - Date: 2026-08-18
+- Amended: 2026-10-02, the statement about associativity
+- Amended: 2026-10-03, a mean is a composition and not a kind
 
 ## Context
 
@@ -31,12 +34,37 @@ arguments after the element argument, in order:
 }
 ```
 
-`swage.reduce` combines with a `kind` enum — initially `sum`, `max`,
-`min` — while its region is the per-element transform. Every admitted
-kind must be associative and commutative with a known identity; that
-gate is what later licenses split reductions. Identities per
+`swage.reduce` combines with a `kind` enum, initially `sum`, `max`, and
+`min`, while its region is the per-element transform. Every admitted
+kind has a known identity and no fixed combining order. That freedom is
+what lets a lowering split a reduction into partial results and a merge
+([ADR-0017](ADR-0017-private-split-cta-reductions.md)). Identities per
 element type: `sum` → 0, `max` → −∞ / minimum integer, `min` → +∞ /
 maximum integer.
+
+This record first said that every admitted kind must be associative and
+commutative. That holds for `max` and `min`, whose result does not depend
+on the order. It does not hold for floating-point `sum`, which is
+commutative but not associative: the result depends on the order a
+lowering and a schedule choose, within rounding, and two schedules need
+not agree bit for bit
+([ADR-0019](ADR-0019-composable-private-reductions.md)). Integer `sum`
+has no lowering, and its overflow behavior is not defined. The operation
+description in `SwageOps.td` states the current contract.
+
+A mean is not a kind, and the kind enum does not grow for it
+([ADR-0022](ADR-0022-wider-data-model-for-segmented-reductions.md)). A kind
+is an identity and a combine with no fixed order, and that is what lets a
+lowering merge partial results with the kind of the program. A mean has no
+identity, and a mean of partial means is not the mean. A `kind<mean>`
+reduction in the merge of a split would also read a range of partial
+results and divide by a number that is not the extent of that range. A mean
+is therefore written with what the dialect already has: a `kind<sum>`
+reduction, `swage.extent` of the same segment, and one `arith.divf`, which
+runs once per segment after the reduction. The lowerings admit exactly that
+scalar epilogue, and the split lowering sums the partial results and
+divides once. An empty segment gives NaN, zero divided by zero, where the
+kinds give their identity.
 
 Semantic contract:
 
@@ -47,10 +75,14 @@ Semantic contract:
 - **Floating max NaNs**: a non-empty f32 `max` reduction propagates NaN. The
   private segmented lowering uses `maximumf`, not
   `maxnumf`, and tests the behavior against the CPU oracle and PyTorch.
-- **Effects**: `map` and `reduce` expose only their region's effects, so
-  unused instances with pure `arith`/`math` bodies fold away.
-  `swage.map_store` declares a write on its output operand and is never
-  dead-code-eliminated.
+- **Effects**: `map`, `reduce`, and `map_store` read the values and
+  offsets buffers behind the segment handle and declare that read on
+  their segment operand, as `swage.extent` does, so common subexpression
+  elimination does not merge two instances across a write. `map` and
+  `reduce` expose their region's effects in addition to that read. A read
+  alone does not keep an operation alive, so unused instances with pure
+  `arith`/`math` bodies still fold away. `swage.map_store` also declares
+  a write on its output operand and is never dead-code-eliminated.
 - **Aliasing**: `map_store`'s output must not alias the segment's
   values buffer. A runtime obligation, documented, not statically
   checked.

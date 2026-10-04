@@ -7,11 +7,16 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "swage-compiler"
 dynamic = ["version"]
-description = "MLIR/LLVM fixed vector add/multiply compiler with explicit CPU and CUDA backends"
+description = "MLIR/LLVM compiler for fixed vector add and multiply on CPU and CUDA, and segmented reduce and softmax on CUDA"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = "MIT AND Apache-2.0 WITH LLVM-exception"
-license-files = ["LICENSE", "LICENSES/LLVM.txt"]
+# Swage is MIT. The native wheel embeds LLVM and MLIR, the code LLVM Support
+# carries under terms of its own (Henry Spencer's regex, xxHash, MD5,
+# BLAKE3, and the Unicode conversion tables), nanobind, and robin-map;
+# THIRD_PARTY_NOTICES.md lists each with its license text. MD5 has no SPDX
+# identifier: it is public domain with permissive fallback terms.
+license = "MIT AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND Spencer-94 AND (CC0-1.0 OR Apache-2.0) AND Unicode-DFS-2016 AND LicenseRef-LLVM-MD5"
+license-files = ["LICENSE", "LICENSES/LLVM.txt", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Abhik Sarkar", email = "abhiksark@gmail.com" }]
 keywords = ["mlir", "llvm", "gpu", "compiler", "cuda", "ragged", "segments"]
 classifiers = [
@@ -38,7 +43,31 @@ dev = [
 ]
 docs = ["mkdocs", "mkdocs-material"]
 figures = ["pymupdf"]
-pytorch = ["torch>=2.6,<3"]
+# The segmented calls copy the offsets into a numpy array on the host.
+pytorch = ["torch>=2.6,<3", "numpy"]
+
+# Tools that only the hosted workflows install, on top of the dev and docs
+# extras. The MLIR binding entries repeat the ranges in
+# mlir/python/requirements.txt of the pinned LLVM release. PyYAML is left to
+# that file: it caps PyYAML at a version that has no Python 3.13 wheel.
+#
+# requirements-ci.txt pins every tool named in the dev extra, the docs extra,
+# and this group, and everything they depend on, with hashes. Regenerate it
+# from the repository root, then restore its first line:
+#
+#   uv pip compile pyproject.toml --extra dev --extra docs --group ci \
+#     --universal --python-version 3.10 --generate-hashes \
+#     --output-file requirements-ci.txt
+#
+# Existing pins are kept. Add --upgrade-package <name> to move one.
+[dependency-groups]
+ci = [
+  "clang-format",
+  "ml_dtypes>=0.5.0,<=0.6.0",
+  "ninja",
+  "numpy>=1.19.5,<=2.1.2",
+  "typing_extensions>=4.12.2",
+]
 
 [tool.scikit-build]
 minimum-version = "1.0.3"
@@ -46,8 +75,10 @@ wheel.packages = ["python/swage"]
 wheel.platlib = true
 wheel.reproducible = true
 # Extensions need the versioned SONAME, not its duplicate development symlink.
+# The segmented modules ship: `import swage` loads the public segmented calls,
+# which import them.
 wheel.exclude = [
-  "swage/_segmented*.py", "**/__pycache__/**", "**/*.pyc",
+  "**/__pycache__/**", "**/*.pyc",
   "mlir_swage/_mlir_libs/libSwagePythonCAPI.so",
 ]
 cmake.build-type = "Release"
@@ -60,8 +91,8 @@ sdist.inclusion-mode = "explicit"
 sdist.include = [
   "/CMakeLists.txt", "/cmake/**", "/include/**", "/lib/**", "/python/**",
   "/tools/**", "/test/**", "/unittests/**", "/tests/**", "/scripts/**",
-  "/examples/**", "/benchmarks/*.py", "/LICENSE", "/LICENSES/**", "/README.md",
-  "/pyproject.toml",
+  "/examples/**", "/benchmarks/*.py", "/LICENSE", "/LICENSES/**",
+  "/THIRD_PARTY_NOTICES.md", "/README.md", "/pyproject.toml",
 ]
 sdist.exclude = [
   "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**",

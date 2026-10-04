@@ -2,7 +2,9 @@
 """Real CUDA tests for the fixed vector-add launch boundary."""
 
 import gc
+import threading
 import weakref
+from collections import OrderedDict
 
 import pytest
 import swage as sw
@@ -148,6 +150,160 @@ def test_repeated_launches_and_argument_release():
     gc.collect()
 
     assert all(reference() is None for reference in references)
+
+
+def test_warm_launch_is_served_by_the_native_fixed_launcher(monkeypatch):
+    """Serve a warm launch natively, advance the output, and decline grad.
+
+    The first launch prepares a native fixed launcher for its stream. A
+    matching call is served by it without entering the Python launch, and
+    each such launch advances the output's version counter once, as the
+    Python path does. A tensor that requires grad is declined, so the
+    Python path raises its refusal and nothing is written.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+    from swage import _runtime
+
+    kernel = sw.jit(add_kernel.__wrapped__)
+    assert kernel._cuda_fast_launch is None
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    arguments = {"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": 129}
+    constexprs = {"BLOCK": 128}
+    kernel.launch(arguments=arguments, constexprs=constexprs, grid=(2,))
+    torch.cuda.synchronize()
+    fast_launch = kernel._cuda_fast_launch()
+    assert isinstance(fast_launch, native_swage._FixedCUDALaunch)
+
+    runtime_launch = _runtime.launch
+    python_launches = 0
+
+    def counted_launch(*args, **kwargs):
+        nonlocal python_launches
+        python_launches += 1
+        return runtime_launch(*args, **kwargs)
+
+    monkeypatch.setattr(_runtime, "launch", counted_launch)
+
+    output.fill_(-777.0)
+    version = output._version
+    assert fast_launch(arguments, constexprs, (2,)) is True
+    torch.cuda.synchronize()
+    assert output._version == version + 1
+    assert torch.equal(output, x + y)
+    for _ in range(2):
+        output.fill_(-777.0)
+        version = output._version
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=(2,))
+        torch.cuda.synchronize()
+        assert output._version == version + 1
+        assert torch.equal(output, x + y)
+    assert python_launches == 0
+
+    leaf = torch.ones(129, device="cuda", requires_grad=True)
+    output.fill_(-777.0)
+    version = output._version
+    for position, name in enumerate(("x_ptr", "y_ptr", "output_ptr")):
+        refused = {**arguments, name: leaf}
+        assert fast_launch(refused, constexprs, (2,)) is False
+        with pytest.raises(ValueError, match=f"'{name}' must not require grad"):
+            kernel.launch(arguments=refused, constexprs=constexprs, grid=(2,))
+        assert python_launches == position + 1
+    torch.cuda.synchronize()
+    assert output._version == version
+    assert torch.all(output == -777.0)
+    assert torch.all(leaf == 1.0)
+
+    kernel.launch(arguments=arguments, constexprs=constexprs, grid=(2,))
+    torch.cuda.synchronize()
+    assert python_launches == 3
+    assert torch.equal(output, x + y)
+
+
+def _prepared_fast_launch(kernel, x, y, output, stream=None):
+    """Launch twice on `stream` and return the native launcher it prepared.
+
+    Returns:
+        The launcher and the arguments, constexprs, and grid it serves.
+    """
+    arguments = {"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": 129}
+    constexprs = {"BLOCK": 128}
+    with torch.cuda.stream(stream or torch.cuda.current_stream()):
+        for _ in range(2):
+            kernel.launch(arguments=arguments, constexprs=constexprs, grid=(2,))
+    torch.cuda.synchronize()
+    return kernel._cuda_fast_launch(), arguments, constexprs, (2,)
+
+
+def _count_python_launches(monkeypatch):
+    """Count the launches that reach the Python path from now on."""
+    from swage import _runtime
+
+    calls = []
+    runtime_launch = _runtime.launch
+
+    def counted_launch(*args, **kwargs):
+        calls.append(1)
+        return runtime_launch(*args, **kwargs)
+
+    monkeypatch.setattr(_runtime, "launch", counted_launch)
+    return calls
+
+
+def test_native_launch_declines_while_its_stream_captures():
+    """Hand a launch to the Python path while the launch stream captures.
+
+    The launcher asks the driver whether its stream captures a graph. It
+    declines inside a capture on that stream, so the Python path records
+    the launch into the graph, and serves the stream again afterwards.
+    """
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    side = torch.cuda.Stream()
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output, side
+    )
+    with torch.cuda.stream(side):
+        assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=side):
+        assert fast_launch(arguments, constexprs, grid) is False
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    output.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+
+    output.zero_()
+    with torch.cuda.stream(side):
+        assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+
+
+def test_native_launch_serves_inference_tensors(monkeypatch):
+    """Serve tensors made under inference mode, which have no version."""
+    kernel = sw.jit(add_kernel.__wrapped__)
+    with torch.inference_mode():
+        x = torch.arange(129, dtype=torch.float32, device="cuda")
+        y = torch.ones_like(x)
+        output = torch.zeros_like(x)
+        fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+            kernel, x, y, output
+        )
+        python_launches = _count_python_launches(monkeypatch)
+        output.zero_()
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+        torch.cuda.synchronize()
+    assert python_launches == []
+    assert torch.equal(output, x + y)
 
 
 @pytest.mark.parametrize(
@@ -356,7 +512,11 @@ def test_warm_launch_survives_capture_and_cache_eviction(monkeypatch, capture):
 
 
 def test_launch_rejects_invalid_runtime_inputs():
-    """Fail closed for unsafe pointers, bounds, grids, and blocks."""
+    """Fail closed for unsafe pointers, bounds, grids, and blocks.
+
+    The kernel is warm, and one mapping is mutated between calls, so a
+    warm shortcut must still apply every check.
+    """
     x = torch.ones(4, device="cuda")
     output = torch.empty_like(x)
     arguments = {
@@ -372,7 +532,7 @@ def test_launch_rejects_invalid_runtime_inputs():
     torch.cuda.synchronize()
 
     arguments["y_ptr"] = torch.empty(4)
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="must be a CUDA tensor"):
         add_kernel.launch(
             arguments=arguments,
             constexprs={"BLOCK": 128},
@@ -380,14 +540,14 @@ def test_launch_rejects_invalid_runtime_inputs():
         )
     arguments["y_ptr"] = x
     arguments["n"] = 5
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="exceeds tensor length"):
         add_kernel.launch(
             arguments=arguments,
             constexprs={"BLOCK": 128},
             grid=(1,),
         )
     arguments["n"] = 4
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="grid must equal"):
         add_kernel.launch(
             arguments=arguments,
             constexprs={"BLOCK": 128},
@@ -396,12 +556,355 @@ def test_launch_rejects_invalid_runtime_inputs():
     limit = torch.cuda.get_device_properties(
         torch.cuda.current_device()
     ).max_threads_per_block
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="exceeds device limit"):
         add_kernel.launch(
             arguments=arguments,
             constexprs={"BLOCK": limit + 1},
             grid=(1,),
         )
+
+
+def test_launch_rejects_a_lazy_negation_view():
+    """Refuse a view whose storage holds the opposite of what it shows."""
+    base = torch.ones(129, device="cuda")
+    if not hasattr(base, "_neg_view"):
+        pytest.skip("this PyTorch cannot build a contiguous negation view")
+    view = base._neg_view()
+    y = torch.ones(129, device="cuda")
+    output = torch.full((129,), -777.0, device="cuda")
+    assert view.is_neg() and view.is_contiguous()
+    assert view.data_ptr() == base.data_ptr()
+
+    with pytest.raises(ValueError, match="'x_ptr' must not be a lazy negation"):
+        _launch(view, y, output, 129)
+    with pytest.raises(ValueError, match="'output_ptr' must not be a lazy"):
+        _launch(base, y, view, 129)
+    _launch(view.resolve_neg(), y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.all(base == 1.0)
+    assert torch.all(output == 0.0)
+
+
+def test_launch_rejects_tensors_that_require_grad():
+    """Refuse a tensor autograd tracks, because a launch records nothing.
+
+    A leaf, a result with a grad function, and a leaf under `no_grad` all
+    require grad. The detached tensor shares their storage and is admitted.
+    """
+    leaf = torch.ones(129, device="cuda", requires_grad=True)
+    y = torch.ones(129, device="cuda")
+    output = torch.full((129,), -777.0, device="cuda")
+
+    with pytest.raises(ValueError, match="'x_ptr' must not require grad"):
+        _launch(leaf, y, output, 129)
+    with pytest.raises(ValueError, match="'y_ptr' must not require grad"):
+        _launch(y, leaf * 2, output, 129)
+    with pytest.raises(ValueError, match="'output_ptr' must not require grad"):
+        _launch(y, y, leaf, 129)
+    with torch.no_grad():
+        with pytest.raises(ValueError, match="'x_ptr' must not require grad"):
+            _launch(leaf, y, output, 129)
+    torch.cuda.synchronize()
+    assert torch.all(output == -777.0)
+    assert torch.all(leaf == 1.0)
+
+    _launch(leaf.detach(), y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.all(output == 2.0)
+
+
+def test_launch_advances_the_output_version_for_autograd():
+    """Make autograd refuse a value that a launch overwrote.
+
+    The product saves the output for its backward pass. PyTorch cannot see
+    the kernel store, so without the advance the backward pass would use
+    the overwritten output and return a wrong gradient without an error.
+    """
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones(129, device="cuda")
+    output = torch.zeros(129, device="cuda")
+    weights = torch.ones(129, device="cuda", requires_grad=True)
+    loss = (weights * output).sum()
+    versions = [tensor._version for tensor in (x, y, output)]
+
+    _launch(x, y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+    assert [x._version, y._version] == versions[:2]
+    assert output._version == versions[2] + 1
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+
+
+def test_captured_launch_advances_the_output_version_at_capture_only():
+    """Advance the counter in the launch call, which a replay does not run."""
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones(129, device="cuda")
+    output = torch.zeros(129, device="cuda")
+    _launch(x, y, output, 129)
+    torch.cuda.synchronize()
+    version = output._version
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _launch(x, y, output, 129)
+    assert output._version == version + 1
+
+    output.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert output._version == version + 2
+    assert torch.equal(output, x + y)
+
+
+def test_launch_accepts_inference_tensors():
+    """Launch on tensors that have no version counter to advance."""
+    with torch.inference_mode():
+        x = torch.arange(129, dtype=torch.float32, device="cuda")
+        y = torch.ones(129, device="cuda")
+        output = torch.zeros(129, device="cuda")
+        assert output.is_inference()
+
+        _launch(x, y, output, 129)
+
+        torch.cuda.synchronize()
+        assert torch.equal(output, x + y)
+
+
+@pytest.mark.parametrize("shift", [1, 128, -1, -128])
+@pytest.mark.parametrize("overlapped", ["x_ptr", "y_ptr"])
+def test_launch_rejects_an_output_that_partially_overlaps_an_input(
+    overlapped, shift
+):
+    """Refuse an output sharing part of the active range of an input."""
+    buffer = torch.arange(512, device="cuda", dtype=torch.float32)
+    expected = buffer.clone()
+    shared = buffer[128:257]
+    output = buffer[128 + shift : 257 + shift]
+    other = torch.ones(129, device="cuda")
+    x, y = (shared, other) if overlapped == "x_ptr" else (other, shared)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"'output_ptr' must not partially overlap argument "
+            f"'{overlapped}' in their active ranges"
+        ),
+    ):
+        _launch(x, y, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(buffer, expected)
+
+
+@pytest.mark.parametrize("overlapped", ["x_ptr", "y_ptr"])
+def test_launch_updates_an_output_that_is_exactly_an_input_in_place(
+    overlapped,
+):
+    """Admit an output equal to an input, because each lane owns one index."""
+    buffer = torch.arange(512, device="cuda", dtype=torch.float32)
+    expected = buffer.clone()
+    expected[128:257] += 1
+    shared = buffer[128:257]
+    other = torch.ones(129, device="cuda")
+    x, y = (shared, other) if overlapped == "x_ptr" else (other, shared)
+
+    _launch(x, y, shared, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(buffer, expected)
+
+
+def test_launch_accepts_adjacent_slices_and_one_tensor_for_both_inputs():
+    """Run buffers that only touch, and two inputs that share memory."""
+    buffer = torch.arange(258, device="cuda", dtype=torch.float32)
+    x, output = buffer[:129], buffer[129:]
+    expected = x + x
+
+    _launch(x, x, output, 129)
+
+    torch.cuda.synchronize()
+    assert torch.equal(output, expected)
+    assert torch.equal(x, torch.arange(129, device="cuda", dtype=torch.float32))
+
+
+def _fresh_process_cache(monkeypatch, cache):
+    """Start from an empty in-process cache on the cache root `cache`."""
+    from swage import _runtime
+
+    monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache))
+    monkeypatch.setattr(_runtime, "_artifact_cache", OrderedDict())
+    monkeypatch.setattr(_runtime, "_cache_off", {})
+    for name in (
+        "SWAGE_CACHE_MAX_ENTRIES",
+        "SWAGE_CACHE_READ_ONLY",
+        "SWAGE_NO_COMPILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return _runtime
+
+
+def test_no_compile_mode_launches_from_the_cache_and_refuses_a_miss(
+    tmp_path, monkeypatch
+):
+    """Launch a published kernel without compiling, and refuse another."""
+    from swage import _cuda_backend
+
+    cache = tmp_path / "cache"
+    _runtime = _fresh_process_cache(monkeypatch, cache)
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+    _launch(x, y, output, 129, block=64)
+    torch.cuda.synchronize()
+    (entry,) = cache.iterdir()
+
+    def compile_nothing(*_arguments, **_keywords):
+        raise AssertionError("compiled although SWAGE_NO_COMPILE=1")
+
+    monkeypatch.setattr(_runtime, "_artifact_cache", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_compile_native", compile_nothing)
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+    warm = torch.full_like(x, -777.0)
+    untouched = torch.full_like(x, -777.0)
+
+    _launch(x, y, warm, 129, block=64)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "SWAGE_NO_COMPILE=1 refuses to compile kernel 'add_kernel': "
+            "no entry [0-9a-f]{64} in "
+        ),
+    ):
+        _launch(x, y, untouched, 129, block=256)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(warm, x + y)
+    assert torch.all(untouched == -777.0)
+    assert [path.name for path in cache.iterdir()] == [entry.name]
+
+
+def test_read_only_mode_launches_without_writing_the_cache(
+    tmp_path, monkeypatch
+):
+    """Compile and launch while leaving a missing cache root missing."""
+    cache = tmp_path / "cache"
+    _fresh_process_cache(monkeypatch, cache)
+    monkeypatch.setenv("SWAGE_CACHE_READ_ONLY", "1")
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+
+    for _ in range(2):
+        _launch(x, y, output, 129, block=32)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, x + y)
+    assert not cache.exists()
+
+
+def test_cache_bound_evicts_real_entries(tmp_path, monkeypatch):
+    """Keep the two newest specializations and recompile an evicted one."""
+    cache = tmp_path / "cache"
+    _runtime = _fresh_process_cache(monkeypatch, cache)
+    monkeypatch.setenv("SWAGE_CACHE_MAX_ENTRIES", "2")
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.empty_like(x)
+    keys = []
+
+    for block in (32, 64, 128):
+        _launch(x, y, output, 129, block=block)
+        keys.append(list(_runtime._artifact_cache)[-1])
+    torch.cuda.synchronize()
+    assert sorted(path.name for path in cache.iterdir()) == sorted(keys[1:])
+
+    monkeypatch.setattr(_runtime, "_artifact_cache", OrderedDict())
+    output.fill_(-777.0)
+    _launch(x, y, output, 129, block=32)
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, x + y)
+    assert sorted(path.name for path in cache.iterdir()) == sorted(
+        [keys[2], keys[0]]
+    )
+
+
+def test_environment_report_describes_this_device(tmp_path, monkeypatch):
+    """Report the loaded bindings, the driver, the target, and the cache."""
+    import mlir_swage._mlir_libs._swageDialectsNanobind as extension
+    from swage import env
+
+    cache = tmp_path / "cache"
+    _fresh_process_cache(monkeypatch, cache)
+    major, minor = torch.cuda.get_device_capability()
+
+    report = env.report()
+
+    assert report["source"]["file"] == sw.__file__
+    assert report["native"]["bindings"]["file"] == extension.__file__
+    assert report["cuda_driver"]
+    assert report["gpu"]["compute_capability"] == f"{major}.{minor}"
+    assert report["backends"]["cuda"]["target"] == f"sm_{major}{minor}"
+    assert report["cache"] == {
+        "directory": str(cache),
+        "state": "active (reads and writes; 0 of at most 1024 entries)",
+        "compile_on_miss": "allowed",
+    }
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("block", [128, 48])
+def test_launch_works_on_a_thread_that_has_not_used_cuda(block):
+    """Make PyTorch's context current on the thread and create no other.
+
+    A new thread has no current CUDA context. The launch gives it the
+    context of the validated device, for a kernel the process has loaded
+    (block 128) and for one it compiles and loads on that thread (block 48).
+    """
+    from swage import _cuda_backend
+    from swage._errors import BackendUnavailableError
+
+    x = torch.randn(129, device="cuda")
+    y = torch.randn(129, device="cuda")
+    output = torch.full_like(x, -777.0)
+    _launch(x, y, torch.empty_like(x), 129)
+    torch.cuda.synchronize()
+    driver = _cuda_backend._get_driver()
+    main_context = driver.current_context()
+    seen = {}
+
+    def launch_first_thing():
+        try:
+            try:
+                seen["before"] = driver.current_context()
+            except BackendUnavailableError as error:
+                seen["before"] = error
+            _launch(x, y, output, 129, block=block)
+            seen["after"] = driver.current_context()
+        except Exception as error:  # Reported by the assertion below.
+            seen["error"] = error
+
+    worker = threading.Thread(target=launch_first_thing)
+    worker.start()
+    worker.join()
+    torch.cuda.synchronize()
+
+    assert "error" not in seen, seen
+    assert isinstance(seen["before"], BackendUnavailableError)
+    assert seen["before"].code == "cuda-context-unavailable"
+    assert str(seen["before"]).startswith(
+        "PyTorch has no current CUDA context; "
+    )
+    # Context ids are unique for the life of the process, so an equal id is
+    # the context PyTorch already had, not a new one.
+    assert seen["after"] == main_context
+    assert driver.current_context() == main_context
+    torch.testing.assert_close(output, x + y)
 
 
 def test_native_launcher_runs_the_fixed_kernel():
@@ -561,13 +1064,13 @@ def test_native_launcher_rejects_invalid_arguments(kinds, values, error_type):
 
 
 def test_native_launcher_surfaces_driver_errors():
-    """Preserve driver failures instead of classifying them as unavailable."""
+    """Report a failed cuLaunchKernel as itself, not as unavailability."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
     torch.zeros(1, device="cuda")
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(RuntimeError, match="cuLaunchKernel failed") as raised:
         native_swage._launch_cuda_kernel(
             ("ptr", "i32"),
             (0, 0),

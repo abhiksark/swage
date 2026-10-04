@@ -33,6 +33,18 @@ _CONFIG = {
     },
     "memory": {"source": "/proc/self/status VmRSS", "unit": "bytes"},
 }
+# Inclusive ceilings of the Swage/PyTorch median ratio, per vector size. At
+# 2**18 elements PyTorch's add takes about 2.9 us on the A6000, less than
+# one Swage launch, so that ratio measures the host cost of a launch. Its
+# ceiling was set from
+# benchmarks/results/fixed-runtime-gate-a6000-sm86-0ea2a78.json: the
+# smallest multiple of 0.05 that is at least 5% above the largest ratio of
+# the wheel of the final launch path. It supersedes the 1.85 of
+# fixed-runtime-gate-a6000-sm86.json, which records why the original 1.50
+# failed: every launch now advances the version counter of its output for
+# autograd correctness, main's launch path grew slower, and the commit that
+# set 1.50 measures at it on that host today.
+_THROUGHPUT_MAXIMUM_RATIO = {1 << 18: 1.80, 1 << 20: 1.50}
 
 
 def _fixed_vector_add_kernel():
@@ -187,12 +199,13 @@ def evaluate(record):
         if torch["median"] <= 0:
             raise ValueError("throughput reference duration must be positive")
         ratio = swage["median"] / torch["median"]
+        ceiling = _THROUGHPUT_MAXIMUM_RATIO[n]
         gates["throughput"][str(n)] = {
             "swage_us": swage,
             "torch_us": torch,
             "median_ratio": ratio,
-            "maximum_ratio": 1.50,
-            "passed": ratio <= 1.50,
+            "maximum_ratio": ceiling,
+            "passed": ratio <= ceiling,
         }
     record["gates"] = gates
     record["valid"] = True

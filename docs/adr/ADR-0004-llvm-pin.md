@@ -1,3 +1,4 @@
+<!-- docs/adr/ADR-0004-llvm-pin.md -->
 # ADR-0004: Exact LLVM pin
 
 - Status: accepted
@@ -30,5 +31,9 @@ GCC 11.4 satisfies the release's minimum (`GCC_MIN 7.4`, verified in
 
 - Every build and benchmark names one exact LLVM revision.
 - Pin updates are dedicated compatibility PRs, never side effects.
-- Contributors pay a one-time ~1 hour LLVM build; CI caches the install
-  tree keyed on the pin file.
+- Contributors pay a one-time LLVM build whose duration depends on the
+  machine and the build type. The hosted CI workflow notes about three
+  hours for it on a new pin and then reuses a cached install tree whose
+  cache key includes the pin.
+  [Installation](../getting-started/installation.md) states the current
+  build cost.

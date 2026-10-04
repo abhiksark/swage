@@ -1,10 +1,30 @@
+# CMakeLists.txt
 cmake_minimum_required(VERSION 3.20.0)
+
+# Checked before project(), which would otherwise write compiler detection
+# files into the source tree.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR
+    "Swage does not support in-source builds: the build directory is the "
+    "source directory ${CMAKE_SOURCE_DIR}.\n"
+    "Configure into a separate directory:\n"
+    "  cmake -S . -B build\n"
+    "Then delete the CMakeCache.txt and CMakeFiles/ that this attempt left "
+    "in the source directory.")
+endif()
+
 project(swage LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
-file(STRINGS "${PROJECT_SOURCE_DIR}/cmake/llvm-version.txt" SWAGE_LLVM_TAG
-     LIMIT_COUNT 1)
+# ADR-0004: Swage builds against exactly the release named in
+# cmake/llvm-version.txt. Any other LLVM/MLIR install is rejected here
+# instead of failing later in the build or passing with different behavior.
+set(SWAGE_LLVM_PIN_FILE "${PROJECT_SOURCE_DIR}/cmake/llvm-version.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${SWAGE_LLVM_PIN_FILE}")
+file(STRINGS "${SWAGE_LLVM_PIN_FILE}" SWAGE_LLVM_TAG LIMIT_COUNT 1)
+string(STRIP "${SWAGE_LLVM_TAG}" SWAGE_LLVM_TAG)
 if(NOT SWAGE_LLVM_TAG MATCHES "^llvmorg-([0-9]+\\.[0-9]+\\.[0-9]+)$")
   message(FATAL_ERROR "Invalid LLVM pin in cmake/llvm-version.txt")
 endif()
@@ -12,10 +32,11 @@ set(SWAGE_LLVM_VERSION "${CMAKE_MATCH_1}")
 find_package(MLIR ${SWAGE_LLVM_VERSION} EXACT CONFIG QUIET)
 if(NOT MLIR_FOUND OR NOT LLVM_PACKAGE_VERSION STREQUAL SWAGE_LLVM_VERSION)
   message(FATAL_ERROR
-    "Swage requires exactly LLVM/MLIR ${SWAGE_LLVM_VERSION} (${SWAGE_LLVM_TAG}). "
-    "Run scripts/fetch_llvm.sh and scripts/build_llvm.sh, then set MLIR_DIR "
-    "and LLVM_DIR to that pinned install's lib/cmake directories. "
-    "Discovered LLVM_PACKAGE_VERSION='${LLVM_PACKAGE_VERSION}'.")
+    "Swage requires LLVM/MLIR ${SWAGE_LLVM_VERSION}, the release pinned "
+    "as ${SWAGE_LLVM_TAG} in cmake/llvm-version.txt, but found LLVM "
+    "'${LLVM_PACKAGE_VERSION}' at '${LLVM_DIR}'. Build the pinned release "
+    "with scripts/fetch_llvm.sh and scripts/build_llvm.sh, or point MLIR_DIR "
+    "and LLVM_DIR at the lib/cmake directories of an install of it.")
 endif()
 
 option(SWAGE_WHEEL_BUILD "Install a self-contained native wheel package" OFF)
@@ -77,7 +98,9 @@ if(SWAGE_ENABLE_SANITIZERS)
      NOT CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$")
     message(FATAL_ERROR "SWAGE_ENABLE_SANITIZERS requires Linux GCC or Clang")
   endif()
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  # A finding stops the program, so a test cannot pass over one.
+  add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all
+                      -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
@@ -91,10 +114,13 @@ add_definitions(${LLVM_DEFINITIONS})
 add_subdirectory(include/swage/Dialect/Swage/IR)
 add_subdirectory(include/swage/Dialect/SwagePlan/IR)
 add_subdirectory(lib/Dialect/Swage/IR)
+add_subdirectory(lib/Dialect/Swage/Transforms)
 add_subdirectory(lib/Dialect/SwagePlan/IR)
+add_subdirectory(lib/Target)
 add_subdirectory(lib/Support)
 add_subdirectory(lib/CAPI)
 add_subdirectory(lib/Conversion)
+add_subdirectory(lib/Runtime)
 add_subdirectory(tools/swage-opt)
 add_subdirectory(test)
 add_subdirectory(unittests)
@@ -130,3 +156,25 @@ if(SWAGE_PYTHON_BINDINGS)
 else()
   message(STATUS "Swage Python bindings: OFF")
 endif()
+
+# Install tree. The libraries install through the MLIR library macros, which
+# also place them in the MLIRTargets export set. The rules below add the
+# headers and the package that an out-of-tree project loads with
+# `find_package(Swage CONFIG)`.
+install(DIRECTORY include/swage include/swage-c
+  DESTINATION include
+  FILES_MATCHING
+  PATTERN "*.h"
+  PATTERN "*.td")
+install(DIRECTORY ${SWAGE_BINARY_DIR}/include/swage
+  DESTINATION include
+  FILES_MATCHING
+  PATTERN "*.inc"
+  PATTERN "CMakeFiles" EXCLUDE)
+install(EXPORT MLIRTargets
+  FILE SwageTargets.cmake
+  DESTINATION lib/cmake/swage)
+configure_file(cmake/SwageConfig.cmake.in
+  ${SWAGE_BINARY_DIR}/lib/cmake/swage/SwageConfig.cmake @ONLY)
+install(FILES ${SWAGE_BINARY_DIR}/lib/cmake/swage/SwageConfig.cmake
+  DESTINATION lib/cmake/swage)

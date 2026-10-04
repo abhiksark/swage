@@ -1,3 +1,4 @@
+// test/Dialect/Swage/invalid-map.mlir
 // RUN: swage-opt %s --split-input-file --verify-diagnostics
 
 func.func @yield_type_mismatch(%s: !swage.segment<f32>) -> !swage.segment<f32> {
@@ -53,6 +54,20 @@ func.func @isolation_violation(%s: !swage.segment<f32>, %outer: f32) -> !swage.s
     // expected-error @below {{using value defined outside the region}}
     %y = arith.addf %x, %outer : f32
     swage.yield %y : f32
+  }
+  return %r : !swage.segment<f32>
+}
+
+// -----
+
+// A region may end in a terminator that is legal anywhere, such as
+// llvm.unreachable, so the yield requirement is checked by the region
+// operation and not by the terminator.
+func.func @region_without_yield(%s: !swage.segment<f32>) -> !swage.segment<f32> {
+  // expected-error @below {{region must terminate with swage.yield}}
+  %r = swage.map %s : !swage.segment<f32> -> !swage.segment<f32> {
+  ^bb0(%x: f32):
+    llvm.unreachable
   }
   return %r : !swage.segment<f32>
 }

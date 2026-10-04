@@ -1,0 +1,1416 @@
+# python/tests/mlir/test_segmented_bounds.py
+"""Device-side segment bounds and block-size admission for segmented kernels.
+
+Host validation sees one snapshot of the offsets. The kernels reload them
+from device memory at every launch, so the bound that keeps every read inside
+``[0, value_count)`` has to live in the kernel. The CUDA tests here bind
+their arguments by the launch contract of each kernel and enqueue it below
+the Python validation, with ranges that validation would reject. Plan-owned
+ranges take the same bound against the buffer they index: partial ranges
+against the value count, merge ranges against the partial count.
+
+Three loaded indices take a bound of their own: a segment ID read from a task
+buffer and the output segment of a merge record against the segment count,
+and the merge ID of a persistent partial against the merge count. An index
+outside its bound is skipped. The tests for them place every buffer such an
+index could reach between guards and require the guards to be unchanged.
+
+The column kernel of rank-two values takes one more count, the feature
+count. Its row ranges are clamped to the row count like any range into
+values, and its column loop is bounded by the feature count, which is what
+keeps a load inside `[N, D]` and a store inside `[S, D]`. The column kernel
+of the softmax stores a row for every row it reads, so the same two bounds
+keep its stores inside the `[N, D]` output.
+"""
+
+import re
+from itertools import accumulate, pairwise
+
+import pytest
+import torch
+from mlir_swage import ir
+from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
+from mlir_swage.dialects import swage
+from swage import _cuda_backend, _segmented_runtime
+from swage._segmented_programs import (
+    _SOFTMAX_MODULE,
+    _parameter_roles,
+    _semantic_module,
+    _softmax_text,
+)
+from swage._segmented_qualification import (
+    _launch_segmented_sum_tasks,
+    launch_gpu,
+    launch_softmax_gpu,
+)
+from swage._segmented_validation import (
+    _validate_offsets,
+    _validate_softmax_tensors,
+)
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA unavailable"
+)
+
+_KERNEL = "segmented_sum"
+_VALUE_COUNT = 1000
+_INT32_MIN = -(1 << 31)
+_INT32_MAX = (1 << 31) - 1
+
+# Each sequence fails host validation. Apart from the last, every unclamped
+# read stays inside the NaN guard that `_guarded_values` allocates.
+INVALID_OFFSETS = [
+    pytest.param((0, 400, 1500), id="end-past-value-count"),
+    pytest.param((-300, 250, 1000), id="negative-start"),
+    pytest.param((0, 700, 300, 1000), id="decreasing-pair"),
+    pytest.param((1200, 1700, 1900), id="start-past-value-count"),
+    pytest.param((_INT32_MIN, 600, _INT32_MAX), id="i32-extremes"),
+]
+
+# One sequence holding every violation above, for the ABIs that add task
+# indirection: a negative start, an end and a start past the value count, and
+# a decreasing pair.
+_MIXED_OFFSETS = (-300, 250, 1500, 700, 300, 1900)
+
+# Elements in each guard that `_canaried` allocates around a buffer.
+_GUARD = 64
+# No reduction of the test values produces this, so a store shows.
+_CANARY = -1.0
+
+# Indices that name nothing in a batch of `count` segments or merges. The
+# near ones reach a few elements outside a buffer, well inside the guards:
+# without a device bound they would change a guard element. The extremes
+# would leave the allocation. The last two of each set also miss the three
+# claim counters when they are used as a persistent merge ID.
+STRAY_IDS = [
+    pytest.param(lambda count: (count, -1, count + 2, -5), id="near"),
+    pytest.param(lambda _: (_INT32_MAX, _INT32_MIN), id="i32-extremes"),
+]
+
+# Each kernel maps the parameter index of a count to the number of loaded
+# indices it compares with that count. The segment count is the last i32 of
+# every ABI that loads a segment ID or an output segment. The merge count is
+# the fifth i32 of the persistent ABI.
+BOUNDED_ID_KERNELS = [
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+        {6: 1},
+        id="task-ids-warp",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+        {6: 1},
+        id="task-ids-cta",
+    ),
+    pytest.param(
+        "_compile_fused_segmented_reduction_ptx", {}, {7: 2}, id="fused"
+    ),
+    pytest.param(
+        "_compile_persistent_segmented_reduction_ptx",
+        {},
+        {14: 1, 15: 3},
+        id="persistent",
+    ),
+    pytest.param(
+        "_compile_split_merge_reduction_ptx", {}, {5: 1}, id="split-merge"
+    ),
+]
+
+# Each kernel maps the parameter index of a buffer length to the number of
+# ranges it clamps against that length. The value count is the first i32 of
+# every ABI that reads values, directly after the pointers, and bounds the
+# ranges into values. The partial count bounds the merge ranges into scratch:
+# it is the fourth i32 of the persistent ABI and the first of the merge ABI.
+CLAMPED_KERNELS = [
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32},
+        {3: 1},
+        id="direct-32",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128},
+        {3: 1},
+        id="direct-128",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+        {4: 1},
+        id="task-ids-warp",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+        {4: 1},
+        id="task-ids-cta",
+    ),
+    pytest.param(
+        "_compile_fused_segmented_reduction_ptx", {}, {4: 2}, id="fused"
+    ),
+    pytest.param(
+        "_compile_persistent_segmented_reduction_ptx",
+        {},
+        {10: 3, 13: 1},
+        id="persistent",
+    ),
+    pytest.param(
+        "_compile_split_partial_reduction_ptx", {}, {3: 1}, id="split-partial"
+    ),
+    pytest.param(
+        "_compile_split_merge_reduction_ptx", {}, {3: 1}, id="split-merge"
+    ),
+    # The column kernel clamps the rows of a segment against the row count.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {3: 1},
+        id="columns",
+    ),
+    # The softmax over rank-two values clamps the rows once for its three
+    # passes over a column.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "module_text": _softmax_text(2),
+            "kernel_name": "ragged_softmax_r2",
+        },
+        {3: 1},
+        id="softmax-columns",
+    ),
+]
+
+
+def _compile(
+    compiler, target, *, module_text=None, kernel_name=_KERNEL, **arguments
+):
+    """Compile one program through one native entry point.
+
+    The program is the canonical identity sum unless ``module_text`` names
+    another one.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(module_text or _semantic_module("sum"))
+        return getattr(native_swage, compiler)(
+            module, kernel_name=kernel_name, target=target, **arguments
+        )
+
+
+def _word(value):
+    """Return a count as the i32 word a launch takes; pass a buffer through.
+
+    A negative count passes as its 32-bit two's complement, so the kernel
+    reads the same signed value.
+    """
+    return value & 0xFFFFFFFF if isinstance(value, int) else value
+
+
+def _launcher(compiler, *, module_text=None, kernel_name=_KERNEL, **options):
+    """Compile a kernel for the current device and return its raw launch.
+
+    The program is the canonical identity sum unless ``module_text`` names
+    another one. The launch binds its arguments by the contract of the
+    kernel, without any host validation, and enqueues it on the current
+    stream under a lease that it releases once the launch is enqueued.
+
+    Returns:
+        A function of the block count of a one-dimensional grid, the plan
+        and scratch buffers and derived counts by contract key
+        (``named``), and the user values by parameter role. A buffer is a
+        tensor and a count is an integer. A role the kernel does not take
+        may be left out.
+    """
+    module_text = module_text or _semantic_module("sum")
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    kernel = _segmented_runtime._compile_once(
+        getattr(native_swage, compiler),
+        module_text,
+        kernel_name=kernel_name,
+        target=f"sm_{major}{minor}",
+        **options,
+    )
+
+    def launch(blocks, named=None, **by_role):
+        user = dict.fromkeys(_parameter_roles(module_text))
+        user.update((role, _word(value)) for role, value in by_role.items())
+        arguments = _segmented_runtime._bind(
+            kernel,
+            _segmented_runtime._user_arguments(module_text, **user),
+            {key: _word(value) for key, value in (named or {}).items()},
+        )
+        lease = _segmented_runtime._lease(torch, kernel)
+        try:
+            _segmented_runtime._enqueue(
+                torch,
+                lease,
+                kernel,
+                arguments,
+                blocks,
+                torch.cuda.current_stream(),
+            )
+        finally:
+            lease.release()
+
+    return launch
+
+
+def _guarded(host_values):
+    """Place a buffer the kernel reads between two NaN guards.
+
+    The kernel receives a pointer to the valid elements. Each guard is at
+    least as long as the buffer, so a read past its end or before element
+    zero poisons the result and neither stray read leaves the allocation.
+    """
+    count = host_values.numel()
+    guard = max(count, 32)
+    buffer = torch.full((count + 2 * guard,), float("nan"), device="cuda")
+    guarded = buffer[guard : guard + count]
+    guarded.copy_(host_values)
+    return guarded
+
+
+def _guarded_values():
+    """Build the guarded values every out-of-range launch reads.
+
+    Returns:
+        The device view the kernel reads, and a host copy of its values.
+        The values are position-dependent small integers, so every sum is
+        exact in f32 and a shifted window changes it.
+    """
+    host_values = ((torch.arange(_VALUE_COUNT) * 7) % 13 + 1).to(torch.float32)
+    return _guarded(host_values), host_values
+
+
+def _canaried(host, fill):
+    """Place a buffer between two guards that hold ``fill``.
+
+    Returns:
+        The device view a kernel receives, and the whole allocation. An
+        index up to ``_GUARD`` elements outside the view stays inside the
+        allocation and addresses a guard element.
+    """
+    count = host.numel()
+    buffer = torch.full(
+        (count + 2 * _GUARD,), fill, dtype=host.dtype, device="cuda"
+    )
+    view = buffer[_GUARD : _GUARD + count]
+    view.copy_(host)
+    return view, buffer
+
+
+def _canaried_output(count):
+    """Build an output whose slots and guards all hold the canary."""
+    return _canaried(torch.full((count,), _CANARY), _CANARY)
+
+
+def _canaried_i32(values):
+    """Build an i32 buffer between zero guards.
+
+    A zero guard read as an offset or as a merge record names an empty
+    range, so a stray read that reaches it still ends in a store.
+    """
+    return _canaried(torch.tensor(values, dtype=torch.int32), 0)
+
+
+def _assert_only_stored(buffer, stored):
+    """Require the canary everywhere except the slots named in ``stored``."""
+    torch.cuda.synchronize()
+    expected = torch.full((buffer.numel(),), _CANARY)
+    for slot, value in stored.items():
+        expected[_GUARD + slot] = value
+    assert torch.equal(buffer.cpu(), expected)
+
+
+def _assert_guards_hold(buffer, fill):
+    """Require both guards of a canaried buffer to hold their fill."""
+    torch.cuda.synchronize()
+    host = buffer.cpu()
+    guard = torch.full((_GUARD,), fill, dtype=host.dtype)
+    assert torch.equal(host[:_GUARD], guard)
+    assert torch.equal(host[-_GUARD:], guard)
+
+
+def _clamped_sums(host_values, ranges):
+    """Sum each range after the clamp the kernels apply."""
+    count = host_values.numel()
+    sums = []
+    for start, end in ranges:
+        start = min(max(start, 0), count)
+        end = min(max(end, start), count)
+        sums.append(host_values[start:end].sum())
+    return torch.stack(sums)
+
+
+def _device_i32(values):
+    return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+
+def _device_ranges(ranges):
+    """Flatten half-open ranges into the plan's begin, end record layout."""
+    return _device_i32([bound for bounds in ranges for bound in bounds])
+
+
+def _nan_output(count):
+    return torch.full((count,), float("nan"), device="cuda")
+
+
+def _assert_clamped(output, host_values, ranges):
+    """Require finite outputs equal to the sums over the clamped ranges."""
+    torch.cuda.synchronize()
+    assert torch.isfinite(output).all()
+    assert torch.equal(output.cpu(), _clamped_sums(host_values, ranges))
+
+
+@pytest.mark.parametrize(("block_size", "warps"), [(96, 3), (160, 5)])
+def test_native_compiler_rejects_non_power_of_two_warp_counts(
+    block_size, warps
+):
+    """Reject block sizes whose all-reduce stores from incomplete lanes."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            "block-size must give a power-of-two warp count, "
+            rf"got {block_size} \({warps} warps\)"
+        ),
+    ):
+        _compile(
+            "_compile_segmented_reduction_ptx", "sm_86", block_size=block_size
+        )
+
+
+@pytest.mark.parametrize(("compiler", "arguments", "bounds"), CLAMPED_KERNELS)
+def test_loaded_ranges_are_clamped_against_the_abi_buffer_length(
+    compiler, arguments, bounds
+):
+    """Bound every loaded range by the buffer length its own ABI carries."""
+    lowered, _, _ = _compile(compiler, "sm_86", **arguments)
+
+    signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
+    assert signature is not None
+    parameters = [
+        parameter.split(":")[0].strip()
+        for parameter in signature.group(1).split(",")
+    ]
+    # A clamp is two signed maxima and two signed minima; both minima take
+    # the buffer length as their upper bound.
+    for length_index, ranges in bounds.items():
+        length = re.escape(parameters[length_index])
+        upper_bounds = re.findall(
+            rf"llvm\.intr\.smin\(%\w+, {length}\) : \(i32, i32\)", lowered
+        )
+        assert len(upper_bounds) == 2 * ranges
+    total = 2 * sum(bounds.values())
+    assert lowered.count("llvm.intr.smin") == total
+    assert lowered.count("llvm.intr.smax") == total
+
+
+@pytest.mark.parametrize(
+    ("compiler", "arguments", "bounds"), BOUNDED_ID_KERNELS
+)
+def test_loaded_ids_are_compared_with_the_abi_count(
+    compiler, arguments, bounds
+):
+    """Bound every loaded index by the count its own ABI carries."""
+    lowered, _, _ = _compile(compiler, "sm_86", **arguments)
+
+    signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
+    assert signature is not None
+    parameters = [
+        parameter.split(":")[0].strip()
+        for parameter in signature.group(1).split(",")
+    ]
+    assert len(parameters) == max(bounds) + 1
+    # One unsigned comparison of the loaded i32 word bounds it on both
+    # sides: a negative word is a large unsigned one.
+    for count_index, sites in bounds.items():
+        count = re.escape(parameters[count_index])
+        comparisons = re.findall(
+            rf'llvm\.icmp "ult" %\w+, {count} : i32', lowered
+        )
+        assert len(comparisons) == sites
+
+
+@pytest.mark.parametrize(
+    ("value_count", "output_count", "bound"),
+    [(10, 6, 6), (10, 10, 10), (10, 16, 10)],
+    ids=["shorter-output", "equal", "longer-output"],
+)
+def test_softmax_validation_returns_the_shorter_buffer_as_the_kernel_bound(
+    value_count, output_count, bound
+):
+    """Give the map_store kernel a count that fits both element buffers."""
+    values = torch.ones(value_count)
+    offsets = torch.tensor([0, 2, 6], dtype=torch.int32)
+    output = torch.zeros(output_count)
+
+    assert _validate_softmax_tensors(
+        values, offsets, output, require_cuda=False
+    ) == (bound, 2)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_direct_kernel_clamps_offsets_that_validation_rejects(
+    offsets, block_size
+):
+    """Keep one-CTA reads inside the value count without host validation."""
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_values = _guarded_values()
+    device_offsets = _device_i32(offsets)
+    output = _nan_output(segment_count)
+    launch = _launcher(
+        "_compile_segmented_reduction_ptx", block_size=block_size
+    )
+
+    launch(
+        segment_count,
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    _assert_clamped(output, host_values, pairwise(offsets))
+
+
+def _column_kernel():
+    """Compile the column kernel of the rank-two sum and return its launch."""
+    return _launcher(
+        "_compile_segmented_reduction_ptx",
+        block_size=128,
+        module_text=_semantic_module("sum", "f32", 2),
+        kernel_name="segmented_sum_r2",
+    )
+
+
+def _guarded_rows(row_count, columns):
+    """Build `[row_count, columns]` values between NaN guards.
+
+    Returns:
+        The device view the kernel reads, as its elements in row order, and
+        a host copy of the rows. Every value depends on its row and on its
+        column and is a small integer, so every column sum is exact and a
+        load from another row or column changes it.
+    """
+    row = torch.arange(row_count)[:, None]
+    column = torch.arange(columns)[None, :]
+    host_rows = ((row * 7 + column * 3) % 13 + 1).to(torch.float32)
+    return _guarded(host_rows.reshape(-1)), host_rows
+
+
+def _clamped_column_sums(host_rows, ranges):
+    """Sum each column over each row range after the clamp of the kernel."""
+    count = host_rows.shape[0]
+    sums = []
+    for start, end in ranges:
+        start = min(max(start, 0), count)
+        end = min(max(end, start), count)
+        sums.append(host_rows[start:end].sum(dim=0))
+    return torch.stack(sums)
+
+
+@requires_cuda
+@pytest.mark.parametrize("columns", [3, 129], ids=["few", "second-pass"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_column_kernel_clamps_row_ranges_that_validation_rejects(
+    offsets, columns
+):
+    """Keep every load inside `[N, D]` and every store inside `[S, D]`.
+
+    The launch is bound by the contract, below the Python validation, with
+    row offsets that validation rejects. The values sit between NaN guards
+    at least as long as the values, and the output between canaries. A row
+    range that was not clamped to the row count would read a guard, or
+    leave the allocation, at a flat index of rows times columns.
+    """
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_rows = _guarded_rows(_VALUE_COUNT, columns)
+    device_offsets = _device_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count * columns)
+
+    _column_kernel()(
+        segment_count,
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        feature_count=columns,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(segment_count, columns)
+    assert torch.isfinite(stored).all()
+    assert torch.equal(
+        stored, _clamped_column_sums(host_rows, pairwise(offsets))
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [1, 5, 127, 128, 129, 300])
+def test_column_kernel_stores_one_row_per_segment_and_nothing_else(
+    feature_count,
+):
+    """Bound the columns by the feature count and the blocks by the segments.
+
+    The grid holds two blocks more than there are segments, and a block
+    holds 128 threads whatever the number of columns. A block beyond the
+    segment count and a thread beyond the feature count store nothing: the
+    canaries after the last row and before the first are unchanged. The
+    output is exact, so no thread wrote the slot of another column either.
+    """
+    row_offsets = (0, 7, 7, 40)
+    segment_count = len(row_offsets) - 1
+    values, host_rows = _guarded_rows(row_offsets[-1], feature_count)
+    output, output_buffer = _canaried_output(segment_count * feature_count)
+
+    _column_kernel()(
+        segment_count + 2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=segment_count,
+        feature_count=feature_count,
+    )
+
+    torch.cuda.synchronize()
+    assert torch.equal(
+        output.cpu().reshape(segment_count, feature_count),
+        _clamped_column_sums(host_rows, pairwise(row_offsets)),
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, -129, _INT32_MIN])
+def test_column_kernel_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no column for a feature count that names none.
+
+    Host validation never passes such a count. The kernel compares its
+    column index with the count as a signed value, so a count of zero or
+    below starts no column loop: nothing is loaded and nothing is stored.
+    """
+    row_offsets = (0, 7, 40)
+    values, _ = _guarded_rows(row_offsets[-1], 4)
+    output, output_buffer = _canaried_output(2 * 4)
+
+    _column_kernel()(
+        2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=2,
+        feature_count=feature_count,
+    )
+
+    _assert_only_stored(output_buffer, {})
+
+
+def _softmax_column_kernel(block_size=128):
+    """Compile the column kernel of the rank-two softmax; return its launch."""
+    return _launcher(
+        "_compile_segmented_reduction_ptx",
+        block_size=block_size,
+        module_text=_softmax_text(2),
+        kernel_name="ragged_softmax_r2",
+    )
+
+
+def _guarded_logits(row_count, columns):
+    """Build `[row_count, columns]` logits between NaN guards.
+
+    Returns:
+        The device view the kernel reads, as its elements in row order, and
+        a host copy of the rows. Every logit is a quarter multiple that
+        depends on its row and on its column, with a spread of three.
+    """
+    values, host_rows = _guarded_rows(row_count, columns)
+    values.div_(4)
+    return values, host_rows / 4
+
+
+def _column_softmax(host_rows, start, end):
+    """Normalize every column over rows `[start, end)` in float64."""
+    return torch.softmax(host_rows[start:end].double(), 0).float()
+
+
+@requires_cuda
+@pytest.mark.parametrize("columns", [3, 129], ids=["few", "second-pass"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_softmax_column_kernel_stores_only_rows_inside_the_clamped_ranges(
+    offsets, columns
+):
+    """Keep every load and every store inside `[N, D]`.
+
+    The launch is bound by the contract, below the Python validation, with
+    row offsets that validation rejects. The values sit between NaN guards
+    and the output between canaries. A softmax output is positive, so the
+    canary of minus one shows a row that no thread stored. A row range that
+    was not clamped to the row count would read a guard and make a whole
+    column NaN, or store past the last row. The decreasing pair makes two
+    segments claim the same rows: either may win there, and both are
+    finite.
+    """
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_rows = _guarded_logits(_VALUE_COUNT, columns)
+    output, output_buffer = _canaried_output(_VALUE_COUNT * columns)
+
+    _softmax_column_kernel()(
+        segment_count,
+        values=values,
+        offsets=_device_i32(offsets),
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        feature_count=columns,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(_VALUE_COUNT, columns)
+    claims = torch.zeros(_VALUE_COUNT, dtype=torch.int64)
+    expected = torch.full_like(stored, _CANARY)
+    for start, end in pairwise(offsets):
+        start = min(max(start, 0), _VALUE_COUNT)
+        end = min(max(end, start), _VALUE_COUNT)
+        claims[start:end] += 1
+        expected[start:end] = _column_softmax(host_rows, start, end)
+    once = claims <= 1
+    torch.testing.assert_close(stored[once], expected[once], rtol=1e-5, atol=0)
+    contested = stored[~once]
+    assert ((contested > 0) & (contested <= 1)).all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [1, 5, 127, 128, 129, 300])
+def test_softmax_column_kernel_stores_its_own_columns_and_nothing_else(
+    feature_count,
+):
+    """Bound the columns by the feature count and the blocks by the segments.
+
+    The grid holds two blocks more than there are segments, and a block
+    holds 128 threads whatever the number of columns. A block beyond the
+    segment count and a thread beyond the feature count store nothing: the
+    canaries around the output are unchanged, and every row holds the
+    softmax of its own column.
+    """
+    row_offsets = (0, 7, 7, 40)
+    segment_count = len(row_offsets) - 1
+    values, host_rows = _guarded_logits(row_offsets[-1], feature_count)
+    output, output_buffer = _canaried_output(row_offsets[-1] * feature_count)
+
+    _softmax_column_kernel()(
+        segment_count + 2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=segment_count,
+        feature_count=feature_count,
+    )
+
+    torch.cuda.synchronize()
+    expected = torch.cat(
+        [
+            _column_softmax(host_rows, start, end)
+            for start, end in pairwise(row_offsets)
+        ]
+    )
+    torch.testing.assert_close(
+        output.cpu().reshape(row_offsets[-1], feature_count),
+        expected,
+        rtol=1e-5,
+        atol=0,
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, -129, _INT32_MIN])
+def test_softmax_column_kernel_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no column for a feature count that names none."""
+    row_offsets = (0, 7, 40)
+    values, _ = _guarded_logits(row_offsets[-1], 4)
+    output, output_buffer = _canaried_output(row_offsets[-1] * 4)
+
+    _softmax_column_kernel()(
+        2,
+        values=values,
+        offsets=_device_i32(row_offsets),
+        output=output,
+        value_count=row_offsets[-1],
+        segment_count=2,
+        feature_count=feature_count,
+    )
+
+    _assert_only_stored(output_buffer, {})
+
+
+@requires_cuda
+def test_softmax_column_launch_passes_the_rows_of_the_shorter_buffer(
+    monkeypatch,
+):
+    """Give the kernel a row count that fits the values and the output.
+
+    The private launch admits an output of fewer rows than the values, as
+    it does for rank one. The kernel stores at the rows it reads, so the
+    count it clamps against is the smaller one. Without it the count would
+    be the ten rows of the values.
+    """
+    launches = []
+
+    def launch_entry(function, contract, bindings, grid, stream):
+        launches.append((grid, bindings))
+
+    monkeypatch.setattr(
+        _cuda_backend._get_driver(), "launch_entry", launch_entry
+    )
+    values = torch.ones(10, 3, device="cuda")
+    output = torch.zeros(6, 3, device="cuda")
+
+    launch_softmax_gpu(values, _device_i32((0, 2, 6)), output)
+
+    ((grid, (_, arguments)),) = launches
+    assert grid == (2, 1, 1)
+    assert arguments[3:] == (6, 2, 3)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_softmax_column_store_stays_inside_the_validated_rows(block_size):
+    """Bound the store of a column by the rows the host validated.
+
+    The output has fewer rows than the values, and the row count the
+    kernel receives is the one of the output. The offsets then change
+    through a path the host cannot see, and the last segment claims every
+    row of the values. Its threads stop at the last row of the output.
+    """
+    covered, columns = 600, 5
+    values, host_rows = _guarded_logits(_VALUE_COUNT, columns)
+    output_buffer = torch.full(
+        ((covered + _VALUE_COUNT) * columns,), _CANARY, device="cuda"
+    )
+    output = output_buffer[: covered * columns]
+    stale = (0, 400, _VALUE_COUNT)
+
+    _softmax_column_kernel(block_size)(
+        2,
+        values=values,
+        offsets=_device_i32(stale),
+        output=output,
+        value_count=covered,
+        segment_count=2,
+        feature_count=columns,
+    )
+    torch.cuda.synchronize()
+
+    assert (output_buffer[covered * columns :] == _CANARY).all()
+    expected = torch.cat(
+        [
+            _column_softmax(host_rows, 0, 400),
+            _column_softmax(host_rows, 400, covered),
+        ]
+    )
+    torch.testing.assert_close(
+        output.cpu().reshape(covered, columns), expected, rtol=1e-5, atol=0
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
+def test_task_id_kernels_clamp_offsets(block_size):
+    """Clamp behind task indirection, in the warp and the CTA reduction."""
+    segment_count = len(_MIXED_OFFSETS) - 1
+    values, host_values = _guarded_values()
+    device_offsets = _device_i32(_MIXED_OFFSETS)
+    output = _nan_output(segment_count)
+    task_ids = _device_i32(list(reversed(range(segment_count))))
+    launch = _launcher(
+        "_compile_segmented_reduction_ptx",
+        block_size=block_size,
+        use_task_ids=True,
+    )
+
+    launch(
+        segment_count,
+        {"task_ids": task_ids, "task_count": segment_count},
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    _assert_clamped(output, host_values, pairwise(_MIXED_OFFSETS))
+
+
+@requires_cuda
+def test_fused_kernel_clamps_offsets_in_both_branches():
+    """Clamp in the four-per-block warp slots and in the CTA tasks."""
+    segment_count = len(_MIXED_OFFSETS) - 1
+    values, host_values = _guarded_values()
+    device_offsets = _device_i32(_MIXED_OFFSETS)
+    output = _nan_output(segment_count)
+    warp_ids = [0, 2, 3]
+    cta_ids = [1, 4]
+    task_ids = _device_i32([*warp_ids, *cta_ids])
+    launch = _launcher("_compile_fused_segmented_reduction_ptx")
+
+    launch(
+        (len(warp_ids) + 3) // 4 + len(cta_ids),
+        {
+            "task_ids": task_ids,
+            "warp_task_count": len(warp_ids),
+            "cta_task_count": len(cta_ids),
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    _assert_clamped(output, host_values, pairwise(_MIXED_OFFSETS))
+
+
+@requires_cuda
+def test_persistent_kernel_clamps_offsets_partial_and_merge_ranges():
+    """Clamp the warp, CTA, and split partial queues, and the merge."""
+    direct_count = len(_MIXED_OFFSETS) - 1
+    values, host_values = _guarded_values()
+    device_offsets = _device_i32(_MIXED_OFFSETS)
+    # Two extra output slots receive one merge each. The first group's
+    # partials start before element zero and end past the value count. The
+    # second group's partials are valid, but its merge record names scratch
+    # slots 3 and 4 of four: the length still matches its two partials, so
+    # the merge runs, and it must read slot 3 alone.
+    partial_ranges = [(-200, 450), (450, 1800), (100, 300), (300, 500)]
+    merge_ranges = [(0, 2), (3, 5)]
+    merge_count = len(merge_ranges)
+    output = _nan_output(direct_count + merge_count)
+    warp_tasks = _device_i32([0, 2, 3])
+    cta_tasks = _device_i32([1, 4])
+    device_partials = _device_ranges(partial_ranges)
+    partial_merges = _device_i32([0, 0, 1, 1])
+    merge_records = _device_i32(
+        [
+            field
+            for merge_id, (begin, end) in enumerate(merge_ranges)
+            for field in (direct_count + merge_id, begin, end)
+        ]
+    )
+    scratch = _guarded(torch.full((len(partial_ranges),), float("nan")))
+    counters = torch.zeros(3 + merge_count, dtype=torch.int32, device="cuda")
+    launch = _launcher("_compile_persistent_segmented_reduction_ptx")
+
+    launch(
+        2,
+        {
+            "warp_ids": warp_tasks,
+            "cta_ids": cta_tasks,
+            "partial_ranges": device_partials,
+            "partial_merge_ids": partial_merges,
+            "merge_records": merge_records,
+            "scratch": scratch,
+            "counters": counters,
+            "warp_task_count": warp_tasks.numel(),
+            "cta_task_count": cta_tasks.numel(),
+            "partial_count": len(partial_ranges),
+            "merge_count": merge_count,
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=output.numel(),
+    )
+
+    partial_sums = _clamped_sums(host_values, partial_ranges)
+    _assert_clamped(
+        output[:direct_count], host_values, pairwise(_MIXED_OFFSETS)
+    )
+    assert torch.equal(scratch.cpu(), partial_sums)
+    assert torch.equal(
+        output[direct_count:].cpu(), _clamped_sums(partial_sums, merge_ranges)
+    )
+
+
+@requires_cuda
+def test_split_partial_kernel_clamps_plan_ranges():
+    """Clamp plan-owned partial ranges, which also index the values."""
+    ranges = [(-200, 450), (450, 1800), (1200, 1300), (900, 200)]
+    values, host_values = _guarded_values()
+    device_ranges = _device_ranges(ranges)
+    scratch = _nan_output(len(ranges))
+    launch = _launcher("_compile_split_partial_reduction_ptx")
+
+    launch(
+        len(ranges),
+        {
+            "partial_ranges": device_ranges,
+            "scratch": scratch,
+            "partial_count": len(ranges),
+        },
+        values=values,
+        value_count=_VALUE_COUNT,
+    )
+
+    _assert_clamped(scratch, host_values, ranges)
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "block_size", [1, 31, 33, 40, 64, 97, 100, 256, 512, 1024]
+)
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "softmax"])
+def test_admitted_block_sizes_reduce_position_dependent_data(block_size, kind):
+    """Run admitted block sizes other than 32 and 128 with data.
+
+    The sizes cover a single lane, one partly filled warp, a partly filled
+    last warp behind full ones (33, 40, 97, 100), and whole warps up to
+    1024 threads. Segment lengths fall below and above each block size.
+
+    Sum, max, and min use ``(2 * (index % 67) - 65) / 4``, nonzero multiples of
+    0.25 whose sums are exact in f32 under any order at these lengths, and
+    are compared with no tolerance. A window moved by 1 to 64 elements, or
+    a dropped or repeated element, changes a sum.
+
+    Softmax uses quarter-step logits with spread 4 and the tolerance of
+    test_softmax_store_stays_inside_the_validated_output against float64
+    PyTorch. It is a measured tolerance: the largest deviation is 2.8e-06,
+    at block size 1, where one lane chains all 4097 terms.
+    """
+    from swage._segmented_qualification import launch_softmax_gpu
+
+    lengths = [0, 1, 31, 33, 97, 300, 4097]
+    offsets = list(accumulate(lengths, initial=0))
+    index = torch.arange(offsets[-1])
+    if kind == "softmax":
+        host_values = ((index % 17) - 8).to(torch.float32) / 4
+        expected = torch.cat(
+            [
+                torch.softmax(host_values[begin:end].double(), 0)
+                for begin, end in pairwise(offsets)
+            ]
+        ).float()
+        tolerance = {"rtol": 1e-5, "atol": 0}
+    else:
+        host_values = (2 * (index % 67) - 65).to(torch.float32) / 4
+        identity, reduce = {
+            "sum": (0.0, torch.sum),
+            "max": (float("-inf"), torch.amax),
+            "min": (float("inf"), torch.amin),
+        }[kind]
+        expected = torch.stack(
+            [
+                reduce(host_values[begin:end].double())
+                if end > begin
+                else torch.tensor(identity, dtype=torch.float64)
+                for begin, end in pairwise(offsets)
+            ]
+        ).float()
+        tolerance = {"rtol": 0, "atol": 0}
+    values = host_values.cuda()
+    device_offsets = _device_i32(offsets)
+
+    # Repeat the launch: a fault that depends on which lane's store survives
+    # would not show every time.
+    for _ in range(4):
+        output = _nan_output(expected.numel())
+        if kind == "softmax":
+            launch_softmax_gpu(
+                values, device_offsets, output, block_size=block_size
+            )
+        else:
+            launch_gpu(
+                values, device_offsets, output, kind, block_size=block_size
+            )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(output.cpu(), expected, **tolerance)
+
+
+@requires_cuda
+def test_split_merge_kernel_clamps_plan_ranges():
+    """Clamp plan-owned merge ranges by the partial count they index."""
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    ranges = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+    ]
+    scratch = _guarded(host_scratch)
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in enumerate(ranges)
+            for field in (segment, begin, end)
+        ]
+    )
+    output = _nan_output(len(ranges))
+    launch = _launcher("_compile_split_merge_reduction_ptx")
+
+    launch(
+        len(ranges),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_count": partial_count,
+            "merge_count": len(ranges),
+        },
+        output=output,
+        segment_count=output.numel(),
+    )
+
+    _assert_clamped(output, host_scratch, ranges)
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_mean_merge_kernel_reads_range_records_inside_the_partial_count(
+    stray_ids,
+):
+    """Read the extent of a split segment from the clamped range of partials.
+
+    The merge of a mean takes the range records of the partial tasks as a
+    fourth buffer and reads two of them per task: the begin of the first
+    partial of its segment and the end of the last. Both are addressed
+    through the range of partials after its clamp to the partial count, so
+    a merge record that names partials outside the plan reads no record
+    outside the buffer, and an empty range of partials reads none.
+
+    The range records sit between guards that hold a large word. A record
+    read from a guard would change the divisor, and so the mean. The
+    scratch sits between NaN guards, and the output between canaries: a
+    merge record whose segment names no segment stores nothing.
+    """
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    # Six chunks of uneven lengths, as [begin, end] pairs of value indices.
+    host_ranges = [(0, 5), (5, 9), (9, 20), (20, 21), (21, 40), (40, 47)]
+    partials = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+        (0, partial_count),
+        (2, 3),
+    ]
+    segment_count = 4
+    stray = stray_ids(segment_count)
+    segments = [0, 1, 2, 3, stray[0], stray[1]]
+    scratch = _guarded(host_scratch)
+    ranges, _ = _canaried(
+        torch.tensor(
+            [bound for bounds in host_ranges for bound in bounds],
+            dtype=torch.int32,
+        ),
+        1 << 20,
+    )
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, partials, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    output, output_buffer = _canaried_output(segment_count)
+    launch = _launcher(
+        "_compile_split_merge_reduction_ptx",
+        module_text=_semantic_module("mean"),
+        kernel_name="segmented_mean",
+    )
+
+    launch(
+        len(partials),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_ranges": ranges,
+            "partial_count": partial_count,
+            "merge_count": len(partials),
+        },
+        output=output,
+        segment_count=segment_count,
+    )
+
+    # The first segment merges partials [0, 3) and the second [3, 6). The
+    # third and the fourth have no partial after the clamp: zero divided
+    # by zero.
+    sums = _clamped_sums(host_scratch, partials)
+    first = sums[0] / (host_ranges[2][1] - host_ranges[0][0])
+    second = sums[1] / (host_ranges[5][1] - host_ranges[3][0])
+    torch.cuda.synchronize()
+    stored = output.cpu()
+    assert torch.equal(stored[:2], torch.stack([first, second]))
+    assert stored[2:].isnan().all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_softmax_store_stays_inside_the_validated_output(block_size):
+    """Bound the map_store write by the output the host validated.
+
+    The softmax kernel stores one element per input element, so its range
+    bounds a write as well as a read. The output may be shorter than the
+    values. The offsets then change through a path the host cannot see, and
+    the last segment claims every value.
+    """
+    covered = 600
+    values, host_values = _guarded_values()
+    values.div_(4)
+    host_values = host_values / 4
+    output_buffer = torch.full((covered + _VALUE_COUNT,), -1.0, device="cuda")
+    output = output_buffer[:covered]
+    offsets = _device_i32((0, 400, covered))
+    bound, segment_count = _validate_softmax_tensors(values, offsets, output)
+    stale = (0, 400, _VALUE_COUNT)
+    with pytest.raises(ValueError, match="output has 600 elements"):
+        _validate_softmax_tensors(values, _device_i32(stale), output)
+    offsets.copy_(_device_i32(stale))
+    launch = _launcher(
+        "_compile_segmented_reduction_ptx",
+        module_text=_SOFTMAX_MODULE,
+        kernel_name="ragged_softmax",
+        block_size=block_size,
+    )
+
+    launch(
+        segment_count,
+        values=values,
+        offsets=offsets,
+        output=output,
+        value_count=bound,
+        segment_count=segment_count,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(
+        output_buffer[covered:].cpu(), torch.full((_VALUE_COUNT,), -1.0)
+    )
+    expected = torch.cat(
+        [
+            torch.softmax(host_values[begin:end].double(), 0)
+            for begin, end in ((0, 400), (400, covered))
+        ]
+    ).float()
+    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=0)
+
+
+@requires_cuda
+@pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_task_id_kernels_skip_ids_outside_the_segment_count(
+    stray_ids, block_size
+):
+    """Store nothing for a task whose segment ID names no segment.
+
+    The task buffer is the caller's, so it can change after the host
+    validated it. Segment 1 has no task: a stray ID must not be redirected
+    to a valid segment either.
+    """
+    offsets = (0, 250, 600, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    task_ids = _device_i32([0, *stray_ids(segment_count), 2])
+    with pytest.raises(ValueError, match="valid segment IDs"):
+        _launch_segmented_sum_tasks(
+            values, device_offsets, output, task_ids, block_size=block_size
+        )
+    launch = _launcher(
+        "_compile_segmented_reduction_ptx",
+        block_size=block_size,
+        use_task_ids=True,
+    )
+
+    launch(
+        task_ids.numel(),
+        {"task_ids": task_ids, "task_count": task_ids.numel()},
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[2]})
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_fused_kernel_skips_ids_outside_the_segment_count(stray_ids):
+    """Skip stray IDs in the four-per-block warp slots and the CTA tasks."""
+    offsets = (0, 20, 300, 330, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    stray = stray_ids(segment_count)
+    # Both schedules see every stray ID, and in the warp schedule a stray
+    # ID shares a block with a valid one.
+    warp_ids = [0, *stray, 2]
+    cta_ids = [*stray, 3]
+    task_ids = _device_i32([*warp_ids, *cta_ids])
+    launch = _launcher("_compile_fused_segmented_reduction_ptx")
+
+    launch(
+        (len(warp_ids) + 3) // 4 + len(cta_ids),
+        {
+            "task_ids": task_ids,
+            "warp_task_count": len(warp_ids),
+            "cta_task_count": len(cta_ids),
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[2], 3: sums[3]})
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_persistent_kernel_skips_ids_outside_their_counts(stray_ids):
+    """Skip stray segment IDs, merge IDs, and merge output segments.
+
+    Segments 0 to 3 are direct work and segments 4 and 5 are split in two
+    partials each. Four more partials carry the stray indices: two belong to
+    merges whose record names a stray output segment, and two name a stray
+    merge ID. Every partial still writes its own scratch slot. A stray merge
+    ID must leave the completion counters alone, and a stray output segment
+    must leave the output alone.
+    """
+    offsets = (0, 20, 300, 330, 400, 700, 1000)
+    segment_count = len(offsets) - 1
+    values, host_values = _guarded_values()
+    device_offsets, _ = _canaried_i32(offsets)
+    output, output_buffer = _canaried_output(segment_count)
+    stray = stray_ids(segment_count)
+    warp_tasks = _device_i32([0, *stray, 2])
+    cta_tasks = _device_i32([1, *stray, 3])
+    partial_ranges = [
+        (400, 550),
+        (550, 700),  # merge 0, segment 4
+        (700, 850),
+        (850, 1000),  # merge 1, segment 5
+        (100, 200),  # merge 2, stray output segment
+        (200, 300),  # merge 3, stray output segment
+        (0, 50),
+        (50, 100),  # stray merge IDs
+    ]
+    merge_records = [(4, 0, 2), (5, 2, 4), (stray[0], 4, 5), (stray[1], 5, 6)]
+    merge_count = len(merge_records)
+    # Completion counter 3 + ID follows three claim counters. The last two
+    # stray IDs miss those, so a counter update without a bound would land
+    # in a guard and not corrupt the queues.
+    stray_merges = stray_ids(merge_count)[-2:]
+    partial_merges = _device_i32([0, 0, 1, 1, 2, 3, *stray_merges])
+    device_partials = _device_ranges(partial_ranges)
+    device_merges, _ = _canaried_i32(
+        [field for record in merge_records for field in record]
+    )
+    scratch, scratch_buffer = _canaried_output(len(partial_ranges))
+    counters, counters_buffer = _canaried_i32([0] * (3 + merge_count))
+    launch = _launcher("_compile_persistent_segmented_reduction_ptx")
+
+    launch(
+        2,
+        {
+            "warp_ids": warp_tasks,
+            "cta_ids": cta_tasks,
+            "partial_ranges": device_partials,
+            "partial_merge_ids": partial_merges,
+            "merge_records": device_merges,
+            "scratch": scratch,
+            "counters": counters,
+            "warp_task_count": warp_tasks.numel(),
+            "cta_task_count": cta_tasks.numel(),
+            "partial_count": len(partial_ranges),
+            "merge_count": merge_count,
+        },
+        values=values,
+        offsets=device_offsets,
+        output=output,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+    )
+
+    sums = _clamped_sums(host_values, pairwise(offsets))
+    _assert_only_stored(output_buffer, dict(enumerate(sums)))
+    partial_sums = _clamped_sums(host_values, partial_ranges)
+    _assert_only_stored(scratch_buffer, dict(enumerate(partial_sums)))
+    _assert_guards_hold(counters_buffer, 0)
+    # Each merge counted its own partials and nothing else.
+    assert counters[3:].tolist() == [2, 2, 1, 1]
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_split_merge_kernel_skips_output_segments_outside_the_segment_count(
+    stray_ids,
+):
+    """Store nothing for a merge record whose segment names no segment."""
+    host_scratch = torch.arange(1, 7, dtype=torch.float32)
+    partial_count = host_scratch.numel()
+    segment_count = 3
+    scratch = _guarded(host_scratch)
+    output, output_buffer = _canaried_output(segment_count)
+    ranges = [(0, 3), (3, 5), (0, 6), (5, 6)]
+    stray = stray_ids(segment_count)
+    segments = [0, stray[0], stray[1], 2]
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, ranges, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    launch = _launcher("_compile_split_merge_reduction_ptx")
+
+    launch(
+        len(ranges),
+        {
+            "scratch": scratch,
+            "merge_records": records,
+            "partial_count": partial_count,
+            "merge_count": len(ranges),
+        },
+        output=output,
+        segment_count=segment_count,
+    )
+
+    sums = _clamped_sums(host_scratch, ranges)
+    _assert_only_stored(output_buffer, {0: sums[0], 2: sums[3]})

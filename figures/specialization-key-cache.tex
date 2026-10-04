@@ -23,8 +23,8 @@
     3/{sorted compile-time values},
     4/{exact compute capability},
     5/{code generation options},
-    6/{Swage revision, dialect version},
-    7/{LLVM version}} {
+    6/{frontend and native compiler identity},
+    7/{dialect version, LLVM version}} {
   \node[swcell, minimum width=4.9cm, minimum height=0.34cm,
         fill=swbluefill, draw=swblue]
     at (2.7, {-1.2 - \row * 0.42}) {};
@@ -67,7 +67,7 @@
 \node[font=\scriptsize, text=sworange, align=center] at (13.4, -3.68)
   {rejected entries stop the cache path:};
 \node[font=\tiny, text=sworange, align=center] at (13.4, -4.05)
-  {symlinked, world-writable, incomplete,};
+  {symlinked, world-writable, unowned,};
 \node[font=\tiny, text=sworange, align=center] at (13.4, -4.38)
   {unreadable, corrupt, or mismatched};
 \node[font=\tiny, text=sworange, align=center] at (13.4, -4.72)
@@ -87,8 +87,8 @@
 
 % Scope note.
 \node[anchor=west, font=\small, text=swmuted] at (0, -6.6)
-  {a dirty or unidentified build skips the persistent cache and uses
-   process-local reuse only};
+  {a process that cannot identify its compiler skips the persistent
+   cache and uses process-local reuse only};
 
 \end{tikzpicture}
 \end{document}

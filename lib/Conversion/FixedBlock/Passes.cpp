@@ -16,7 +16,9 @@
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
+#include "swage/Target/TargetDescription.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <utility>
@@ -29,22 +31,61 @@ namespace {
 FailureOr<std::pair<func::FuncOp, detail::FixedElementwiseKind>>
 admitFixedElementwise(ModuleOp module, int64_t blockSize) {
   if (blockSize <= 0) {
-    module.emitError("block-size must be a positive integer");
+    module.emitError() << "block-size must be a positive integer, got "
+                       << blockSize;
     return failure();
   }
-  if (blockSize > 1024) {
-    module.emitError("block-size must be at most 1024");
+  if (blockSize > nvidiaTarget().maxBlockThreads) {
+    module.emitError() << "block-size must be at most "
+                       << nvidiaTarget().maxBlockThreads << ", got "
+                       << blockSize;
     return failure();
   }
   auto functions = llvm::to_vector(module.getOps<func::FuncOp>());
   if (functions.size() != 1) {
-    module.emitError("expected exactly one kernel function");
+    module.emitError() << "expected exactly one kernel function, found "
+                       << functions.size();
     return failure();
   }
   auto kind = detail::verifyFixedElementwise(functions.front(), blockSize);
   if (failed(kind))
     return failure();
   return std::make_pair(functions.front(), *kind);
+}
+
+/// The GPU lowering replaces the kernel function by a `gpu.module` named
+/// after it, so nothing may refer to the function and the name of the module
+/// must be free. Checked before the module is changed.
+LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function) {
+  std::optional<SymbolTable::UseRange> uses = SymbolTable::getSymbolUses(
+      function.getOperation(), module.getOperation());
+  if (!uses)
+    return function.emitError()
+           << "cannot tell whether @" << function.getName()
+           << " is referenced; lowering it to a GPU kernel removes it, so the "
+              "module must hold only operations with known symbol uses";
+  if (!uses->empty()) {
+    InFlightDiagnostic diagnostic =
+        function.emitError()
+        << "kernel function @" << function.getName() << " is referenced "
+        << llvm::size(*uses)
+        << " times; lowering it to a GPU kernel removes it, so it must have "
+           "no symbol use";
+    diagnostic.attachNote(uses->begin()->getUser()->getLoc())
+        << "referenced here";
+    return diagnostic;
+  }
+  std::string name = function.getName().str() + "_module";
+  if (Operation *existing =
+          SymbolTable::lookupSymbolIn(module.getOperation(), name)) {
+    InFlightDiagnostic diagnostic = function.emitError()
+                                    << "lowering @" << function.getName()
+                                    << " creates @" << name
+                                    << ", which the module already defines";
+    diagnostic.attachNote(existing->getLoc()) << "defined here";
+    return diagnostic;
+  }
+  return success();
 }
 
 class FixedBlockToGPUPass
@@ -72,7 +113,8 @@ public:
 
   void runOnOperation() final {
     auto function = admitFixedElementwise(getOperation(), blockSize);
-    if (failed(function))
+    if (failed(function) ||
+        failed(verifyKernelSymbols(getOperation(), function->first)))
       return signalPassFailure();
     detail::buildFixedGPUProgram(getOperation(), function->first, blockSize,
                                  function->second);

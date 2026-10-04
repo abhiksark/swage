@@ -1,3 +1,4 @@
+<!-- docs/adr/ADR-0006-ptx-via-llvm-nvptx.md -->
 # ADR-0006: PTX generation through LLVM NVPTX
 
 - Status: accepted
@@ -15,7 +16,7 @@ The production path emits PTX directly via LLVM NVPTX
 (`LLVM_TARGETS_TO_BUILD=Native;NVPTX`); modules are loaded and launched
 through the CUDA Driver API on the current PyTorch stream. NVRTC is not a
 production dependency. (The master plan retained NVRTC for the prototype
-backend; with no prototype — ADR-0005 — NVRTC drops out entirely unless a
+backend; with no prototype (ADR-0005), NVRTC drops out entirely unless a
 future differential backend earns it.)
 
 ## Consequences

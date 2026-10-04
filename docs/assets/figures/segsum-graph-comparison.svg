@@ -1,8 +1,8 @@
 <!-- docs/assets/figures/segsum-graph-comparison.svg -->
-<!-- source-sha256: 0b893420677519492c34622615709bcf8b9d74b43c6862907a9c13ede30f1f17 -->
+<!-- source-sha256: 6c598f1294b576b929a01bae9d4c4335441e18a6fd0d5678e12da354b8d5517f -->
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" version="1.1" width="466.6" height="347.76" viewBox="0 0 466.6 347.76" role="img" aria-labelledby="segsum-graph-comparison-title segsum-graph-comparison-description">
 <title id="segsum-graph-comparison-title">Segmented sum under graph timing</title>
-<desc id="segsum-graph-comparison-description">Grouped bars compare graph-replay medians for the best Swage policy, the tuned Triton baseline, and torch segment_reduce across seven segment distributions on an RTX 5090.</desc>
+<desc id="segsum-graph-comparison-description">Grouped bars compare graph-replay medians for the best Swage policy, the recorded per-segment Triton baseline, and torch segment_reduce across seven segment distributions on an RTX 5090.</desc>
 <defs>
 <path id="font_1_1" d="M.56199648 .20014954C.56199648 .2942047 .5 .38433839 .3909912 .40937806L.2539978 .4404297C.15499878 .4624176 .1519928 .5343628 .1519928 .5483551 .1519928 .59928897 .18499756 .65823367 .28199769 .65823367 .3789978 .65823367 .46598817 .61128237 .4869995 .48042298 .48999024 .45942689 .48999024 .4584198 .5089874 .4584198 .5299988 .4584198 .5299988 .46142579 .5299988 .48442079V.6722412C.5299988 .6912384 .5299988 .6982422 .5149994 .6982422 .5079956 .6982422 .5049896 .6972351 .49598695 .6872406L.45298768 .6382599C.42799378 .6592407 .37799073 .6982422 .2809906 .6982422 .13798523 .6982422 .06199646 .6082916 .06199646 .4994049 .06199646 .43241883 .09799194 .38534547 .11199951 .37132264 .1639862 .31924439 .19198609 .31323243 .29599 .2902069 .3959961 .26817323 .4079895 .26617433 .42999269 .2451477 .44299317 .23214722 .47200013 .20414734 .47200013 .15318299 .47200013 .11021423 .45098878 .031280519 .33898927 .031280519 .25099183 .031280519 .11199951 .06124878 .10398865 .20713806 .102996829 .22514344 .102996829 .22813416 .08299255 .22813416 .06199646 .22813416 .06199646 .22514344 .06199646 .20214844V.014266968C.06199646-.0047302248 .06199646-.01171875 .07699585-.01171875 .083999637-.01171875 .084991458-.010726929 .09498596-.0017242432 .10598755 .009277344 .114990238 .022277832 .13999939 .04725647 .19799805 .0012664795 .27999879-.01171875 .33999635-.01171875 .49598695-.01171875 .56199648 .09422302 .56199648 .20014954Z"/>
 <path id="font_1_4" d="M.48098756 .11706543C.48098756 .13206482 .46598817 .13206482 .45999146 .13206482 .44400025 .13206482 .44299317 .12905884 .43699647 .11607361 .41099549 .051116945 .34498597 .030136109 .29699708 .030136109 .1519928 .030136109 .15098572 .16503906 .15098572 .22099304H.45199586C.47499085 .22099304 .48098756 .22099304 .48098756 .24598694 .48098756 .27601625 .47399903 .35105897 .42799378 .3981018 .38598634 .4401245 .32998658 .453125 .27198792 .453125 .115997318 .453125 .0309906 .35105897 .0309906 .22499085 .0309906 .08509827 .13398743-.005859375 .2849884-.005859375 .43598939-.005859375 .48098756 .1000824 .48098756 .11706543M.3889923 .25H.15098572C.15299988 .29101563 .1539917 .3300476 .1749878 .3660736 .19400025 .3981018 .22898865 .42012025 .27198792 .42012025 .3789978 .42012025 .3880005 .30003358 .3889923 .25Z"/>
@@ -426,8 +426,8 @@
 <use data-text="n" xlink:href="#font_4_28" transform="matrix(0,-6.973848,-6.973848,-0,18.08635,159.00693)" fill="#17212b"/>
 <use data-text="d" xlink:href="#font_4_19" transform="matrix(0,-6.973848,-6.973848,-0,18.08635,154.60642)" fill="#17212b"/>
 <use data-text="s" xlink:href="#font_4_33" transform="matrix(0,-6.973848,-6.973848,-0,18.08635,150.20594)" fill="#17212b"/>
-<path transform="matrix(1,0,0,-1,71.39534,274.7039)" d="M-22.20607 138.81305H45.856035V176.2801H-22.20607Z" fill="#fffdf8"/>
-<path transform="matrix(1,0,0,-1,71.39534,274.7039)" stroke-width=".3985" stroke-linecap="round" stroke-miterlimit="10" stroke-linejoin="miter" fill="none" stroke="#59636e" d="M-22.20607 138.81305H45.856035V176.2801H-22.20607Z"/>
+<path transform="matrix(1,0,0,-1,71.39534,274.7039)" d="M-22.20607 138.81305H68.01045V176.2801H-22.20607Z" fill="#fffdf8"/>
+<path transform="matrix(1,0,0,-1,71.39534,274.7039)" stroke-width=".3985" stroke-linecap="round" stroke-miterlimit="10" stroke-linejoin="miter" fill="none" stroke="#59636e" d="M-22.20607 138.81305H68.01045V176.2801H-22.20607Z"/>
 <path transform="matrix(1,0,0,-1,53.87175,106.59358)" d="M-1.49442-1.99252H1.49441V5.9777104H-1.49442ZM4.48325-1.99252H7.47208V3.9851804H4.48325Z" fill="#dceffd"/>
 <path transform="matrix(1,0,0,-1,53.87175,106.59358)" stroke-width=".3985" stroke-linecap="butt" stroke-miterlimit="10" stroke-linejoin="miter" fill="none" stroke="#00689d" d="M-1.49442-1.99252H1.49441V5.9777104H-1.49442ZM4.48325-1.99252H7.47208V3.9851804H4.48325Z"/>
 <use data-text="s" xlink:href="#font_4_33" transform="matrix(6.973848,0,0,-6.973848,63.53553,107.34779)" fill="#17212b"/>
@@ -444,12 +444,18 @@
 <use data-text="o" xlink:href="#font_4_29" transform="matrix(6.973848,0,0,-6.973848,75.119098,118.87959)" fill="#17212b"/>
 <use data-text="n" xlink:href="#font_4_28" transform="matrix(6.973848,0,0,-6.973848,79.08721,118.87959)" fill="#17212b"/>
 <use data-text="(" xlink:href="#font_4_1" transform="matrix(6.973848,0,0,-6.973848,86.165668,118.87959)" fill="#17212b"/>
-<use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,89.276,118.87959)" fill="#17212b"/>
-<use data-text="u" xlink:href="#font_4_35" transform="matrix(6.973848,0,0,-6.973848,92.38634,118.87959)" fill="#17212b"/>
-<use data-text="n" xlink:href="#font_4_28" transform="matrix(6.973848,0,0,-6.973848,96.786838,118.87959)" fill="#17212b"/>
-<use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,101.18733,118.87959)" fill="#17212b"/>
-<use data-text="d" xlink:href="#font_4_19" transform="matrix(6.973848,0,0,-6.973848,104.73006,118.87959)" fill="#17212b"/>
-<use data-text=")" xlink:href="#font_4_2" transform="matrix(6.973848,0,0,-6.973848,109.130558,118.87959)" fill="#17212b"/>
+<use data-text="p" xlink:href="#font_4_30" transform="matrix(6.973848,0,0,-6.973848,89.276,118.87959)" fill="#17212b"/>
+<use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,93.89269,118.87959)" fill="#17212b"/>
+<use data-text="r" xlink:href="#font_4_32" transform="matrix(6.973848,0,0,-6.973848,97.43541,118.87959)" fill="#17212b"/>
+<use data-text="-" xlink:href="#font_4_4" transform="matrix(6.973848,0,0,-6.973848,100.545749,118.87959)" fill="#17212b"/>
+<use data-text="s" xlink:href="#font_4_33" transform="matrix(6.973848,0,0,-6.973848,103.23067,118.87959)" fill="#17212b"/>
+<use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,106.38983,118.87959)" fill="#17212b"/>
+<use data-text="g" xlink:href="#font_4_22" transform="matrix(6.973848,0,0,-6.973848,109.93254,118.87959)" fill="#17212b"/>
+<use data-text="m" xlink:href="#font_4_27" transform="matrix(6.973848,0,0,-6.973848,113.900669,118.87959)" fill="#17212b"/>
+<use data-text="e" xlink:href="#font_4_20" transform="matrix(6.973848,0,0,-6.973848,120.44911,118.87959)" fill="#17212b"/>
+<use data-text="n" xlink:href="#font_4_28" transform="matrix(6.973848,0,0,-6.973848,123.99182,118.87959)" fill="#17212b"/>
+<use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,128.1831,118.87959)" fill="#17212b"/>
+<use data-text=")" xlink:href="#font_4_2" transform="matrix(6.973848,0,0,-6.973848,131.29344,118.87959)" fill="#17212b"/>
 <path transform="matrix(1,0,0,-1,53.87175,128.54334)" d="M-1.49442-1.99252H1.49441V5.9777104H-1.49442ZM4.48325-1.99252H7.47208V3.9851804H4.48325Z" fill="#f7e2ef"/>
 <path transform="matrix(1,0,0,-1,53.87175,128.54334)" stroke-width=".3985" stroke-linecap="butt" stroke-miterlimit="10" stroke-linejoin="miter" fill="none" stroke="#8e4775" d="M-1.49442-1.99252H1.49441V5.9777104H-1.49442ZM4.48325-1.99252H7.47208V3.9851804H4.48325Z"/>
 <use data-text="t" xlink:href="#font_4_34" transform="matrix(6.973848,0,0,-6.973848,63.53553,130.41138)" fill="#17212b"/>

@@ -37,6 +37,45 @@ def _integer_case(lengths):
     return values, offsets, torch.tensor(expected, dtype=torch.float32)
 
 
+def _closure_values(function):
+    """Expose retained private allocations for white-box race poisoning."""
+    return {
+        name: cell.cell_contents
+        for name, cell in zip(
+            function.__code__.co_freevars, function.__closure__
+        )
+    }
+
+
+def _bound_buffer(prepared, key):
+    """Return the buffer that a persistent launch binds to a contract key.
+
+    The launch keeps its kernel, its bound arguments, and its buffers in its
+    closure. The buffer returned is the retained tensor whose data pointer
+    the launch passes for the contract argument named `key`, so poisoning
+    it poisons what the kernel reads.
+
+    Args:
+        prepared: What `_prepare_persistent_sum` returned.
+        key: Contract key of an argument that points at the start of a
+            retained tensor: `scratch` or `counters`.
+    """
+    closure = _closure_values(prepared.launch)
+    contract = closure["kernel"].contract
+    _, values = closure["arguments"]
+    (pointer,) = (
+        value
+        for argument, value in zip(contract.arguments, values, strict=True)
+        if argument.key == key
+    )
+    (buffer,) = (
+        value
+        for value in closure.values()
+        if isinstance(value, torch.Tensor) and value.data_ptr() == pointer
+    )
+    return buffer
+
+
 @pytest.mark.parametrize("resident_blocks", [1, 2, 3, 7, 168, 336])
 def test_persistent_batch_boundaries_across_residencies(resident_blocks):
     """Cover both claim batch edges with under- and over-subscribed grids."""
@@ -67,7 +106,7 @@ def test_persistent_batch_boundaries_across_residencies(resident_blocks):
         values.copy_(base_values)
         values.mul_(factor)
         output.fill_(float("nan"))
-        prepared.launch_persistent()
+        prepared.launch()
         torch.cuda.synchronize()
 
         torch.testing.assert_close(
@@ -95,13 +134,13 @@ def test_persistent_merge_never_observes_poisoned_scratch(resident_blocks):
         output,
         resident_blocks=resident_blocks,
     )
-    scratch = prepared.scratch_buffers["partials"]
+    scratch = _bound_buffer(prepared, "scratch")
     expected = torch.tensor(lengths, dtype=torch.float32)
 
     for _ in range(100):
         scratch.fill_(float("nan"))
         output.fill_(float("nan"))
-        prepared.launch_persistent()
+        prepared.launch()
         torch.cuda.synchronize()
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
@@ -120,14 +159,18 @@ def test_persistent_poisoned_scratch_survives_graph_replay(resident_blocks):
         output,
         resident_blocks=resident_blocks,
     )
-    scratch = prepared.scratch_buffers["partials"]
+    scratch = _bound_buffer(prepared, "scratch")
     expected = torch.tensor(lengths, dtype=torch.float32)
 
-    prepared.launch_persistent()
+    # The first launch may only queue the wait for task storage. Capture
+    # needs a launch that observes the storage ready.
+    prepared.launch()
+    torch.cuda.synchronize()
+    prepared.launch()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        prepared.launch_persistent()
+        prepared.launch()
 
     for _ in range(100):
         scratch.fill_(float("nan"))
@@ -180,7 +223,7 @@ def test_persistent_randomized_plans_and_values():
             values.copy_(base_values)
             values.mul_(factor)
             output.fill_(float("nan"))
-            prepared.launch_persistent()
+            prepared.launch()
             torch.cuda.synchronize()
             torch.testing.assert_close(
                 output.cpu(), expected * factor, rtol=0, atol=0
@@ -202,7 +245,7 @@ def test_persistent_nonfinite_values_cross_every_worker_policy():
 
     _prepare_persistent_sum(
         values, device_offsets, output, resident_blocks=2
-    ).launch_persistent()
+    ).launch()
 
     expected = torch.tensor(
         [0.0, float("nan"), float("inf"), float("-inf"), float("nan")]
@@ -221,7 +264,7 @@ def test_persistent_capture_requires_initialized_task_storage(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
 
     with pytest.raises(RuntimeError, match="must launch once"):
-        prepared.launch_persistent()
+        prepared.launch()
 
 
 def test_persistent_rejects_overlapping_cross_stream_launches():
@@ -235,63 +278,49 @@ def test_persistent_rejects_overlapping_cross_stream_launches():
 
     with torch.cuda.stream(first):
         torch.cuda._sleep(2_000_000_000)
-        prepared.launch_persistent()
+        prepared.launch()
     with torch.cuda.stream(second):
-        with pytest.raises(RuntimeError, match="cannot run concurrently"):
-            prepared.launch_persistent()
+        with pytest.raises(RuntimeError, match="in flight on another stream"):
+            prepared.launch()
 
     first.synchronize()
     with torch.cuda.stream(second):
-        prepared.launch_persistent()
+        prepared.launch()
+    second.synchronize()
+    torch.testing.assert_close(output.cpu(), torch.tensor([33.0]))
 
 
-def test_persistent_cache_hit_launches_in_a_clean_child_process(
+def test_persistent_kernel_is_not_cached_for_a_clean_child_process(
     tmp_path, monkeypatch
 ):
-    """Populate version-3 PTX in the parent and launch it in a child."""
-    from swage import _runtime
+    """Write no PTX to the persistent cache, and serve no child from it.
 
+    The private segmented path keeps its kernels in the process only. A
+    launch in the parent leaves the cache directory empty, and a clean
+    child process that may not compile is refused instead of being served
+    the parent's kernel.
+    """
     cache_dir = tmp_path / "cache"
-    identity = {
-        "revision": "clean-child-cache-test",
-        "clean": True,
-        "llvm": "llvmorg-test",
-    }
     monkeypatch.setenv("SWAGE_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(_runtime, "_cached_identity", lambda: identity)
-    _runtime._artifact_cache.clear()
-    _runtime._compilations.clear()
 
     lengths = [0, 1, 33, 4097]
     values = torch.ones(sum(lengths), device="cuda")
     offsets = torch.tensor(_offsets(lengths), device="cuda", dtype=torch.int32)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_persistent_sum(values, offsets, output)
-    prepared.launch_persistent()
+    prepared.launch()
     torch.cuda.synchronize()
     torch.testing.assert_close(
         output.cpu(), torch.tensor(lengths, dtype=torch.float32)
     )
-    assert any(cache_dir.iterdir())
+    assert not cache_dir.exists() or not any(cache_dir.iterdir())
 
     script = textwrap.dedent(
         """
         import torch
 
-        from swage import _cuda_backend, _runtime
         from swage._segmented_qualification import _prepare_persistent_sum
 
-
-        def fail_compile(*_args, **_kwargs):
-            raise RuntimeError("compiler called on child-process cache hit")
-
-
-        _runtime._cached_identity = lambda: {
-            "revision": "clean-child-cache-test",
-            "clean": True,
-            "llvm": "llvmorg-test",
-        }
-        _cuda_backend.CUDA_BACKEND.compile = fail_compile
         lengths = [0, 1, 33, 4097]
         host_offsets = [0]
         for length in lengths:
@@ -301,21 +330,27 @@ def test_persistent_cache_hit_launches_in_a_clean_child_process(
             host_offsets, device="cuda", dtype=torch.int32
         )
         output = torch.empty(len(lengths), device="cuda")
-        prepared = _prepare_persistent_sum(values, offsets, output)
-        prepared.launch_persistent()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            output.cpu(), torch.tensor(lengths, dtype=torch.float32)
-        )
-        print("child CUDA cache result matches")
+        try:
+            _prepare_persistent_sum(values, offsets, output)
+        except RuntimeError as error:
+            print(error)
         """
     )
-    root = pathlib.Path(__file__).parents[3]
+    # The child imports the swage and the bindings this process imported,
+    # wherever the build that holds the bindings is.
+    import swage
+    from mlir_swage import _mlir_libs
+
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join(
-        (str(root / "python"), str(root / "build" / "python_packages"))
+        (
+            # Not resolved: the build tree links its packages into place.
+            str(pathlib.Path(os.path.abspath(swage.__file__)).parents[1]),
+            str(pathlib.Path(os.path.abspath(_mlir_libs.__file__)).parents[2]),
+        )
     )
     environment["SWAGE_CACHE_DIR"] = str(cache_dir)
+    environment["SWAGE_NO_COMPILE"] = "1"
     result = subprocess.run(
         [sys.executable, "-c", script],
         check=True,
@@ -324,4 +359,10 @@ def test_persistent_cache_hit_launches_in_a_clean_child_process(
         env=environment,
     )
 
-    assert result.stdout.strip() == "child CUDA cache result matches"
+    refusal = result.stdout.strip()
+    assert refusal.startswith(
+        "SWAGE_NO_COMPILE=1 refuses to compile kernel 'segmented_sum'"
+    )
+    assert refusal.endswith(
+        "the private segmented path has no persistent cache"
+    )

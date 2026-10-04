@@ -12,79 +12,22 @@ import json
 import pathlib
 import platform
 import random
-import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
-from benchmark_triton_comparison import _git_metadata
+import benchmark_provenance
+from benchmark_triton_comparison import (
+    _call_us,
+    _event_tick_us,
+    _gb_per_s,
+    _git_metadata,
+    _graph_us,
+    _resolution,
+    _useful_bytes,
+)
 from distributions import generate_lengths, summarize_lengths
-
-_BATCHED_LAUNCHES = 32
-
-
-# The recorded composable-reduction results used these sequential timers.
-# They are kept here, unchanged, after the comparison harness moved to
-# interleaved timing, so that this script reproduces its recorded method.
-def _median_iqr(values: Iterable[float]) -> dict[str, float]:
-    """Return median and quartiles for one sample list."""
-    ordered = sorted(values)
-    return {
-        "median": statistics.median(ordered),
-        "q1": statistics.quantiles(ordered, n=4, method="inclusive")[0],
-        "q3": statistics.quantiles(ordered, n=4, method="inclusive")[2],
-    }
-
-
-def _call_us(torch, launch: Callable[[], object], warmups: int,
-             samples: int) -> dict[str, object]:
-    """Measure synchronized Python-call latency in microseconds."""
-    for _ in range(warmups):
-        launch()
-    torch.cuda.synchronize()
-    timings = []
-    for _ in range(samples):
-        start = time.perf_counter_ns()
-        launch()
-        torch.cuda.synchronize()
-        end = time.perf_counter_ns()
-        timings.append((end - start) / 1_000.0)
-    return {"samples_us": timings, "summary_us": _median_iqr(timings)}
-
-
-def _graph_us(torch, launch: Callable[[], object], warmups: int,
-              samples: int) -> dict[str, object]:
-    """Measure one launch through replay of a captured 32-launch graph."""
-    for _ in range(warmups):
-        launch()
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    try:
-        with torch.cuda.graph(graph):
-            for _ in range(_BATCHED_LAUNCHES):
-                launch()
-    except RuntimeError as error:
-        torch.cuda.synchronize()
-        return {"available": False, "error": str(error)}
-    for _ in range(warmups):
-        graph.replay()
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    timings = []
-    for _ in range(samples):
-        start.record()
-        graph.replay()
-        end.record()
-        end.synchronize()
-        timings.append(start.elapsed_time(end) * 1_000.0 / _BATCHED_LAUNCHES)
-    return {
-        "available": True,
-        "samples_us": timings,
-        "summary_us": _median_iqr(timings),
-    }
 
 
 def _workloads():
@@ -180,22 +123,32 @@ def main():
 
     device = torch.cuda.current_device()
     torch.ones(1, device="cuda").sum().item()
+    provenance = benchmark_provenance.start(
+        torch, benchmark_provenance.swage_build()
+    )
+    ticks = {
+        "call": benchmark_provenance.clock_tick_us(),
+        "graph": _event_tick_us(torch, "cuda"),
+    }
     native_path = pathlib.Path(_swageDialectsNanobind.__file__)
     paths = [
         pathlib.Path(__file__).resolve(),
         root / "benchmarks/benchmark_triton_comparison.py",
         root / "benchmarks/distributions.py",
         root / "python/tests/mlir/reduction_programs.py",
-        root / "python/swage/_segmented_qualification.py",
-        root / "python/swage/_segmented_plan.py",
-        root / "python/swage/_segmented_runtime.py",
         *(
-            root / "lib/Conversion/SegmentedReduction" / name
+            root / f"python/swage/_segmented_{name}.py"
             for name in (
-                "GPU.cpp", "Passes.cpp", "SegmentProgram.cpp",
-                "SegmentProgram.h", "Sequential.cpp", "Split.cpp",
+                "plan",
+                "programs",
+                "qualification",
+                "runtime",
+                "validation",
             )
         ),
+        root / "lib/Conversion/SwageToPlan/SwageToPlan.cpp",
+        root / "lib/Conversion/SwagePlanToGPU/SwagePlanToGPU.cpp",
+        root / "lib/Conversion/SwagePlanToGPU/Emission.cpp",
         native_path,
     ]
     telemetry = subprocess.run(
@@ -205,6 +158,7 @@ def main():
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "status": "provisional engineering run; no performance gate",
         "source": _git_metadata(root),
+        "provenance": provenance,
         "sha256": {
             str(path.relative_to(root)): hashlib.sha256(
                 path.read_bytes()
@@ -244,13 +198,26 @@ def main():
             ),
             "prepare_ms": (
                 "One synchronized wall-time sample for the whole policy "
-                "bundle: validation, offset transfer, planning, compilation, "
-                "module loading, metadata/scratch allocation. Input/output "
-                "allocation and CUDA initialization excluded. First case "
-                "includes native initialization; no cold-cache claim."
+                "bundle: validation, offset transfer, planning, "
+                "metadata/scratch allocation, and compilation and module "
+                "loading only for kernels the process has not already "
+                "compiled and loaded. Input/output allocation and CUDA "
+                "initialization excluded. First case includes native "
+                "initialization; no cold-cache claim."
             ),
             "call": "Synchronized Python call latency, preparation excluded.",
             "graph": "CUDA events around 32 captured calls, divided by 32.",
+            "effective_gb_per_s": (
+                "The row's useful_bytes (f32 values and i32 offsets read, "
+                "f32 results written) divided by the median time."
+            ),
+            "timer_ticks_us": ticks,
+            "tick_fraction_of_sample": (
+                "The measured host clock or CUDA event tick divided by one "
+                "sample: a call, or the 32 captured calls of a graph "
+                "replay. The batch is fixed and is not raised to meet a "
+                "resolution limit."
+            ),
             "order": "Rotate policy order across cases; sequential samples.",
             "torch": (
                 "Eager segment_reduce with transform and output allocations "
@@ -303,24 +270,21 @@ def main():
                     _transform(values, transform), kind, offsets=offsets
                 )
 
-            launches = {
-                "warp": prepared.launch_warp,
-                "cta": prepared.launch_cta,
-                "mixed": prepared.launch_mixed,
-                "torch": launch_torch,
-            }
+            launches = dict(zip(prepared._fields, prepared))
+            launches["torch"] = launch_torch
             if held_out:
-                launches = {
-                    "cta": prepared.launch_cta,
-                    "mixed": prepared.launch_mixed,
-                }
+                launches = {"cta": prepared.cta, "mixed": prepared.mixed}
+            useful_bytes = _useful_bytes(sum(lengths), len(lengths))
             row = {
                 "workload": workload,
                 "lengths": summarize_lengths(lengths),
+                "useful_bytes": useful_bytes,
                 "kind": kind,
                 "transform": transform,
                 "prepare_ms": prepare_ms,
-                "mixed_schedule": "cta" if prepared.direct_cta else "mixed",
+                "mixed_schedule": (
+                    "cta" if prepared.mixed is prepared.cta else "mixed"
+                ),
                 "policies": {},
             }
             names = list(launches)
@@ -343,8 +307,23 @@ def main():
                 }
                 if name != "torch":
                     torch.testing.assert_close(output, expected, **tolerance)
+                for method, timing in row["policies"][name].items():
+                    if "summary_us" in timing:
+                        median = timing["summary_us"]["median"]
+                        timing["effective_gb_per_s"] = _gb_per_s(
+                            useful_bytes, median
+                        )
+                        timing.update(
+                            _resolution(
+                                ticks[method],
+                                median * timing["launches_per_sample"],
+                            )
+                        )
             row["correctness_passed"] = True
             report["results"].append(row)
+            # Rewritten after every row, so the block always describes the
+            # rows that are in the file.
+            benchmark_provenance.finish(provenance)
             args.output.write_text(json.dumps(report, indent=2) + "\n")
             medians = {
                 name: round(timing["graph"]["summary_us"]["median"], 2)

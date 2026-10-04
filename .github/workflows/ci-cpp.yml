@@ -1,3 +1,4 @@
+# .github/workflows/ci-cpp.yml
 name: ci-cpp
 
 on:
@@ -17,8 +18,10 @@ jobs:
   build-and-test:
     name: build-and-test
     runs-on: ubuntu-latest
-    # First run on a new LLVM pin builds LLVM from source (~3h); afterwards
-    # the install tree is cached and the job takes minutes.
+    # The first run after the LLVM pin, its tarball digest,
+    # scripts/build_llvm.sh, or the runner image changes builds LLVM from
+    # source (~3h); afterwards the install tree is cached and the job takes
+    # minutes.
     timeout-minutes: 350
     permissions:
       contents: read
@@ -29,6 +32,9 @@ jobs:
       CCACHE_DISABLE: "1"
       CC: gcc
       CXX: g++
+    outputs:
+      llvm-tag: ${{ steps.pin.outputs.tag }}
+      llvm-cache-key: ${{ steps.pin.outputs.cache-key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,13 +44,21 @@ jobs:
         with:
           python-version: "3.13"
 
+      # The key names everything the cached install tree was built from: the
+      # runner image, the pin, the build script, and the digest of the
+      # source tarball. The fixed middle part names the build type and the
+      # Python version of the bindings; change it by hand when those change.
       - name: Read LLVM pin
         id: pin
+        env:
+          LLVM_BUILD_INPUTS: ${{ hashFiles('scripts/build_llvm.sh', 'cmake/llvm-source-sha256.txt') }}
         run: |
           tag="$(cat cmake/llvm-version.txt)"
+          image="${ImageOS:-unknown-image}"
+          key="llvm-$RUNNER_OS-$image-$tag-release-py313-bindings-v2-gtest-v1"
           echo "SWAGE_BUILD_DIR=$RUNNER_TEMP/native-build" >> "$GITHUB_ENV"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "cache-key=llvm-${{ runner.os }}-$tag-release-py313-bindings-v2-gtest-v1" >> "$GITHUB_OUTPUT"
+          echo "cache-key=$key-$LLVM_BUILD_INPUTS" >> "$GITHUB_OUTPUT"
 
       - name: Cache LLVM install tree
         id: llvm-cache
@@ -68,11 +82,16 @@ jobs:
           cp "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}/mlir/python/requirements.txt" \
              "$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/python-requirements.txt"
 
+      # requirements-ci.txt pins pytest, lit, ninja, and the MLIR binding
+      # requirements by hash. The second command then installs the list that
+      # the pinned LLVM release ships. The lock already satisfies every entry
+      # except PyYAML, which that list caps at a version without a Python
+      # 3.13 wheel, so PyYAML alone is built from source without a hash.
       - name: Install Python binding test dependencies
-        run: >
-          python -m pip install
-          -r /home/runner/.swage/llvm/install-${{ steps.pin.outputs.tag }}/python-requirements.txt
-          pytest lit ninja build nanobind==2.15.0
+        run: |
+          python -m pip install --require-hashes -r requirements-ci.txt
+          python -m pip install \
+            -r "$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/python-requirements.txt"
 
       - name: Install current PyTorch CPU dependency
         run: >
@@ -115,11 +134,14 @@ jobs:
       - name: Run Python binding integration tests
         run: ninja -C "$SWAGE_BUILD_DIR" check-swage-python
 
+      # The build backend and nanobind come from the hash lock installed
+      # above, so the build runs without isolation.
       - name: Build local cp313 native wheel
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain)"
-          python -m build --wheel --outdir "$RUNNER_TEMP/native-wheelhouse" \
+          python -m build --wheel --no-isolation \
+            --outdir "$RUNNER_TEMP/native-wheelhouse" \
             -Ccmake.define.SWAGE_SOURCE_REVISION="$GITHUB_SHA" \
             -Ccmake.define.SWAGE_SOURCE_CLEAN=true \
             -Ccmake.define.MLIR_DIR="$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/lib/cmake/mlir" \
@@ -148,83 +170,148 @@ jobs:
           "$RUNNER_TEMP/wheel-venv/bin/python" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
             --backend cpu --expected-revision "$GITHUB_SHA"
 
+      # The whole native suite runs against the installed wheel, from a copy
+      # of the tests and of the repository files they read, so only the
+      # installed packages can be imported. The private CPU oracle runs
+      # swage-opt and the LLVM runner, which the wheel does not hold, so
+      # SWAGE_ORACLE_BUILD_DIR names the build of this job for its tools.
+      # Every CUDA test skips on this runner.
+      - name: Run the native suite against the installed wheel
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONNOUSERSITE: "1"
+        run: |
+          unset PYTHONPATH
+          python="$RUNNER_TEMP/wheel-venv/bin/python"
+          proof="$RUNNER_TEMP/wheel-proof"
+          mkdir -p "$proof/python/tests" "$proof/cmake" "$proof/docs/internals" \
+            "$proof/benchmarks"
+          cp -r "$GITHUB_WORKSPACE/python/tests/mlir" "$proof/python/tests/mlir"
+          cp -r "$GITHUB_WORKSPACE/examples" "$GITHUB_WORKSPACE/test" "$proof/"
+          cp "$GITHUB_WORKSPACE/cmake/llvm-version.txt" "$proof/cmake/"
+          cp "$GITHUB_WORKSPACE/docs/internals/segmented-reductions.md" \
+            "$proof/docs/internals/"
+          cp "$GITHUB_WORKSPACE/benchmarks/distributions.py" "$proof/benchmarks/"
+          export SWAGE_ORACLE_BUILD_DIR="$SWAGE_BUILD_DIR"
+          cd "$proof"
+          "$python" - "$GITHUB_SHA" <<'PY'
+          import pathlib
+          import sys
+
+          import swage
+          from swage import env
+
+          report = env.report()
+          installed = pathlib.Path(sys.prefix)
+          native = report["native"]
+          bindings = native["bindings"]
+          for path in (report["source"]["file"], bindings["file"]):
+              assert pathlib.Path(path).is_relative_to(installed), report
+          assert native["available"], report
+          assert native["source_revision"] == sys.argv[1], report
+          assert native["source_clean"] is True, report
+          assert bindings["version"] == swage.__version__, report
+          assert bindings["revision"] == sys.argv[1], report
+          assert bindings["llvm_linked"], report
+          PY
+          "$python" examples/emit_fixed_vector_add.py
+          "$python" -m pytest -q -p no:cacheprovider python/tests/mlir
+
       - name: Analyze CodeQL C/C++
         if: ${{ !cancelled() && steps.codeql-init.outcome == 'success' }}
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938
         with:
           category: /language:c-cpp
 
-  sanitizers:
-    name: Native ASan + UBSan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    permissions:
-      contents: read
-    env:
-      SWAGE_LLVM_HOME: /home/runner/.swage/llvm-sanitizers
-      CMAKE_BUILD_PARALLEL_LEVEL: "2"
-      CC: clang-18
-      CXX: clang++-18
-      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
-      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:abort_on_error=1
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
-      - name: Read LLVM pin
-        id: pin
-        run: |
-          tag="$(cat cmake/llvm-version.txt)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # clang-format versions format differently, so the check uses the
+      # version pinned in requirements-ci.txt.
+      - name: Install hash-locked tools
+        run: python -m pip install --require-hashes -r requirements-ci.txt
 
-      - name: Cache sanitizer-matched LLVM install
-        id: llvm-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Check C and C++ formatting
+        run: |
+          clang-format --version
+          git ls-files -z '*.c' '*.cpp' '*.h' \
+            | xargs -0 -r clang-format --dry-run --Werror
+
+  # AddressSanitizer and UndefinedBehaviorSanitizer over the Swage targets,
+  # linked against the cached Release LLVM, which is not instrumented. The
+  # Python bindings are left out: an instrumented extension does not load
+  # into an uninstrumented interpreter.
+  sanitizers:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CC: gcc
+      CXX: g++
+      # abort_on_error makes a report a crash, so a test that expects
+      # swage-opt to fail cannot pass on a sanitizer report. Each runtime
+      # reads its own variable, so both set it.
+      # allow_user_poisoning=0 ignores the manual poisoning in LLVM's bump
+      # allocator. Its inline functions are instrumented in Swage objects and
+      # not in the LLVM libraries, so with poisoning honored every MLIR
+      # context reports a use-after-poison that is not a defect.
+      ASAN_OPTIONS: abort_on_error=1:allow_user_poisoning=0
+      UBSAN_OPTIONS: abort_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          path: /home/runner/.swage/llvm-sanitizers/install-${{ steps.pin.outputs.tag }}
-          key: llvm-ubuntu24-${{ steps.pin.outputs.tag }}-clang18-asan-ubsan-v1
+          python-version: "3.13"
 
-      - name: Free runner disk space (LLVM build only)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghcup || true
-          df -h /
+      # build-and-test saved or restored this entry before this job started.
+      - name: Restore LLVM install tree
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /home/runner/.swage/llvm/install-${{ needs.build-and-test.outputs.llvm-tag }}
+          key: ${{ needs.build-and-test.outputs.llvm-cache-key }}
+          fail-on-cache-miss: true
 
-      - name: Install sanitizer build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-18 libclang-rt-18-dev
-          python -m pip install lit ninja
+      - name: Install hash-locked tools
+        run: python -m pip install --require-hashes -r requirements-ci.txt
 
-      - name: Build sanitizer-matched LLVM (cache miss only)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
+      - name: Configure Swage with sanitizers
+        env:
+          LLVM_INSTALL: /home/runner/.swage/llvm/install-${{ needs.build-and-test.outputs.llvm-tag }}
+          SANITIZER_FLAGS: >-
+            -fsanitize=address,undefined
+            -fno-sanitize=vptr
+            -fno-sanitize-recover=all
+            -fno-omit-frame-pointer
         run: |
-          ./scripts/fetch_llvm.sh
-          SWAGE_LLVM_BUILD_TYPE=Release SWAGE_LLVM_PYTHON_BINDINGS=OFF \
-            SWAGE_LLVM_TARGETS='X86;NVPTX' \
-            SWAGE_LLVM_SANITIZERS='Address;Undefined' \
-            ./scripts/build_llvm.sh
-          rm -rf "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}" \
-                 "$SWAGE_LLVM_HOME/build-${{ steps.pin.outputs.tag }}" \
-                 "$SWAGE_LLVM_HOME"/*.tar.xz
-
-      - name: Configure bindings-off ASan and UBSan build
-        run: |
-          cmake -G Ninja -S "$GITHUB_WORKSPACE" -B "$RUNNER_TEMP/sanitizer-build" \
+          cmake -G Ninja -S . -B build-sanitize \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DMLIR_DIR="$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/lib/cmake/mlir" \
-            -DLLVM_DIR="$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/lib/cmake/llvm" \
+            -DMLIR_DIR="$LLVM_INSTALL/lib/cmake/mlir" \
+            -DLLVM_DIR="$LLVM_INSTALL/lib/cmake/llvm" \
             -DLLVM_EXTERNAL_LIT="$(command -v lit)" \
             -DSWAGE_PYTHON_BINDINGS=OFF \
-            -DSWAGE_ENABLE_SANITIZERS=ON
-          echo "ASAN_SYMBOLIZER_PATH=$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/bin/llvm-symbolizer" >> "$GITHUB_ENV"
-          echo "UBSAN_SYMBOLIZER_PATH=$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/bin/llvm-symbolizer" >> "$GITHUB_ENV"
+            -DCMAKE_C_FLAGS="$SANITIZER_FLAGS" \
+            -DCMAKE_CXX_FLAGS="$SANITIZER_FLAGS"
 
-      - name: Run sanitizer lit and C++ unit tests
-        run: ninja -C "$RUNNER_TEMP/sanitizer-build" check-swage check-swage-unit
+      - name: Build Swage with sanitizers
+        run: ninja -C build-sanitize
+
+      # A build that dropped the flags would pass every test below.
+      - name: Require instrumented binaries
+        run: |
+          nm build-sanitize/bin/swage-opt > "$RUNNER_TEMP/swage-opt-symbols.txt"
+          grep -q __asan_init "$RUNNER_TEMP/swage-opt-symbols.txt"
+          grep -q __ubsan_handle "$RUNNER_TEMP/swage-opt-symbols.txt"
+
+      - name: Run lit suite under sanitizers
+        run: ninja -C build-sanitize check-swage
+
+      - name: Run C++ unit tests under sanitizers
+        run: ninja -C build-sanitize check-swage-unit

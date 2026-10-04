@@ -3,7 +3,11 @@
 
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).parents[2]
 _SKIP_PARTS = {
@@ -24,6 +28,7 @@ _SKIP_PARTS = {
     "site",
     "venv",
 }
+_PLANNING_DIRECTORY = "maintainers"
 _EXEMPT_FILES = {
     Path("ROADMAP.md"),
     Path("scripts/mkdocs_redirect_pages.py"),
@@ -33,26 +38,126 @@ _CODENAME = re.compile(
     r"(?<![A-Za-z0-9])(?:M(?:10|[0-9])|P[0])(?![0-9])",
     re.IGNORECASE,
 )
+# Assembled at run time so this tracked file never spells a codename.
+_SAMPLE_CODENAME = "M" + "7"
+# Committed benchmark records are raw evidence and are never edited.
+_RECORD_DIRECTORY = Path("benchmarks/results")
+# Variables that point git at a repository, index, object store, or work
+# tree. Git sets them while it runs a hook, and they take precedence over
+# the directory given with -C, so they are never passed on.
+_GIT_LOCATION_VARIABLES = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
 
 
-def _source_files():
-    """Yield source files without traversing build or planning trees."""
-    for root, directories, filenames in os.walk(REPO_ROOT):
+def _git(root, *arguments):
+    """Run git in a tree, or return None when git cannot answer.
+
+    Args:
+        root: Directory git runs in. Only the repository found from this
+            directory is read or written, whatever the caller's environment
+            says about another one.
+        *arguments: The git command and its arguments.
+
+    Returns:
+        The standard output bytes, or None when git is unavailable or
+        reports an error.
+    """
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCATION_VARIABLES
+    }
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _tracked_files(root):
+    """Return the files git tracks in a checkout rooted at root.
+
+    Args:
+        root: Directory expected to be the top level of a git work tree.
+
+    Returns:
+        Sorted paths relative to root, or None when root is not the top
+        level of a git checkout or git is unavailable. A tree unpacked
+        inside another repository is not that repository's checkout, so
+        it also yields None.
+    """
+    top_level = _git(root, "rev-parse", "--show-toplevel")
+    if top_level is None:
+        return None
+    if Path(os.fsdecode(top_level).rstrip("\n")).resolve() != root.resolve():
+        return None
+    listing = _git(root, "ls-files", "-z")
+    if listing is None:
+        return None
+    return sorted(
+        Path(os.fsdecode(name)) for name in listing.split(b"\0") if name
+    )
+
+
+def _walked_files(root):
+    """Yield files under root without traversing build or planning trees."""
+    for directory, directories, filenames in os.walk(root):
         directories[:] = sorted(
-            directory
-            for directory in directories
-            if directory not in _SKIP_PARTS
-            and not (Path(root) == REPO_ROOT and directory == "maintainers")
+            name
+            for name in directories
+            if name not in _SKIP_PARTS
+            and not (Path(directory) == root and name == _PLANNING_DIRECTORY)
         )
         for filename in sorted(filenames):
-            yield Path(root) / filename
+            yield (Path(directory) / filename).relative_to(root)
 
 
-def test_milestone_codenames_stay_in_planning_history():
-    """Use capability names in code, docs, tests, and artifact paths."""
+def _source_files(root):
+    """Yield the repository-relative files that must stay codename free.
+
+    A git checkout is scanned through its tracked files, so untracked
+    tool output cannot change the result. Any other tree, such as an
+    unpacked source archive, is scanned by walking the filesystem.
+
+    Args:
+        root: Repository root to scan.
+
+    Yields:
+        Paths relative to root, excluding maintainer planning files.
+    """
+    tracked = _tracked_files(root)
+    if tracked is None:
+        yield from _walked_files(root)
+        return
+    for relative in tracked:
+        if relative.parts[0] != _PLANNING_DIRECTORY:
+            yield relative
+
+
+def _violations(root):
+    """Return one message per codename found in a path or in file text."""
     violations = []
-    for path in _source_files():
-        relative = path.relative_to(REPO_ROOT)
+    for relative in _source_files(root):
         if relative in _EXEMPT_FILES:
             continue
         path_match = _CODENAME.search(relative.as_posix())
@@ -61,10 +166,18 @@ def test_milestone_codenames_stay_in_planning_history():
 
         # Generated SVG path data can resemble planning identifiers. Its
         # source generator or TeX file is scanned instead.
-        if path.suffix.lower() == ".svg":
+        if relative.suffix.lower() == ".svg":
+            continue
+        # A JSON benchmark record holds device fields such as the NVIDIA
+        # performance state, whose values read like planning identifiers.
+        # The pages and scripts that describe a record are still scanned.
+        if (
+            relative.suffix.lower() == ".json"
+            and _RECORD_DIRECTORY in relative.parents
+        ):
             continue
         try:
-            text = path.read_text()
+            text = (root / relative).read_text()
         except (OSError, UnicodeDecodeError):
             continue
         for match in _CODENAME.finditer(text):
@@ -72,5 +185,115 @@ def test_milestone_codenames_stay_in_planning_history():
             violations.append(
                 f"{relative}:{line}: unexpected {match.group(0)!r}"
             )
+    return violations
+
+
+def _write(root, relative, text):
+    """Write one file under root, creating its parent directories."""
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def test_milestone_codenames_stay_in_planning_history():
+    """Use capability names in code, docs, tests, and artifact paths."""
+    this_file = Path(__file__).resolve().relative_to(REPO_ROOT.resolve())
+    assert this_file in set(_source_files(REPO_ROOT)), "the scan is empty"
+
+    violations = _violations(REPO_ROOT)
 
     assert not violations, "\n" + "\n".join(violations)
+
+
+def test_benchmark_record_text_is_not_scanned_but_its_page_is(tmp_path):
+    """A device field in a JSON record is not a codename; prose still is."""
+    state = "P" + "0"
+    record = f'{{"gpu": {{"pstate": "{state}"}}}}\n'
+    _write(tmp_path, "benchmarks/results/run/summary.json", record)
+    _write(tmp_path, "benchmarks/results/run.md", f"state {state}\n")
+    _write(tmp_path, "benchmarks/other.json", record)
+    _write(tmp_path, f"benchmarks/results/{_SAMPLE_CODENAME}.json", "{}\n")
+
+    assert sorted(_violations(tmp_path)) == [
+        f"benchmarks/other.json:1: unexpected {state!r}",
+        f"benchmarks/results/{_SAMPLE_CODENAME}.json: codename in path",
+        f"benchmarks/results/run.md:1: unexpected {state!r}",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_git_checkout_scans_tracked_files_only(tmp_path):
+    """Untracked files in a checkout never reach the scan."""
+    assert _git(tmp_path, "init", "--quiet") is not None
+    _write(tmp_path, "docs/guide.md", f"shipped in {_SAMPLE_CODENAME}\n")
+    _write(tmp_path, "docs/clean.md", "capability names only\n")
+    _write(tmp_path, "maintainers/plan.md", f"{_SAMPLE_CODENAME} plan\n")
+    assert _git(tmp_path, "add", "docs", "maintainers") is not None
+    _write(tmp_path, "scratch.md", f"local {_SAMPLE_CODENAME} note\n")
+    _write(tmp_path, "tool-cache/graph.json", f"{_SAMPLE_CODENAME}\n")
+
+    assert _tracked_files(tmp_path) == [
+        Path("docs/clean.md"),
+        Path("docs/guide.md"),
+        Path("maintainers/plan.md"),
+    ]
+    assert _violations(tmp_path) == [
+        f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
+    ]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_git_location_variables_do_not_redirect_the_scan(tmp_path, monkeypatch):
+    """Variables git sets for hooks never reach another repository."""
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _git(other, "init", "--quiet") is not None
+    _write(other, "kept.txt", "staged before the scan\n")
+    assert _git(other, "add", "kept.txt") is not None
+    index = other / ".git" / "index"
+    staged = index.read_bytes()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(index))
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    assert _git(checkout, "init", "--quiet") is not None
+    _write(checkout, "docs/guide.md", f"shipped in {_SAMPLE_CODENAME}\n")
+    assert _git(checkout, "add", "docs") is not None
+
+    assert index.read_bytes() == staged
+    assert (checkout / ".git").is_dir()
+    assert _tracked_files(checkout) == [Path("docs/guide.md")]
+    assert _violations(checkout) == [
+        f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
+    ]
+
+
+def test_tree_without_git_metadata_falls_back_to_a_filesystem_walk(tmp_path):
+    """A source archive is scanned by walking it, minus generated trees."""
+    _write(tmp_path, "docs/guide.md", f"shipped in {_SAMPLE_CODENAME}\n")
+    _write(tmp_path, "docs/clean.md", "capability names only\n")
+    _write(tmp_path, "build/generated.md", f"{_SAMPLE_CODENAME}\n")
+    _write(tmp_path, "maintainers/plan.md", f"{_SAMPLE_CODENAME} plan\n")
+
+    assert _tracked_files(tmp_path) is None
+    assert sorted(_source_files(tmp_path)) == [
+        Path("docs/clean.md"),
+        Path("docs/guide.md"),
+    ]
+    assert _violations(tmp_path) == [
+        f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
+    ]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+def test_tree_nested_in_another_checkout_is_not_that_checkout(tmp_path):
+    """An archive unpacked inside a repository is still walked."""
+    assert _git(tmp_path, "init", "--quiet") is not None
+    unpacked = tmp_path / "swage-source"
+    _write(unpacked, "docs/guide.md", f"shipped in {_SAMPLE_CODENAME}\n")
+
+    assert _tracked_files(unpacked) is None
+    assert _violations(unpacked) == [
+        f"docs/guide.md:1: unexpected {_SAMPLE_CODENAME!r}"
+    ]

@@ -78,6 +78,6 @@ def test_post_build_writes_stub_pages_into_the_site(tmp_path):
     for old, new in module.REDIRECTS.items():
         stub = tmp_path / module.page_url(old) / "index.html"
         text = stub.read_text()
-        assert "http-equiv=\"refresh\"" in text
+        assert 'http-equiv="refresh"' in text
         assert module.relative_target(old, new) in text
         assert "<a href=" in text

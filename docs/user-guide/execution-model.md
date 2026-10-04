@@ -44,15 +44,24 @@ A task is a unit that a runtime can schedule for a segment. One semantic
 segment may require one task or several tasks. A task can represent direct
 work, a chunk of a long segment, a partial result, or a merge.
 
-Current private single-stage sum/max qualification derives:
+The static reduction paths, which `swage.segment_reduce` runs with these
+defaults, derive:
 
 - one direct warp task for a segment of at most 32 elements;
 - one direct CTA task for a segment from 33 through 4096 elements;
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
-The thresholds are configurable planning limits. Static work supports
-capture-free f32 sum/max programs and their fused element expressions. The
-experimental private resident kernel retains identity-sum admission and
+These three tasks derive from segments of scalars. Rows of features have
+one more shape and no derivation: one block per segment, in which each
+thread reduces one column in row order, whatever the length of the segment.
+[Segmented Calls](segmented-calls.md#rows-of-features) states its costs.
+
+The thresholds are planning limits that the private helpers can change
+and the public call cannot. Static work supports capture-free sum, max,
+and min programs over f32 or f64 values and their fused element
+expressions, of which the public call runs the three identity programs in
+both element types. The
+experimental private resident kernel retains f32 identity-sum admission and
 consumes these descriptors through device counters, but its clean
 A6000 run failed the predeclared performance gate. Packing several short
 segments in the static path,
@@ -79,15 +88,36 @@ contains the GPU work that is actually launched. Keeping the grids separate
 allows a future planner to change task structure without changing program
 meaning.
 
-The current public Python path uses a logical fixed-block coordinate for
-canonical vector add or multiply. The private segmented path proves selected
-Segment to Task to Tile mappings. It does not yet provide a public general
-planner.
+The public kernel language uses a logical fixed-block coordinate for
+canonical vector add or multiply. The segmented paths prove selected
+Segment to Task to Tile mappings, and the two public segmented calls run
+through them. They do not yet provide a public general planner.
+
+## What a schedule may change
+
+Deriving different tasks for one segment never changes which elements a
+reduction combines: every element contributes exactly once. It can change
+the order in which they are combined, because `swage.reduce` leaves that
+order open. The admitted kinds respond differently:
+
+- A maximum and a minimum are the same in every order.
+- A floating-point sum is not. Floating-point addition is not associative,
+  so two schedules can return different sums of one segment, within
+  rounding error. That holds for f32 and for f64 values.
+
+[Sum rounding](../internals/segmented-reductions.md#sum-rounding) is the one
+place that states the reduction trees, the cases in which the schedule of a
+segment changes, the error bound and its tests, and how to pin a schedule
+with the private helpers. The public `swage.segment_reduce` cannot pin one;
+[Segmented Calls](segmented-calls.md#sum-rounding) says what it selects.
+[Textual Swage IR](../language/swage-ir.md#swagereduce) states the operation
+contract.
 
 ## From model to machinery
 
-Every level of this model has qualified machinery behind it, all of it
-private qualification rather than public API:
+Every level of this model has qualified machinery behind it. The two
+segmented calls run through it; the machinery itself is private
+qualification rather than public API:
 
 - The three fixed tiles and their reductions are drawn in
   [Task Execution](../internals/task-execution.md) and

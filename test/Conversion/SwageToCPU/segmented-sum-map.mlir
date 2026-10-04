@@ -1,13 +1,17 @@
 // test/Conversion/SwageToCPU/segmented-sum-map.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 // Two reduction stages, where the second reduces a swage.map that captures the
 // first stage's result. The map is fused into the consumer's element loop and
 // no intermediate segment is materialized.
 module {
   func.func @segmented_exp_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>

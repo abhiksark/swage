@@ -4,6 +4,7 @@
 import email
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -16,6 +17,15 @@ from packaging.specifiers import SpecifierSet
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _VERSION = "0.5.2"
 _SOURCE_DATE_EPOCH = "1700000000"
+# The native wheel embeds LLVM, MLIR, the code LLVM Support carries under
+# terms of its own, nanobind, and robin-map; THIRD_PARTY_NOTICES.md holds
+# their texts.
+_LICENSE_EXPRESSION = (
+    "MIT AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND "
+    "BSD-3-Clause AND Spencer-94 AND (CC0-1.0 OR Apache-2.0) AND "
+    "Unicode-DFS-2016 AND LicenseRef-LLVM-MD5"
+)
+_LICENSE_FILES = ("LICENSE", "LICENSES/LLVM.txt", "THIRD_PARTY_NOTICES.md")
 
 
 def _build_sdist(source, output):
@@ -93,25 +103,25 @@ def test_sdist_release_metadata(source_members):
     requirements = [
         Requirement(value) for value in metadata.get_all("Requires-Dist", [])
     ]
-    torch_requirements = [item for item in requirements if item.name == "torch"]
-    assert len(torch_requirements) == 1
-    torch = torch_requirements[0]
-    assert torch.specifier == SpecifierSet(">=2.6,<3")
-    assert torch.marker is not None
-    assert torch.marker.evaluate({"extra": "pytorch"})
-    assert not torch.marker.evaluate({"extra": ""})
+    # The segmented calls copy the offsets into a numpy array on the host,
+    # so the pytorch extra brings numpy along.
+    for name, specifier in (("torch", ">=2.6,<3"), ("numpy", "")):
+        matching = [item for item in requirements if item.name == name]
+        assert len(matching) == 1, name
+        requirement = matching[0]
+        assert requirement.specifier == SpecifierSet(specifier)
+        assert requirement.marker is not None
+        assert requirement.marker.evaluate({"extra": "pytorch"})
+        assert not requirement.marker.evaluate({"extra": ""})
     assert "pytorch" in metadata.get_all("Provides-Extra", [])
 
-    assert metadata["License-Expression"] == (
-        "MIT AND Apache-2.0 WITH LLVM-exception"
-    )
-    assert {"LICENSE", "LICENSES/LLVM.txt"} <= set(
-        metadata.get_all("License-File", [])
-    )
-    for license_path in ("LICENSE", "LICENSES/LLVM.txt"):
-        assert source_members[PurePosixPath(license_path)][0] == (
-            _REPO_ROOT / license_path
-        ).read_bytes()
+    assert metadata["License-Expression"] == _LICENSE_EXPRESSION
+    assert set(_LICENSE_FILES) <= set(metadata.get_all("License-File", []))
+    for license_path in _LICENSE_FILES:
+        assert (
+            source_members[PurePosixPath(license_path)][0]
+            == (_REPO_ROOT / license_path).read_bytes()
+        )
 
 
 def test_sdist_preserves_source_build_resources(source_members):
@@ -122,6 +132,7 @@ def test_sdist_preserves_source_build_resources(source_members):
         "cmake/llvm-version.txt",
         "pyproject.toml",
         "README.md",
+        "THIRD_PARTY_NOTICES.md",
         "python/CMakeLists.txt",
         "python/mlir_swage/_build_info.json.in",
         "python/swage/py.typed",
@@ -131,9 +142,10 @@ def test_sdist_preserves_source_build_resources(source_members):
         "scripts/build_swage.sh",
     )
     for name in entry_points:
-        assert source_members[PurePosixPath(name)][0] == (
-            _REPO_ROOT / name
-        ).read_bytes()
+        assert (
+            source_members[PurePosixPath(name)][0]
+            == (_REPO_ROOT / name).read_bytes()
+        )
 
     # Discover current build inputs so adding or renaming sources needs no
     # test inventory update. Missing a source category must still fail.
@@ -194,6 +206,23 @@ def test_sdist_rebuild_is_byte_reproducible(sdist, source_members, tmp_path):
         destination.chmod(mode)
         os.utime(destination, (946684800, 946684800))
     rebuilt = _build_sdist(source, tmp_path / "rebuilt")
-    assert hashlib.sha256(sdist.read_bytes()).digest() == hashlib.sha256(
-        rebuilt.read_bytes()
-    ).digest()
+    assert (
+        hashlib.sha256(sdist.read_bytes()).digest()
+        == hashlib.sha256(rebuilt.read_bytes()).digest()
+    )
+
+
+def test_build_backend_and_bindings_have_one_pinned_version():
+    """Pin one scikit-build-core and one nanobind across build and CI."""
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (_REPO_ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    build_system = re.search(r"^requires = (\[.*\])$", pyproject, re.MULTILINE)
+    assert build_system is not None
+
+    for name in ("scikit-build-core", "nanobind"):
+        lock_pins = re.findall(rf"^{name}==(\S+)", lock, re.MULTILINE)
+        assert len(lock_pins) == 1, name
+        pyproject_pins = re.findall(rf'"{name}==([^"]+)"', pyproject)
+        # One pin in the build system and one in the dev extra.
+        assert pyproject_pins == [lock_pins[0], lock_pins[0]], name
+        assert f'"{name}=={lock_pins[0]}"' in build_system.group(1)

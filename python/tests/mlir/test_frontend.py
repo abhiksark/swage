@@ -3,11 +3,13 @@
 
 import gc
 import inspect
+import sys
 import weakref
 from unittest import mock
 
 import pytest
 import swage as sw
+import swage.language as lang
 import swage.language as sl
 import torch
 from mlir_swage import ir
@@ -760,6 +762,117 @@ def test_a_docstring_only_kernel_emits_an_empty_function():
     assert "return" in str(module)
 
 
+@sw.jit
+def negative_other_kernel(x_ptr, n, BLOCK: sl.constexpr):  # noqa: D103
+    offsets = sl.program_id(0) * BLOCK + sl.arange(0, BLOCK)
+    mask = offsets < n
+    x = sl.load(x_ptr + offsets, mask=mask, other=-1.0)
+    y = sl.load(x_ptr + offsets, mask=mask, other=3.4028235e38)
+    z = sl.load(x_ptr + offsets, mask=mask, other=-16777216)
+    sl.store(x_ptr + offsets, x + y + z, mask=mask)
+
+
+def test_signed_load_other_literals_are_emitted_as_float32_constants():
+    """Emit the documented signed literal, and the float32 it rounds to."""
+    asm = negative_other_kernel.emit_mlir(
+        signature={"x_ptr": sl.pointer(sl.float32), "n": sl.int32},
+        constexprs={"BLOCK": 8},
+    ).operation.get_asm(enable_debug_info=False)
+
+    assert "arith.constant -1.000000e+00 : f32" in asm
+    # The largest finite float32, not the infinity 0x7F800000.
+    assert "arith.constant 3.40282347E+38 : f32" in asm
+    # The bit pattern of -16777216.0, which float32 holds exactly.
+    assert "arith.constant 0xCB800000 : f32" in asm
+
+
+def _aliased_add_kernel():
+    """Return the vector-add kernel written against another module name."""
+
+    @sw.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: lang.constexpr):
+        pid = lang.program_id(0)
+        offsets = pid * BLOCK + lang.arange(0, BLOCK)
+        mask = offsets < n
+        x = lang.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = lang.load(y_ptr + offsets, mask=mask, other=0.0)
+        lang.store(output_ptr + offsets, x + y, mask=mask)
+
+    return add_kernel
+
+
+def test_language_module_alias_emits_the_same_mlir():
+    """Match the language module by object, whatever name it is bound to."""
+    aliased = _emit(kernel=_aliased_add_kernel())
+
+    assert aliased.operation.verify()
+    assert aliased.operation.get_asm(
+        enable_debug_info=False
+    ) == _emit().operation.get_asm(enable_debug_info=False)
+
+
+def test_the_none_return_annotation_emits_the_same_mlir():
+    """Treat `-> None` as no annotation; it says what a kernel returns."""
+
+    @sw.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr) -> None:
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    annotated = _emit(kernel=add_kernel)
+
+    assert annotated.operation.verify()
+    assert annotated.operation.get_asm(
+        enable_debug_info=False
+    ) == _emit().operation.get_asm(enable_debug_info=False)
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        address_compare_left_kernel,
+        address_load_mask_kernel,
+        address_store_value_kernel,
+        nested_address_kernel,
+        oversized_axis_kernel,
+        oversized_literal_kernel,
+        rebound_block_kernel,
+    ],
+)
+def test_a_body_draws_the_same_diagnostic_without_the_bindings(
+    kernel, monkeypatch
+):
+    """Report one text whether or not the native package is importable."""
+    signature = {
+        name: sl.int32 if name == "n" else sl.pointer(sl.float32)
+        for name in kernel.parameter_names
+        if name not in kernel.constexpr_names
+    }
+    constexprs = {name: 8 for name in kernel.constexpr_names}
+    with pytest.raises(sw.CompilationError) as native:
+        kernel.emit_mlir(signature=signature, constexprs=constexprs)
+
+    monkeypatch.setitem(sys.modules, "mlir_swage", None)
+    with pytest.raises(sw.CompilationError) as wheel_only:
+        kernel.emit_mlir(signature=signature, constexprs=constexprs)
+
+    assert str(wheel_only.value) == str(native.value)
+
+
+def test_an_accepted_body_reports_missing_bindings_only_after_the_check(
+    monkeypatch,
+):
+    """Raise the installation hint, not a diagnostic, for a good body."""
+    monkeypatch.setitem(sys.modules, "mlir_swage", None)
+
+    with pytest.raises(RuntimeError, match="requires the mlir_swage"):
+        _emit()
+
+
 @pytest.mark.parametrize("scalar_on_left", [False, True])
 def test_vector_scalar_multiplication_is_rejected(scalar_on_left):
     """Do not add scalar broadcasting to floating-point multiplication."""
@@ -777,7 +890,10 @@ def test_vector_scalar_multiplication_is_rejected(scalar_on_left):
         _ = 2 * x
 
     kernel = left_scalar if scalar_on_left else right_scalar
-    with pytest.raises(sw.CompilationError, match="requires index operands"):
+    with pytest.raises(
+        sw.CompilationError,
+        match=r"'\*' on a float vector requires another float vector",
+    ):
         kernel.emit_mlir(
             signature={"x_ptr": sl.pointer(sl.float32)},
             constexprs={"BLOCK": 128},

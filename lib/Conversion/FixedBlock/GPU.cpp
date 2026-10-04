@@ -12,11 +12,11 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "swage/Support/KernelContract.h"
+#include "swage/Target/TargetDescription.h"
 
 #include <array>
 #include <vector>
@@ -57,8 +57,7 @@ void buildFixedGPUProgram(ModuleOp module, func::FuncOp source,
   contract.arguments = arguments;
   kernel->setDiscardableAttr(kernelContractAttrName,
                              buildKernelContractAttr(builder, contract));
-  kernel->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
-                  builder.getDenseI32ArrayAttr(*contract.launch.block));
+  nvidiaTarget().pinLaunchWidth(kernel, static_cast<int32_t>(blockSize));
 
   Block *entry = &kernel.getBody().front();
   builder.setInsertionPointToStart(entry);

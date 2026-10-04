@@ -41,7 +41,6 @@ OPERATIONS = {
 
 def _reset_runtime(kernel=add_kernel):
     _runtime._artifact_cache.clear()
-    _runtime._compilations.clear()
     kernel.__dict__.pop("_specialization_memo", None)
 
 

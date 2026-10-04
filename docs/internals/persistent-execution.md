@@ -10,15 +10,15 @@ private experiment, not a public API or completed qualification.
 !!! warning "Performance gate failed"
 
     Correctness tests exercise the implementation, but the semantically
-    qualified NVIDIA RTX A6000 run was 1.06% faster than static mixed
-    execution and missed the
+    qualified NVIDIA RTX A6000 run, at revision `205f629`, was 1.06% faster
+    than static mixed execution and missed the
     predeclared 5% requirement. Consequently
     [ADR-0018](../adr/ADR-0018-private-persistent-task-queue.md) remains
     proposed and no current release status depends on this path.
 
 ## Private ABI
 
-The 512-thread kernel receives ten pointers followed by five signed-i32
+The 512-thread kernel receives ten pointers followed by six signed-i32
 counts:
 
     values*, offsets*, output*,
@@ -26,12 +26,23 @@ counts:
     partial_ranges*, partial_merge_ids*, merge_records*,
     scratch*, counters*,
     value_count:i32, warp_count:i32, cta_count:i32,
-    partial_count:i32, merge_count:i32
+    partial_count:i32, merge_count:i32, segment_count:i32
 
 The flat record layouts remain those of [Split Execution](split-execution.md):
 partial ranges are `[begin, end]` pairs and merge records are
 `[segment_id, partial_begin, partial_end]` triples. `partial_merge_ids[i]`
 identifies the merge record that depends on scratch slot `i`.
+
+Each count bounds what the kernel loads from the buffers:
+
+- `value_count` bounds every range into `values`.
+- `warp_count` bounds every claim on the warp queue.
+- `cta_count` bounds every claim on the direct CTA queue.
+- `partial_count` bounds every claim on the partial queue and every merge
+  range into `scratch`.
+- `merge_count` bounds every merge ID loaded from `partial_merge_ids`.
+- `segment_count` bounds every segment ID loaded from a task queue or a
+  merge record.
 
 The counter array has this layout:
 
@@ -39,6 +50,13 @@ The counter array has this layout:
 
 Preparation validates and materializes all metadata, allocates scratch and
 counters, compiles and loads the kernel, and records a task-readiness event.
+The compiled kernel is memoized per target and the loaded module per CUDA
+context, so a later preparation compiles and loads nothing while the two
+memos still hold the kernel. Each memo keeps 128 entries, and a module is
+unloaded once no prepared launch holds it;
+[Runtime and Environment](../reference/runtime-environment.md#module-lifetime)
+states the rules. The prepared object keeps its kernel loaded for as long as
+it is referenced.
 Every launch resets its private counters on the current PyTorch stream before
 submitting the resident kernel. The reset is part of timed execution rather
 than hidden preparation.
@@ -47,7 +65,7 @@ than hidden preparation.
 
 The default launch requests two 512-thread blocks per SM and caps that count
 at the number of available work groups. On the qualification RTX A6000 this
-is at most 168 resident blocks. “Resident” describes a bounded physical grid
+is at most 168 resident blocks. "Resident" describes a bounded physical grid
 whose blocks claim multiple tasks; it does not promise that CUDA can
 simultaneously place every requested block.
 
@@ -101,16 +119,59 @@ softmax.
 ## Stream and graph behavior
 
 Queue reset, resident execution, and tensor retention use the current PyTorch
-stream. Launching on another device after preparation is rejected. CUDA graph
-capture is supported after one ordinary initialized launch, matching the
-prepared static path's task-readiness contract. One prepared object owns one
-counter array and must not have launches in flight concurrently on different
-streams; callers must serialize such reuse.
+stream. Launching on another device after preparation is rejected, and so is
+launching in a CUDA context other than the one the object was prepared in,
+because the kernel is loaded in one context. A thread that has no current
+CUDA context is given the context of the prepared device before that
+comparison. A launch raises if the values, offsets, or output tensor was
+rebound to other storage after preparation, and if the offsets tensor was
+modified in place, which it detects through the tensor version counter.
+
+That check sees only what PyTorch counts:
+
+- A write through `offsets.data`, a DLPack alias, a raw pointer, or another
+  kernel is not detected. The launch proceeds: warp and CTA tasks use the
+  new offsets, split segments keep their prepared partial and merge ranges,
+  and the output can mix both layouts.
+- A write to another view of the same tensor is refused although the
+  offsets are unchanged, because views share one version counter.
+- Offsets created under `torch.inference_mode()` have no version counter
+  and are refused at preparation.
+- A replayed CUDA graph runs no host check.
+
+[Ragged Data](../user-guide/ragged-data.md#offsets-of-a-prepared-launch)
+states the contract and the remedies. The kernel clamps every loaded range
+that indexes the values buffer to the value count and every merge range
+that indexes scratch to the partial count, so an undetected change stays
+inside the buffers. It skips a segment ID outside the segment count and a
+merge ID outside the merge count (ADR-0012). CUDA
+graph capture is supported after an ordinary launch that observed task
+storage ready, matching the prepared static path's task-readiness contract.
+A first launch that only queued the wait for task storage does not count, so
+the protocol is launch, synchronize, launch again, then capture.
+
+One prepared object owns one counter array and one scratch buffer, so it
+admits one launch at a time. The launch enforces that itself:
+
+- It raises `RuntimeError` when another thread is inside a launch of the
+  same object.
+- It raises `RuntimeError` when an earlier launch of the object is still in
+  flight on another stream. Synchronize that stream first.
+- It admits a launch on the stream of the earlier one, because the stream
+  orders the two.
+
+Two cases are not checked. A launch recorded during a CUDA graph capture
+skips the in-flight check, because CUDA forbids the event query during a
+capture. A replay of a captured graph runs no host code, so nothing checks
+it. A caller that replays a graph must keep replays of one prepared object
+from overlapping.
 
 Failures do not fall back to static mixed execution. Unsupported semantics,
 invalid metadata, invalid residency, compilation errors, allocation errors,
 and CUDA launch errors propagate to the caller.
 
-Continue with [Split Execution](split-execution.md) for static stage ordering,
-[Task Execution](task-execution.md) for direct fixed tiles, or
-[Verification](verification.md) for the current evidence boundary.
+Continue with [Compiler Tools and Passes](compiler-tools.md) for the driver
+options that select each schedule, or [Verification](verification.md)
+for the current evidence boundary. The static paths this kernel is compared
+with are on [Task Execution](task-execution.md) and
+[Split Execution](split-execution.md).

@@ -6,11 +6,16 @@
 #   SWAGE_LLVM_HOME            source/build/install root (default ~/.swage/llvm)
 #   SWAGE_LLVM_BUILD_TYPE      CMake build type (default RelWithDebInfo)
 #   SWAGE_LLVM_PYTHON_BINDINGS ON/OFF for MLIR Python bindings (default ON)
-#   SWAGE_PYTHON_EXECUTABLE    active Python interpreter (default python3)
+#   SWAGE_PYTHON_EXECUTABLE    Python interpreter for the build and the MLIR
+#                              Python bindings (default: see below)
 #   SWAGE_LLVM_TARGETS        LLVM targets (default Native;NVPTX)
 #   SWAGE_LLVM_SANITIZERS     LLVM sanitizer list (default empty)
 #   CMAKE_BUILD_PARALLEL_LEVEL maximum concurrent build jobs (CMake default)
 #   CC / CXX                   host compiler
+#
+# Without SWAGE_PYTHON_EXECUTABLE, the MLIR Python bindings are built for the
+# `python` found on PATH, the interpreter the documented commands run, or for
+# `python3` where `python` is absent or older than Python 3.10.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,12 +26,31 @@ BUILD_DIR="$LLVM_HOME/build-$TAG"
 INSTALL_DIR="$LLVM_HOME/install-$TAG"
 BUILD_TYPE="${SWAGE_LLVM_BUILD_TYPE:-RelWithDebInfo}"
 ENABLE_PYTHON="${SWAGE_LLVM_PYTHON_BINDINGS:-ON}"
-PYTHON_EXECUTABLE="$(command -v "${SWAGE_PYTHON_EXECUTABLE:-python3}")"
 
 if [ ! -d "$SRC_DIR" ]; then
     echo "error: LLVM source not found at $SRC_DIR (run scripts/fetch_llvm.sh)" >&2
     exit 1
 fi
+
+PYTHON=""
+CANDIDATES=(python python3)
+if [ -n "${SWAGE_PYTHON_EXECUTABLE:-}" ]; then
+    CANDIDATES=("$SWAGE_PYTHON_EXECUTABLE")
+fi
+for candidate in "${CANDIDATES[@]}"; do
+    if command -v "$candidate" >/dev/null &&
+        "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
+            >/dev/null 2>&1; then
+        PYTHON="$(command -v "$candidate")"
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "error: found no Python 3.10 or newer as ${CANDIDATES[*]};" \
+        "the LLVM build and the MLIR Python bindings need one" >&2
+    exit 1
+fi
+echo "Python interpreter: $PYTHON"
 
 EXTRA_ARGS=()
 if command -v ccache >/dev/null; then
@@ -46,7 +70,7 @@ cmake -G Ninja -S "$SRC_DIR/llvm" -B "$BUILD_DIR" \
     -DLLVM_INSTALL_UTILS=ON \
     -DLLVM_USE_SANITIZER="${SWAGE_LLVM_SANITIZERS:-}" \
     -DMLIR_ENABLE_BINDINGS_PYTHON="$ENABLE_PYTHON" \
-    -DPython3_EXECUTABLE="$PYTHON_EXECUTABLE" \
+    -DPython3_EXECUTABLE="$PYTHON" \
     "${EXTRA_ARGS[@]}"
 
 cmake --build "$BUILD_DIR" --target install
