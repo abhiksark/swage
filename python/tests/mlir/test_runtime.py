@@ -223,6 +223,164 @@ def test_warm_launch_is_served_by_the_native_fixed_launcher(monkeypatch):
     assert torch.equal(output, x + y)
 
 
+def _prepared_fast_launch(kernel, x, y, output, stream=None):
+    """Launch twice on `stream` and return the native launcher it prepared.
+
+    Returns:
+        The launcher and the arguments, constexprs, and grid it serves.
+    """
+    arguments = {"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": 129}
+    constexprs = {"BLOCK": 128}
+    with torch.cuda.stream(stream or torch.cuda.current_stream()):
+        for _ in range(2):
+            kernel.launch(arguments=arguments, constexprs=constexprs, grid=(2,))
+    torch.cuda.synchronize()
+    return kernel._cuda_fast_launch(), arguments, constexprs, (2,)
+
+
+def _count_python_launches(monkeypatch):
+    """Count the launches that reach the Python path from now on."""
+    from swage import _runtime
+
+    calls = []
+    runtime_launch = _runtime.launch
+
+    def counted_launch(*args, **kwargs):
+        calls.append(1)
+        return runtime_launch(*args, **kwargs)
+
+    monkeypatch.setattr(_runtime, "launch", counted_launch)
+    return calls
+
+
+def _count_public_version_calls(monkeypatch):
+    """Count the calls of torch.autograd.graph.increment_version."""
+    calls = []
+    public = torch.autograd.graph.increment_version
+
+    def counted(tensor):
+        calls.append(1)
+        return public(tensor)
+
+    monkeypatch.setattr(torch.autograd.graph, "increment_version", counted)
+    return calls
+
+
+def test_native_launch_declines_while_its_stream_captures():
+    """Hand a launch to the Python path while the launch stream captures.
+
+    The launcher asks the driver whether its stream captures a graph. It
+    declines inside a capture on that stream, so the Python path records
+    the launch into the graph, and serves the stream again afterwards.
+    """
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    side = torch.cuda.Stream()
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output, side
+    )
+    with torch.cuda.stream(side):
+        assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=side):
+        assert fast_launch(arguments, constexprs, grid) is False
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    output.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+
+    output.zero_()
+    with torch.cuda.stream(side):
+        assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+    assert torch.equal(output, x + y)
+
+
+def test_native_launch_serves_inference_tensors(monkeypatch):
+    """Serve tensors made under inference mode, which have no version."""
+    kernel = sw.jit(add_kernel.__wrapped__)
+    with torch.inference_mode():
+        x = torch.arange(129, dtype=torch.float32, device="cuda")
+        y = torch.ones_like(x)
+        output = torch.zeros_like(x)
+        fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+            kernel, x, y, output
+        )
+        python_launches = _count_python_launches(monkeypatch)
+        output.zero_()
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+        torch.cuda.synchronize()
+    assert python_launches == []
+    assert torch.equal(output, x + y)
+
+
+def test_native_launch_advances_the_version_without_the_public_wrapper(
+    monkeypatch,
+):
+    """Advance the output version through torch._C._increment_version.
+
+    The public increment_version only wraps the tensor in a tuple for it,
+    so the native launch calls it directly, once per launch.
+    """
+    public_calls = _count_public_version_calls(monkeypatch)
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    public_calls.clear()
+    version = output._version
+
+    assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+
+    assert public_calls == []
+    assert output._version == version + 1
+
+
+def test_native_launch_keeps_the_public_wrapper_without_a_tuple_form(
+    monkeypatch,
+):
+    """Fall back to the public increment_version for a single-tensor form.
+
+    A torch._C._increment_version that does not take a tuple would read a
+    single tensor as the sequence of its elements, so a launcher made
+    beside one calls the public function, which passes the tuple itself.
+    """
+    direct = torch._C._increment_version
+
+    def single_tensor_form(tensors):
+        if tensors == ():
+            raise TypeError("_increment_version() takes a Tensor")
+        return direct(tensors)
+
+    monkeypatch.setattr(torch._C, "_increment_version", single_tensor_form)
+    public_calls = _count_public_version_calls(monkeypatch)
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, dtype=torch.float32, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    public_calls.clear()
+    version = output._version
+
+    assert fast_launch(arguments, constexprs, grid) is True
+    torch.cuda.synchronize()
+
+    assert public_calls == [1]
+    assert output._version == version + 1
+    assert torch.equal(output, x + y)
+
+
 @pytest.mark.parametrize(
     ("mutation", "error_type"),
     [
