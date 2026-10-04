@@ -64,6 +64,10 @@ def _bindings_info(extension):
         _runtime._verify_bindings(extension)
     except _runtime._BindingsMismatch as error:
         info["problem"] = str(error)
+    except Exception as error:
+        # The report never fails, also when the check's warning about
+        # stale sources is turned into an error.
+        info["problem"] = f"bindings probe failed ({type(error).__name__})"
     try:
         # `mlir_swage` is a namespace package with no file of its own, so
         # the loaded extension is what identifies the build.

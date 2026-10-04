@@ -774,6 +774,33 @@ def test_probe_exceptions_do_not_disclose_payloads(probes, monkeypatch):
     assert "RuntimeError" in result["backends"]["cuda"]["reason"]
 
 
+def test_a_failing_pairing_check_does_not_fail_the_report(
+    probes, monkeypatch, capsys
+):
+    """Report bindings whose check raises, as with a warning made an error.
+
+    The check warns about stale native sources, and `-W error` turns that
+    warning into an exception. The report names the failure by its type
+    only, counts the bindings as unavailable, and a native check fails.
+    """
+
+    def broken(_extension):
+        raise RuntimeWarning("do-not-log stale native sources")
+
+    monkeypatch.setattr(_runtime, "_verify_bindings", broken)
+
+    result = env.report()
+
+    assert not result["native"]["available"]
+    assert result["native"]["error"] == "native-mismatch"
+    assert result["native"]["bindings"]["problem"] == (
+        "bindings probe failed (RuntimeWarning)"
+    )
+    assert "do-not-log" not in json.dumps(result)
+    assert env.main(["--json", "--check", "native"]) == 1
+    assert json.loads(capsys.readouterr().out)["schema_version"] == 2
+
+
 @pytest.mark.parametrize("check", (None, "native", "cpu", "cuda"))
 def test_json_health_exit_contract(probes, monkeypatch, capsys, check):
     """A complete sorted JSON report is printed even when checks fail."""
