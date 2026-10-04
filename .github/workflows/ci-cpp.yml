@@ -134,11 +134,14 @@ jobs:
       - name: Run Python binding integration tests
         run: ninja -C "$SWAGE_BUILD_DIR" check-swage-python
 
+      # The build backend and nanobind come from the hash lock installed
+      # above, so the build runs without isolation.
       - name: Build local cp313 native wheel
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain)"
-          python -m build --wheel --outdir "$RUNNER_TEMP/native-wheelhouse" \
+          python -m build --wheel --no-isolation \
+            --outdir "$RUNNER_TEMP/native-wheelhouse" \
             -Ccmake.define.SWAGE_SOURCE_REVISION="$GITHUB_SHA" \
             -Ccmake.define.SWAGE_SOURCE_CLEAN=true \
             -Ccmake.define.MLIR_DIR="$SWAGE_LLVM_HOME/install-${{ steps.pin.outputs.tag }}/lib/cmake/mlir" \

@@ -107,9 +107,9 @@ jobs:
         env:
           SOURCE_DATE_EPOCH: ${{ steps.source.outputs.epoch }}
         run: |
-          python -m pip install build twine
-          python -m build --sdist --outdir dist
-          python -m build --sdist --outdir "$RUNNER_TEMP/second-sdist"
+          python -m pip install --require-hashes -r requirements-ci.txt
+          python -m build --sdist --no-isolation --outdir dist
+          python -m build --sdist --no-isolation --outdir "$RUNNER_TEMP/second-sdist"
           cmp dist/swage_compiler-0.5.2.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.2.tar.gz"
           python -m twine check --strict dist/*.tar.gz
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
@@ -165,7 +165,9 @@ jobs:
           only: ${{ matrix.python }}-manylinux_x86_64
         env:
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
-          CIBW_BUILD_FRONTEND: build
+          # The build backend and nanobind come from the hash lock that the
+          # step before the build installs.
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
           CIBW_ENVIRONMENT_PASS_LINUX: SOURCE_DATE_EPOCH SWAGE_SOURCE_REVISION SWAGE_PYTHON_TAG SWAGE_EVIDENCE_DIR SWAGE_REBUILD_SDIST
           CIBW_ENVIRONMENT_LINUX: >-
             SWAGE_LLVM_HOME=/opt/swage/llvm
@@ -177,9 +179,9 @@ jobs:
             CMAKE_ARGS="-DMLIR_DIR=$MLIR_DIR -DLLVM_DIR=$LLVM_DIR -DSWAGE_SOURCE_REVISION=$SWAGE_SOURCE_REVISION -DSWAGE_SOURCE_CLEAN=true"
           CIBW_BEFORE_BUILD_LINUX: >-
             bash {project}/scripts/fetch_llvm.sh &&
+            python -m pip install --require-hashes -r {project}/requirements-ci.txt &&
             python -m pip install
-            -r /opt/swage/llvm/src-llvmorg-22.1.8/mlir/python/requirements.txt
-            nanobind==2.15.0 ninja build scikit-build-core==1.0.3 auditwheel pyelftools &&
+            -r /opt/swage/llvm/src-llvmorg-22.1.8/mlir/python/requirements.txt &&
             SWAGE_PYTHON_EXECUTABLE="$(command -v python)" bash {project}/scripts/build_llvm.sh
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             python {project}/scripts/repair_native_wheel.py {wheel}
@@ -187,7 +189,7 @@ jobs:
             --forbid-prefix {project} --forbid-prefix /tmp/swage-release-build
             $SWAGE_REBUILD_SDIST > "$SWAGE_EVIDENCE_DIR/repair-$SWAGE_PYTHON_TAG.json"
           CIBW_BEFORE_TEST_LINUX: >-
-            python -m pip install pytest &&
+            python -m pip install --require-hashes -r {project}/requirements-ci.txt &&
             python -m pip install torch==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu/ &&
             mkdir -p /tmp/swage-installed-cpu
           CIBW_TEST_COMMAND: >-
@@ -243,7 +245,7 @@ jobs:
         env:
           EXPECTED_REVISION: ${{ needs.source.outputs.revision }}
         run: |
-          python -m pip install twine auditwheel pyelftools packaging
+          python -m pip install --require-hashes -r requirements-ci.txt
           python - <<'PY'
           import hashlib
           import json
@@ -357,7 +359,7 @@ jobs:
         run: |
           work="$RUNNER_TEMP/swage-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           python3.13 -m venv --system-site-packages "$work/venv"
-          "$work/venv/bin/python" -m pip install pytest
+          "$work/venv/bin/python" -m pip install --require-hashes -r requirements-ci.txt
           "$work/venv/bin/python" -m pip install --no-deps --ignore-installed \
             release-dist/swage_compiler-0.5.2-cp313-cp313-manylinux_2_28_x86_64.whl
           mkdir "$work/evidence"

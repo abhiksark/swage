@@ -28,18 +28,21 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # requirements-ci.txt pins every tool and its dependencies by hash. The
-      # package is then installed with the locked build backend and without
-      # a download.
-      - name: Install hash-locked tools and the package
+      # frontend is then installed in editable mode with the locked build
+      # backend, without CMake and without a download.
+      - name: Install hash-locked tools and the frontend
         run: |
           python -m pip install --require-hashes -r requirements-ci.txt
-          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip install --no-deps --no-build-isolation -e . \
+            -Cwheel.cmake=false
       - name: Lint
         run: ruff check .
       - name: Tests including typing and sdist reproducibility
         run: python -m pytest tests/python -q
-      - name: Package build
-        run: python -m build --no-isolation
+      - name: Build CMake-free source distribution
+        run: python -m build --sdist --no-isolation
+      - name: Check source distribution metadata strictly
+        run: python -m twine check --strict dist/*.tar.gz
 
   codeql-python:
     name: CodeQL Python (3.13)

@@ -98,10 +98,12 @@ jobs:
           test -z "$(git status --porcelain)"
           python -m venv --system-site-packages "$work/venv"
           py="$work/venv/bin/python"
-          "$py" -m pip install build scikit-build-core==1.0.3 nanobind==2.15.0
+          # The build tools come from the hash lock, so the build runs
+          # without isolation.
+          "$py" -m pip install --require-hashes -r requirements-ci.txt
           pin="$(cat cmake/llvm-version.txt)"
           llvm="$HOME/.swage/llvm/install-$pin"
-          "$py" -m build --wheel --outdir "$work/dist" \
+          "$py" -m build --wheel --no-isolation --outdir "$work/dist" \
             -Cbuild-dir="$work/build" \
             -Ccmake.define.MLIR_DIR="$llvm/lib/cmake/mlir" \
             -Ccmake.define.LLVM_DIR="$llvm/lib/cmake/llvm" \
