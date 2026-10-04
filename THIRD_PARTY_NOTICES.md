@@ -9,17 +9,17 @@ a redistributed build.
 
 ## Scope
 
-- The published `swage-compiler` wheel and source distribution contain only
-  the pure Python `swage` package. They contain no third-party code, and
-  nothing in this file applies to them.
-- The native `mlir_swage` package and the `swage-opt` tool are produced in a
-  build tree and are not published by this project. They contain the
-  components below. Ship this file with any copy of them that leaves the
-  machine that built it, for example in a container image or an internal
-  package index.
-- The `swage-compiler-native` wheel that `scripts/build_native_wheel.sh`
-  builds holds the `mlir_swage` package and carries this file and `LICENSE`
-  among its license files.
+- The `swage-compiler` wheel is a native wheel: it holds the `swage`
+  package and the native `mlir_swage` package, which contains the
+  components below. It carries this file, `LICENSE`, and
+  `LICENSES/LLVM.txt` among its license files, and its license expression
+  names every license below.
+- The `swage-compiler` source distribution holds the sources of Swage and
+  this file. It contains no third-party code.
+- A native build from source, the `mlir_swage` package in a build tree and
+  the `swage-opt` tool, contains the same components. Ship this file with
+  any copy of them that leaves the machine that built it, for example in a
+  container image or an internal package index.
 
 ## Components in a native build
 
@@ -32,7 +32,7 @@ a redistributed build.
 | MD5 by Alexander Peslyak, in LLVM Support | As shipped in that release | Compiled into the LLVM Support library | Public domain, with fallback terms |
 | BLAKE3, in LLVM Support | As shipped in that release | Compiled into the LLVM Support library | CC0-1.0 OR Apache-2.0 |
 | Unicode conversion code and data tables, in LLVM Support | As shipped in that release | Compiled into the LLVM Support library | Unicode license |
-| nanobind | The version installed when the bindings are built; `requirements-ci.txt` pins the one hosted CI uses | Sources compiled into `libnanobind-mlir_swage.so` | BSD-3-Clause |
+| nanobind | The version `pyproject.toml` pins for the wheel build (`2.15.0`), or the one installed when bindings are built from source | Sources compiled into `libnanobind-mlir_swage.so` | BSD-3-Clause |
 | robin-map, bundled with nanobind | As shipped in that nanobind | Headers compiled into `libnanobind-mlir_swage.so` | MIT |
 
 The LLVM and MLIR rows come from the link line of `libSwagePythonCAPI.so`

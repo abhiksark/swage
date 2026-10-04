@@ -31,6 +31,12 @@ _SWAGE_EXTENSION = (
 _CAPI = f"{_LIBDIR}/libSwagePythonCAPI.so.22.1"
 _SUPPORT = f"{_LIBDIR}/libMLIRPythonSupport-mlir_swage.so"
 _NANOBIND = f"{_LIBDIR}/libnanobind-mlir_swage.so"
+_RUNTIME = f"{_LIBDIR}/libSwageRuntime.so"
+_LICENSE_EXPRESSION = (
+    "MIT AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND "
+    "BSD-3-Clause AND Spencer-94 AND (CC0-1.0 OR Apache-2.0) AND "
+    "Unicode-DFS-2016 AND LicenseRef-LLVM-MD5"
+)
 _INFO = {
     "schema_version": 2,
     "package_version": "0.5.2",
@@ -155,11 +161,15 @@ def _wheel(
     metadata = (
         "Metadata-Version: 2.4\nName: swage-compiler\nVersion: 0.5.2\n"
         "Requires-Python: >=3.10,<3.14\n"
-        "License-Expression: MIT AND Apache-2.0 WITH LLVM-exception\n"
-        "License-File: LICENSE\nLicense-File: LICENSES/LLVM.txt\n\n"
+        f"License-Expression: {_LICENSE_EXPRESSION}\n"
+        "License-File: LICENSE\nLicense-File: LICENSES/LLVM.txt\n"
+        "License-File: THIRD_PARTY_NOTICES.md\n\n"
     )
     members = {
         "swage/__init__.py": b'__version__ = "0.5.2"\n',
+        "swage/_segments.py": b"",
+        "swage/_segmented_qualification.py": b"",
+        "swage/compile.py": b"",
         "swage/bench.py": b"",
         "swage/_benchmark.py": b"",
         "swage/language.py": b"",
@@ -177,6 +187,7 @@ def _wheel(
         _CAPI: _elf(),
         _SUPPORT: _elf(),
         _NANOBIND: _elf(),
+        _RUNTIME: _elf(),
         f"{_DIST}/METADATA": metadata.encode(),
         f"{_DIST}/WHEEL": (
             f"Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: {_TAG}\n"
@@ -184,6 +195,9 @@ def _wheel(
         f"{_DIST}/licenses/LICENSE": (_ROOT / "LICENSE").read_bytes(),
         f"{_DIST}/licenses/LICENSES/LLVM.txt": (
             _ROOT / "LICENSES/LLVM.txt"
+        ).read_bytes(),
+        f"{_DIST}/licenses/THIRD_PARTY_NOTICES.md": (
+            _ROOT / "THIRD_PARTY_NOTICES.md"
         ).read_bytes(),
     }
     members.update(edits or {})
@@ -355,6 +369,9 @@ def test_dirty_artifacts_require_explicit_local_opt_in(checker, tmp_path):
     "member",
     [
         "swage/__init__.py",
+        "swage/_segments.py",
+        "swage/_segmented_qualification.py",
+        "swage/compile.py",
         "swage/bench.py",
         "swage/_benchmark.py",
         "mlir_swage/ir.py",
@@ -363,10 +380,12 @@ def test_dirty_artifacts_require_explicit_local_opt_in(checker, tmp_path):
         _CAPI,
         _SUPPORT,
         _NANOBIND,
+        _RUNTIME,
         "swage/py.typed",
         "swage/language.pyi",
         f"{_DIST}/licenses/LICENSE",
         f"{_DIST}/licenses/LICENSES/LLVM.txt",
+        f"{_DIST}/licenses/THIRD_PARTY_NOTICES.md",
     ],
 )
 def test_missing_release_capability_fails(checker, tmp_path, member):
@@ -376,18 +395,19 @@ def test_missing_release_capability_fails(checker, tmp_path, member):
         checker.check_wheel(wheel, expected_revision=_REVISION)
 
 
-@pytest.mark.parametrize(
-    "member,diagnostic",
-    [
-        ("swage/_segmented_plan.py", "segmented Python"),
-        ("swage/__pycache__/language.pyc", "bytecode"),
-    ],
-)
-def test_unshipped_python_payload_fails(checker, tmp_path, member, diagnostic):
-    """Research entry points and bytecode never enter release wheels."""
-    wheel = _wheel(tmp_path, edits={member: b"private"})
-    with pytest.raises(ValueError, match=diagnostic):
+def test_bytecode_payload_fails(checker, tmp_path):
+    """Bytecode never enters a release wheel."""
+    wheel = _wheel(
+        tmp_path, edits={"swage/__pycache__/language.pyc": b"private"}
+    )
+    with pytest.raises(ValueError, match="bytecode"):
         checker.check_wheel(wheel, expected_revision=_REVISION)
+
+
+def test_segmented_modules_ship(checker, tmp_path):
+    """Admit the segmented modules, which `import swage` loads."""
+    wheel = _wheel(tmp_path, edits={"swage/_segmented_plan.py": b""})
+    checker.check_wheel(wheel, expected_revision=_REVISION)
 
 
 @pytest.mark.parametrize(

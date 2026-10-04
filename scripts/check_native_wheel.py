@@ -24,6 +24,13 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name, parse_wheel_filename
 
 PLATFORM = "manylinux_2_28_x86_64"
+# The code the wheel embeds, with THIRD_PARTY_NOTICES.md holding the texts.
+LICENSE_EXPRESSION = (
+    "MIT AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND "
+    "BSD-3-Clause AND Spencer-94 AND (CC0-1.0 OR Apache-2.0) AND "
+    "Unicode-DFS-2016 AND LicenseRef-LLVM-MD5"
+)
+LICENSE_FILES = ("LICENSE", "LICENSES/LLVM.txt", "THIRD_PARTY_NOTICES.md")
 PYTHONS = ("cp310", "cp311", "cp312", "cp313")
 MAX_WHEEL_SIZE = 95_000_000
 _BUILD_FIELDS = {
@@ -257,13 +264,6 @@ def _check_archive(
         names.add(item.filename)
         if path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.parts:
             raise ValueError(f"wheel contains bytecode: {item.filename}")
-        if path.name.startswith("_segmented") and path.suffix in {
-            ".py",
-            ".pyi",
-        }:
-            raise ValueError(
-                f"wheel contains private segmented Python: {item.filename}"
-            )
         if ".cpython-" in path.name and not path.name.endswith(
             f".cpython-{python[2:]}-x86_64-linux-gnu.so"
         ):
@@ -280,6 +280,9 @@ def _check_archive(
         )
     required = {
         "swage/__init__.py",
+        "swage/_segments.py",
+        "swage/_segmented_qualification.py",
+        "swage/compile.py",
         "swage/bench.py",
         "swage/_benchmark.py",
         "swage/language.py",
@@ -290,11 +293,13 @@ def _check_archive(
         "mlir_swage/dialects/swage.py",
         "mlir_swage/_mlir_libs/__init__.py",
         "mlir_swage/_build_info.json",
+        "mlir_swage/_mlir_libs/libSwageRuntime.so",
         f"{dist_info}/METADATA",
         f"{dist_info}/WHEEL",
         f"{dist_info}/RECORD",
         f"{dist_info}/licenses/LICENSE",
         f"{dist_info}/licenses/LICENSES/LLVM.txt",
+        f"{dist_info}/licenses/THIRD_PARTY_NOTICES.md",
     }
     missing = required - names
     if missing:
@@ -320,19 +325,23 @@ def _check_archive(
         ">=3.10,<3.14"
     ):
         raise ValueError("METADATA Requires-Python must be >=3.10,<3.14")
-    if (
-        _one_header(metadata, "License-Expression")
-        != "MIT AND Apache-2.0 WITH LLVM-exception"
-    ):
+    if _one_header(metadata, "License-Expression") != LICENSE_EXPRESSION:
         raise ValueError(
-            "METADATA must declare MIT and Apache-2.0 WITH LLVM-exception"
+            "METADATA must declare the license expression of the embedded "
+            f"code: {LICENSE_EXPRESSION}"
         )
-    if not {"LICENSE", "LICENSES/LLVM.txt"} <= set(
-        metadata.get_all("License-File", [])
-    ):
-        raise ValueError("METADATA must declare both license files")
+    if not set(LICENSE_FILES) <= set(metadata.get_all("License-File", [])):
+        raise ValueError(
+            f"METADATA must declare the license files {list(LICENSE_FILES)}"
+        )
     mit = archive.read(f"{dist_info}/licenses/LICENSE")
     llvm = archive.read(f"{dist_info}/licenses/LICENSES/LLVM.txt")
+    notices = archive.read(f"{dist_info}/licenses/THIRD_PARTY_NOTICES.md")
+    if not all(
+        f"### {component}".encode() in notices
+        for component in ("nanobind", "robin-map", "xxHash", "MD5", "BLAKE3")
+    ):
+        raise ValueError("third-party notices are absent or incomplete")
     if b"Permission is hereby granted, free of charge" not in mit:
         raise ValueError("MIT license text is absent or corrupt")
     if b"Apache License" not in llvm or b"LLVM Exceptions" not in llvm:

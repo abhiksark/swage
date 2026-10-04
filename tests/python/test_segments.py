@@ -287,10 +287,7 @@ def test_the_pytorch_extra_declares_numpy():
     extra = re.search(r"^pytorch = \[(.*)\]$", project.read_text(), re.M)
 
     assert extra is not None
-    assert [name.strip() for name in extra[1].split(",")] == [
-        '"torch>=2.6"',
-        '"numpy"',
-    ]
+    assert re.findall(r'"([^"]+)"', extra[1]) == ["torch>=2.6,<3", "numpy"]
 
 
 @pytest.mark.parametrize("kind", ["median", "prod", "MIN", "", None, 1])

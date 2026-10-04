@@ -1,225 +1,228 @@
 # tests/python/test_packaging.py
-"""Tests for the published Python distributions."""
+"""Check source artifacts without requiring LLVM or a native compiler."""
 
 import email
+import hashlib
+import os
 import re
 import subprocess
 import sys
 import tarfile
-import textwrap
-import venv
-import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_VERSION = "0.5.2"
+_SOURCE_DATE_EPOCH = "1700000000"
+# The native wheel embeds LLVM, MLIR, the code LLVM Support carries under
+# terms of its own, nanobind, and robin-map; THIRD_PARTY_NOTICES.md holds
+# their texts.
+_LICENSE_EXPRESSION = (
+    "MIT AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND "
+    "BSD-3-Clause AND Spencer-94 AND (CC0-1.0 OR Apache-2.0) AND "
+    "Unicode-DFS-2016 AND LicenseRef-LLVM-MD5"
+)
+_LICENSE_FILES = ("LICENSE", "LICENSES/LLVM.txt", "THIRD_PARTY_NOTICES.md")
 
 
-def _source_version():
-    """Read the version from the file the build backend reads it from."""
-    source = (_REPO_ROOT / "python" / "swage" / "__init__.py").read_text(
-        encoding="utf-8"
-    )
-    match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
-    assert match is not None, "python/swage/__init__.py sets no __version__"
-    return match.group(1)
-
-
-_VERSION = _source_version()
-_PACKAGE_FILES = {
-    "swage/__init__.py",
-    "swage/_artifact.py",
-    "swage/_frontend.py",
-    "swage/_runtime.py",
-    "swage/_segmented_qualification.py",
-    "swage/_segments.py",
-    "swage/compile.py",
-    "swage/env.py",
-    "swage/language.py",
-}
-_SDIST_ROOT_ENTRIES = {
-    ".gitignore",
-    "LICENSE",
-    "PKG-INFO",
-    "README.md",
-    "pyproject.toml",
-    "python",
-}
-_FORBIDDEN_PARTS = {
-    ".git",
-    ".github",
-    "CMakeFiles",
-    "build",
-    "docs",
-    "mlir_swage",
-    "test",
-    "tests",
-}
-
-
-@pytest.fixture(scope="session")
-def distributions(tmp_path_factory):
-    """Build one wheel and sdist with the checked-in backend."""
-    output = tmp_path_factory.mktemp("distributions")
+def _build_sdist(source, output):
     result = subprocess.run(
         [
             sys.executable,
             "-m",
             "build",
+            "--sdist",
             "--no-isolation",
             "--outdir",
             str(output),
         ],
-        cwd=_REPO_ROOT,
+        cwd=source,
+        env={**os.environ, "SOURCE_DATE_EPOCH": _SOURCE_DATE_EPOCH},
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-    wheels = list(output.glob("*.whl"))
+    assert result.returncode == 0, result.stdout + result.stderr
     sdists = list(output.glob("*.tar.gz"))
-    assert len(wheels) == 1
     assert len(sdists) == 1
-    return wheels[0], sdists[0]
+    assert not list(output.glob("*.whl"))
+    return sdists[0]
 
 
-def test_wheel_contains_only_the_importable_python_package(distributions):
-    """Exclude native bindings and repository debris from the wheel."""
-    wheel, _ = distributions
-    with zipfile.ZipFile(wheel) as archive:
-        members = {PurePosixPath(name) for name in archive.namelist()}
-
-    assert _PACKAGE_FILES <= {str(member) for member in members}
-    assert {member.parts[0] for member in members} == {
-        "swage",
-        f"swage_compiler-{_VERSION}.dist-info",
-    }
-    assert not any(_FORBIDDEN_PARTS & set(member.parts) for member in members)
-    assert not any(member.suffix in {".a", ".o", ".so"} for member in members)
+@pytest.fixture(scope="session")
+def sdist(tmp_path_factory):
+    """Build only the sdist with the installed scikit-build-core backend."""
+    return _build_sdist(_REPO_ROOT, tmp_path_factory.mktemp("sdist"))
 
 
-def test_sdist_contains_only_distribution_sources(distributions):
-    """Exclude build output, native sources, and repository debris."""
-    _, sdist = distributions
+@pytest.fixture(scope="session")
+def source_members(sdist):
+    """Read regular source files beneath a single safe archive root."""
+    files = {}
+    roots = set()
     with tarfile.open(sdist) as archive:
-        members = {
-            PurePosixPath(*PurePosixPath(member.name).parts[1:])
-            for member in archive.getmembers()
-            if len(PurePosixPath(member.name).parts) > 1
+        for member in archive.getmembers():
+            path = PurePosixPath(member.name)
+            assert not path.is_absolute()
+            assert ".." not in path.parts
+            roots.add(path.parts[0])
+            if member.isdir():
+                continue
+            assert member.isfile(), member.name
+            assert len(path.parts) > 1, member.name
+            relative = PurePosixPath(*path.parts[1:])
+            assert relative not in files, member.name
+            extracted = archive.extractfile(member)
+            assert extracted is not None
+            files[relative] = (extracted.read(), member.mode)
+    assert len(roots) == 1
+    return files
+
+
+def test_sdist_release_metadata(source_members):
+    """Advertise the supported release, Python range, platform, and extra."""
+    metadata = email.message_from_bytes(
+        source_members[PurePosixPath("PKG-INFO")][0]
+    )
+    assert metadata["Name"] == "swage-compiler"
+    assert metadata["Version"] == _VERSION
+    assert SpecifierSet(metadata["Requires-Python"]) == SpecifierSet(
+        ">=3.10,<3.14"
+    )
+    classifiers = set(metadata.get_all("Classifier", []))
+    assert "Development Status :: 4 - Beta" in classifiers
+    assert {
+        value for value in classifiers if value.startswith("Operating System")
+    } == {"Operating System :: POSIX :: Linux"}
+    for version in ("3.10", "3.11", "3.12", "3.13"):
+        assert f"Programming Language :: Python :: {version}" in classifiers
+
+    requirements = [
+        Requirement(value) for value in metadata.get_all("Requires-Dist", [])
+    ]
+    # The segmented calls copy the offsets into a numpy array on the host,
+    # so the pytorch extra brings numpy along.
+    for name, specifier in (("torch", ">=2.6,<3"), ("numpy", "")):
+        matching = [item for item in requirements if item.name == name]
+        assert len(matching) == 1, name
+        requirement = matching[0]
+        assert requirement.specifier == SpecifierSet(specifier)
+        assert requirement.marker is not None
+        assert requirement.marker.evaluate({"extra": "pytorch"})
+        assert not requirement.marker.evaluate({"extra": ""})
+    assert "pytorch" in metadata.get_all("Provides-Extra", [])
+
+    assert metadata["License-Expression"] == _LICENSE_EXPRESSION
+    assert set(_LICENSE_FILES) <= set(metadata.get_all("License-File", []))
+    for license_path in _LICENSE_FILES:
+        assert (
+            source_members[PurePosixPath(license_path)][0]
+            == (_REPO_ROOT / license_path).read_bytes()
+        )
+
+
+def test_sdist_preserves_source_build_resources(source_members):
+    """Retain build inputs and qualification sources, not a frozen inventory."""
+    # These are source-build entry points, not an exhaustive package file list.
+    entry_points = (
+        "CMakeLists.txt",
+        "cmake/llvm-version.txt",
+        "pyproject.toml",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "python/CMakeLists.txt",
+        "python/mlir_swage/_build_info.json.in",
+        "python/swage/py.typed",
+        "python/swage/__init__.pyi",
+        "python/swage/language.pyi",
+        "scripts/build_llvm.sh",
+        "scripts/build_swage.sh",
+    )
+    for name in entry_points:
+        assert (
+            source_members[PurePosixPath(name)][0]
+            == (_REPO_ROOT / name).read_bytes()
+        )
+
+    # Discover current build inputs so adding or renaming sources needs no
+    # test inventory update. Missing a source category must still fail.
+    resource_patterns = {
+        "cmake": ("*.txt", "*.cmake"),
+        "include": ("*.h", "*.td", "CMakeLists.txt"),
+        "lib": ("*.cpp", "*.h", "CMakeLists.txt"),
+        "python": ("*.cpp", "*.td", "*.py", "*.pyi", "CMakeLists.txt"),
+        "tools": ("*.cpp", "CMakeLists.txt"),
+        "test": ("*.mlir", "*.py", "*.in", "CMakeLists.txt"),
+        "unittests": ("*.cpp", "CMakeLists.txt"),
+        "tests": ("*.py",),
+        "scripts": ("*.sh", "*.py"),
+    }
+    for directory, patterns in resource_patterns.items():
+        sources = {
+            path
+            for pattern in patterns
+            for path in (_REPO_ROOT / directory).rglob(pattern)
+            if path.is_file()
         }
+        assert sources, directory
+        for source in sources:
+            relative = PurePosixPath(source.relative_to(_REPO_ROOT).as_posix())
+            assert relative in source_members, str(relative)
+            assert source_members[relative][0] == source.read_bytes(), str(
+                relative
+            )
 
-    assert {member.parts[0] for member in members} == _SDIST_ROOT_ENTRIES
-    assert not any(_FORBIDDEN_PARTS & set(member.parts) for member in members)
-    package_members = {
-        str(PurePosixPath(*member.parts[1:]))
-        for member in members
-        if len(member.parts) > 2 and member.parts[:2] == ("python", "swage")
+
+def test_sdist_excludes_generated_and_checkout_debris(source_members):
+    """Do not distribute local binaries, caches, Git state, or paper assets."""
+    forbidden_parts = {
+        ".git",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".benchmarks",
+        "__pycache__",
+        "CMakeFiles",
     }
-    assert _PACKAGE_FILES == package_members
+    for path in source_members:
+        assert not forbidden_parts.intersection(path.parts), str(path)
+        assert path.parts[0] not in {"build", "dist", "site", "paper"}
+        assert not any(part.endswith(".egg-info") for part in path.parts)
+        assert path.suffix not in {".pyc", ".pyo", ".o", ".a", ".so"}
+        assert ".so." not in path.name
 
 
-def test_distribution_metadata_matches_the_package_source(distributions):
-    """Publish wheel and sdist metadata that carry the source version."""
-    wheel, sdist = distributions
-    with zipfile.ZipFile(wheel) as archive:
-        metadata_name = next(
-            name for name in archive.namelist() if name.endswith("/METADATA")
-        )
-        wheel_metadata = email.message_from_bytes(archive.read(metadata_name))
-    with tarfile.open(sdist) as archive:
-        metadata_member = next(
-            member
-            for member in archive.getmembers()
-            if member.name.endswith("/PKG-INFO")
-        )
-        extracted = archive.extractfile(metadata_member)
-        assert extracted is not None
-        sdist_metadata = email.message_from_bytes(extracted.read())
-
-    for metadata in (wheel_metadata, sdist_metadata):
-        assert metadata["Name"] == "swage-compiler"
-        assert metadata["Version"] == _VERSION
-        assert metadata["Requires-Python"] == ">=3.10"
-        assert metadata["Summary"] == (
-            "Pure Python package of Swage, an experimental MLIR/LLVM GPU "
-            "compiler; emitting MLIR and launching kernels require a native "
-            "build from source"
-        )
+def test_sdist_rebuild_is_byte_reproducible(sdist, source_members, tmp_path):
+    """Rebuild identically without Git or the original source timestamps."""
+    source = tmp_path / "unpacked-source"
+    source.mkdir()
+    for relative, (content, mode) in source_members.items():
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        destination.chmod(mode)
+        os.utime(destination, (946684800, 946684800))
+    rebuilt = _build_sdist(source, tmp_path / "rebuilt")
+    assert (
+        hashlib.sha256(sdist.read_bytes()).digest()
+        == hashlib.sha256(rebuilt.read_bytes()).digest()
+    )
 
 
-def test_build_backend_has_one_pinned_version():
-    """Pin the same hatchling in the build system, dev extra, and CI lock."""
+def test_build_backend_and_bindings_have_one_pinned_version():
+    """Pin one scikit-build-core and one nanobind across build and CI."""
     pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     lock = (_REPO_ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
-
     build_system = re.search(r"^requires = (\[.*\])$", pyproject, re.MULTILINE)
     assert build_system is not None
-    pyproject_pins = re.findall(r'"hatchling==([^"]+)"', pyproject)
-    lock_pins = re.findall(r"^hatchling==(\S+)", lock, re.MULTILINE)
 
-    assert len(lock_pins) == 1
-    assert build_system.group(1) == f'["hatchling=={lock_pins[0]}"]'
-    assert pyproject_pins == [lock_pins[0], lock_pins[0]]
-
-
-def test_wheel_clean_install_has_the_expected_native_boundary(
-    distributions, tmp_path
-):
-    """Import without optional dependencies and explain the native boundary."""
-    wheel, _ = distributions
-    environment = tmp_path / "environment"
-    venv.EnvBuilder(with_pip=True).create(environment)
-    python = environment / "bin" / "python"
-    install = subprocess.run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--no-deps",
-            str(wheel),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert install.returncode == 0, install.stderr
-
-    smoke = tmp_path / "smoke.py"
-    smoke.write_text(
-        textwrap.dedent(
-            """
-            import sys
-
-            import swage
-
-            assert swage.__version__ == sys.argv[1]
-            assert "torch" not in sys.modules
-            assert "mlir_swage" not in sys.modules
-
-            @swage.jit
-            def kernel():
-                return
-
-            try:
-                kernel.emit_mlir(signature={}, constexprs={})
-            except RuntimeError as error:
-                assert str(error).startswith(
-                    "Swage emit_mlir() requires the build-tree "
-                    "mlir_swage bindings"
-                )
-            else:
-                raise AssertionError("missing native bindings were accepted")
-            """
-        ),
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        [str(python), str(smoke), _VERSION],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
+    for name in ("scikit-build-core", "nanobind"):
+        lock_pins = re.findall(rf"^{name}==(\S+)", lock, re.MULTILINE)
+        assert len(lock_pins) == 1, name
+        pyproject_pins = re.findall(rf'"{name}==([^"]+)"', pyproject)
+        # One pin in the build system and one in the dev extra.
+        assert pyproject_pins == [lock_pins[0], lock_pins[0]], name
+        assert f'"{name}=={lock_pins[0]}"' in build_system.group(1)
