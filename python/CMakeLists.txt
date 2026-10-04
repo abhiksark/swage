@@ -134,9 +134,13 @@ else()
   set(SWAGE_PYTHON_TEST_ROOT "${MLIR_BINARY_DIR}/python_packages")
 endif()
 
+# The private CPU oracle of the segmented tests runs bin/swage-opt of a
+# build directory. This target names its own, wherever it is, instead of
+# leaving the oracle to look for `build` in the checkout.
 add_custom_target(check-swage-python
   COMMAND ${CMAKE_COMMAND} -E env
     "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}:${SWAGE_PYTHON_TEST_ROOT}"
+    "SWAGE_ORACLE_BUILD_DIR=${CMAKE_BINARY_DIR}"
     "${Python3_EXECUTABLE}" -m pytest -q
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   DEPENDS SwagePythonModules
