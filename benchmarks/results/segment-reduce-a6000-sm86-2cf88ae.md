@@ -24,6 +24,13 @@ These are research measurements, not a performance gate. The machine was not
 idle while they were taken; [Machine and conditions](#machine-and-conditions)
 says what ran.
 
+The record names revision `2cf88ae`. The branch history was rewritten after
+the run, to replace the same scratch path in the process records of the
+`c6099ec` record, so that commit is not in the published history. Its
+counterpart is `65235ee`: the two trees differ only in the process records
+and summaries of the `c6099ec` record directory, which the harness does not
+read.
+
 ## What the record holds
 
 The directory
@@ -43,10 +50,14 @@ Each run directory holds:
 - `summary.json`, written by `benchmarks/benchmark_processes.py`: for every
   row, timing method, and candidate, the median of each process and the
   median, minimum, and maximum of those five medians. It is committed as the
-  driver wrote it.
+  driver wrote it, except for the SHA-256 of each process record, which the
+  next item describes.
 - `process-1.json.xz` to `process-5.json.xz`: the record of each process
-  with every raw sample, compressed with `xz -9`. Each decompressed file has
-  the SHA-256 that `summary.json` lists for it under `process_records`.
+  with every raw sample, compressed with `xz -9`. Before the record was
+  committed, the output path that each process record stores was replaced
+  by `<work>`, because it named a scratch directory of the machine. Each
+  decompressed file has the SHA-256 that `summary.json` lists for it under
+  `process_records`; those digests were updated to match.
 
 The record directory also holds:
 

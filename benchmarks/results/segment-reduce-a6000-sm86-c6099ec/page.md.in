@@ -32,10 +32,14 @@ Each run directory holds:
 - `summary.json`, written by `benchmarks/benchmark_processes.py`: for every
   row, timing method, and candidate, the median of each process and the
   median, minimum, and maximum of those five medians. It is committed as the
-  driver wrote it.
+  driver wrote it, except for the SHA-256 of each process record, which the
+  next item describes.
 - `process-1.json.xz` to `process-5.json.xz`: the record of each process
-  with every raw sample, compressed with `xz -9`. Each decompressed file has
-  the SHA-256 that `summary.json` lists for it under `process_records`.
+  with every raw sample, compressed with `xz -9`. Before the record was
+  committed, the output path that each process record stores was replaced
+  by `<work>`, because it named a scratch directory of the machine. Each
+  decompressed file has the SHA-256 that `summary.json` lists for it under
+  `process_records`; those digests were updated to match.
 
 The record directory also holds:
 
