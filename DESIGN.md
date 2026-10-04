@@ -27,9 +27,11 @@ Three levels remain distinct:
 
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
 tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
-steps, and 512-thread split partial and merge steps. Rank-two values use a
-128-thread column step, in which a thread reduces or normalizes one column
-of one segment.
+steps, and 512-thread split partial and merge steps. Rank-two values use
+row-stripe steps of the same widths, in which the row stripes of a group
+of columns combine across a block, and, on a private path, a 128-thread
+column step, in which a thread reduces or normalizes one column of one
+segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -46,9 +48,11 @@ verified Swage semantic MLIR
         |
         +-- public canonical fixed vector add
         +-- private direct segmented qualification
-        |     (public segment_softmax runs its softmax module)
+        |     (public segment_softmax runs its softmax modules, and its
+        |      row-stripe kernel for rows of features)
         +-- private single-stage reduction planning and split execution
-        |     (public segment_reduce runs its identity sum, max, and min)
+        |     (public segment_reduce runs its sum, max, min, and mean,
+        |      over scalars and over rows of features)
         |
         v
 upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
@@ -65,7 +69,9 @@ construction path.
 The current fixed-block frontend and public execution subset are deliberately
 narrow. Native segmented modules exercise a separate private qualification
 surface, and two public calls, `swage.segment_reduce` and
-`swage.segment_softmax`, run three fixed modules of it. The canonical
+`swage.segment_softmax`, run eighteen fixed modules of it: a sum, a
+maximum, a minimum, and a mean over f32 and f64 values of rank one and of
+rank two, and a softmax over f32 values of each rank. The canonical
 pipeline and links to exact references live in
 [`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
 
@@ -109,9 +115,10 @@ scalar partials without reapplying element expressions.
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
-policy. A function over rank-two values has one kernel schedule, the column
-policy: it has no task buffer, nothing classifies its segments, and no
-segment is split.
+policy. A function over rank-two values has the column policy, with no
+task buffer, and the row-stripe tile of `policy<cta>` over a task buffer
+and of the split partial and merge kernels, described in
+[`docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md`](docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md).
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion
@@ -177,9 +184,10 @@ not widen the admitted public kernel subset.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add, the public
-  segmented calls, and private segmented runtime qualification on a real
-  NVIDIA device.
+- The trusted GPU workflow runs public fixed vector add and private
+  segmented runtime qualification on a real NVIDIA device, on `main` only.
+  The public segmented calls are not on `main`, so it has not run their
+  tests; they ran on the development machine.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 

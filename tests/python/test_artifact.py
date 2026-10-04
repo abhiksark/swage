@@ -16,6 +16,7 @@ import pathlib
 import platform
 import re
 import stat
+import struct
 import subprocess
 import sys
 import types
@@ -142,11 +143,11 @@ def _manifest(programs=tuple(PROGRAM_TEXTS), target="sm_86"):
             {
                 "name": program,
                 "sha256": _digest(PROGRAM_TEXTS[program]),
-                # The softmax programs and the reductions over rank-two
-                # values are not planned, so nothing was admitted for them.
+                # The softmax programs are not planned, so nothing was
+                # admitted for them.
                 **(
                     {}
-                    if program == "ragged_softmax" or program.endswith("_r2")
+                    if program.startswith("ragged_softmax")
                     else {"small_element_program": program == "segmented_sum"}
                 ),
             }
@@ -349,23 +350,17 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         ),
     ]
 
-    # A program over rank-two values has one kernel, the direct schedule
-    # of its program, which takes the number of columns as a third count.
-    column = [
-        (
-            "column",
-            segmented,
-            (("block_size", 128),),
-            128,
-            "",
-            (
-                *task[:3],
-                ("value_count", "int32_t"),
-                ("segment_count", "int32_t"),
-                ("feature_count", "int32_t"),
-            ),
-        )
-    ]
+    # A reduction over rank-two values has the task-id, partial, and merge
+    # kernels of the row-stripe tile, which take the number of columns
+    # after their counts, and no fused kernel. The softmax over rank-two
+    # values has the task-id kernel alone.
+    def rows(kernels):
+        """Return the row-stripe kernels of the kernels of rank one."""
+        return [
+            (*kernel[:5], (*kernel[5], ("feature_count", "int32_t")))
+            for kernel in kernels
+            if kernel[0] != "mixed"
+        ]
 
     def typed(kernels):
         """Return the same kernels for f64 values, scratch, and output."""
@@ -393,15 +388,17 @@ def test_the_kernel_table_names_every_kernel_a_public_call_requests():
         "segmented_min_f64": typed(reduction),
         "segmented_mean_f64": typed(mean),
         **{
-            f"segmented_{kind}_r2": column
-            for kind in ("sum", "max", "min", "mean")
+            f"segmented_{kind}_r2": rows(reduction)
+            for kind in ("sum", "max", "min")
         },
+        "segmented_mean_r2": rows(mean),
         **{
-            f"segmented_{kind}_f64_r2": typed(column)
-            for kind in ("sum", "max", "min", "mean")
+            f"segmented_{kind}_f64_r2": typed(rows(reduction))
+            for kind in ("sum", "max", "min")
         },
+        "segmented_mean_f64_r2": typed(rows(mean)),
         "ragged_softmax": softmax,
-        "ragged_softmax_r2": column,
+        "ragged_softmax_r2": rows(reduction)[:1],
     }
     assert len(mean[3][5]) == len(reduction[3][5]) + 1
     # An f64 program differs from its f32 program in the element pointers
@@ -437,7 +434,6 @@ def test_the_kernel_table_uses_the_block_sizes_of_the_runner():
         "mixed": description["ctaBlockThreads"],
         "partial": description["splitBlockThreads"],
         "merge": description["splitBlockThreads"],
-        "column": description["ctaBlockThreads"],
     }
     assert set(widths.values()) == {128, 512}
 
@@ -484,7 +480,6 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
         "mixed": "fusedMixed",
         "partial": "splitPartial",
         "merge": "splitMerge",
-        "column": "directColumns",
     }
     # A function over rank-one values declares five roles, and one over
     # rank-two values the feature count as well.
@@ -503,6 +498,9 @@ def test_the_kernel_table_passes_the_arguments_of_the_kernel_layouts():
             # The merge of a mean reads the extent of its split segments.
             if program.startswith("segmented_mean") and kernel.role == "merge":
                 layout = "splitMergeExtent"
+            # The kernels of rank-two values take the number of columns.
+            if program.endswith("_r2"):
+                layout += "Columns"
             assert [role for role, _ in kernel.arguments] == layouts[layout]
 
 
@@ -1067,11 +1065,168 @@ def test_a_library_that_does_not_load_is_refused(artifact_dir, monkeypatch):
     with pytest.raises(
         RuntimeError,
         match=(
-            "^the runtime library of the artifact at .* cannot be loaded: "
-            ".*libSwageRuntime.so: invalid ELF header$"
+            "^the runtime library of the artifact at .*, libSwageRuntime.so, "
+            "cannot be loaded from its verified bytes: .*: invalid ELF "
+            "header$"
         ),
     ):
         _artifact.selected()
+
+
+@pytest.mark.parametrize("swap", ["renamed", "rewritten"])
+def test_the_library_loaded_is_the_one_whose_digest_was_verified(
+    swap, artifact_dir, monkeypatch
+):
+    """Load the bytes that matched the manifest, not the path once more.
+
+    The library file changes between the check of its digest and the load:
+    another file is renamed over it, or its own bytes are rewritten. The
+    library that is loaded still holds the verified bytes.
+    """
+    loaded = []
+
+    class _Recording(_FakeLibrary):
+        """Record the bytes behind the path the loader opens."""
+
+        def __init__(self, path):
+            super().__init__(path)
+            loaded.append(pathlib.Path(path).read_bytes())
+
+    monkeypatch.setattr(ctypes, "PyDLL", _Recording)
+    library = artifact_dir / "libSwageRuntime.so"
+    verified = library.read_bytes()
+    read_verified = _artifact._Artifact._read_verified
+
+    def verify_then_change(self, entry):
+        contents = read_verified(self, entry)
+        if entry.get("file") == "libSwageRuntime.so":
+            if swap == "renamed":
+                replacement = artifact_dir / "replacement"
+                replacement.write_bytes(b"another library\n")
+                os.replace(replacement, library)
+            else:
+                library.write_bytes(b"another library\n")
+        return contents
+
+    monkeypatch.setattr(
+        _artifact._Artifact, "_read_verified", verify_then_change
+    )
+
+    _load(monkeypatch, artifact_dir)
+
+    assert loaded == [verified]
+    assert library.read_bytes() == b"another library\n"
+
+
+def _elf_needing(*versions, library=b"libc.so.6"):
+    """Return a 64-bit ELF file that needs `versions` of `library`.
+
+    The file has the three sections the requirement is read from: none, a
+    string table, and a `.gnu.version_r` section with one entry for
+    `library` that names each version.
+    """
+    strings = b"\0" + library + b"\0"
+    names = []
+    for version in versions:
+        names.append(len(strings))
+        strings += version.encode() + b"\0"
+    auxiliary = b"".join(
+        struct.pack("<IHHII", 0, 0, 0, name, 16 * (index + 1 < len(names)))
+        for index, name in enumerate(names)
+    )
+    needed = struct.pack("<HHIII", 1, len(names), 1, 16, 0) + auxiliary
+    section_offset = 64 + len(strings) + len(needed)
+    padding = -section_offset % 8
+    section_offset += padding
+    sections = (
+        bytes(64)
+        + struct.pack(
+            "<IIQQQQIIQQ", 0, 3, 0, 0, 64, len(strings), 0, 0, 1, 0
+        )
+        + struct.pack(
+            "<IIQQQQIIQQ",
+            0,
+            0x6FFFFFFE,
+            0,
+            0,
+            64 + len(strings),
+            len(needed),
+            1,
+            1,
+            8,
+            0,
+        )
+    )
+    header = b"\x7fELF\x02\x01\x01" + bytes(9) + struct.pack(
+        "<HHIQQQIHHHHHH", 3, 62, 1, 0, 0, section_offset, 0, 64, 0, 0, 64, 3, 0
+    )
+    return header + strings + needed + bytes(padding) + sections
+
+
+def test_the_glibc_requirement_is_read_from_the_library():
+    """Read the newest glibc version the library needs, and nothing else.
+
+    The versions of other libraries do not count, and a file that is not
+    a 64-bit ELF file, or has no version needs, needs nothing.
+    """
+    requirement = _artifact._glibc_requirement
+
+    assert requirement(_elf_needing("GLIBC_2.2.5", "GLIBC_2.34")) == (2, 34)
+    assert requirement(_elf_needing("GLIBC_2.4", "GLIBC_2.17")) == (2, 17)
+    assert requirement(_elf_needing("GLIBCXX_3.4.30")) is None
+    assert (
+        requirement(_elf_needing("GLIBC_2.38", library=b"libother.so")) is None
+    )
+    assert requirement(RUNTIME_BYTES) is None
+    assert requirement(_elf_needing()) is None
+
+
+@pytest.mark.parametrize(
+    ("host", "message"),
+    [
+        (
+            "glibc 2.31",
+            "needs glibc 2.34 or newer, and this host has glibc 2.31",
+        ),
+        (None, "needs glibc 2.34 or newer, and this host has no glibc"),
+    ],
+    ids=["older-glibc", "no-glibc"],
+)
+def test_a_library_that_needs_a_newer_glibc_is_refused_before_it_loads(
+    host, message, tmp_path, monkeypatch
+):
+    """Name the glibc the library needs instead of a loader error."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "RUNTIME_BYTES", _elf_needing("GLIBC_2.34")
+    )
+    root = _write(tmp_path / "artifact", _manifest())
+    monkeypatch.setattr(_artifact, "_host_glibc", lambda: host)
+    monkeypatch.setattr(
+        ctypes, "PyDLL", lambda path: pytest.fail("the library was loaded")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "^the runtime library of the artifact at .*, libSwageRuntime.so, "
+            f"{message}; write the artifact with a runtime library built "
+            "for the glibc of this host"
+        ),
+    ):
+        _load(monkeypatch, root)
+
+
+def test_a_library_whose_glibc_the_host_has_loads(tmp_path, monkeypatch):
+    """Load a library whose glibc requirement the host meets."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "RUNTIME_BYTES", _elf_needing("GLIBC_2.34")
+    )
+    root = _write(tmp_path / "artifact", _manifest())
+
+    for host in ("glibc 2.34", "glibc 2.39"):
+        monkeypatch.setattr(_artifact, "_host_glibc", lambda: host)
+        monkeypatch.setattr(_artifact, "_selected", (None, None))
+        assert _load(monkeypatch, root).directory == root
 
 
 def test_a_read_only_artifact_loads(artifact_dir, monkeypatch):
@@ -1296,7 +1451,10 @@ def test_admission_refuses_a_program_the_build_host_did_not_plan(
         f"text of this call (SHA-256 {_digest(text)}); it holds the planned "
         "programs segmented_sum, segmented_max, segmented_min, "
         "segmented_mean, segmented_sum_f64, segmented_max_f64, "
-        "segmented_min_f64, segmented_mean_f64. The "
+        "segmented_min_f64, segmented_mean_f64, segmented_sum_r2, "
+        "segmented_max_r2, segmented_min_r2, segmented_mean_r2, "
+        "segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, "
+        "segmented_mean_f64_r2. The "
         "artifact was written without this program, or from another "
         "program text than this swage runs. Nothing was compiled or "
         "launched"
@@ -1544,6 +1702,9 @@ def _fake_torch(monkeypatch):
     torch.autograd = types.SimpleNamespace(
         graph=types.SimpleNamespace(increment_version=lambda tensor: None)
     )
+    # The calls wrap their bodies against `torch.compile`; nothing compiles.
+    torch.compiler = types.SimpleNamespace(disable=lambda function: function)
+    torch.is_grad_enabled = lambda: True
     torch.cuda = types.SimpleNamespace(
         is_current_stream_capturing=_reached("capture check")
     )
@@ -1672,7 +1833,7 @@ def test_the_environment_report_describes_the_selected_artifact(
     _select(monkeypatch, artifact_dir)
 
     assert env.report()["artifact"] == (
-        f"{artifact_dir} (format 2, target sm_86, 42 kernels of "
+        f"{artifact_dir} (format 2, target sm_86, 58 kernels of "
         "segmented_sum, segmented_max, segmented_min, segmented_mean, "
         "segmented_sum_f64, segmented_max_f64, segmented_min_f64, "
         "segmented_mean_f64, segmented_sum_r2, segmented_max_r2, "
@@ -1711,7 +1872,8 @@ def test_the_environment_command_reports_an_artifact_it_cannot_load(
     assert completed.returncode == 0, completed.stderr
     assert (
         f"artifact: rejected (the runtime library of the artifact at "
-        f"{artifact_dir} cannot be loaded: "
+        f"{artifact_dir}, libSwageRuntime.so, cannot be loaded from its "
+        "verified bytes: "
     ) in completed.stdout
 
 

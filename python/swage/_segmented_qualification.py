@@ -18,6 +18,50 @@ from . import _segmented_programs as _programs
 from . import _segmented_runtime as _execution
 from . import _segmented_validation as _validation
 
+# The largest grid of a launch, in blocks along x.
+_MAX_GRID = (1 << 31) - 1
+
+
+def _column_group_width(features, subgroup_width):
+    """Return the column-group width of the row-stripe tile.
+
+    It is the smallest power of two that is at least `features`, capped at
+    `subgroup_width`, and 1 for one feature or fewer: the rule of
+    `TargetDescription::columnGroupWidth`, which the kernel computes from
+    the same feature count.
+    """
+    width = 1
+    while width < subgroup_width and width < features:
+        width <<= 1
+    return width
+
+
+def _row_chunk(width, target):
+    """Return the chunk limit of rank-two values for a group width.
+
+    It is the default chunk limit divided by the column-group width `W`. A
+    segment of at most `floor(4096 / W)` rows is one task of the task-id
+    kernel, at most eight rows per stripe of a CTA block, and a longer
+    segment is cut into chunks of that many rows.
+
+    Args:
+        width: The column-group width `W`.
+        target: The target description, as `_target_description` returns.
+
+    Returns:
+        The chunk limit, in rows.
+    """
+    return target.default_cta_chunk_elements // width
+
+
+def _row_grid(count, features, width):
+    """Return the blocks of a row-stripe launch over `count` tasks.
+
+    A launch runs one block per task and column group, up to the largest
+    grid; a block loops over the items beyond it.
+    """
+    return min(count * -(-features // width), _MAX_GRID)
+
 
 class _PreparedReduction(NamedTuple):
     """Prepared pure and classified launch policies.
@@ -149,14 +193,18 @@ def _launch_columns(
     int64_offsets=False,
     block_size=None,
     clamp_rows_to_output=False,
+    row_stripes=False,
 ):
-    """Validate and enqueue the column kernel of one rank-two program.
+    """Validate and enqueue one rank-two program with one task per segment.
 
     The kernel is the direct schedule of a program over `[rows, columns]`
-    values: one block per segment, in which thread `t` runs the program
-    for the columns `t`, `t + block_size`, and so on, each alone. A launch
-    classifies nothing and uploads no task record. Its host work is the
-    validation of the offsets.
+    values, the column tile: one block per segment, in which thread `t`
+    runs the program for the columns `t`, `t + block_size`, and so on, each
+    alone. With `row_stripes` it is the task-id schedule, the row-stripe
+    tile, launched with the identity task list: a block runs the program on
+    a group of adjacent columns of one segment, with its threads split into
+    stripes of rows. A launch classifies nothing and uploads no task
+    record. Its host work is the validation of the offsets.
 
     Args:
         values: Contiguous `[rows, columns]` CUDA tensor of the element
@@ -176,6 +224,9 @@ def _launch_columns(
             as a map store does. The row count it receives is then the
             number of rows of the shorter of the values and the output, as
             `_validate_softmax_tensors` returns it for rank one.
+        row_stripes: Whether to launch the row-stripe tile instead of the
+            column tile. Its block size is a multiple of the subgroup
+            width.
     """
     torch = _runtime._import_torch()
     value_count, segment_count, host_offsets = _validation._validate_shapes(
@@ -195,26 +246,45 @@ def _launch_columns(
     if segment_count == 0 or feature_count == 0:
         return None
 
+    options = {"use_task_ids": True} if row_stripes else {}
     kernel = _execution._compile_once(
         _execution._native_swage()._compile_segmented_reduction_ptx,
         module_text,
         kernel_name=kernel_name,
         block_size=block_size,
         target=_execution._target(torch, torch.cuda.current_device()),
+        **options,
     )
     kernel_offsets = _validation._kernel_offsets(torch, offsets, host_offsets)
+    counts = {
+        "value_count": value_count,
+        "segment_count": segment_count,
+        "feature_count": feature_count,
+    }
+    if not row_stripes:
+        _launch_one(
+            torch,
+            kernel,
+            module_text,
+            (values, kernel_offsets, output),
+            counts,
+            segment_count,
+            {},
+        )
+        return None
+    # Task `t` is segment `t`, in segment order.
+    task_ids = _plan._identity_ids(torch, offsets.device, segment_count)
+    width = _column_group_width(
+        feature_count, _execution._target_description().subgroup_width
+    )
     _launch_one(
         torch,
         kernel,
         module_text,
-        (values, kernel_offsets, output),
-        {
-            "value_count": value_count,
-            "segment_count": segment_count,
-            "feature_count": feature_count,
-        },
-        segment_count,
-        {},
+        (values, kernel_offsets, output, task_ids),
+        counts,
+        _row_grid(segment_count, feature_count, width),
+        {"task_ids": task_ids.data_ptr(), "task_count": segment_count},
     )
     return None
 
@@ -887,6 +957,203 @@ def _launch_planned_reduction(
             output=output.data_ptr(),
             value_count=value_count,
             segment_count=segment_count,
+        )
+        arguments = [
+            _execution._bind(kernel, user, named) for kernel, _ in launched
+        ]
+        stream = torch.cuda.current_stream()
+        for lease, (kernel, grid), bound in zip(leases, launched, arguments):
+            _execution._enqueue(
+                torch, lease, kernel, bound, grid, stream, context=context
+            )
+    finally:
+        for lease in leases:
+            lease.release()
+    for tensor in retained:
+        tensor.record_stream(stream)
+    _runtime._advance_version(torch, output)
+    return None
+
+
+def _launch_planned_rows(values, offsets, output, *, module_text, kernel_name):
+    """Validate, classify, and enqueue the row-stripe tile of one batch.
+
+    This is the counterpart of `_launch_planned_reduction` for a program
+    over `[rows, columns]` values, with the same validation and the same
+    guards left out. The classifier validates the host offsets and
+    classifies the rows of each segment in one walk, under the chunk limit
+    of `_row_chunk` for the column-group width `W` of the feature count:
+
+    - A segment of at most `floor(4096 / W)` rows is one task of the
+      task-id kernel at the CTA width. The warp limit equals the chunk
+      limit, so every such segment is in the warp class: rank two has no
+      warp tile, so a second class would run on the same kernel, and its
+      unpredictable boundary is what makes the classifier slow.
+    - A longer segment is cut into chunks of that many rows. The partial
+      kernel reduces each chunk into one row of a `[P, D]` scratch, and the
+      merge kernel reduces the partials of each segment into its row of
+      the output.
+
+    A batch without a split launches the identity task list, which stays
+    on the device, and uploads no record. A task reads its own segment
+    only, so neither the order of the tasks nor the list changes a bit.
+
+    Every launch runs one block per task and column group, up to the
+    largest grid. The program is admitted under the default planning
+    limits, the ones an artifact records, and its rows are classified under
+    the chunk limit, which follows from the feature count. The kernels of a
+    segment, and so the bits of its result, therefore depend on its row
+    count and on the feature count, and not on the rest of the batch.
+
+    Args:
+        values: Contiguous `[rows, columns]` CUDA tensor, float32 or float64
+            as the program declares its values.
+        offsets: Contiguous rank-one CUDA i32 or i64 row offsets.
+        output: Disjoint contiguous `[segments, columns]` CUDA output of the
+            dtype of the values.
+        module_text: Native qualification MLIR with the semantic program,
+            one capture-free reduction over rank-two values.
+        kernel_name: Name of the segment function in the module.
+
+    Returns:
+        None. The version counter of the output is advanced once, after the
+        enqueue; a batch without segments or without columns enqueues
+        nothing and leaves it.
+    """
+    torch = _runtime._import_torch()
+    blocks = _execution._target_description()
+    features = 0
+    if isinstance(values, torch.Tensor) and values.dim() == 2:
+        features = values.shape[1]
+    width = _column_group_width(features, blocks.subgroup_width)
+    chunk = _row_chunk(width, blocks)
+    validate, found = _plan._classifying_validator(chunk, chunk)
+    value_count, segment_count, host_offsets = _validation._validate_shapes(
+        values,
+        offsets,
+        output,
+        validate,
+        int64_offsets=True,
+        element=_programs._program_element(module_text),
+        rank=2,
+    )
+    native_swage = _execution._native_swage()
+    device = offsets.device
+    target = _execution._target(torch, device.index)
+    _plan._admit_program(
+        module_text, kernel_name, *_plan._planning_limits(None, None)
+    )
+    (
+        records,
+        direct_warp_count,
+        direct_cta_count,
+        partial_count,
+        merge_count,
+    ) = _plan._classification(
+        found,
+        host_offsets,
+        value_count=value_count,
+        segment_count=segment_count,
+        warp_max_elements=chunk,
+        cta_chunk_elements=chunk,
+    )
+    if segment_count == 0 or features == 0:
+        return None
+
+    def compile_kernel(compiler, **options):
+        return _execution._compile_once(
+            getattr(native_swage, compiler),
+            module_text,
+            kernel_name=kernel_name,
+            target=target,
+            **options,
+        )
+
+    # Every kernel is held before anything is uploaded or enqueued, so a
+    # refused compile leaves the device untouched.
+    direct_count = direct_warp_count + direct_cta_count
+    launched = []
+    if direct_count:
+        launched.append(
+            (
+                compile_kernel(
+                    "_compile_segmented_reduction_ptx",
+                    block_size=blocks.cta_block_threads,
+                    use_task_ids=True,
+                ),
+                _row_grid(direct_count, features, width),
+            )
+        )
+    if partial_count:
+        launched.append(
+            (
+                compile_kernel("_compile_split_partial_reduction_ptx"),
+                _row_grid(partial_count, features, width),
+            )
+        )
+        launched.append(
+            (
+                compile_kernel("_compile_split_merge_reduction_ptx"),
+                _row_grid(merge_count, features, width),
+            )
+        )
+    narrowed = offsets.dtype != torch.int32
+    context = _cuda_backend.ensure_context(torch, device.index)
+    leases = [_execution._lease(torch, kernel) for kernel, _ in launched]
+    try:
+        named = {"task_count": direct_count}
+        if not partial_count:
+            # Every segment is one task, in segment order.
+            task_ids = _plan._identity_ids(torch, device, segment_count)
+            kernel_offsets = _validation._kernel_offsets(
+                torch, offsets, host_offsets
+            )
+            named["task_ids"] = task_ids.data_ptr()
+            offsets_pointer = kernel_offsets.data_ptr()
+            retained = (values, kernel_offsets, output, task_ids)
+        else:
+            # One upload carries every record: the task ids, the partial
+            # ranges, and the merge records, in that order. The private
+            # copy of int64 offsets follows them in the same tensor.
+            if narrowed:
+                import numpy
+
+                record_words = len(records)
+                records = numpy.concatenate(
+                    (numpy.asarray(records, dtype=numpy.int32), host_offsets)
+                )
+            task_records = torch.tensor(
+                records, dtype=torch.int32, device=device
+            )
+            tasks_pointer = task_records.data_ptr()
+            partial_pointer = tasks_pointer + 4 * direct_count
+            if narrowed:
+                offsets_pointer = tasks_pointer + 4 * record_words
+                retained = (values, output, task_records)
+            else:
+                offsets_pointer = offsets.data_ptr()
+                retained = (values, offsets, output, task_records)
+            # One row of partial results per chunk, of the element type.
+            scratch = torch.empty(
+                partial_count, features, dtype=values.dtype, device=device
+            )
+            retained += (scratch,)
+            named.update(
+                task_ids=tasks_pointer,
+                partial_ranges=partial_pointer,
+                merge_records=partial_pointer + 8 * partial_count,
+                partial_count=partial_count,
+                merge_count=merge_count,
+                scratch=scratch.data_ptr(),
+            )
+        user = _execution._user_arguments(
+            module_text,
+            values=values.data_ptr(),
+            offsets=offsets_pointer,
+            output=output.data_ptr(),
+            value_count=value_count,
+            segment_count=segment_count,
+            feature_count=features,
         )
         arguments = [
             _execution._bind(kernel, user, named) for kernel, _ in launched

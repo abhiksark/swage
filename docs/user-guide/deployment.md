@@ -64,7 +64,7 @@ artifact: /srv/swage/sm_86
 format_version: 2
 target: sm_86
 programs: segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, ragged_softmax_r2
-kernels: 42
+kernels: 58
 runtime: libSwageRuntime.so (x86_64)
 manifest_sha256: <64 hexadecimal digits>
 ```
@@ -93,6 +93,12 @@ These rules hold for every run:
   of the compiler and exit status 1.
 - The command refuses to run while `SWAGE_ARTIFACT_DIR` is set, and with
   `SWAGE_NO_COMPILE=1` it stops at the first kernel it would compile.
+- The manifest names the source revision of the bindings, and the kernels
+  are compiled from the program texts of the `swage` that runs the command.
+  The command therefore refuses bindings that were not built beside that
+  `swage`: bindings whose recorded digest of the `swage` sources differs
+  from the sources that run, as after a frontend edit without a native
+  rebuild, and bindings that record no such digest.
 
 ## Run from an artifact on the serving host
 
@@ -111,7 +117,7 @@ python -m swage.env
 The last line of the report describes the selected artifact:
 
 ```text
-artifact: /srv/swage/sm_86 (format 2, target sm_86, 42 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, ragged_softmax_r2, written by swage 0.5.2 at revision <revision>)
+artifact: /srv/swage/sm_86 (format 2, target sm_86, 58 kernels of segmented_sum, segmented_max, segmented_min, segmented_mean, segmented_sum_f64, segmented_max_f64, segmented_min_f64, segmented_mean_f64, segmented_sum_r2, segmented_max_r2, segmented_min_r2, segmented_mean_r2, segmented_sum_f64_r2, segmented_max_f64_r2, segmented_min_f64_r2, segmented_mean_f64_r2, ragged_softmax, ragged_softmax_r2, written by swage 0.5.2 at revision <revision>)
 ```
 
 It reads `none (SWAGE_ARTIFACT_DIR is unset)` without the variable, and
@@ -144,23 +150,25 @@ that point.
 
 ## What the directory holds
 
-An artifact for all eighteen programs holds forty-four files:
+An artifact for all eighteen programs holds sixty files:
 
 | File | Contents |
 |---|---|
 | `manifest.json` | What the artifact is and how each kernel is launched |
-| `<program>.<role>.ptx` | One kernel: four roles for each of the eight reductions over rank-one values, which are `segmented_sum`, `segmented_max`, `segmented_min`, and `segmented_mean` over float32 values and the same four names with `_f64` over float64 values; one role for each of the eight reductions over rank-two values, which are those eight names with `_r2`; and one each for `ragged_softmax` and `ragged_softmax_r2` |
+| `<program>.<role>.ptx` | One kernel: four roles for each of the eight reductions over rank-one values, which are `segmented_sum`, `segmented_max`, `segmented_min`, and `segmented_mean` over float32 values and the same four names with `_f64` over float64 values; three roles for each of the eight reductions over rank-two values, which are those eight names with `_r2`; and one each for `ragged_softmax` and `ragged_softmax_r2` |
 | `libSwageRuntime.so` | The runtime library: the task classifier and a launcher |
 
 The roles of a reduction over rank-one values are `cta` for the pure CTA
 schedule, `mixed` for the fused kernel, and `partial` and `merge` for split
-segments. A reduction over rank-two values has the one role `column`, the
-kernel in which a thread reduces a column. The `merge`
+segments. A reduction over rank-two values has the roles `cta`,
+`partial`, and `merge` of the row-stripe tile, which take the number of
+columns after their counts, and no `mixed` kernel. The `merge`
 kernel of a mean takes one buffer more than that of the other reductions:
 the range records of the partial tasks, from which it reads the length of
 each split segment. The softmax
-has one `cta` kernel, and the softmax over rank-two values one `column`
-kernel, in which a thread normalizes a column. These are the kernels a call can launch, and the
+has one `cta` kernel, and the softmax over rank-two values one `cta`
+kernel of the row-stripe tile, which the call launches with one task per
+segment. These are the kernels a call can launch, and the
 loader requires each of them for every program the artifact lists.
 
 The manifest is JSON. This one is shortened to the first kernel:
@@ -223,10 +231,10 @@ The fields mean the following:
 | `format_version` | The version of this layout. The loader reads version 2 and refuses any other, also version 1, which an earlier `swage` wrote: write such an artifact again. |
 | `swage_version`, `source_revision`, `llvm_version` | What the native build that compiled the kernels recorded about itself: the `swage` version, the source revision, which ends in `-dirty` for a modified tree, and the LLVM release it links. They are information; the loader does not compare them. |
 | `target` | The NVPTX processor of every kernel. |
-| `target_description` | The widths the kernels were compiled for: the threads of one subgroup, of a block of the `cta`, `mixed`, and `column` kernels, and of a block of the `partial` and `merge` kernels. The loader requires the two block widths this `swage` launches with. |
-| `planning` | The limits the reductions were admitted under: the longest segment of warp work and the longest range of one CTA task. They are the limits `segment_reduce` plans with. |
+| `target_description` | The widths the kernels were compiled for: the threads of one subgroup, of a block of the `cta` and `mixed` kernels, and of a block of the `partial` and `merge` kernels. The loader requires the two block widths this `swage` launches with. |
+| `planning` | The limits the reductions were admitted under: the longest segment of warp work and the longest range of one CTA task. They are the limits `segment_reduce` plans with. A call on `[N, D]` values classifies its rows with the chunk limit divided by the column-group width, which follows from the feature count, as both limits, and records nothing more. |
 | `runtime` | The runtime library: its file, its SHA-256 digest, the machine it was built for, and the version of its C interface. |
-| `programs` | Each program by the name of its kernel function, with the SHA-256 digest of the program text it was compiled from. A reduction over rank-one values also records what the planning admission of the build host returned, which the schedule selection of a call reads. A program over rank-two values has one kernel and is not planned, and neither is the softmax. |
+| `programs` | Each program by the name of its kernel function, with the SHA-256 digest of the program text it was compiled from. A reduction also records what the planning admission of the build host returned, which a call reads before it classifies its offsets. The softmax programs are not planned. |
 | `kernels` | Each kernel: its program and role, the entry name in the PTX, the threads per block it must be launched with, its file and the SHA-256 digest of that file, and its launch arguments in order. |
 
 An argument has a role and a C type. A pointer type is a device pointer,
@@ -289,7 +297,14 @@ checks:
   applies the rule to what a link leads to.
 - It takes only plain file names from the manifest, so a manifest cannot
   name a file outside the directory.
-- It verifies every digest before it loads anything.
+- It verifies every digest before it loads anything, and it loads what it
+  verified: the kernels from the PTX text it read, and the runtime library
+  from a copy of the bytes it read, in an anonymous memory file of the
+  process (`memfd_create`) that the dynamic loader opens through
+  `/proc/self/fd`. A library file that is replaced or rewritten after the
+  check is not the one that is loaded. A Linux kernel whose
+  `vm.memfd_noexec` setting is 1 or 2 does not let a memory file be
+  executed, and the load then fails with the error it reports.
 
 The digests detect damage and a partial copy. They do not authenticate an
 artifact, because the manifest is not signed: whoever can write the
@@ -313,16 +328,53 @@ runs only on hosts of the machine its library was built for. The manifest
 records that machine, and the loader refuses the artifact on another one.
 Only an x86-64 library has been built and run.
 
+The library also needs a glibc at least as new as the symbol versions it
+was linked against. It calls `dlopen` and `dlsym`, which glibc 2.34 moved
+into the C library, so a library built on glibc 2.34 or newer needs glibc
+2.34 on the serving host; the one built for the tests, on Ubuntu 22.04,
+does. The loader reads the newest `GLIBC_` version the library needs from
+its ELF version needs and, on a host with an older glibc or none, refuses
+the artifact before it loads anything, with an error that names both
+versions. A serving host with an older glibc needs a library built on, or
+for, that glibc, passed to the command with `--runtime-library`.
+
 For a serving host of another machine, such as an AArch64 host with an
 `sm_87` device, two steps are needed, and neither has been tried:
 
 1. Compile `lib/Runtime/SwageRuntime.c`, which needs a C11 compiler for
    that machine and nothing from LLVM, into a shared library. It includes
-   only `include/swage-c/Runtime.h`.
+   only `include/swage-c/Runtime.h`. The in-tree CMake target cannot build
+   it alone, because the project configures only against an LLVM install
+   for the build host. These commands, run from the checkout, are the
+   flags of that target written out. They have not been run for AArch64;
+   the first was run on the x86-64 build host, where it gives a library
+   that exports the five functions of the header:
+
+    ```bash
+    # On the AArch64 host itself:
+    cc -std=c11 -O2 -fPIC -fvisibility=hidden -shared -I include \
+        lib/Runtime/SwageRuntime.c -o libSwageRuntime.so -ldl
+    # Or with a cross compiler on another host:
+    aarch64-linux-gnu-gcc -std=c11 -O2 -fPIC -fvisibility=hidden -shared \
+        -I include lib/Runtime/SwageRuntime.c -o libSwageRuntime.so -ldl
+    ```
+
+   `-ldl` links the dynamic loader library, which holds `dlopen` and
+   `dlsym` on a glibc older than 2.34, such as glibc 2.31 of Ubuntu 20.04.
+   On glibc 2.34 or newer those functions are in the C library and the
+   flag does no harm. A library built against an older glibc runs on that
+   glibc and on newer ones; the loader reads its requirement as
+   [The runtime library](#the-runtime-library) states above.
 2. Pass that library to the command with `--runtime-library`. The command
    reads the machine from the ELF header of the library, records it in the
    manifest, and ships the file. It names `x86_64` and `aarch64` and
    refuses a library of any other machine.
+
+The artifact directory may sit on a file system mounted `noexec`: the
+loader does not execute the library file of the directory but a copy of
+its verified bytes in an anonymous memory file, as [Trust](#trust) states.
+The memory file is subject to the `vm.memfd_noexec` setting of the kernel
+instead.
 
 ## Evidence
 

@@ -81,10 +81,15 @@ Bindings that load but were not built for the `swage` that is loaded show
 `native.error: "native-mismatch"`, and `native.bindings.problem` gives the
 reason, which names both versions and both locations. Emission and launch
 raise a `RuntimeError` with the same text. Rebuild the bindings from the
-sources of that `swage`, or install a wheel that holds both.
+sources of that `swage`, or install a wheel that holds both. The bindings
+also record the digest of the frontend sources they were built beside.
+Outside a checkout, bindings built beside another frontend are refused in
+the same way. In a checkout, bindings whose native sources differ from the
+revision they were built from are refused, and bindings whose `swage`
+sources alone differ are used with a warning; rebuild the bindings to remove
+either.
 [Frontend and bindings](../reference/runtime-environment.md#frontend-and-bindings)
-states the rule, and also explains the warning that a checkout prints when
-its native sources differ from the revision the bindings were built from.
+states the rule.
 
 ## PyTorch or CUDA is unavailable
 
@@ -210,8 +215,8 @@ enqueued in these cases:
 - `numpy` cannot be imported. The call raises `BackendUnavailableError`
   with the code `numpy-unavailable`. Install it, for example through the
   `pytorch` extra, which declares it.
-- `values` require grad. Pass `values.detach()`; the calls record no
-  gradient.
+- `out` is given while the call records a gradient. Call without `out`,
+  or under `torch.no_grad()`.
 
 [Segmented Calls](../user-guide/segmented-calls.md#where-a-call-is-refused)
 lists every refusal and the reason for it.

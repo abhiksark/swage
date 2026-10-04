@@ -281,6 +281,7 @@ def _check_archive(
     required = {
         "swage/__init__.py",
         "swage/_segments.py",
+        "swage/_autograd.py",
         "swage/_segmented_qualification.py",
         "swage/compile.py",
         "swage/bench.py",

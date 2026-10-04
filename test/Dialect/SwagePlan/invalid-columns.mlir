@@ -2,8 +2,8 @@
 // RUN: swage-opt --verify-diagnostics --split-input-file %s
 
 // A task operation over rank-two values takes the number of columns, has
-// policy<column> or policy<sequential>, takes no task buffer, and stores its
-// scalars into rank-two rows.
+// policy<column>, policy<cta>, or policy<sequential>, takes a task buffer
+// with policy<cta> only, and stores its scalars into rank-two rows.
 
 // The column policy is the kernel of rank-two values.
 module {
@@ -76,14 +76,14 @@ module {
 
 // -----
 
-// Nothing is combined across the threads of a block of rank-two values.
+// A warp task reduces scalars within one subgroup.
 module {
-  func.func @rows_across_a_block(
+  func.func @rows_in_a_warp(
       %values: memref<?x?xf32>, %offsets: memref<?xi32>,
       %output: memref<?x?xf32>, %value_count: i32, %segment_count: i32,
       %feature_count: i32) {
-    // expected-error@+1 {{'swage_plan.tasks' op rank-two values take policy<column> or policy<sequential>, got policy<cta>}}
-    swage_plan.tasks policy<cta>
+    // expected-error@+1 {{'swage_plan.tasks' op rank-two values take policy<column>, policy<cta>, or policy<sequential>, got policy<warp>}}
+    swage_plan.tasks policy<warp>
         segments(%values, %offsets : memref<?x?xf32>, memref<?xi32>)
         value_count(%value_count : i32) segment_count(%segment_count : i32)
         feature_count(%feature_count : i32)
@@ -172,14 +172,14 @@ module {
 
 // -----
 
-// A task of rank-two values is one segment, in order.
+// A column task is one segment, in order.
 module {
   func.func @rows_with_ids(
       %values: memref<?x?xf32>, %offsets: memref<?xi32>,
       %output: memref<?x?xf32>, %ids: memref<?xi32>, %task_count: i32,
       %value_count: i32, %segment_count: i32,
       %feature_count: i32) {
-    // expected-error@+1 {{'swage_plan.tasks' op a task of rank-two values is one segment, in order, and takes no ids}}
+    // expected-error@+1 {{'swage_plan.tasks' op policy<column> runs one task per segment, in order, and takes no ids}}
     swage_plan.tasks policy<column>
         segments(%values, %offsets : memref<?x?xf32>, memref<?xi32>)
         value_count(%value_count : i32) segment_count(%segment_count : i32)

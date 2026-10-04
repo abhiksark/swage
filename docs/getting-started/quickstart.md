@@ -202,9 +202,10 @@ The values above are rank-one `torch.float32`. Both calls also take
 `[N, D]` rows of features, which they reduce or normalize per column, and a
 reduction also takes `torch.float64` values and the kinds `"min"` and
 `"mean"`. The offsets are `torch.int32` or `torch.int64`. The calls run on
-the current CUDA device only, record no gradient, and are refused under
-CUDA graph capture. [Segmented Calls](../user-guide/segmented-calls.md)
-states the whole contract, including the cost and the cases a call refuses.
+the current CUDA device only, record a gradient for values that require
+grad, and are refused under CUDA graph capture.
+[Segmented Calls](../user-guide/segmented-calls.md) states the whole
+contract, including the cost and the cases a call refuses.
 
 The committed example runs the same calls and compares them with PyTorch:
 

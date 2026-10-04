@@ -91,3 +91,52 @@ module {
     return
   }
 }
+
+// -----
+
+// Over rank-two values scratch holds one row per partial task and the
+// output one row per segment, both of feature_count columns.
+
+module {
+  func.func @rows_without_a_feature_count(
+      %scratch: memref<?x?xf32>, %output: memref<?x?xf32>,
+      %merges: memref<?xi32>, %partial_count: i32, %merge_count: i32,
+      %segment_count: i32) {
+    // expected-error@+1 {{'swage_plan.merge_tasks' op scratch must have rank 1 without a feature_count, got 'memref<?x?xf32>'}}
+    swage_plan.merge_tasks scratch(%scratch : memref<?x?xf32>)
+        partial_count(%partial_count : i32) merges(%merges : memref<?xi32>)
+        merge_count(%merge_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?x?xf32>) {
+    ^bb0(%partials: !swage.segment<f32>):
+      %total = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%partial: f32):
+        swage.yield %partial : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  func.func @scalar_output_of_rows(
+      %scratch: memref<?x?xf32>, %output: memref<?xf32>,
+      %merges: memref<?xi32>, %partial_count: i32, %merge_count: i32,
+      %segment_count: i32, %feature_count: i32) {
+    // expected-error@+1 {{'swage_plan.merge_tasks' op into must have rank 2 with a feature_count, got 'memref<?xf32>'}}
+    swage_plan.merge_tasks scratch(%scratch : memref<?x?xf32>)
+        partial_count(%partial_count : i32) merges(%merges : memref<?xi32>)
+        merge_count(%merge_count : i32) segment_count(%segment_count : i32)
+        feature_count(%feature_count : i32) into(%output : memref<?xf32>) {
+    ^bb0(%partials: !swage.segment<f32>):
+      %total = swage.reduce %partials kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%partial: f32):
+        swage.yield %partial : f32
+      }
+      swage_plan.yield %total : f32
+    }
+    return
+  }
+}

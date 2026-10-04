@@ -4,6 +4,7 @@
 - Status: accepted
 - Date: 2026-10-02
 - Amended: 2026-10-03, format version 2
+- Amended: 2026-10-03, the roles of the programs over rank-two values
 
 ## Context
 
@@ -34,9 +35,9 @@ states what the first format held and why it was replaced.
 - `manifest.json`, which describes everything else.
 - One PTX text file per kernel, named `<program>.<role>.ptx`. A reduction
   over rank-one values has the roles `cta`, `mixed`, `partial`, and
-  `merge`. A program over rank-two values, a reduction or the softmax,
-  has the role `column`. The softmax over rank-one values has the role
-  `cta`.
+  `merge`. A reduction over rank-two values has the roles `cta`,
+  `partial`, and `merge`, and the softmax over rank-two values the role
+  `cta`. The softmax over rank-one values has the role `cta`.
 - `libSwageRuntime.so`, a C library that classifies offsets into task
   records and enqueues one kernel through `libcuda.so.1`. It needs nothing
   from LLVM.
@@ -54,10 +55,16 @@ programs of a mean, `segmented_mean` and `segmented_mean_f64`. Their
 reductions, the range records of the partial tasks, which the argument
 list of that kernel states in the manifest like any other. The reductions
 over rank-two values, named with the suffix `_r2`, were added in the same
-way. Each has one kernel, of the role `column`, which takes the number of
-columns as a third count and is launched at the CTA block width. The
-softmax over rank-two values, `ragged_softmax_r2`, followed with the same
-role and the same arguments. A new role
+way, first with one kernel each, of the role `column`, the column tile of
+ADR-0022. Since
+[ADR-0023](ADR-0023-row-stripe-tile-for-rank-two-values.md) their kernels
+are the row-stripe tiles of the roles `cta`, `partial`, and `merge`, each
+of which takes the number of columns after its counts, and the softmax
+over rank-two values, `ragged_softmax_r2`, has the one role `cta`. The
+`column` role left the table as the `warp` role did: no public call
+launches the column tile. The format version stays 2, and an artifact
+written before is refused at load time for its unknown role and its
+missing ones. A new role
 is part of the kernel table and not of the format: a `swage` that does not
 know the role refuses the artifact that lists it, as it refuses a program
 it does not know.
@@ -78,7 +85,7 @@ The manifest is a JSON object with these fields:
 | `target_description` | `subgroup_width`, `cta_block_threads`, and `split_block_threads`, the widths of the target description the kernels were compiled for. |
 | `planning` | `warp_max_elements` and `cta_chunk_elements`, the limits the reductions were admitted under. |
 | `runtime` | The runtime library: `file`, `sha256`, the `machine` it was built for, and the `abi_version` of its C interface. |
-| `programs` | A list. Each entry has the `name` of the kernel function and the `sha256` of the program text. A reduction over rank-one values also has `small_element_program`, the answer of planning admission on the build host. |
+| `programs` | A list. Each entry has the `name` of the kernel function and the `sha256` of the program text. A reduction also has `small_element_program`, the answer of planning admission on the build host. |
 | `kernels` | A list. Each entry has `program`, `role`, the `entry` name in the PTX, the `block_size` of the launch, `file`, `sha256`, and `arguments`, the launch arguments in order as a `role` and a C `type`. |
 
 [Running Without the Compiler](../user-guide/deployment.md#what-the-directory-holds)
@@ -114,7 +121,10 @@ a kernel is loaded or enqueued:
 - The digest of the program text this `swage` would compile equals the one
   in the manifest.
 - For a reduction, the planning limits of the call equal the ones in the
-  manifest.
+  manifest. A reduction over rank-two values is admitted under those
+  limits and classifies its rows with the chunk limit divided by the
+  column-group width of its feature count as both limits, which the
+  manifest does not record because they follow from it.
 
 Every failed check raises a `RuntimeError` that names the directory.
 Nothing is compiled in place of an artifact that cannot serve a call: a
