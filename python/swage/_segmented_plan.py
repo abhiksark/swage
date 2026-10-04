@@ -47,7 +47,7 @@ class _PreparedPlan:
         if self.tasks_ready_complete:
             return
         if torch.cuda.is_current_stream_capturing():
-            label = "persistent sum" if persistent else "sum"
+            label = "persistent sum" if persistent else "reduction"
             raise RuntimeError(
                 f"prepared {label} must launch once after task "
                 "initialization before CUDA graph capture"
@@ -134,8 +134,10 @@ def _validate_materialized_plan(
 
 
 def _prepare_planned_device_state(
-    torch, device, host_plan, *, value_count, segment_count
+    torch, device, host_plan, *, value_count, segment_count, split=True
 ):
+    # A preparation that runs every segment as direct CTA work never launches
+    # the split kernels, so it allocates neither their records nor scratch.
     direct_count = host_plan.warp_count + host_plan.cta_count
     buffers = {
         "task_ids": torch.arange(
@@ -149,7 +151,7 @@ def _prepare_planned_device_state(
             device=device,
         )
     scratch = {}
-    if host_plan.partial_count:
+    if host_plan.partial_count and split:
         buffers["partial_ranges"] = torch.tensor(
             host_plan.partial_records, dtype=torch.int32, device=device
         )

@@ -1,6 +1,8 @@
 # python/swage/_segmented_qualification.py
 """Private coordinator for native segmented qualification."""
 
+from itertools import pairwise
+
 from . import _native, _runtime
 from . import _segmented_plan as _plan
 from . import _segmented_programs as _programs
@@ -164,10 +166,38 @@ def _materialize_planned_sum_host(
     warp_max_elements,
     cta_chunk_elements,
 ):
-    """Materialize the host plan without compiling or device allocation."""
+    """Materialize the identity-sum host plan without compiling."""
+    semantic = _programs._semantic_module("sum")
+    _, host_plan, target, schedule = _materialize_planned_host(
+        torch,
+        semantic,
+        host_offsets,
+        value_count,
+        segment_count,
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+    )
+    return semantic, host_plan, target, schedule
+
+
+def _materialize_planned_host(
+    torch,
+    semantic,
+    host_offsets,
+    value_count,
+    segment_count,
+    *,
+    warp_max_elements,
+    cta_chunk_elements,
+):
+    """Materialize one program's host plan without compiling or allocating.
+
+    Returns:
+        The parsed semantic module, the validated host plan, the CUDA
+        target, and the schedule recorded in each artifact's cache identity.
+    """
     native_swage = _native.load_extension(backend="cuda")
 
-    semantic = _programs._semantic_module("sum")
     module = _execution._emit_semantic_module(semantic)
     host_plan = _materialize_host_plan(
         native_swage,
@@ -184,12 +214,89 @@ def _materialize_planned_sum_host(
         "warp_max_elements": warp_max_elements,
         "cta_chunk_elements": cta_chunk_elements,
     }
-    return semantic, host_plan, target, schedule
+    return module, host_plan, target, schedule
 
 
-def _planned_sum_artifact_specs(host_plan, schedule):
-    """Describe the required artifacts in their compilation order."""
-    kernel_name = "segmented_sum"
+def _has_small_element_program(module):
+    """Conservatively bound work in already-admitted element regions."""
+    from mlir_swage import ir
+    from mlir_swage.dialects import arith, math, swage
+
+    cheap_operations = (
+        arith.AddFOp, arith.SubFOp, arith.MulFOp,
+        arith.MaximumFOp, arith.MinimumFOp,
+    )
+    work = 0
+    eligible = True
+
+    def inspect(operation):
+        nonlocal work, eligible
+        if not isinstance(operation.opview, (swage.MapOp, swage.ReduceOp)):
+            return ir.WalkResult.ADVANCE
+        for instruction in operation.regions[0].blocks[0].operations:
+            if isinstance(instruction, (arith.ConstantOp, swage.YieldOp)):
+                continue
+            # Relative work units calibrated on the held-out GPU benchmarks.
+            # They are a bounded heuristic, not instruction latency estimates.
+            if isinstance(instruction, cheap_operations):
+                work += 1
+            elif isinstance(instruction, math.Exp2Op):
+                work += 8
+            elif isinstance(instruction, arith.DivFOp):
+                work += 16
+            else:
+                eligible = False
+                return ir.WalkResult.INTERRUPT
+            if work > 32:
+                eligible = False
+                return ir.WalkResult.INTERRUPT
+        return ir.WalkResult.SKIP
+
+    with module.context:
+        module.operation.walk(inspect, ir.WalkOrder.PRE_ORDER)
+    return eligible
+
+
+def _selects_direct_cta(
+    torch, values, module, host_offsets, host_plan, cta_chunk_elements
+):
+    """Decide whether direct CTA work replaces split work for every segment."""
+    segment_count = len(host_offsets) - 1
+    max_length = max(
+        (end - begin for begin, end in pairwise(host_offsets)), default=0
+    )
+    # ponytail: a measured two-chunk rule, not a general cost model.
+    # Retain splitting for sparse batches, larger tails, or mixed lengths.
+    return (
+        segment_count > 0
+        and cta_chunk_elements == _CTA_CHUNK_ELEMENTS
+        and host_plan.merge_count == segment_count
+        and max_length <= 2 * cta_chunk_elements
+        and segment_count
+        >= torch.cuda.get_device_properties(
+            values.device
+        ).multi_processor_count
+        and _has_small_element_program(module)
+    )
+
+
+def _planned_sum_artifact_specs(
+    host_plan, schedule, *, kernel_name="segmented_sum", split=True
+):
+    """Describe the required artifacts in their compilation order.
+
+    Args:
+        host_plan: Validated host plan that decides the direct and split
+            artifacts.
+        schedule: Planning limits recorded in each artifact cache identity.
+        kernel_name: Name of the single semantic function.
+        split: Include split partial and merge kernels for long segments.
+            A preparation that selects direct CTA work for every segment
+            omits them.
+
+    Returns:
+        Pairs of artifact name and compile options, in compile order.
+    """
     specs = [
         (
             "warp",
@@ -224,7 +331,7 @@ def _planned_sum_artifact_specs(host_plan, schedule):
                 },
             )
         )
-    if host_plan.partial_count:
+    if host_plan.partial_count and split:
         specs.extend(
             (
                 (
@@ -258,7 +365,51 @@ def _prepare_planned_sum(
     warp_max_elements=32,
     cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
 ):
-    """Validate, compile, bind, and own one reusable segmented sum plan."""
+    """Prepare the canonical identity sum used by existing qualification."""
+    return _prepare_planned_reduction(
+        values,
+        offsets,
+        output,
+        module_text=_programs._semantic_module("sum"),
+        kernel_name="segmented_sum",
+        warp_max_elements=warp_max_elements,
+        cta_chunk_elements=cta_chunk_elements,
+        select_schedule=False,
+    )
+
+
+def _prepare_planned_reduction(
+    values,
+    offsets,
+    output,
+    *,
+    module_text,
+    kernel_name,
+    warp_max_elements=32,
+    cta_chunk_elements=_CTA_CHUNK_ELEMENTS,
+    select_schedule=True,
+):
+    """Prepare static policies for one private capture-free sum/max module.
+
+    Args:
+        values: Contiguous rank-one CUDA f32 input tensor.
+        offsets: Contiguous rank-one CUDA i32 segment offsets.
+        output: Disjoint contiguous CUDA f32 output, one value per segment.
+        module_text: Native qualification MLIR with the semantic program.
+        kernel_name: Name of its single semantic function.
+        warp_max_elements: Largest segment assigned to direct warp work.
+        cta_chunk_elements: Largest input range assigned to one CTA task.
+        select_schedule: Allow a conservative direct-CTA choice for batches
+            of moderately long segments with the default chunk size and at
+            most 32 relative units of element arithmetic work.
+
+    Returns:
+        The owned prepared execution. Its mixed launch runs the fused direct
+        kernel and ordered partial and merge launches for split work, or the
+        CTA launch when the preparation-time selection avoids splitting.
+    """
+    if type(select_schedule) is not bool:
+        raise TypeError("select_schedule must be a bool")
     torch = _runtime._import_torch()
     value_count, segment_count, host_offsets = _validation._validate_shapes(
         values, offsets, output, _validation._validate_offsets
@@ -267,17 +418,26 @@ def _prepare_planned_sum(
     if segment_count == 0:
         return _execution._PreparedSegmentedExecution(torch=torch)
 
-    semantic, host_plan, target, schedule = _materialize_planned_sum_host(
+    module, host_plan, target, schedule = _materialize_planned_host(
         torch,
+        module_text,
         host_offsets,
         value_count,
         segment_count,
         warp_max_elements=warp_max_elements,
         cta_chunk_elements=cta_chunk_elements,
     )
+    direct_cta = select_schedule and _selects_direct_cta(
+        torch, values, module, host_offsets, host_plan, cta_chunk_elements
+    )
+    specs = _planned_sum_artifact_specs(
+        host_plan, schedule, kernel_name=kernel_name, split=not direct_cta
+    )
     artifacts = {
-        name: _execution._compile_artifact(semantic, target=target, **kwargs)
-        for name, kwargs in _planned_sum_artifact_specs(host_plan, schedule)
+        name: _execution._compile_artifact(
+            module_text, target=target, **kwargs
+        )
+        for name, kwargs in specs
     }
 
     counts = {
@@ -311,6 +471,7 @@ def _prepare_planned_sum(
         host_plan,
         value_count=value_count,
         segment_count=segment_count,
+        split=not direct_cta,
     )
     for name, artifact in artifacts.items():
         actual_plan = prepared_plan.buffers
@@ -336,6 +497,7 @@ def _prepare_planned_sum(
         artifacts=artifacts,
         leases=leases,
         prepared_plan=prepared_plan,
+        direct_cta=direct_cta,
     )
 
 

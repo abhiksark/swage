@@ -1,5 +1,5 @@
-<!-- docs/adr/ADR-0019-compiler-generated-kernel-contracts.md -->
-# ADR-0019: Compiler-generated kernel launch contracts
+<!-- docs/adr/ADR-0025-compiler-generated-kernel-contracts.md -->
+# ADR-0025: Compiler-generated kernel launch contracts
 
 - Status: accepted
 - Date: 2026-09-04

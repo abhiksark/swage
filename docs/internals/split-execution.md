@@ -8,7 +8,8 @@ contracts; none of them is a public API.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
 [Verification](verification.md) and
-[ADR-0017](../adr/ADR-0017-private-split-cta-reductions.md).*
+[ADR-0017](../adr/ADR-0017-private-split-cta-reductions.md) and
+[ADR-0019](../adr/ADR-0019-composable-private-reductions.md).*
 
 Segments of at most 32 elements receive one direct warp descriptor. Segments
 from 33 through 4096 elements receive one direct CTA descriptor. A longer
@@ -22,8 +23,10 @@ The figure uses one oversized identity-sum segment over absolute input range
 writer. The merge record names segment 7 and compact scratch range `[0, 3)`,
 then one writer stores `output[7]`. Mixed execution submits direct fused work,
 partial CTAs, and merge CTAs in that order on the current stream, skipping any
-empty phase. This lifecycle is private identity-sum qualification only; it
-does not imply split max or split softmax.
+empty phase. This lifecycle supports private capture-free, single-stage f32
+sum and max, including fused map chains. Partial tasks evaluate the element
+program on input values; merges combine scratch using the reduction kind
+without reapplying that program. It does not support split softmax.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
@@ -55,8 +58,8 @@ If no split exists, the direct one-launch path remains unchanged. Exact
 all-one and tolerant nontrivial f32 cases match PyTorch and the
 sequential CPU oracle on NVIDIA RTX A6000 `sm_86`.
 
-Split execution does not implement packed warps, split max, split
-softmax, device queues, persistent scheduling, public segment syntax,
+Split execution does not implement packed warps, split softmax, captured
+stages, device queues, persistent scheduling, public segment syntax,
 or public segmented launch.
 
 Continue with [Verification](verification.md) for the executable

@@ -164,6 +164,9 @@ public:
     if (kind != SegmentedExecutionKind::Direct &&
         failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
+    if (kind == SegmentedExecutionKind::Persistent &&
+        failed(verifyPersistentProgram(analysis)))
+      return signalPassFailure();
     SegmentProgram program;
     detachSegmentProgram(analysis, program);
     buildGPUProgram(getOperation(), *function, analysis.roles, program,
@@ -214,7 +217,7 @@ public:
     return "swage-split-segmented-reduction-to-gpu";
   }
   StringRef getDescription() const final {
-    return "Lower one identity sum to a private split reduction stage";
+    return "Lower one capture-free sum or max to a private split stage";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {
@@ -230,7 +233,10 @@ public:
     if (failed(analyzeSegmentProgram(*function, analysis)) ||
         failed(verifyPlanningProgram(analysis)))
       return signalPassFailure();
-    buildSplitGPUProgram(getOperation(), *function, analysis.roles, merge);
+    SegmentProgram program;
+    detachSegmentProgram(analysis, program);
+    buildSplitGPUProgram(getOperation(), *function, analysis.roles,
+                         program.reductions.front(), merge);
   }
 
 private:
@@ -255,7 +261,7 @@ public:
 
   StringRef getArgument() const final { return "swage-to-plan"; }
   StringRef getDescription() const final {
-    return "Add runtime classification for one identity segmented sum";
+    return "Add runtime classification for one capture-free sum or max";
   }
 
   void getDependentDialects(DialectRegistry &registry) const final {

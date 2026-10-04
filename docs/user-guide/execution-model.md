@@ -44,24 +44,25 @@ A task is a unit that a runtime can schedule for a segment. One semantic
 segment may require one task or several tasks. A task can represent direct
 work, a chunk of a long segment, a partial result, or a merge.
 
-Current private identity-sum qualification derives:
+Current private single-stage sum/max qualification derives:
 
 - one direct warp task for a segment of at most 32 elements;
 - one direct CTA task for a segment from 33 through 4096 elements;
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
-The thresholds are configurable planning limits. Split work is current only
-for the private canonical identity sum. An experimental private resident
-kernel consumes these descriptors through device counters, but its clean
+The thresholds are configurable planning limits. Static work supports
+capture-free f32 sum/max programs and their fused element expressions. The
+experimental private resident kernel retains identity-sum admission and
+consumes these descriptors through device counters, but its clean
 A6000 run failed the predeclared performance gate. Packing several short
 segments in the static path,
-split max, split softmax, and public persistent scheduling remain future
+split softmax and public persistent scheduling remain future
 work.
 
 ## Tile: the physical step
 
 A tile is the fixed physical work shape used while lowering a task. In the
-current qualified identity-sum paths, a warp step uses 32 threads, a CTA
+current static reduction paths, a warp step uses 32 threads, a CTA
 step uses 128 threads, and a split partial or merge step uses 512 threads.
 The 4096-element CTA chunk limit is the number of input elements traversed
 by a task, not the number of threads.

@@ -8,6 +8,40 @@ import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
+from reduction_programs import reduction_module
+from swage._segmented_qualification import _has_small_element_program
+
+
+@pytest.mark.parametrize(
+    ("transform", "eligible"),
+    [
+        ("identity", True), ("square", True), ("maps", True),
+        ("affine4", True), ("affine32", True), ("exp2", True),
+        ("exp2_chain", False), ("rational8", False),
+    ],
+)
+def test_direct_cta_element_work_guard(transform, eligible):
+    """Inspect typed native element operations instead of matching text."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module("sum", transform))
+        assert _has_small_element_program(module) is eligible
+
+
+def test_direct_cta_work_budget_spans_maps_and_reduction():
+    """Individually small regions must share the per-element work budget."""
+    operations = []
+    value = "%value"
+    for index in range(31):
+        operations.append(f"%v{index} = arith.mulf {value}, %value : f32")
+        value = f"%v{index}"
+    operations.append(f"swage.yield {value} : f32")
+    text = reduction_module("sum", "maps").replace(
+        "swage.yield %value : f32", "\n      ".join(operations)
+    )
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        assert not _has_small_element_program(ir.Module.parse(text))
 
 
 def _contract(entry, block, arguments):
@@ -65,6 +99,110 @@ module {
   }
 }
 """
+
+
+@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("transform", ["identity", "square", "maps"])
+def test_static_schedules_share_reduction_program(kind, transform):
+    """One admitted program compiles unchanged through every static path."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module(kind, transform))
+        original = module.operation.get_asm(enable_debug_info=False)
+        assert native_swage._materialize_segmented_plan(
+            module,
+            offsets=[0, 1, 34, 4131],
+            value_count=4131,
+            segment_count=3,
+        ) == ([0], [1], [34, 4130, 4130, 4131], [2, 0, 2])
+        options = [
+            (
+                "_compile_segmented_reduction_ptx",
+                {"block_size": 32, "use_task_ids": True},
+            ),
+            (
+                "_compile_segmented_reduction_ptx",
+                {"block_size": 128, "use_task_ids": True},
+            ),
+            ("_compile_fused_segmented_reduction_ptx", {}),
+            ("_compile_split_partial_reduction_ptx", {}),
+            ("_compile_split_merge_reduction_ptx", {}),
+        ]
+        for name, arguments in options:
+            compiler = getattr(native_swage, name)
+            first = compiler(
+                module,
+                kernel_name=f"segmented_{kind}",
+                target="sm_86",
+                **arguments,
+            )
+            assert first == compiler(
+                module,
+                kernel_name=f"segmented_{kind}",
+                target="sm_86",
+                **arguments,
+            )
+            lowered, ptx, _ = first
+            merge = name == "_compile_split_merge_reduction_ptx"
+            assert ("llvm.fmul" in lowered) == (
+                transform != "identity" and not merge
+            )
+            assert "swage." not in lowered
+            assert ".entry segmented_" in ptx
+            assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+@pytest.mark.parametrize(
+    ("kind", "transform"),
+    [
+        ("sum", "square"),
+        ("sum", "maps"),
+        ("max", "identity"),
+        ("max", "square"),
+        ("max", "maps"),
+    ],
+)
+def test_persistent_admission_remains_identity_sum(kind, transform):
+    """Broadening static planning must not widen persistent execution."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module(kind, transform))
+        original = module.operation.get_asm(enable_debug_info=False)
+        with pytest.raises(ValueError, match="persistent execution"):
+            native_swage._compile_persistent_segmented_reduction_ptx(
+                module, kernel_name=f"segmented_{kind}", target="sm_86"
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+@pytest.mark.parametrize(
+    "compiler",
+    [
+        "_compile_segmented_reduction_ptx",
+        "_compile_fused_segmented_reduction_ptx",
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+    ],
+)
+def test_static_schedules_reject_stage_dependencies(compiler):
+    """Keep captured softmax stages out of every generalized static path."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(RAGGED_SOFTMAX)
+        original = module.operation.get_asm(enable_debug_info=False)
+        arguments = (
+            {"block_size": 32, "use_task_ids": True}
+            if compiler == "_compile_segmented_reduction_ptx"
+            else {}
+        )
+        with pytest.raises(ValueError, match="capture-free maps"):
+            getattr(native_swage, compiler)(
+                module,
+                kernel_name="ragged_softmax",
+                target="sm_86",
+                **arguments,
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
 
 
 def test_compiles_segmented_sum_to_deterministic_ptx():
@@ -393,20 +531,17 @@ def test_persistent_lowering_rejects_non_planning_program():
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
-def test_fused_mixed_lowering_rejects_non_planning_program():
-    """Fail before mutation when fused scheduling cannot preserve semantics."""
+def test_fused_mixed_lowering_accepts_element_program():
+    """Compile the element expression in both branches of the fused kernel."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-
-        with pytest.raises(ValueError, match="identity reduction region"):
-            native_swage._compile_fused_segmented_reduction_ptx(
-                module,
-                kernel_name="segmented_sum",
-                target="sm_80",
-            )
-
+        lowered, ptx, _ = native_swage._compile_fused_segmented_reduction_ptx(
+            module, kernel_name="segmented_sum", target="sm_80"
+        )
+        assert lowered.count("llvm.intr.exp2") == 2
+        assert "ex2.approx.f32" in ptx
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -544,20 +679,18 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
         "_compile_split_merge_reduction_ptx",
     ],
 )
-def test_split_lowering_rejects_non_identity_sum(compiler):
-    """Keep split execution restricted to the planning semantic shape."""
+def test_split_lowering_transforms_only_input_elements(compiler):
+    """Partial tasks evaluate the region; merges only combine scratch."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-
-        with pytest.raises(ValueError, match="identity reduction region"):
-            getattr(native_swage, compiler)(
-                module,
-                kernel_name="segmented_sum",
-                target="sm_80",
-            )
-
+        lowered, ptx, _ = getattr(native_swage, compiler)(
+            module, kernel_name="segmented_sum", target="sm_80"
+        )
+        partial = compiler == "_compile_split_partial_reduction_ptx"
+        assert ("llvm.intr.exp2" in lowered) == partial
+        assert ("ex2.approx.f32" in ptx) == partial
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -568,16 +701,16 @@ def test_split_lowering_rejects_non_identity_sum(compiler):
         "_compile_split_merge_reduction_ptx",
     ],
 )
-def test_split_lowering_rejects_max_and_unsupported_target(compiler):
-    """Keep split kernels on identity sum and explicitly supported GPUs."""
+def test_split_lowering_rejects_min_and_unsupported_target(compiler):
+    """Keep unsupported reduction kinds and targets outside split lowering."""
     with ir.Context() as context:
         swage.register_dialects(context)
-        maximum = ir.Module.parse(
-            SEGMENTED_SUM.replace("kind<sum>", "kind<max>")
+        minimum = ir.Module.parse(
+            SEGMENTED_SUM.replace("kind<sum>", "kind<min>")
         )
-        with pytest.raises(ValueError, match="planning requires kind<sum>"):
+        with pytest.raises(ValueError, match="supports only kind<sum>"):
             getattr(native_swage, compiler)(
-                maximum,
+                minimum,
                 kernel_name="segmented_sum",
                 target="sm_80",
             )
@@ -660,9 +793,9 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
                 cta_chunk_elements=32,
             )
 
-        transformed = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
+        transformed = ir.Module.parse(RAGGED_SOFTMAX)
         original = transformed.operation.get_asm(enable_debug_info=False)
-        with pytest.raises(ValueError, match="identity reduction region"):
+        with pytest.raises(ValueError, match="capture-free maps"):
             native_swage._materialize_segmented_plan(
                 transformed,
                 offsets=[0, 1],

@@ -91,6 +91,7 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 void detachSegmentProgram(SegmentProgramAnalysis &analysis,
                           SegmentProgram &program);
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis);
+LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis);
 
 Value evaluateElement(OpBuilder &builder, const ElementProgram &element,
                       Value value, ArrayRef<Value> reductions);
@@ -106,7 +107,8 @@ void buildGPUProgram(ModuleOp module, func::FuncOp source,
                      const SegmentProgram &program, int64_t blockSize,
                      SegmentedExecutionKind kind);
 void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
-                          const SemanticBufferRoles &roles, bool merge);
+                          const SemanticBufferRoles &roles,
+                          const ReductionStage &stage, bool merge);
 
 } // namespace mlir::swage::detail
 

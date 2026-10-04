@@ -33,3 +33,6 @@ site/
 
 # Swage artifacts
 .swage-cache/
+
+# Knowledge graph artifacts
+.understand-anything/

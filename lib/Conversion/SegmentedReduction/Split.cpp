@@ -55,7 +55,8 @@ getSplitKernelArguments(const SemanticBufferRoles &roles, bool merge) {
 } // namespace
 
 void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
-                          const SemanticBufferRoles &roles, bool merge) {
+                          const SemanticBufferRoles &roles,
+                          const ReductionStage &stage, bool merge) {
   // 512 threads per split CTA: wide enough to stream oversized
   // segments at memory bandwidth, still fully occupied by one 4096-element
   // chunk (8 elements per thread).
@@ -134,7 +135,7 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
         Value end = arith::IndexCastOp::create(
             body, bodyLoc, body.getIndexType(), loadRecord(rangeField + 1));
         Value first = arith::AddIOp::create(body, bodyLoc, begin, threadId);
-        Value identity = identityFor(body, bodyLoc, ReductionKind::Sum);
+        Value identity = identityFor(body, bodyLoc, stage.kind);
         auto local = scf::ForOp::create(
             body, bodyLoc, first, end, block, ValueRange(identity),
             [&](OpBuilder &loop, Location loopLoc, Value index,
@@ -144,12 +145,18 @@ void buildSplitGPUProgram(ModuleOp module, func::FuncOp source,
               Value address = LLVM::GEPOp::create(
                   loop, loopLoc, pointer, f32, entry->getArgument(0), index64);
               Value value = LLVM::LoadOp::create(loop, loopLoc, f32, address);
+              // Only input elements are transformed; scratch holds completed
+              // partial reductions and must never run the element program.
+              if (!merge)
+                value = evaluateElement(loop, stage.element, value, {});
               scf::YieldOp::create(loop, loopLoc,
-                                   combine(loop, loopLoc, ReductionKind::Sum,
+                                   combine(loop, loopLoc, stage.kind,
                                            accumulator.front(), value));
             });
         auto operation = gpu::AllReduceOperationAttr::get(
-            module.getContext(), gpu::AllReduceOperation::ADD);
+            module.getContext(), stage.kind == ReductionKind::Sum
+                                     ? gpu::AllReduceOperation::ADD
+                                     : gpu::AllReduceOperation::MAXIMUMF);
         Value total = gpu::AllReduceOp::create(
             body, bodyLoc, local.getResult(0), operation, true);
         Value firstThread = arith::CmpIOp::create(

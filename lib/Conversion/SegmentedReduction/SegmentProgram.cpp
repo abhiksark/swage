@@ -406,11 +406,11 @@ void detachSegmentProgram(SegmentProgramAnalysis &analysis,
   }
 }
 
-/// Accept only the private identity segmented-sum planning shape.
+/// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
-  if (!analysis.maps.empty())
-    return analysis.maps.front().emitError(
-        "planning does not support swage.map");
+  for (MapOp map : analysis.maps)
+    if (!map.getCaptures().empty())
+      return map.emitError("planning requires capture-free maps");
   for (ReduceOp reduction : analysis.reductions)
     if (!reduction.getCaptures().empty())
       return reduction.emitError("planning requires a capture-free reduction");
@@ -420,16 +420,26 @@ LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
   if (!analysis.mapStores.empty())
     return analysis.mapStores.front().emitError(
         "planning requires memref.store of the reduction result");
+  return success();
+}
+
+/// Persistent partials and merges still implement only identity sum.
+LogicalResult verifyPersistentProgram(SegmentProgramAnalysis &analysis) {
+  if (failed(verifyPlanningProgram(analysis)))
+    return failure();
+  if (!analysis.maps.empty())
+    return analysis.maps.front().emitError(
+        "persistent execution does not support swage.map");
 
   ReduceOp reduction = analysis.reductions.front();
   if (reduction.getKind() != ReductionKind::Sum)
-    return reduction.emitError("planning requires kind<sum>");
+    return reduction.emitError("persistent execution requires kind<sum>");
   Block &body = reduction.getBody().front();
   auto yield = cast<YieldOp>(body.getTerminator());
   if (!body.without_terminator().empty() ||
       yield.getValue() != body.getArgument(0))
     return reduction.emitError(
-        "planning requires an identity reduction region");
+        "persistent execution requires an identity reduction region");
   return success();
 }
 

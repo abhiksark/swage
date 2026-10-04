@@ -34,7 +34,7 @@ passes.
 | `--swage-fixed-block-to-host` | required positive `block-size` | Lower canonical fixed vector add or multiply to one sequential host call |
 | `--swage-segmented-reduction-to-scf` | none | Lower an admitted private segmented sum, max, or fused softmax program to sequential SCF and memref operations |
 | `--swage-segmented-reduction-to-gpu` | required positive `block-size`; optional `use-task-ids`; optional `fused-mixed` | Lower an admitted private segmented program to GPU form; fused mixed mode requires block size 128 |
-| `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for the canonical identity segmented sum |
+| `--swage-to-plan` | `warp-max-elements`, default 32; `cta-chunk-elements`, default 4096 | Add one private planning companion for a capture-free, single-stage f32 sum or max |
 
 Planning limits must satisfy:
 
@@ -49,8 +49,9 @@ task graph or inspect runtime offset contents.
 ## Private compiler factories
 
 Native runtime code also constructs split partial and split merge lowering
-passes directly. These factories admit only the private split identity-sum
-shape and emit 512-thread partial or merge kernels. They are intentionally
+passes directly. These factories admit private capture-free, single-stage
+f32 sum/max programs with optional map chains and emit 512-thread partial or
+merge kernels. They are intentionally
 not registered as `swage-opt` arguments.
 
 The driver and passes expose the tested compiler surface, not a general

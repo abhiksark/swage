@@ -1,0 +1,266 @@
+<!-- docs/language/swage-ir.md -->
+
+# Swage Textual IR
+
+Textual MLIR is useful for native tests, debugging, and minimal reproducers.
+The Python JIT constructs MLIR directly through native bindings; it does not
+use textual IR as an intermediate representation. See the
+[Compiler Pipeline](../internals/compiler-pipeline.md) for that frontend boundary.
+
+This page describes the syntax and verifier contracts of the
+[Swage Dialect](../internals/swage-dialect.md). Dialect parsing and verification
+accept more shapes than the currently admitted public and private lowerings.
+A valid module here is not a promise of execution support; the
+[Compiler Pipeline](../internals/compiler-pipeline.md) describes those boundaries.
+
+## The segment type
+
+`!swage.segment<T>` is a symbolic handle for one runtime-sized, internally
+dense segment. `T` must be an integer or floating-point type, such as `i32`,
+`f16`, `bf16`, or `f32`.
+
+The type carries only the element type: no length, values buffer, offsets
+array, or segment identity. The SSA value produced by `swage.make_segment`
+carries those runtime relationships. A segment is never a runtime-sized
+register array, and constructing its handle does not materialize its data.
+
+## A complete module
+
+The following module starts with the coordinate, segment construction, and
+extent forms in
+[`test/Dialect/Swage/roundtrip.mlir`](https://github.com/abhiksark/swage/blob/main/test/Dialect/Swage/roundtrip.mlir),
+then adds a map, reduction, and terminal store. It uses every current Swage
+operation. The output buffer must not alias the values buffer.
+
+```mlir
+module {
+  func.func @fixed_program_coordinate() -> index {
+    %pid = swage.program_id 0
+    return %pid : index
+  }
+
+  func.func @segment_walkthrough(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %scale: f32) -> index {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %values, %offsets, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %length = swage.extent %segment : !swage.segment<f32>
+    %scaled = swage.map %segment captures(%scale : f32)
+        : !swage.segment<f32> -> !swage.segment<f32> {
+    ^bb0(%element: f32, %factor: f32):
+      %product = arith.mulf %element, %factor : f32
+      swage.yield %product : f32
+    }
+    %total = swage.reduce %scaled kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%element: f32):
+      swage.yield %element : f32
+    }
+    swage.map_store %scaled, %output captures(%total : f32)
+        : !swage.segment<f32>, memref<?xf32> {
+    ^bb0(%element: f32, %sum: f32):
+      %result = arith.addf %element, %sum : f32
+      swage.yield %result : f32
+    }
+    return %length : index
+  }
+}
+```
+
+Read the SSA data flow in source order:
+
+1. `%pid` is a logical fixed-block coordinate in the first function, not a
+   physical GPU block or thread identifier.
+2. In the second function, `%sid` selects the slice
+   `values[offsets[sid] : offsets[sid + 1]]`. The explicit values, offsets,
+   and ID operands connect `%segment` to that runtime data.
+3. `%length` is the runtime element count. It remains an `index` SSA value,
+   not a parameter of `!swage.segment<f32>`.
+4. `%scaled` is another symbolic segment. Its region receives one element
+   and the explicit `%scale` capture as `%factor`, then yields their product.
+5. `%total` is a scalar sum of the scaled elements. The reduction region
+   yields each element unchanged; `kind<sum>` supplies the combining rule.
+6. `swage.map_store` captures `%total` and writes each scaled element plus
+   that total into the segment's corresponding output range. This is the
+   terminal write, not a new segment result. The function returns `%length`.
+
+`arith.mulf` and `arith.addf` are upstream MLIR operations. Swage supplies
+segment semantics rather than duplicating ordinary scalar arithmetic.
+
+## Operations
+
+These forms use concrete element types. Other integer or floating-point
+types are accepted where the operation's type constraints allow them; this
+does not imply that every such type has an admitted lowering.
+
+### `swage.program_id`
+
+```mlir
+%pid = swage.program_id 0
+```
+
+The form is `%pid = swage.program_id <axis>`, where `<axis>` is a
+nonnegative `i32` attribute, not an SSA operand. The result is `index`.
+It identifies the current logical fixed-block program along that axis,
+never a physical GPU block or thread.
+
+### `swage.segment_id`
+
+```mlir
+%sid = swage.segment_id 0
+```
+
+The form is `%sid = swage.segment_id <axis>`. Like `program_id`, its axis
+is a nonnegative `i32` attribute and its result is `index`. It identifies
+the logical segment on the given logical grid axis. Dialect acceptance
+does not guarantee a lowering for every axis.
+
+### `swage.make_segment`
+
+```mlir
+%segment = swage.make_segment %values, %offsets, %sid
+    : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+```
+
+The operands are values, offsets, and segment ID, in that order. Their
+types are explicit, followed by `-> !swage.segment<T>`:
+
+- Both buffers must be rank-one memrefs.
+- Offsets must have a signless integer element type.
+- The segment ID must have type `index`.
+- The values buffer's element type must equal the result segment's
+  element type.
+
+The handle denotes `values[offsets[id] : offsets[id + 1]]`. This operation
+binds those runtime relationships without materializing or copying data.
+
+### `swage.extent`
+
+```mlir
+%length = swage.extent %segment : !swage.segment<f32>
+```
+
+The general form is `%length = swage.extent %segment : !swage.segment<T>`.
+Its `index` result is the runtime length
+`offsets[id + 1] - offsets[id]`, which may be zero.
+
+### `swage.map`
+
+```mlir
+%mapped = swage.map %segment captures(%scale, %bias : f32, f64)
+    : !swage.segment<f32> -> !swage.segment<f64> {
+^bb0(%element: f32, %factor: f32, %shift: f64):
+  %product = arith.mulf %element, %factor : f32
+  %wide = arith.extf %product : f32 to f64
+  %result = arith.addf %wide, %shift : f64
+  swage.yield %result : f64
+}
+```
+
+`map` applies its region to each input element and produces another
+symbolic segment. The optional `captures(values : types)` clause appears
+before the segment and result types; omit the clause when there are no
+captures.
+
+The single-block region is isolated from above: it cannot refer directly
+to outer SSA values. Its block arguments must be the input element,
+followed by one argument per capture in operand order, with matching
+types. Captures are integer or floating-point scalars, not segment or
+buffer handles.
+
+The region must terminate with `swage.yield`. The yielded type must equal
+the result segment's element type, so a map may change element type, as
+the `f32` to `f64` example does. An empty input maps to an empty segment.
+
+### `swage.reduce`
+
+```mlir
+%total = swage.reduce %segment captures(%bias : f32) kind<sum>
+    : !swage.segment<f32> -> f32 {
+^bb0(%element: f32, %shift: f32):
+  %adjusted = arith.addf %element, %shift : f32
+  swage.yield %adjusted : f32
+}
+```
+
+The optional capture clause follows the segment operand, before the
+required `kind<sum>`, `kind<max>`, or `kind<min>`. The single-block,
+isolated region receives the input element followed by explicit scalar
+captures in operand order, with matching types, just as for `map`.
+
+The region is a **per-element transform**, not a generic two-argument
+combiner or an accumulator loop. The kind combines its yielded values.
+`swage.yield` must terminate the region, and its type must equal the
+integer or floating-point scalar result type.
+
+For an empty segment, the result is the kind's identity:
+
+- `sum`: zero.
+- `max`: negative infinity for floating-point values, or the minimum
+  integer for the integer type.
+- `min`: positive infinity for floating-point values, or the maximum
+  integer for the integer type.
+
+### `swage.map_store`
+
+```mlir
+swage.map_store %segment, %output captures(%total : f32)
+    : !swage.segment<f32>, memref<?xf32> {
+^bb0(%element: f32, %sum: f32):
+  %result = arith.addf %element, %sum : f32
+  swage.yield %result : f32
+}
+```
+
+The operands are the segment and a rank-one output memref, followed by
+optional `captures(values : types)`. The single-block region is isolated
+and receives the input element followed by captures in operand order,
+with matching types. Captures are integer or floating-point scalars.
+The region must terminate with `swage.yield`, whose type must match the
+output buffer's integer or floating-point element type.
+
+This terminal operation has no SSA result. It writes the per-element
+results only to the segment's corresponding output range,
+`output[offsets[id] : offsets[id + 1]]`. An empty segment writes nothing.
+The explicit write effect on the output keeps the operation alive under
+dead-code elimination.
+
+The output buffer must not alias the segment's values buffer. This is a
+runtime obligation, not something dialect type verification proves.
+
+### `swage.yield`
+
+```mlir
+swage.yield %result : f32
+```
+
+`yield` takes exactly one integer or floating-point value with an explicit
+type. It is valid only as the terminator of a `swage.map`, `swage.reduce`,
+or `swage.map_store` region. The parent operation checks that the yielded
+type matches its result segment element, scalar result, or output buffer
+element, respectively.
+
+## Design rules
+
+- **Runtime identity stays in SSA values, not types.**
+  `!swage.segment<T>` describes elements, while `swage.make_segment`
+  connects a handle to values, offsets, and an ID. Runtime length never
+  becomes a runtime-sized register array.
+- **Semantic coordinates are logical.** Physical GPU thread and block
+  IDs do not belong in semantic Swage IR.
+- **Regions are isolated and captures are explicit.** Integer or
+  floating-point scalar captures follow the element block argument in
+  operand order; argument and yield types must agree with the parent
+  operation's contract.
+- **Reuse upstream dialects.** Ordinary arithmetic, memory operations,
+  and backend work belong to upstream MLIR dialects, not duplicate Swage
+  operations.
+- **The terminal store owns the write.** `swage.map_store` is the only
+  Swage operation with its own memory effect. `map` and `reduce` track
+  nested operations' memory effects recursively.
+
+For exhaustive operand and trait tables, use the generated
+[Swage Dialect reference](../internals/swage-dialect.md). For `swage-opt`
+and the registered pass surface, continue with
+[Compiler Tools and Passes](../internals/compiler-tools.md).

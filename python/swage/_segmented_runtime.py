@@ -121,6 +121,7 @@ class _PreparedSegmentedExecution:
         "cta_tasks",
         "partial_tasks",
         "merge_tasks",
+        "direct_cta",
     )
 
     def __init__(
@@ -134,6 +135,7 @@ class _PreparedSegmentedExecution:
         leases=None,
         prepared_plan=None,
         resident_blocks=0,
+        direct_cta=False,
     ):
         self._torch = torch
         self._values = values
@@ -193,6 +195,9 @@ class _PreparedSegmentedExecution:
         self.cta_tasks = self._counts.get("cta_task_count", 0)
         self.partial_tasks = self._counts.get("partial_task_count", 0)
         self.merge_tasks = self._counts.get("merge_task_count", 0)
+        # Preparation selected direct CTA work for every segment: mixed
+        # execution is the CTA launch, and no split kernel was compiled.
+        self.direct_cta = direct_cta
 
     def __del__(self):
         for lease in self._leases.values():
@@ -202,7 +207,7 @@ class _PreparedSegmentedExecution:
         if self._device_index is None:
             return None
         if self._torch.cuda.current_device() != self._device_index:
-            label = "persistent sum" if persistent else "sum"
+            label = "persistent sum" if persistent else "reduction"
             raise ValueError(
                 f"prepared {label} must launch on its prepared device"
             )
@@ -252,6 +257,8 @@ class _PreparedSegmentedExecution:
         return None
 
     def launch_mixed(self):
+        if self.direct_cta:
+            return self.launch_cta()
         if self._device_index is None:
             return None
         stream = self._current_stream()
