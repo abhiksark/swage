@@ -336,10 +336,18 @@ def test_persistent_kernel_is_not_cached_for_a_clean_child_process(
             print(error)
         """
     )
-    root = pathlib.Path(__file__).parents[3]
+    # The child imports the swage and the bindings this process imported,
+    # wherever the build that holds the bindings is.
+    import swage
+    from mlir_swage import _mlir_libs
+
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join(
-        (str(root / "python"), str(root / "build" / "python_packages"))
+        (
+            # Not resolved: the build tree links its packages into place.
+            str(pathlib.Path(os.path.abspath(swage.__file__)).parents[1]),
+            str(pathlib.Path(os.path.abspath(_mlir_libs.__file__)).parents[2]),
+        )
     )
     environment["SWAGE_CACHE_DIR"] = str(cache_dir)
     environment["SWAGE_NO_COMPILE"] = "1"

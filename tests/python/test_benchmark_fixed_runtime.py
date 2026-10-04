@@ -31,7 +31,7 @@ def _evidence():
             # Each size sits exactly at its ratio ceiling.
             "throughput": {
                 str(n): {"swage_us": [swage] * 100, "torch_us": [10.0] * 100}
-                for n, swage in ((1 << 18, 18.5), (1 << 20, 15.0))
+                for n, swage in ((1 << 18, 18.0), (1 << 20, 15.0))
             },
         },
     }
@@ -45,7 +45,7 @@ def test_inclusive_threshold_equality_passes(slo_harness):
     assert {
         n: gate["maximum_ratio"]
         for n, gate in record["gates"]["throughput"].items()
-    } == {"262144": 1.85, "1048576": 1.50}
+    } == {"262144": 1.80, "1048576": 1.50}
     assert record["valid"] and record["passed"]
 
 
@@ -64,7 +64,7 @@ def test_exceeding_one_threshold_fails_the_record(slo_harness, gate):
     elif gate == "memory":
         raw["cold"][-1]["rss_delta_bytes"] += 1
     elif gate == "throughput_262144":
-        raw["throughput"]["262144"]["swage_us"] = [18.501] * 100
+        raw["throughput"]["262144"]["swage_us"] = [18.001] * 100
     else:
         raw["throughput"]["1048576"]["swage_us"] = [15.001] * 100
     assert not slo_harness.evaluate(record)

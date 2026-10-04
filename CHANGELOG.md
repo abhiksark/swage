@@ -206,9 +206,11 @@ semantic versioning (`0.x`; anything may change).
   Swage alone against the cached Release LLVM.
 - ADR-0025 records the compiler-generated kernel launch contracts; ADR-0019
   keeps the composable private reductions.
-- `benchmarks/results/fixed-runtime-gate-a6000-sm86.json` and its page hold
-  the alternating runs of the release benchmark command behind the
-  recalibrated `2^18` throughput ceiling.
+- `benchmarks/results/fixed-runtime-gate-a6000-sm86-0ea2a78.json` and its
+  page hold the alternating runs of the release benchmark command behind
+  the current `2^18` throughput ceiling. They supersede
+  `fixed-runtime-gate-a6000-sm86.json` and its page, which hold the first
+  recalibration and the evidence that the earlier ceiling no longer held.
 
 ### Changed
 
@@ -303,6 +305,8 @@ semantic versioning (`0.x`; anything may change).
   importable.
 - `SWAGE_ORACLE_BUILD_DIR` names the build directory of the private CPU
   oracle, for a `swage` that is not imported from a checkout.
+  `check-swage-python` sets it to its own build directory, so the target
+  runs from a build outside the checkout.
 - Benchmarks: `swage_public_call` in the fresh-offsets harness times the
   public call itself. No record holds it yet.
 - A segment function declares its arguments with `swage.role`, in any order,
@@ -566,18 +570,19 @@ semantic versioning (`0.x`; anything may change).
 - The native wheel holds `swage/_autograd.py`, and the wheel checker
   requires it.
 - The release gate on the Swage/PyTorch median throughput ratio at `2^18`
-  elements is 1.85 instead of 1.50. At that size PyTorch's add takes about
+  elements is 1.80 instead of 1.50. At that size PyTorch's add takes about
   2.9 microseconds, less than one Swage launch, so the ratio measures the
   host cost of a launch. In alternating runs of the release command on the
-  RTX A6000 host, main's own wheel measured 1.60 to 1.64 and failed 1.50 in
-  all 18 runs, a clean build of `b7ce907`, which set 1.50, measured 1.48 to
-  1.50, and this tree's wheel measured 1.71 to 1.74. This tree adds 0.34
-  microseconds per launch over main; the version counter advance that every
-  launch now makes for autograd correctness takes 0.135 microseconds of it.
-  The ceiling is the smallest multiple of 0.05 at least 5% above the largest
-  ratio of this tree's wheel; it fails a launch slower than 5.45
-  microseconds, 7% above this tree's median of 5.07. The `2^20` ceiling and
-  the other gates are unchanged, and every wheel passed them.
+  RTX A6000 host, main's own wheel measured 1.57 to 1.64 and failed 1.50 in
+  all 30 runs of the two calibration records, a clean build of `b7ce907`,
+  which set 1.50, measured 1.48 to 1.50, and this tree's wheel measured
+  1.64 to 1.70. This tree adds 0.155 microseconds per launch over main; the
+  version counter advance that every launch now makes for autograd
+  correctness takes 0.135 microseconds of it. The ceiling is the smallest
+  multiple of 0.05 at least 5% above the largest ratio of this tree's wheel;
+  it fails a launch slower than 5.35 microseconds, 8% above this tree's
+  median of 4.95. The `2^20` ceiling and the other gates are unchanged, and
+  every wheel passed them.
 
 ### Removed
 

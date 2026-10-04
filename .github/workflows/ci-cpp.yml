@@ -173,10 +173,9 @@ jobs:
       # The whole native suite runs against the installed wheel, from a copy
       # of the tests and of the repository files they read, so only the
       # installed packages can be imported. The private CPU oracle runs
-      # swage-opt and the LLVM runner, which the wheel does not hold; it
-      # looks for a build directory two levels above the swage package, so
-      # the build of this job is linked there for its tools. Every CUDA test
-      # skips on this runner.
+      # swage-opt and the LLVM runner, which the wheel does not hold, so
+      # SWAGE_ORACLE_BUILD_DIR names the build of this job for its tools.
+      # Every CUDA test skips on this runner.
       - name: Run the native suite against the installed wheel
         working-directory: ${{ runner.temp }}
         env:
@@ -193,9 +192,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/docs/internals/segmented-reductions.md" \
             "$proof/docs/internals/"
           cp "$GITHUB_WORKSPACE/benchmarks/distributions.py" "$proof/benchmarks/"
-          root="$("$python" -c \
-            'import pathlib, swage; print(pathlib.Path(swage.__file__).resolve().parents[2])')"
-          ln -s "$SWAGE_BUILD_DIR" "$root/build"
+          export SWAGE_ORACLE_BUILD_DIR="$SWAGE_BUILD_DIR"
           cd "$proof"
           "$python" - "$GITHUB_SHA" <<'PY'
           import pathlib

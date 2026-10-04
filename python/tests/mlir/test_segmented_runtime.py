@@ -5,7 +5,6 @@ import dataclasses
 import functools
 import gc
 import os
-import pathlib
 import re
 import threading
 import weakref
@@ -910,18 +909,29 @@ def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
-def _checkout_build():
-    """Return the build directory beside the imported `swage` checkout."""
-    return pathlib.Path(_oracle.__file__).resolve().parents[2] / "build"
+def test_cpu_oracle_takes_its_build_directory_from_the_checkout(
+    tmp_path, monkeypatch
+):
+    """Without the variable, use `build` beside the imported package.
 
-
-def test_cpu_oracle_takes_its_build_directory_from_the_checkout(monkeypatch):
-    """Without the variable, use `build` beside the imported package."""
+    The checkout is a stand-in, so the test does not depend on where the
+    build of this run is: `check-swage-python` names it with the variable.
+    """
+    checkout = tmp_path / "checkout"
+    build = checkout / "build"
+    (build / "bin").mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text("")
+    (build / "bin" / "swage-opt").write_text("")
+    monkeypatch.setattr(
+        _oracle,
+        "__file__",
+        str(checkout / "python" / "swage" / "_segmented_oracle.py"),
+    )
     monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
-    assert _oracle._oracle_build() == _checkout_build()
+    assert _oracle._oracle_build() == build
 
     monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", "")
-    assert _oracle._oracle_build() == _checkout_build()
+    assert _oracle._oracle_build() == build
 
 
 def test_cpu_oracle_takes_its_build_directory_from_the_environment(
@@ -933,7 +943,7 @@ def test_cpu_oracle_takes_its_build_directory_from_the_environment(
     The named directory here holds a `swage-opt` that records its use and
     then runs the real one, so the test shows which tool the oracle ran.
     """
-    real = _checkout_build()
+    real = _oracle._oracle_build()
     named = tmp_path / "another-build"
     (named / "bin").mkdir(parents=True)
     (named / "CMakeCache.txt").write_text((real / "CMakeCache.txt").read_text())
