@@ -88,6 +88,27 @@ module {
 }
 """
 
+# The storage types of a fixed elementwise kernel.
+_FIXED_ELEMENTS = ("f32", "f16", "f8E4M3FN", "f8E5M2")
+
+
+def _fixed_elementwise(operation, element):
+    """Return the fixed vector program of one operation and storage type.
+
+    Args:
+        operation: "add" or "multiply".
+        element: An MLIR float type in `_FIXED_ELEMENTS`.
+
+    Returns:
+        The text of `_FIXED_VECTOR_ADD` with that operation and element type.
+    """
+    text = _FIXED_VECTOR_ADD.replace("f32", element)
+    if operation == "multiply":
+        text = text.replace("@add_kernel", "@multiply_kernel")
+        text = text.replace("arith.addf", "arith.mulf")
+    return text
+
+
 # The schedules of a planned reduction: the variant name, the native compile
 # function, and its options. The direct kernel is compiled at the block
 # width of a CTA task and at the widest tile the split stages use, and the
@@ -160,6 +181,19 @@ def _programs():
             _PROCESSORS,
         ),
     }
+    # The other fixed elementwise kernels: the multiply, and both operations
+    # on half and on the two eight-bit float formats, which are stored in
+    # their own width and computed in f32.
+    for operation in ("add", "multiply"):
+        for element in _FIXED_ELEMENTS:
+            if (operation, element) == ("add", "f32"):
+                continue
+            programs[f"fixed-{operation}-{element}"] = (
+                _fixed_elementwise(operation, element),
+                f"{operation}_kernel",
+                (("block-128", "_compile_ptx", {"block_size": 128}),),
+                _NEWER_PROCESSORS,
+            )
     for kind, transform, element, processors in _REDUCTIONS:
         variants = _REDUCTION_VARIANTS
         # The persistent queue admits the f32 identity sum only.
