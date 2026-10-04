@@ -27,8 +27,8 @@ work.
 git clone https://github.com/abhiksark/swage
 cd swage
 
-python -m pip install -e ".[dev]"
-PYTHONPATH="$PWD/python" python -m pytest tests/python -q
+python -m pip install -e ".[dev]" -Cwheel.cmake=false
+python -m pytest tests/python -q
 ruff check .
 
 ./scripts/fetch_llvm.sh
@@ -36,7 +36,9 @@ ruff check .
 ./scripts/build_swage.sh
 ```
 
-See [`docs/getting-started/installation.md`](docs/getting-started/installation.md)
+`-Cwheel.cmake=false` installs the frontend without a native build, so the
+first two commands need no LLVM. See
+[`docs/getting-started/installation.md`](docs/getting-started/installation.md)
 for prerequisites, build overrides, and the published-package boundary. The
 native build needs the MLIR Python binding requirements installed after
 `fetch_llvm.sh` and before `build_llvm.sh`; that page lists them and gives
@@ -51,9 +53,12 @@ gives the command that regenerates the file.
 
 ## Native Python bindings
 
-The `swage-compiler` wheel contains only the pure Python `swage` package. The
-native `mlir_swage` package is a build-tree artifact and native wheel
-packaging is deferred. A native build contains third-party code;
+The `swage-compiler` distribution is built as one native wheel per CPython
+version. The wheel holds the `swage` package, the `mlir_swage` bindings, and
+the native runtime library. The source distribution and a frontend-only
+editable install stay CMake-free. The release on PyPI, 0.5.1, is pure
+Python; the native wheel of 0.5.2 is not released yet. A native build
+contains third-party code;
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists it and must go with
 any copy of the build that leaves the machine that built it.
 
@@ -65,30 +70,52 @@ This target supplies `build/python_packages` on `PYTHONPATH`. The selected
 pinned MLIR install must include Python bindings. CMake fails if native
 bindings are enabled against an incompatible install.
 
+To build a local wheel the way the `build-and-test` job of `ci-cpp.yml`
+does, install the hash-locked tools and build from a clean checkout against
+the pinned LLVM install:
+
+```bash
+python -m pip install --require-hashes -r requirements-ci.txt
+llvm="$HOME/.swage/llvm/install-$(cat cmake/llvm-version.txt)"
+python -m build --wheel --no-isolation --outdir dist \
+  -Cbuild-dir=build-wheel \
+  -Ccmake.define.MLIR_DIR="$llvm/lib/cmake/mlir" \
+  -Ccmake.define.LLVM_DIR="$llvm/lib/cmake/llvm" \
+  -Ccmake.define.SWAGE_SOURCE_REVISION="$(git rev-parse HEAD)" \
+  -Ccmake.define.SWAGE_SOURCE_CLEAN=true
+```
+
+`SWAGE_SOURCE_CLEAN=true` states that the tree matches the revision; a
+build from a modified tree passes `false`. Such a wheel is tagged
+`linux_x86_64` and is for local use; the release wheels are repaired to
+manylinux_2_28 by `publish-pypi.yml`.
+
 ## Contributor paths
 
 - Documentation: fix incorrect boundaries before improving presentation. Run
   `make docs`, which checks the diagrams and figures, builds the site
   strictly, and checks its links, and `ruff check .`.
 - Public Python frontend: work under `python/swage/`. The accepted AST is a
-  narrow fixed-vector-add contract, and the public API adds two segmented
-  calls with fixed programs. Run the Python tier and native binding
+  narrow contract for canonical fixed vector add and multiply, and the
+  public API adds two segmented calls with fixed programs. Run the Python tier and native binding
   integration when emission changes.
 - Native dialects and lowering: work under `include/swage/`, `lib/`, and
   `test/`. Run `ninja -C build check-swage`; run C++ or binding targets when
   their code changes.
-- Runtime: public execution is canonical fixed vector add and the two
-  segmented calls, `swage.segment_reduce` and `swage.segment_softmax`. The
-  helpers behind those calls are private qualification. Runtime changes
+- Runtime: public execution is canonical fixed vector add and multiply on
+  the Native CPU and CUDA backends, and the two segmented calls,
+  `swage.segment_reduce` and `swage.segment_softmax`, on CUDA. The helpers
+  behind those calls are private qualification. Runtime changes
   require the hosted tests and, where CUDA behavior changes, trusted GPU
   evidence.
 - Benchmarks: preserve frozen inputs and gates, and never overwrite a record
   under `benchmarks/results/`. Prepare outside timing, except in a benchmark
   that deliberately times preparation to measure per-layout cost
   (`benchmarks/benchmark_fresh_offsets.py`). Repeat a configuration in
-  independent processes with `benchmarks/benchmark_processes.py`, which
-  writes to a directory outside the checkout, and commit raw evidence with
-  the exact hardware and revision.
+  independent processes with `benchmarks/run_triton_comparison_campaign.py`
+  (`--harness` names the harness and `--repetitions` the number of
+  processes), which writes to a directory outside the checkout, and commit
+  raw evidence with the exact hardware and revision.
 
 Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
 use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and

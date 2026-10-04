@@ -36,7 +36,7 @@ three parts:
 The older record is what it is: a comparison with a Triton kernel that
 provisions one block for the longest segment, and with a matched planned
 scheduler, at an older revision. Its tables are kept below unchanged. The
-newer record repeats the comparison at the current revision with baselines
+newer record repeats the comparison at revision `453c56e` with baselines
 that do not provision for the longest segment. Where the two disagree, the
 newer one describes the current code and the stronger baselines.
 
@@ -278,6 +278,12 @@ The Swage policies and the PyTorch baselines of the same run:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-frozen-swage.inc"
 
+The padded column is the `torch_padded` baseline of revision `453c56e`,
+which multiplied the padded matrix by its mask and allocated its output
+inside the timed launch. The `torch_padded` of the current comparison
+harness sums the padded rows into a preallocated output, so its times are
+not comparable with this column.
+
 Against the looped Triton kernel, with the range of the ratio across the
 five processes and the number of the 15 configurations that are faster than
 the Swage mixed policy:
@@ -369,11 +375,15 @@ fresh-offsets runs that [Benchmarks](benchmarks.md) reports:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-reproduce.inc"
 
-The driver passes `--output` to each process itself, writes one record per
-process, and summarizes the per-process medians.
-[Benchmarks](benchmarks.md#independent-processes) describes the summary. A
-rerun is a new measurement: it must not write into `benchmarks/results/`,
-and the committed records are not replaced by it.
+The block shows the driver of revision `453c56e`, as the record states it;
+the current tree replaces that driver with
+`benchmarks/run_triton_comparison_campaign.py`, and an exact rerun needs
+that revision. Each driver passes `--output` to each process itself, writes
+one record per process, and summarizes the per-process medians.
+[Benchmarks](benchmarks.md#independent-processes) describes the current
+driver and its summary. A rerun is a new measurement: it must not write
+into `benchmarks/results/`, and the committed records are not replaced by
+it.
 
 The `80f222d` record is the output of one process of
 `benchmarks/benchmark_triton_comparison.py` at that commit. It records 25
@@ -383,9 +393,16 @@ bit from the current tree.
 
 For publishable evidence, run on an idle or exclusively allocated GPU,
 retain the complete raw JSON of every process, and report the clock and
-power policy. A matched one-launch fused Triton variant remains future
-work; the current planned Triton paths use separate packed-warp and CTA
-launches.
+power policy.
+
+The planned Triton baselines of both records use separate packed-warp and
+CTA launches. The current comparison harness also holds a one-launch
+variant, `triton_fused`. It takes the task lists of the matched planned
+baseline and launches one grid: each of the first programs sums four packed
+short tasks with 32 of its 128 lanes each, and each later program sums one
+longer task in 128-lane strides of at most 4,096 elements, with four warps.
+A row whose longest segment exceeds 4,096 elements skips it. No committed
+record holds `triton_fused`, so this page reports no result for it.
 
 This is the last page of the internals section. Continue with the
 [ADR Index](../decisions/index.md) for the decisions behind each boundary.

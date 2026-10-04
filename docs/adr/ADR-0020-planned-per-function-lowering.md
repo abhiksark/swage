@@ -1197,3 +1197,39 @@ Each question was answered as recommended.
 12. Name of the C getter: recommended is the neutral
     `swageGetTargetDescription` returning the one record. That keeps a
     vendor name out of the C API without adding a second target.
+
+## Amendment: launch binding under ADR-0025
+
+- Date: 2026-10-04
+
+The kernel parameter lists in the table under "How the ABI is fixed" are
+unchanged. `kernelLayout` in
+`include/swage/Dialect/SwagePlan/IR/KernelLayout.h` still gives the six
+layouts of its rows, in the same order. Two layouts were added beside them
+later: the column kernel of rank-two values, which takes `feature_count`
+after `segment_count`, and a split merge that also reads the range records
+of the partial tasks.
+
+The launch sites have changed. The host no longer passes positional groups
+of pointers and counts: the launch tuples of `_segmented_qualification.py`,
+the slicing helpers of `_CudaDriver`, and `launchKernel` of the nanobind
+extension are gone. `--swage-plan-to-gpu` attaches to every planned kernel
+the version 2 launch contract of
+[ADR-0025](ADR-0025-compiler-generated-kernel-contracts.md), built from the
+kernel layout, as the attribute `swage.kernel_contract`. The host binds
+every planned launch through that contract:
+
+- `_segmented_runtime._user_arguments` orders the buffers and counts by the
+  `swage.role` of each parameter of the program.
+- `_segmented_runtime._bind` passes them, with the derived counts and the
+  plan and scratch pointers by contract key, to
+  `_abi.bind_kernel_contract`.
+- `_CudaDriver.launch_entry` in `_cuda_backend.py` checks a contract once,
+  keeps the result by the identity of the contract, and checks the
+  argument kinds and the grid of every launch against it.
+
+The launch-site column of the table, and the launch tuples and
+`_CudaDriver` slices named under "Private ABI changes and launch-site
+consequences", therefore describe the code at the time of this decision.
+The amendment of ADR-0025 states the contract keys of the segmented
+arguments.

@@ -69,7 +69,7 @@ last one minus the begin of the first. The two records are addressed
 through the range of partials after its clamp to `partial_count`, so a
 stray merge record reads no range record outside the buffer, and an empty
 range of partials reads none and has the extent zero. No existing kernel,
-record, or launch tuple changed for this: the kernels of a sum, a maximum,
+record, or launch contract changed for this: the kernels of a sum, a maximum,
 and a minimum keep the merge ABI above.
 
 Both kernels use 512 threads, sized so one 4096-element chunk fully

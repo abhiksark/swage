@@ -10,13 +10,15 @@ calls ahead of time. The two segmented calls run fixed programs. Segmented
 Python syntax is not public, and neither are the prepared launches, the
 scheduling policies, and the planning limits of the runner behind the calls.
 
-Compile-only emission and execution require the build-tree `mlir_swage`
-package from [Installation](../getting-started/installation.md). On its own
-the pure Python package captures kernels, checks a kernel against the kernel
-language, and reports the environment. It also runs the two segmented calls
-from an artifact directory that `swage.compile` wrote on a host with that
-package. The installation page lists what the released `0.5.1` wheel lacks,
-which includes the two segmented calls.
+Compile-only emission and execution require the native `mlir_swage`
+package, which the native `swage-compiler` wheel and a build tree provide;
+[Installation](../getting-started/installation.md) describes both. Without
+it, as in a frontend-only editable install, `swage` captures kernels,
+checks a kernel against the kernel language, and reports the environment.
+It also runs the two segmented calls from an artifact directory that
+`swage.compile` wrote on a host with that package. The released `0.5.1`
+wheel is pure Python, and the installation page lists what it lacks, which
+includes the two segmented calls.
 
 ## swage.jit
 
@@ -129,57 +131,75 @@ Related: [Writing Kernels](../user-guide/writing-kernels.md).
 ## Kernel.launch
 
 ```python
-kernel.launch(*, arguments, constexprs, grid)
+kernel.launch(*, arguments, constexprs, grid, backend="cuda")
 ```
 
-Compile as needed and asynchronously launch the canonical fixed
-vector-add kernel on CUDA. The call is keyword-only and returns `None`.
-Its only public execution contract is the canonical one-dimensional
-fixed vector add with parameters in this order:
+Compile as needed and launch the canonical fixed vector add or multiply
+kernel on exactly one backend. CUDA is the default and enqueues
+asynchronously; `backend="cpu"` runs a process-local LLVM JIT entry and
+returns when it has completed. The call is keyword-only and returns
+`None`. Its only public execution contract is the canonical
+one-dimensional fixed vector operation with five parameters in this order:
 
 ```text
-x_ptr, y_ptr, output_ptr, n, BLOCK
+left input, right input, output, element count, constexpr block size
 ```
 
+Names such as `x_ptr`, `y_ptr`, `output_ptr`, `n`, and `BLOCK` are
+conventional, not required. The `arguments` and `constexprs` mappings use
+the names that the captured function declares.
+
 Parameters
-:   `arguments`: `x_ptr`, `y_ptr`, `output_ptr`, and `n`. The pointers
-    are contiguous rank-one `torch.float32` CUDA tensors on the current
-    device; `n` is a nonnegative i32 no larger than any tensor. No tensor
-    may be a lazy negation or conjugate view, and no tensor may require
-    grad. The output must not share memory with either input, which also
-    rules out in-place use; the two inputs may share memory with each
-    other.
-:   `constexprs`: exactly `BLOCK`, a positive integer within the active
-    device limit.
+:   `arguments`: exactly the four runtime parameters. The first three are
+    contiguous rank-one tensors on the selected backend with the same
+    dtype, `torch.float32`, `torch.float16`, `torch.float8_e4m3fn`, or
+    `torch.float8_e5m2`; the fourth is a nonnegative i32 no larger than any
+    tensor. No tensor may be a lazy negation or conjugate view, and no
+    tensor may require grad. The output must not partially overlap either
+    input; an output that is exactly an input, as in an in-place launch, is
+    admitted, and the two inputs may share memory with each other.
+:   `constexprs`: exactly the final constexpr parameter, a positive integer
+    within the device limit for CUDA and at most 1024 for the CPU.
 :   `grid`: the one-dimensional launch geometry, which must equal
     `(ceildiv(n, BLOCK),)`.
+:   `backend`: `"cuda"` or `"cpu"`. CUDA requires CUDA tensors on the
+    current device. CPU requires CPU tensors.
 
 Returns
-:   `None`. The launch enqueues asynchronously on the current PyTorch
-    stream; submitted tensors are retained through `record_stream()`, and
-    the version counter of the output is advanced.
+:   `None`. CUDA enqueues on the current PyTorch stream and retains the
+    submitted tensors through `record_stream()`; CPU execution has completed
+    on return. Either way the version counter of the output is advanced.
+
+Low-precision arithmetic widens both inputs to FP32, adds or multiplies,
+and rounds once to the tensor dtype; it does not promote or cast tensor
+storage. [Dtypes and rounding](runtime-environment.md#dtypes-and-rounding)
+states the subnormal, overflow, and NaN behavior.
 
 Raises
-:   `TypeError`: wrong container, tensor, dtype, rank, or ABI category.
-:   `ValueError`: invalid values, geometry, or device placement; a tensor
-    that is not contiguous, is a lazy negation or conjugate view, or
-    requires grad; an output that overlaps an input; native compiler
-    admission such as an unsupported `sm_*` target; or a cache variable
-    with a value other than the documented ones.
-:   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6 or without
-    `torch.Tensor.record_stream` or
-    `torch.autograd.graph.increment_version`, unavailable CUDA, missing
-    native bindings, a kernel that is not cached while `SWAGE_NO_COMPILE=1`
+:   `TypeError`: wrong container, tensor, dtype, rank, backend category, or
+    ABI category.
+:   `ValueError`: an unknown backend name; invalid values, geometry, or
+    device placement; a tensor that is not contiguous, is a lazy negation
+    or conjugate view, or requires grad; an output that partially overlaps
+    an input; native compiler admission such as an unsupported `sm_*`
+    target; or a cache variable with a value other than the documented
+    ones.
+:   `BackendUnavailableError`, a `RuntimeError`: missing PyTorch, a PyTorch
+    older than 2.6 or without `torch.Tensor.record_stream` or
+    `torch.autograd.graph.increment_version`, unavailable CUDA, or missing
+    native bindings. Its `code`, `backend`, and `remediation` attributes
+    name the prerequisite.
+:   `RuntimeError`: a kernel that is not cached while `SWAGE_NO_COMPILE=1`
     is set, or runtime driver and cache failures.
 :   `CompilationError`: a parameter list outside the kernel language, on
     every call, or a body outside it, when the call compiles the kernel.
 
 The PyTorch check runs first and validation second, both before any kernel
-is compiled or enqueued. Validation, target admission, zero-work, cache,
+is compiled or run. Validation, target admission, zero-work, cache,
 stream, retention, and module-lifetime rules are normative in
 [Runtime and Environment](runtime-environment.md). There is no public
-`emit_ptx()` method and no CPU execution fallback, and `launch()` runs no
-segmented kernel.
+`emit_ptx()` method and no fallback between CPU and CUDA, and `launch()`
+runs no segmented kernel.
 
 ## swage.segment_reduce
 
@@ -347,10 +367,15 @@ line, and column.
 
 ## Exceptions
 
-The public surface uses four exception classes:
+The public surface uses five exception classes:
 
 - `CompilationError` reports a source-located failure at capture, in the
   inputs of `emit_mlir()`, or in a kernel outside the kernel language.
+- `BackendUnavailableError`, a `RuntimeError` through `swage.SwageError`,
+  reports a missing prerequisite: native bindings, PyTorch or a supported
+  release of it, CUDA, or, for the segmented calls, numpy. Its `code`
+  names the prerequisite, `backend` the backend that needs it, and
+  `remediation` what to install or select.
 - `TypeError` reports launch and segmented-call inputs with the wrong
   container, tensor, dtype, rank, or ABI category.
 - `ValueError` reports invalid launch values, geometry, device placement,
@@ -358,8 +383,7 @@ The public surface uses four exception classes:
   compiler admission, a cache variable with an undocumented value, an
   unsupported reduction kind, and offsets outside the offsets contract.
 - `RuntimeError` reports direct kernel calls, symbolic language calls
-  outside a captured kernel, missing native bindings, a missing or
-  unsupported PyTorch for launch, unavailable CUDA, a refused compile under
+  outside a captured kernel, a refused compile under
   `SWAGE_NO_COMPILE=1`, a segmented call under CUDA graph capture, an
   artifact directory that cannot be used, and runtime driver or cache
   failures.
@@ -418,28 +442,35 @@ runtime verifies.
 ## swage.env
 
 ```bash
-python -m swage.env
+python -m swage.env [--json] [--check native|cpu|cuda]
 ```
 
-Print the environment report as flat key and value lines. The report
-never fails: unavailable components are reported as absent instead of
-raising. Its keys, in order, are `swage`, `revision`, `swage_file`,
-`python`, `platform`, `torch`, `torch_cuda_build`, `cuda_driver`, `cuda`,
-`gpu`, `target`, `llvm_pin`, `llvm_linked`, `native_version`,
-`native_revision`, `mlir_swage_file`, `backends`, `cache_dir`, `cache`,
-`compile_on_miss`, and `artifact`.
+Print the environment report, the schema 2 dictionary that
+`swage.env.report()` returns. The report never fails: a component that is
+unavailable is reported with the reason instead of raising. Without
+`--json` the command prints one `key: value` line per top-level key; with
+`--json` it prints one JSON object with sorted keys. The top-level keys, in
+order, are `schema_version`, `swage`, `source`, `python`,
+`implementation`, `machine`, `platform`, `torch`, `torch_cuda_build`,
+`cuda_driver`, `cuda`, `gpu`, `llvm_pin`, `native`, `backends`, `cache`,
+and `artifact`.
 
-- `swage_file` and `mlir_swage_file` name the package file and the native
-  extension that were imported.
-- `target` names the NVPTX processor of the current device and says
-  whether it is qualified, admitted and not qualified, or not admitted.
-- `backends` records whether the build-tree `mlir_swage` bindings import
-  in the reporting process and, when they do, the LLVM version they were
-  linked against.
-- `cache_dir`, `cache`, and `compile_on_miss` describe the persistent
-  cache as the reporting process would use it.
+- `source` names the `swage` package file that was imported and the
+  revision of its sources.
+- `native` holds the native build record and, under `bindings`, the
+  identity of the loaded `mlir_swage` extension and whether it pairs with
+  this `swage`.
+- `backends` says whether the `cpu` and the `cuda` backend are available
+  and why not; `backends.cuda` also gives the target of the current device
+  and whether it is the qualified one.
+- `cache` describes the persistent cache as the reporting process would
+  use it.
 - `artifact` names the directory that `SWAGE_ARTIFACT_DIR` selects for the
   segmented calls, or the reason it is rejected.
+
+Without `--check` the command exits with status 0. With `--check` it exits
+with status 1 when the named component is not available and 0 when it is,
+and prints the whole report in both cases.
 
 [Runtime and Environment](runtime-environment.md#environment-report)
 defines every field.

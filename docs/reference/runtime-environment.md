@@ -2,8 +2,9 @@
 
 # Runtime and Environment
 
-The public runtime executes canonical fixed vector add through `launch()`
-and two fixed segmented programs through `swage.segment_reduce` and
+The public runtime executes canonical fixed vector add and multiply through
+`launch()`, on the Native CPU or the CUDA backend, and two fixed segmented
+programs on CUDA through `swage.segment_reduce` and
 `swage.segment_softmax`. The segmented calls wrap private qualification,
 which reuses the same CUDA Driver wrapper for admitted segmented modules.
 Every path validates its complete host-visible boundary before reading
@@ -44,12 +45,22 @@ arithmetic, broadcasting, and matrix multiplication remain unsupported.
 
 ## Launch lifecycle
 
-The public path requires three contiguous rank-one `torch.float32` CUDA
-tensors on the current device. `n` is a nonnegative i32 no larger than any
-tensor, `BLOCK` is a positive integer within the active device limit, and
-`grid` must equal `(ceildiv(n, BLOCK),)`. Validation also checks the canonical
-parameter names and ordered ABI before reading pointers or starting compiler
-work.
+The public path requires four runtime parameters followed by one constexpr
+block parameter. In source order, the first three runtime values are
+contiguous rank-one tensors on the selected backend with the same dtype, one
+of those in [Dtypes and rounding](#dtypes-and-rounding), and the fourth, `n`,
+is a nonnegative i32 no larger than any tensor. `BLOCK` is a positive
+integer, and `grid` must equal `(ceildiv(n, BLOCK),)`. Validation checks
+this shape before reading pointers or starting compiler work.
+
+`backend="cuda"` is the default. It requires CUDA tensors on the current
+device and a `BLOCK` within the limit of that device. `backend="cpu"`
+selects the Native CPU backend. It requires CPU tensors and a `BLOCK` of at
+most 1024, lowers the same admitted program to a host function, and runs it
+through a process-local LLVM JIT before `launch()` returns. The CPU backend
+has no CUDA context, stream, graph capture, module load, or persistent
+cache. Neither backend falls back to the other. The rest of this section
+describes the CUDA backend unless it names the CPU.
 
 The kernel reads and writes tensor storage through raw pointers, so three
 more checks apply to the tensors:
@@ -58,10 +69,11 @@ more checks apply to the tensors:
   (`is_neg()` or `is_conj()`). Such a view shares the storage of its base
   and shows different values, so the kernel would compute with the base.
   Pass `tensor.resolve_neg()` or `tensor.resolve_conj()`.
-- The output must not share any byte with either input, including an output
-  that is the same tensor as an input. The comparison uses the full extent
-  of each tensor, not only the first `n` elements. The two inputs may share
-  memory with each other. The check cannot see two virtual mappings of one
+- The output must not partially overlap either input within the first `n`
+  elements. An output that starts at the same address as an input, as an
+  in-place launch into one of its inputs does, is admitted, because every
+  lane reads and writes one element index. The two inputs may share memory
+  with each other. The check cannot see two virtual mappings of one
   physical allocation.
 - No tensor may require grad. A launch records no gradient, so a result
   computed from such a tensor would be cut from the autograd graph without
@@ -93,12 +105,13 @@ backend. A thread that has not used CUDA has no current context. A launch
 on such a thread makes the context of the validated current device current
 there, as the first PyTorch CUDA call on the thread would. That context is
 the one PyTorch already holds for the device, so none is created, and a
-context that is already current is never replaced. A launch of a kernel
-that is already loaded does not synchronize.
-A launch that loads a kernel can synchronize the context once;
-[Module lifetime](#module-lifetime) states when. Loaded functions are reused
+context that is already current is never replaced. A launch does not
+synchronize the device, the context, or a stream: a module that is no
+longer used is unloaded only once events show that its launches completed,
+as [Module lifetime](#module-lifetime) states. Loaded functions are reused
 per specialization and CUDA context. Tensor storage remains owned by
-PyTorch, and submitted tensors are retained through `record_stream()`.
+PyTorch, and submitted tensors are retained through `record_stream()`. A
+CPU launch has completed when `launch()` returns.
 
 Autograd sees neither what a kernel reads nor what it stores. Two rules keep
 that from giving a wrong gradient without an error:
@@ -185,13 +198,14 @@ then. The comparison is one host attribute read. It has these limits:
 
 </div>
 
-*The validated runtime lifecycle, including zero work and stream retention. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
+*The CUDA runtime lifecycle, including zero work and stream retention. [Open the full-size figure](../assets/diagrams/runtime-lifecycle.svg).*
 
-Dispatch reaches the driver through a compiled entry point. The nanobind
-`_launch_kernel` binding builds the driver argument array without
-per-launch ctypes marshaling, resolves `libcuda.so.1` with `dlopen` once
-per process, and deliberately holds the GIL across the microsecond
-enqueue. When the compiled bindings are absent, a ctypes path submits the
+CUDA dispatch reaches the driver through a compiled entry point. The
+nanobind `_launch_cuda_kernel` binding receives the argument kinds of the
+launch contract in order with their values, builds the driver argument
+array without per-launch ctypes marshaling, resolves `libcuda.so.1` with
+`dlopen` once per process, and deliberately holds the GIL across the
+microsecond enqueue. When the compiled bindings are absent, a ctypes path submits the
 same driver call with the same error shape and a slower per-launch cost.
 A process that runs the segmented calls from an artifact without the
 bindings has a third lane, which the figure below does not show: the
@@ -212,44 +226,48 @@ it raises the errors of the compiled launcher in the same words.
 A launch from several threads follows these rules:
 
 - A launch of a kernel that the process has already compiled and loaded
-  takes no lock. It reads the in-process caches and enqueues.
+  takes no process-wide lock. It reads the in-process caches and enqueues.
 - The enqueue holds the GIL, as stated above.
 - Compilation releases the GIL. While the native compiler lowers a kernel
   and emits PTX, other Python threads run.
-- One process-wide lock serializes every compile and every load of a kernel
-  that `launch()` or a private qualification helper starts. Two compiles
-  therefore never run at the same time, and a compile on one thread does
-  not delay a launch of a loaded kernel on another.
-- The native binding also keeps two compiles off one MLIR context. A caller
-  of the binding must not use a context from another thread while a compile
+- Compiles of different kernels run at the same time: each compile parses
+  or emits its module in an MLIR context of its own. A second request for a
+  kernel that is being compiled waits for that compile and uses its result,
+  so each kernel compiles once. When that compile fails, a waiting request
+  compiles in its place.
+- One process-wide lock, the cold-path lock, serializes the first load of a
+  kernel into a CUDA context and the creation of the driver wrapper. A
+  compile does not hold it; it holds a place that interpreter exit and
+  `os.fork()` wait for.
+- The native binding keeps two compiles off one MLIR context. A caller of
+  the binding must not use a context from another thread while a compile
   of a module in that context runs.
 
 ### Interpreter exit and fork
 
-The lock that serializes compiles and loads is held for a whole compile,
-and the compiler runs without the GIL. Two process events need care:
+A compile runs without the GIL, and a first load holds the cold-path lock
+while it waits for the driver. Two process events need care:
 
 - Interpreter exit. A daemon thread can be inside the compiler when the
   main thread ends, and a process that finalizes under a compile aborts or
-  crashes. An exit handler therefore waits for the compile or load in
-  flight and then keeps the lock, so that no other thread starts one. The
-  wait is bounded at 5 seconds. A compile takes a few milliseconds, but the
-  lock is also held while a load waits for the device, which nothing
+  crashes. An exit handler therefore takes the cold-path lock, waits for
+  every compile in flight, and keeps the lock, so that no other thread
+  starts a compile or a load. The wait is bounded at 5 seconds. A compile
+  takes a few milliseconds, but a load waits for the device, which nothing
   bounds, and a stuck thread must not hold the process open. After the
   bound the exit continues and the crash is possible again. A later exit
   handler that then needs a compile or a load gets a `RuntimeError` at
   once and does not wait again.
-- Fork. A child forked while another thread compiles would inherit the lock
-  in its taken state and wait for it forever at its first compile or load.
-  `os.fork()` therefore waits for the compile or load in flight, and the
-  parent and the child both release the lock. A fork taken on a thread
-  that is itself compiling does not wait for itself.
+- Fork. A child forked while another thread loads would inherit the lock in
+  its taken state and wait for it forever at its first compile or load.
+  `os.fork()` therefore takes the lock and waits for every compile in
+  flight, and the parent and the child both release the lock.
 
 These cases stay exposed:
 
 - A compile that calls the native binding directly, without `launch()` or
-  a private qualification helper, does not hold the lock. Exit and fork do
-  not wait for it.
+  a private qualification helper, holds no place. Exit and fork do not wait
+  for it.
 - `os._exit()`, a fatal signal, and a process that an embedding application
   tears down without running exit handlers skip the wait.
 - A child forked from a process that has used CUDA cannot use CUDA. The
@@ -257,50 +275,47 @@ These cases stay exposed:
 
 ### Module lifetime
 
-The process keeps compiled artifacts and loaded functions in two in-process
-caches. Each keeps 128 entries. When one more entry is stored, the cache
-forgets the entry it stored first, whether or not that kernel is still in
-use. The next launch of a forgotten kernel reads it from the persistent
-cache or compiles it, and loads it again. The private qualification helpers,
-which the segmented calls run through, keep caches of their own with the
-same bound.
+The process keeps compiled kernels and loaded CUDA modules in in-process
+caches. The caches of `launch()` and the cache of loaded modules are
+least-recently-used caches of 128 entries each; `SWAGE_MEMORY_CACHE_ENTRIES`
+sets another positive bound, and any other value raises a `ValueError` at
+the first launch that uses a cache. The private qualification helpers,
+which the segmented calls run through, load their modules into the same
+cache of loaded modules and keep their compiled kernels in a cache of their
+own with a fixed bound of 128. A kernel that has left a cache is read again
+from the persistent cache or compiled again, and loaded again, at its next
+launch.
 
-A loaded CUDA module stays loaded for as long as something holds its
-function handle: a cache entry, a prepared private launch, or a launch in
-progress. Once nothing holds the handle, the module is queued for unloading.
-The queue is emptied the next time the process loads a kernel in the same
-CUDA context:
+A launch holds a lease on its loaded module while it uses it, and a
+prepared private launch holds leases on its kernels for as long as it
+lives. A module that leaves the cache of loaded modules is retired. A
+retired module is unloaded only when all of these hold:
 
-1. The context is synchronized once, so that launches of the queued modules
-   that are still on a stream finish.
-2. Each queued module is unloaded.
+- No lease holds it.
+- No CUDA graph captured a launch of it. A module launched on a stream that
+  is capturing a graph stays loaded for the rest of the process, because
+  the graph can replay it at any time.
+- An event recorded after its last launch on every stream that launched it
+  has completed. A stream other than the legacy default stream is fenced
+  right after each launch, because its owner may destroy it; the legacy
+  default stream is fenced once the module is idle.
 
-This is the only synchronization on the public path, and a launch of a
-loaded kernel never reaches it. These rules bound it:
+A later lease or launch in the same CUDA context unloads the retired
+modules that are idle. It only records and queries events, so it never
+waits for the device. Nothing is unloaded while the calling thread, or a
+stream that launched the module, captures a graph. A module of another CUDA
+context waits until that context is current.
 
-- A kernel that a public launch enqueues on a stream that is capturing a
-  CUDA graph stays loaded for the rest of the process, because the graph
-  can replay it at any time.
-- A prepared private launch is not kept that way. The prepared object keeps
-  its kernels loaded and must outlive every graph that captured it.
-- A module of another CUDA context stays queued until that context is
-  current.
-- While the calling thread captures a CUDA graph, nothing is unloaded and
-  the queue waits for a later load.
-- A driver error during the synchronize or an unload is reported as one
-  `RuntimeWarning` per load and is never raised, because the caller is
-  loading an unrelated kernel. Every queued module is tried, and a module
-  that was not unloaded stays queued for the next load, which synchronizes
-  and tries again. When the warning filters turn warnings into errors, the
-  report is written to standard error instead.
+A driver error while a retired module is fenced or unloaded is reported as
+one `RuntimeWarning` per call, `Swage left <count> unused CUDA modules
+loaded: <error>`, and is never raised, because the caller is working on an
+unrelated kernel. That module stays loaded for the rest of the process,
+and the other retired modules are still tried. When the warning filters
+turn warnings into errors, the report is written to standard error instead.
 
-One limitation remains. A capture that is open on another thread cannot be
-seen from the loading thread. If a load finds queued modules while another
-thread captures a graph in the same context, the synchronize invalidates
-that capture and fails, the modules stay queued, and the process warns
-that it left `<count>` unused CUDA modules loaded. To avoid it, launch every
-kernel once before any thread starts a capture, so that no kernel is loaded
-while a capture is open.
+A prepared private launch that a CUDA graph captured also lends the graph
+its task storage, so the prepared object must outlive every graph that
+captured it.
 
 ## Segmented calls
 
@@ -341,9 +356,7 @@ Preparation and launch follow these rules:
 
 - The host copy of the offsets is made on every call and waits for the
   work already queued on the current stream. A call asks for no other
-  synchronization, and it does not wait for the kernels it enqueued. A call
-  that loads a kernel can synchronize the context once, as stated under
-  [Module lifetime](#module-lifetime).
+  synchronization, and it does not wait for the kernels it enqueued.
 - No plan is kept between calls. A second call with the same offsets tensor
   copies and classifies it again.
 - `segment_reduce` validates, classifies, and enqueues the `mixed` schedule
@@ -437,10 +450,14 @@ under `SWAGE_NO_COMPILE=1` refers to the private segmented path.
 
 ## Specialization and cache
 
-The specialization key contains normalized source, kernel name, ordered ABI
-descriptors, sorted compile-time values, exact compute capability, code
-generation options, frontend identity, native compiler identity, and
-dialect version.
+The specialization key contains normalized source, kernel name, backend,
+artifact format, exact target (an NVPTX processor for CUDA, `native` for
+the CPU), ordered ABI descriptors including the element dtype, sorted
+compile-time values, code generation options, frontend identity, native
+compiler identity, and dialect version.
+
+Only the CUDA backend uses the persistent cache described below. A Native
+CPU executable is kept in the process only.
 
 The two compiler identities are read from the files on disk, not from the
 checkout they came from:
@@ -525,8 +542,10 @@ The cache root is selected in this order:
 3. `~/.cache/swage`.
 
 Each persistent entry is a directory named by the key digest that contains
-`metadata.json`, `lowered.mlir`, and `kernel.ptx`. Cache directories use
-user-only permissions and files use mode `0600`.
+`metadata.json`, `lowered.mlir`, and `kernel.ptx`. The metadata, version 4,
+names the backend, the artifact format, the target, and the launch contract
+of the kernel; an entry written with an earlier version is not reused. Cache
+directories use user-only permissions and files use mode `0600`.
 
 Entries are published atomically. A writer stages the three files in a
 `.staging-` directory inside the cache root and renames that directory to the
@@ -536,7 +555,8 @@ other processes discard their staged copy and use the published entry. A
 writer that is killed leaves only its staging directory, which lookups never
 read.
 
-Metadata and content digests are verified before module load. An entry
+Metadata and the digests of the lowered MLIR, the PTX, and the launch
+contract are verified before module load. An entry
 directory that lacks any of the three files is treated as a miss. It is
 renamed aside and removed, unless another process completed it in the
 meantime, and the key is compiled and published again. Symlinked,
@@ -689,7 +709,7 @@ kernel is loaded or enqueued. The process never compiles in place of an
 artifact it cannot use.
 
 An artifact concerns the segmented calls only. The public `launch()` of the
-fixed vector add does not read it and behaves as the sections above state.
+fixed vector add and multiply does not read it and behaves as the sections above state.
 When `mlir_swage` is importable beside a selected artifact, the kernels and
 the classification still come from the artifact. A driver wrapper that is
 created while an artifact is selected takes its launcher from the runtime
@@ -702,8 +722,8 @@ runs only the segmented calls maps no LLVM or MLIR library whether or not
   the launcher it took.
 - A selected directory that cannot be used leaves the driver on the ctypes
   path. The bindings are not imported in its place.
-- A `launch()` of the fixed vector add in such a process imports the
-  bindings to compile, which maps the compiler libraries from then on, and
+- A CUDA `launch()` of the fixed vector add or multiply in such a process
+  imports the bindings to compile, which maps the compiler libraries from then on, and
   enqueues through the launcher of the artifact.
 
 ## Test and development settings
@@ -729,6 +749,27 @@ qualification never passes without the cache reuse it records. A dirty
 checkout does not count as unusable: it reads and writes the cache like a
 clean one.
 
+## Opt-in logging
+
+Swage uses `logging.getLogger("swage.runtime")` with no handlers, global
+logging configuration, or default prints. Configure logging in the
+application to see lazy DEBUG records:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("swage.runtime").setLevel(logging.DEBUG)
+```
+
+Cache decisions of `launch()` emit `memory-hit`, `persistent-hit`, or
+`compile`. A successful CPU launch emits `launch complete`; a CUDA launch
+emits `launch enqueued`, not a claim that asynchronous GPU work has
+completed. Records contain only the event, backend, target, kernel name,
+grid where applicable, and shortened artifact key. They exclude pointers,
+tensor contents, source text, PTX, cache paths, and environment secrets.
+Logging does not add synchronization.
+
 ## Debug dumps
 
 Set either dump switch to the string `1`:
@@ -747,73 +788,159 @@ atomic write treatment as cache artifacts.
 
 ```bash
 python -m swage.env
+python -m swage.env --json
+python -m swage.env --json --check native
+python -m swage.env --json --check cpu
+python -m swage.env --json --check cuda
 ```
 
-The command reports the Swage version, checkout revision, and package file,
-Python version, platform, PyTorch version, the CUDA version used to build
-PyTorch, actual CUDA driver version when available, CUDA availability, GPU
-name and compute capability, the qualification of the device target,
-repository LLVM pin when discoverable, the LLVM version the native bindings
-were linked against, the native extension file, backend status, the state
-of the persistent cache, and the selected artifact. It exits cleanly when
-optional components are absent and reports them as unavailable.
+The command prints the dictionary that `swage.env.report()` returns, schema
+version 2. The report never fails: a component that is absent or cannot be
+probed is reported with the reason instead of raising, and each probe runs
+on its own, so one failure does not hide the other facts. Without `--json`
+the command prints one `key: value` line per top-level key, in the order of
+the table below. `--json` prints one JSON object with sorted keys on one
+line.
 
-With the bindings importable, here from a build tree, the report looks like
-this:
+Without `--check` the command exits with status 0. With `--check native`,
+`--check cpu`, or `--check cuda` it exits with status 0 when
+`native.available`, `backends.cpu.available`, or `backends.cuda.available`
+is true and with status 1 otherwise, and prints the whole report in both
+cases. An unknown check name or another malformed argument exits with
+status 2.
 
-```text
-swage: 0.5.1
-revision: 0123456789ab
-swage_file: /home/user/swage/python/swage/__init__.py
-python: 3.13.13
-platform: Linux-6.8.0-138-generic-x86_64-with-glibc2.35
-torch: 2.12.0+cu130
-torch_cuda_build: 13.0
-cuda_driver: 13.0
-cuda: True
-gpu: {'name': 'NVIDIA RTX A6000', 'compute_capability': '8.6'}
-target: sm_86 (qualified)
-llvm_pin: llvmorg-22.1.8
-llvm_linked: 22.1.8
-native_version: 0.5.1
-native_revision: 0123456789abcdef0123456789abcdef01234567
-mlir_swage_file: /home/user/swage/build/python_packages/mlir_swage/_mlir_libs/_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so
-backends: {'mlir': 'available (linked LLVM 22.1.8)'}
-cache_dir: /home/user/.cache/swage
-cache: active (reads and writes; 12 of at most 1024 entries)
-compile_on_miss: allowed
-artifact: none (SWAGE_ARTIFACT_DIR is unset)
+With the bindings importable from a build tree, on the qualified device,
+`--json` prints a report like this one, formatted here for reading:
+
+```json
+{
+  "artifact": "none (SWAGE_ARTIFACT_DIR is unset)",
+  "backends": {
+    "cpu": {"available": true, "reason": null},
+    "cuda": {"available": true, "qualified": true, "reason": null, "target": "sm_86"}
+  },
+  "cache": {
+    "compile_on_miss": "allowed",
+    "directory": "/home/user/.cache/swage",
+    "state": "active (reads and writes; 12 of at most 1024 entries)"
+  },
+  "cuda": true,
+  "cuda_driver": "13.0",
+  "gpu": {"compute_capability": "8.6", "name": "NVIDIA RTX A6000"},
+  "implementation": "CPython",
+  "llvm_pin": "llvmorg-22.1.8",
+  "machine": "x86_64",
+  "native": {
+    "available": true,
+    "bindings": {
+      "file": "/home/user/swage/build/python_packages/mlir_swage/_mlir_libs/_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so",
+      "llvm_linked": "22.1.8",
+      "problem": null,
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "version": "0.5.2"
+    },
+    "build_type": "Release",
+    "error": null,
+    "frontend_digest": "<64 hexadecimal digits>",
+    "llvm_version": "llvmorg-22.1.8",
+    "package_version": "0.5.2",
+    "source_clean": true,
+    "source_revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "python": "3.13.13",
+  "schema_version": 2,
+  "source": {
+    "file": "/home/user/swage/python/swage/__init__.py",
+    "revision": "0123456789ab"
+  },
+  "swage": "0.5.2",
+  "torch": "2.12.0+cu130",
+  "torch_cuda_build": "13.0"
+}
 ```
 
-Seven fields identify the code and the native build:
+The top-level keys, in the order of the lines without `--json`:
 
-- `revision` is the abbreviated git HEAD of the Swage checkout that `swage`
-  was imported from, with `-dirty` appended when tracked files are
-  modified. It is reported only when the package is the `python/swage`
-  directory of a git checkout that also holds `cmake/llvm-version.txt`.
-  Otherwise it is `None`: in a wheel install, and for a copy of the package
-  vendored inside another repository, whose HEAD is not a Swage commit.
-- `swage_file` is the `__init__.py` that `swage` was imported from. It
-  tells two checkouts, or a checkout and a wheel install, apart.
-- `llvm_linked` is the LLVM version compiled into the `mlir_swage` extension.
-  It comes from the native library, not from `cmake/llvm-version.txt`, and
-  is `None` when the bindings cannot be imported or were built before they
-  recorded a version.
-- `native_version` is the `swage` version the bindings were built for, and
-  `native_revision` is the full git commit of the sources they were built
-  from. The revision ends in `-dirty` when a tracked file differed from that
-  commit, and reads `unknown` when the sources were not a git checkout. Both
-  are compiled into the extension. They are `None` when the bindings cannot
-  be imported or are refused.
-- `mlir_swage_file` is the native extension that was loaded. `mlir_swage` is
-  a namespace package with no file of its own, so the extension names the
-  build tree or the installed wheel. It is `None` when the bindings cannot
-  be imported or are refused.
-- `backends` records whether `mlir_swage` imports in the reporting process.
-  It reads `available (linked LLVM <version>)` when the import succeeds,
-  `unavailable (mlir_swage bindings not importable)` when it fails, and
-  `rejected (<reason>)` when the bindings load but were not built for this
-  `swage`.
+| Key | Value |
+|---|---|
+| `schema_version` | The integer `2`. |
+| `swage` | The version of the `swage` package. |
+| `source` | The package file and the revision of its sources, described below. |
+| `python` | The interpreter version. |
+| `implementation` | The interpreter implementation, such as `CPython`. |
+| `machine` | The machine type, such as `x86_64`. |
+| `platform` | The platform string of the interpreter. |
+| `torch` | The PyTorch version, or `null` without PyTorch. |
+| `torch_cuda_build` | The CUDA version PyTorch was built with, or `null`. It is not the driver version. |
+| `cuda_driver` | The CUDA version that `libcuda.so.1` reports, or `null` when the library cannot be loaded. |
+| `cuda` | Whether PyTorch sees a CUDA device. It is not a verdict on the CUDA backend; `backends.cuda` is. |
+| `gpu` | The `name` and `compute_capability` of the current CUDA device, or `null`. |
+| `llvm_pin` | The LLVM release of the native build record, or of `cmake/llvm-version.txt` in a checkout without one, or `null`. |
+| `native` | The native build record and the loaded bindings, described below. |
+| `backends` | The availability of the `cpu` and `cuda` backends, described below. |
+| `cache` | The persistent cache as the reporting process would use it, described below. |
+| `artifact` | The artifact the segmented calls of the reporting process would run from, described below. |
+
+`cuda_driver` needs no PyTorch, so a CPU-only PyTorch build beside an
+installed driver shows `cuda: false` with a driver version.
+
+### Source
+
+`source.file` is the `__init__.py` that `swage` was imported from. It tells
+two checkouts, or a checkout and a wheel install, apart.
+
+`source.revision` is the first 12 hexadecimal digits of the source
+revision, with `-dirty` appended when the sources differ from it:
+
+- In a Swage checkout, where the package is the `python/swage` directory
+  beside `cmake/llvm-version.txt`, it is the git HEAD, and a modified
+  tracked file marks it dirty.
+- Elsewhere, as in a wheel install, it is the revision of the native build
+  record, which is dirty when the build recorded modified sources.
+- It is `null` when neither identifies the sources: for a checkout that git
+  cannot describe, and for a copy of the package vendored inside another
+  repository without a build record, whose HEAD is not a Swage commit.
+
+### Native build and bindings
+
+`native` describes the native package in these fields:
+
+| Field | Value |
+|---|---|
+| `available` | `true` when the bindings import and pair with this `swage`. |
+| `error` | `null`, or the first problem found: the validation error of a build record that is malformed or unreadable, `native-unavailable` when the bindings cannot be imported, `native-probe-failed` when importing them raised another error, or `native-mismatch` when they import and are refused. |
+| `package_version` | The `swage` version of the build record. |
+| `source_revision` | The 40-digit source revision of the build record, or `null` for sources that were not a git checkout. |
+| `source_clean` | Whether the build record states clean sources. |
+| `frontend_digest` | The SHA-256 digest of the Python frontend that the build packaged. |
+| `llvm_version` | The LLVM release of the build record, such as `llvmorg-22.1.8`. |
+| `build_type` | The CMake build type of the build record. |
+| `bindings` | The loaded extension, described below, or `null` when the bindings cannot be imported. |
+
+The six build record fields come from `mlir_swage/_build_info.json`, which
+the native build writes, and are `null` when the record is absent. A
+malformed record leaves them `null` and puts its validation error in
+`error`, which can stand beside `available: true`.
+
+`native.bindings` describes the extension that was loaded:
+
+- `version` is the `swage` version the bindings were built for.
+- `revision` is the full source revision they were built from. It ends in
+  `-dirty` when a tracked file differed from that revision, and reads
+  `unknown` when the sources were not a git checkout.
+- `llvm_linked` is the LLVM version compiled into the extension. It comes
+  from the native library, not from `cmake/llvm-version.txt`.
+- `file` is the extension that was loaded. `mlir_swage` is a namespace
+  package with no file of its own, so the extension names the build tree or
+  the installed wheel.
+- `problem` is `null`, or why bindings that import are refused, in the
+  words of the error that emission and launch raise.
+
+`llvm_pin` is a release tag and `llvm_linked` is a bare version, so a build
+against the pinned release shows `llvmorg-22.1.8` and `22.1.8`. Any other
+pair means the bindings were built against a different LLVM install than
+the repository pins.
 
 ### Frontend and bindings
 
@@ -828,10 +955,9 @@ first imported or first used:
   cause.
 - Bindings that record no version are refused in the same way. They come
   from a build that predates this check.
-- The source revision is not compared between two installed packages,
-  because the `swage-compiler` wheel records no revision. Two different
-  revisions that carry the same version number are therefore accepted as a
-  pair. The report shows `revision` and `native_revision` side by side.
+- Outside a checkout the source revision is not compared. The native wheel
+  installs both packages from one build, and the report shows
+  `source.revision` and `native.bindings.revision` side by side.
 - In a git checkout a different revision is expected: the frontend is
   edited and committed without a native rebuild. There `swage` compares the
   native sources of the checkout with the revision the bindings were built
@@ -845,34 +971,48 @@ first imported or first used:
 The check covers the public paths, `emit_mlir()` and `launch()`, and every
 import of the extension made after `swage` was imported.
 
-`cuda_driver` is the CUDA version that `libcuda.so.1` reports. It needs no
-PyTorch, so a CPU-only PyTorch build beside an installed driver shows
-`cuda: False` with a driver version. It is `None` when the library cannot be
-loaded.
+### Backends
 
-`target` is the NVPTX processor of the current CUDA device, followed by its
-standing. It is `None` when PyTorch sees no CUDA device.
+`backends.cpu` holds `available` and `reason`; `backends.cuda` holds
+`available`, `qualified`, `target`, and `reason`. A `reason` is `null` when
+the backend is available and otherwise joins every cause with `; `:
 
-- `(qualified)`: the GPU tests execute on this target. Only `sm_86` is
-  qualified, on one NVIDIA RTX A6000.
-- `(admitted, not qualified)`: the compiler accepts the target and emits PTX
-  for it, and no test has executed that PTX.
-- `(not admitted)`: compilation rejects the target.
+| Cause | `cpu` | `cuda` |
+|---|---|---|
+| `native-unavailable: install a supported native wheel`, when `native.available` is false | Yes | Yes |
+| `pytorch-unavailable: install swage-compiler[pytorch]`, when PyTorch cannot be imported | Yes | Yes |
+| `cuda-unavailable: select a CUDA-enabled PyTorch build`, when PyTorch sees no CUDA device | No | Yes |
+| `PyTorch probe failed (<exception type>)`, when importing PyTorch or asking it about the device raised, which includes a missing PyTorch | No | Yes |
+| `CUDA driver is unavailable` or `CUDA driver probe failed (<exception type>)`, when `libcuda.so.1` gives no version | No | Yes |
+| `CUDA target is not admitted by the pinned compiler`, when the device is not one of the admitted NVPTX processors | No | Yes |
 
-The [Support Matrix](support-matrix.md) uses the same three terms and adds
-the Python, PyTorch, and driver versions that the tests run with.
+`backends.cuda.target` is the NVPTX processor of the current CUDA device,
+such as `sm_86`, or `null` when PyTorch sees no CUDA device. The admitted
+processors are `sm_80`, `sm_86`, `sm_87`, `sm_88`, `sm_89`, `sm_90`,
+`sm_100`, `sm_101`, `sm_103`, `sm_110`, `sm_120`, and `sm_121`.
 
-Three fields describe the persistent cache as the reporting process would use
+`backends.cuda.qualified` is `true` only for an `NVIDIA RTX A6000` at
+`sm_86`, the hardware that the GPU tests and the release qualification run
+on. It describes the device, not whether this build passed a release gate,
+and it is independent of `available`: an admitted device that is not
+qualified reports `available: true` and `qualified: false`. Neither field
+runs a kernel. The [Support Matrix](support-matrix.md) adds the Python,
+PyTorch, and driver versions that the tests run with.
+
+### Cache and artifact
+
+`cache` describes the persistent cache as the reporting process would use
 it. A process that started earlier, or that runs with other variables, can
 differ.
 
-- `cache_dir` is the cache root.
-- `cache` reads `active (reads and writes; <count> of at most <bound>
+- `directory` is the cache root.
+- `state` reads `active (reads and writes; <count> of at most <bound>
   entries)` in the default mode and `active (reads only; <count> entries)`
   with `SWAGE_CACHE_READ_ONLY=1`. It reads `off (<reason>)` when the process
-  compiles without the cache, `rejected (<reason>)` when the cache root is
-  unsafe and every lookup raises, and `unknown (<error>)` when a cache
-  variable has a value that a launch rejects.
+  compiles without the cache and `rejected (<reason>)` when the cache root
+  is unsafe and every lookup raises. When a cache variable has a value that
+  a launch rejects, it reads `unknown (<error>)`, and `directory` and
+  `compile_on_miss` are `null`.
 - `compile_on_miss` reads `allowed`, or `refused (SWAGE_NO_COMPILE=1)`.
 
 The report only reads. It does not create the cache root, remove anything
@@ -887,11 +1027,6 @@ the segmented calls of the reporting process:
   source revision that wrote it, when the directory passes verification.
   The report loads the runtime library of the artifact to verify it.
 - `rejected (<reason>)` with the error a segmented call would raise.
-
-`llvm_pin` is the release tag in `cmake/llvm-version.txt` and `llvm_linked`
-is a bare version, so a build against the pinned release shows
-`llvmorg-22.1.8` and `22.1.8`. Any other pair means the bindings were built
-against a different LLVM install than the repository pins.
 
 Continue with the [Support Matrix](support-matrix.md) for the environments
 these rules are tested in. Use

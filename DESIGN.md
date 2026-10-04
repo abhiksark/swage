@@ -153,13 +153,19 @@ Runtime and cache requirements live only in
 ## Package boundary
 
 The PyPI distribution is `swage-compiler`; its import package is `swage`.
-The wheel contains pure Python package files only. It excludes compiler build
-output and the native `mlir_swage` package.
+It is built as one native wheel per CPython version, which holds `swage`,
+the private `mlir_swage` bindings, the native runtime library, the
+segmented modules behind the two public segmented calls, the license files,
+and the build record. The source distribution and a frontend-only editable
+install stay CMake-free. The release on PyPI, 0.5.1, is pure Python; the
+native wheel of 0.5.2 is not released yet.
 
-`mlir_swage` embeds the pinned MLIR Python core and generated Swage bindings
-as a build-tree artifact. It never layers onto an unrelated external `mlir`
-package. Native wheel packaging remains deferred. Asking CMake to enable the
-bindings against an MLIR install without Python bindings is an error.
+`mlir_swage` embeds the pinned MLIR Python core and generated Swage
+bindings. It never layers onto an unrelated external `mlir` package. A
+source build keeps it in `build/python_packages/mlir_swage`; a wheel
+installs it into site-packages. Asking CMake to enable the bindings against
+an MLIR install without Python bindings is an error. Native packaging does
+not widen the admitted public kernel subset.
 
 ## Verification strategy
 

@@ -218,31 +218,36 @@ def capability_boundary() -> bytes:
     svg = Svg(
         "capability-boundary.svg",
         "Swage capability boundary",
-        "Three separate lanes distinguish the public surface, which is one "
-        "fixed vector-add kernel and two segmented calls, private segmented "
-        "qualification, and planned segment syntax.",
-        height=650,
+        "Three separate lanes distinguish the public surface, which is fixed "
+        "vector add or multiply on Native CPU or CUDA and two segmented calls "
+        "on CUDA, built as one native wheel; private segmented "
+        "qualification; and planned segment syntax.",
+        height=680,
     )
     svg.text(48, 54, "Capability boundary", size=32, weight=750)
-    svg.text(
+    svg.multiline(
         48,
         84,
-        "The lanes describe status; none is a fallback from another.",
+        (
+            "The lanes describe status; none is a fallback from another.",
+            "The public lane is built as one native wheel, swage-compiler.",
+        ),
         color="muted",
+        gap=27,
     )
     lanes = (
         (
-            120,
+            150,
             "PUBLIC TODAY",
             "blue",
             "blue_fill",
-            ("Python capture", "emit_mlir()", "launch()"),
-            "one fixed vector-add kernel; segment_reduce and "
+            ("Python capture", "emit_mlir()", "launch(cpu / cuda)"),
+            "add or multiply on CPU or CUDA; CUDA segment_reduce and "
             "segment_softmax calls",
             False,
         ),
         (
-            300,
+            330,
             "PRIVATE QUALIFICATION",
             "purple",
             "purple_fill",
@@ -252,7 +257,7 @@ def capability_boundary() -> bytes:
             False,
         ),
         (
-            480,
+            510,
             "PLANNED",
             "line",
             "gray_fill",
@@ -548,25 +553,25 @@ def segments_tasks_tiles() -> bytes:
 
 
 def compiler_pipeline() -> bytes:
-    """Render the canonical compiler spine and three admitted branches."""
+    """Render the canonical compiler spine and two admitted branches."""
     svg = Svg(
         "compiler-pipeline.svg",
         "Swage compiler pipeline",
-        "Verified semantic MLIR enters three admitted branches. The public "
-        "fixed-block branch, the private direct segmented "
-        "GPU: one CTA / segment path, and "
-        "GPU work rejoin upstream MLIR and LLVM before NVPTX, PTX, and CUDA. "
-        "The direct segmented sequential CPU oracle exits separately through "
-        "SCF and "
-        "memref. The public segment_softmax call runs through the direct "
-        "segmented GPU path, and the public segment_reduce call runs "
-        "through the SwagePlan branch.",
+        "Verified semantic MLIR enters two admitted branches. The public "
+        "fixed-block branch admits canonical vector add or multiply and "
+        "lowers it for the selected backend: to a Native LLVM JIT "
+        "host call, or through GPU, NVVM, and LLVM to NVPTX, PTX, and the "
+        "CUDA Driver API. The private SwagePlan stage plans every segment "
+        "function. Its GPU kernels each carry a swage.kernel_contract and "
+        "rejoin the CUDA path, and its sequential CPU oracle stops at SCF "
+        "and memref. The public segment_reduce and segment_softmax calls "
+        "run through the SwagePlan stage.",
         height=850,
     )
     svg.text(
         48,
         54,
-        "One compiler spine, three admitted branches",
+        "One compiler spine, two admitted branches",
         size=32,
         weight=750,
     )
@@ -580,34 +585,29 @@ def compiler_pipeline() -> bytes:
         (
             55,
             "PUBLIC TODAY",
-            "fixed-block vector add",
-            ("canonical vector add", "fixed-block GPU conversion"),
+            "fixed-block add / multiply",
+            ("one fixed admission", "selected cpu or cuda backend"),
             "blue",
             "blue_fill",
         ),
         (
-            420,
+            645,
             "PRIVATE QUALIFICATION",
-            "segmented direct",
-            ("sum, max, min, stable softmax", "runs segment_softmax"),
-            "purple",
-            "purple_fill",
-        ),
-        (
-            785,
-            "PRIVATE QUALIFICATION",
-            "SwagePlan direct + split",
-            ("direct or split reduction", "runs segment_reduce"),
+            "SwagePlan stage",
+            (
+                "one plan per segment function",
+                "runs segment_reduce and segment_softmax",
+            ),
             "green",
             "green_fill",
         ),
     )
     for x, status, heading, body, color, fill in branches:
-        svg.box(x, 245, 330, 180, fill=fill, stroke=color)
+        svg.box(x, 245, 500, 180, fill=fill, stroke=color)
         svg.status_tag(x + 22, 265, 250, status, color=color, fill=fill)
-        svg.text(x + 165, 344, heading, size=19, weight=750, anchor="middle")
+        svg.text(x + 250, 344, heading, size=19, weight=750, anchor="middle")
         svg.multiline(
-            x + 165,
+            x + 250,
             384,
             body,
             size=16,
@@ -615,43 +615,41 @@ def compiler_pipeline() -> bytes:
             gap=30,
             anchor="middle",
         )
-    svg.arrow(600, 215, 220, 235)
-    svg.arrow(600, 215, 585, 235)
-    svg.arrow(600, 215, 950, 235)
+    svg.arrow(600, 215, 305, 235)
+    svg.arrow(600, 215, 895, 235)
 
-    svg.arrow(585, 425, 475, 435)
-    svg.arrow(585, 425, 695, 435)
-    svg.box(380, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.arrow(895, 425, 770, 435)
+    svg.arrow(895, 425, 1020, 435)
+    svg.box(655, 445, 230, 105, fill="canvas", stroke="green")
     svg.multiline(
-        475,
+        770,
         480,
-        ("sequential CPU", "oracle", "SCF / memref stop"),
+        ("plan to SCF", "sequential CPU oracle", "SCF / memref stop"),
         size=16,
         weight=650,
-        color="purple",
+        color="green",
         gap=27,
         anchor="middle",
     )
-    svg.box(600, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.box(905, 445, 230, 105, fill="canvas", stroke="green")
     svg.multiline(
-        695,
+        1020,
         480,
-        ("GPU: one CTA", "per segment", "continues below"),
+        ("plan to GPU", "kernels, each with a", "swage.kernel_contract"),
         size=16,
         weight=650,
-        color="purple",
+        color="green",
         gap=27,
         anchor="middle",
     )
 
-    svg.arrow(220, 425, 350, 565)
-    svg.arrow(695, 550, 600, 565)
-    svg.arrow(950, 425, 850, 565)
-    svg.box(330, 580, 540, 78, fill="gray_fill")
+    svg.arrow(305, 425, 420, 565)
+    svg.arrow(1020, 550, 800, 565)
+    svg.box(300, 580, 600, 78, fill="gray_fill")
     svg.text(
         600,
         613,
-        "GPU / SCF / NVVM / LLVM",
+        "backend-specific MLIR / LLVM lowering",
         size=22,
         weight=750,
         anchor="middle",
@@ -659,22 +657,27 @@ def compiler_pipeline() -> bytes:
     svg.text(
         600,
         640,
-        "upstream MLIR and LLVM paths",
+        "Native: SCF / LLVM | CUDA: GPU / NVVM / LLVM",
         size=16,
         color="muted",
         anchor="middle",
     )
-    svg.arrow(600, 658, 310, 690)
-    backend = (
-        (210, "LLVM NVPTX"),
-        (500, "PTX"),
-        (790, "CUDA Driver API"),
+
+    svg.arrow(600, 658, 225, 690)
+    svg.box(85, 700, 280, 68, fill="blue_fill", stroke="blue")
+    svg.text(225, 742, "Native LLVM JIT", size=17, weight=700, anchor="middle")
+
+    svg.arrow(600, 658, 515, 690)
+    cuda_stages = (
+        (415, "LLVM NVPTX"),
+        (665, "PTX"),
+        (915, "CUDA Driver API"),
     )
-    for x, label in backend:
+    for x, label in cuda_stages:
         svg.box(x, 700, 200, 68, fill="canvas")
         svg.text(x + 100, 742, label, size=17, weight=700, anchor="middle")
-    svg.arrow(410, 734, 490, 734)
-    svg.arrow(700, 734, 780, 734)
+    svg.arrow(615, 734, 655, 734)
+    svg.arrow(865, 734, 905, 734)
     svg.text(
         600,
         818,
@@ -775,20 +778,19 @@ def split_lifecycle() -> bytes:
 
 
 def runtime_lifecycle() -> bytes:
-    """Render the fail-closed launch and stream-retention lifecycle."""
+    """Render the fail-closed CUDA launch and stream-retention lifecycle."""
     svg = Svg(
         "runtime-lifecycle.svg",
-        "Runtime validation, launch, and tensor retention lifecycle",
-        "Validation precedes specialization, compilation, and allocation; "
+        "CUDA runtime validation, launch, and tensor retention lifecycle",
+        "CUDA validation precedes specialization, compilation, and allocation; "
         "work is enqueued on the current stream and tensors are retained.",
         height=680,
     )
-    svg.text(48, 54, "Runtime lifecycle", size=32, weight=750)
+    svg.text(48, 54, "CUDA runtime lifecycle", size=32, weight=750)
     svg.text(
         48,
         84,
-        "Asynchronous launch with no fallback; a warm launch never "
-        "synchronizes.",
+        "Asynchronous CUDA launch with no synchronization or fallback.",
         color="muted",
     )
 
@@ -889,8 +891,8 @@ def runtime_lifecycle() -> bytes:
     svg.text(
         600,
         600,
-        "No copy, cast, device change, context creation, or fallback. Only "
-        "loading a kernel may synchronize.",
+        "No copy, cast, device change, context creation, synchronization, "
+        "or fallback.",
         size=17,
         weight=650,
         anchor="middle",

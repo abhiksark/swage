@@ -7,24 +7,28 @@ becomes verified semantic MLIR, then an admitted lowering branch uses upstream
 MLIR and LLVM infrastructure. There is no second production IR between Python
 and MLIR.
 
-Verified semantic MLIR enters one of three admitted branches. The public
-fixed-block branch uses the fixed-block conversion for canonical vector
-add. Private direct segmented branches lower to the sequential CPU oracle
-or the one-CTA GPU path.
-The private SwagePlan branch adds the narrow classification companion for
-direct or split capture-free reduction lowering. GPU branches rejoin upstream GPU, SCF,
-NVVM, and LLVM lowering. One short list of LLVM passes then runs on the
-translated module before LLVM NVPTX emits PTX for the CUDA Driver API.
-No branch introduces a second production IR or a silent backend fallback.
+Verified semantic MLIR enters one of two admitted branches. The public
+fixed-block branch admits canonical vector add or multiply and lowers it
+for the backend the launch selects: a sequential host function that a
+process-local LLVM JIT runs for `backend="cpu"`, or a GPU kernel for
+`backend="cuda"`. The private SwagePlan branch plans every segment function
+and converts each plan either to a GPU kernel or to the sequential CPU
+oracle. GPU kernels of both branches rejoin upstream GPU, SCF, NVVM, and
+LLVM lowering. One short list of LLVM passes then runs on the translated
+module before LLVM NVPTX emits PTX for the CUDA Driver API. Every lowered
+entry carries a compiler-generated launch contract. No branch introduces a
+second production IR or a silent backend fallback.
 
-The two public segmented calls run fixed modules through the private
-branches: `swage.segment_softmax` through the one-CTA GPU path, and
-`swage.segment_reduce` through the SwagePlan branch. The modules are native
-text that the runner holds. No public syntax produces a segment module.
+The two public segmented calls run fixed modules through the SwagePlan
+branch: `swage.segment_softmax` with one CTA per segment, and
+`swage.segment_reduce` with the schedules that
+[Segmented Reductions](segmented-reductions.md) describes. The modules are
+native text that the runner holds. No public syntax produces a segment
+module.
 
 <div class="doc-figure" tabindex="0" markdown="1">
 
-![Verified semantic MLIR entering three admitted compiler branches](../assets/diagrams/compiler-pipeline.svg)
+![Verified semantic MLIR entering two admitted compiler branches](../assets/diagrams/compiler-pipeline.svg)
 
 </div>
 
@@ -55,27 +59,58 @@ small private planning surface.
 
 ## Public fixed-block branch
 
-The fixed-block conversion admits only the canonical vector-add form. It maps
-each vector lane to one GPU x-thread, lowers through upstream GPU, SCF, NVVM,
-and LLVM infrastructure, and emits PTX in process with LLVM NVPTX. The public
-runtime launches that result through the CUDA Driver API.
+The fixed-block conversion admits only canonical vector add or multiply.
+The CUDA pass (`--swage-fixed-block-to-gpu`) maps each vector lane to one GPU
+x-thread, lowers through upstream GPU, SCF, NVVM, and LLVM infrastructure,
+and emits PTX in process with LLVM NVPTX. The Native host pass
+(`--swage-fixed-block-to-host`) uses the same admission and emits a
+sequential pointer loop, which is lowered to LLVM and run by a process-local
+LLVM JIT. The public runtime selects exactly one of the two from
+`backend="cuda"` or `backend="cpu"`.
 
-No `nvgpu` dialect conversion is part of this implemented branch. Runtime
+The three pointer elements must all be `f32`, `f16`, `f8E4M3FN`, or
+`f8E5M2`. FP16 and FP8 values are widened for FP32 arithmetic and the store
+is rounded to the storage format; FP8 conversion uses byte loads and stores
+and scalar arithmetic, so it needs no FP8 hardware.
+
+No `nvgpu` dialect conversion is part of this branch. Runtime
 specialization, cache, module loading, stream, and retention behavior live in
 [Runtime and Environment](../reference/runtime-environment.md).
 
-## Private direct segmented branches
+## Lowered launch contracts
 
-Canonical segmented sum, max, and stable ragged-softmax modules enter through
-native qualification, not the public Python frontend. A segment function
-declares its arguments with `swage.role` attributes, a module may hold any
-number of segment functions, and each conversion lowers every one of them
-or the one its `function` option names. A conversion first fuses every
-`swage.map` of an admitted function into its consumer, so each reduction
-and each terminal store carries one element region. One conversion creates
-a sequential CPU correctness oracle. Another creates one CTA per segment and
-continues through upstream GPU, NVVM, LLVM, and NVPTX stages. The public
-`swage.segment_softmax` launches the softmax module on that GPU path.
+Each lowered entry comes with a version 2 launch contract that the compiler
+generates
+([ADR-0025](../adr/ADR-0025-compiler-generated-kernel-contracts.md)). The
+contract names the backend, the entry, the kind of every argument, where
+each argument comes from (`user`, `derived`, `plan`, or `scratch`), the
+access of each pointer, and the launch: `spmd-grid` with a three-axis block
+for CUDA, `host-call` with no block for the Native CPU. The fixed-block
+lowerings build it from the admitted function. `--swage-plan-to-gpu`
+builds it from the kernel layout of each plan function and attaches it to
+the kernel as the discardable attribute `swage.kernel_contract`. Code
+generation validates the contract against the physical function, and for
+CUDA against `nvvm.reqntid`, removes the attribute, and returns the contract
+as canonical JSON beside the lowered module and the executable image. The
+runtime binds every launch, fixed or planned, through this contract and
+does not infer an argument order from parameter names, PTX, or LLVM text.
+
+The contract describes one lowered entry. It is not semantic IR, does not
+widen admission, and does not replace the concrete parameter types.
+
+## Private segmented modules
+
+Canonical segmented sum, max, min, mean, and stable ragged-softmax modules
+enter through native qualification, not the public Python frontend. A
+segment function declares its arguments with `swage.role` attributes, a
+module may hold any number of segment functions, and the planner lowers
+every one of them or the one its `function` option names. The planner first
+fuses every `swage.map` of an admitted function into its consumer, so each
+reduction and each terminal store carries one element region. The
+sequential schedule gives a CPU correctness oracle. The direct schedule
+gives one CTA per segment, which continues through upstream GPU, NVVM,
+LLVM, and NVPTX stages. The public `swage.segment_softmax` launches the
+softmax module on that direct schedule.
 
 Exact admitted module shapes and internal ABIs live in
 [Segmented Reductions](segmented-reductions.md) and
@@ -138,8 +173,8 @@ public reusable queue.
 
 Every GPU branch translates its lowered module to LLVM IR and runs the same
 list of LLVM passes on it before the NVPTX backend emits PTX. The list
-applies to the public fixed vector add and to every private segmented
-kernel:
+applies to the public fixed vector add and multiply and to every private
+segmented kernel:
 
 | Pass | What it does to a kernel |
 |---|---|
