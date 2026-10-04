@@ -1601,10 +1601,8 @@ def test_missing_bindings_error_names_the_installation_page(monkeypatch):
         )
 
     message = str(failure.value)
-    assert message.startswith(
-        "Swage launch requires the build-tree mlir_swage bindings"
-    )
-    assert "which the swage-compiler wheel does not include" in message
+    assert message.startswith("Swage launch requires the mlir_swage bindings")
+    assert "which this installation does not have" in message
     assert "kernel 'add_kernel' was not compiled" in message
     assert message.endswith(
         f"; see {_frontend._INSTALLATION} for the native build"

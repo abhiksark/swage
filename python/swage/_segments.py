@@ -377,9 +377,8 @@ def _require_bindings(call):
         )
     except Exception as error:
         raise BackendUnavailableError(
-            f"Swage {call}() requires the build-tree mlir_swage bindings, "
-            "which the swage-compiler wheel does not include; nothing was "
-            "launched",
+            f"Swage {call}() requires the mlir_swage bindings, which this "
+            "installation does not have; nothing was launched",
             code="native-unavailable",
             backend="native",
             remediation=f"see {_INSTALLATION} for the native build",

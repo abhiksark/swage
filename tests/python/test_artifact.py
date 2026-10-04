@@ -1653,7 +1653,7 @@ def test_the_compile_command_stays_light_and_needs_the_bindings(tmp_path):
     assert completed.stdout == ""
     assert completed.stderr == (
         "error: writing an artifact requires the mlir_swage bindings, which "
-        "the swage-compiler wheel does not include. See "
+        "this installation does not have. See "
         "docs/getting-started/installation.md in "
         "https://github.com/abhiksark/swage for the native build\n"
     )

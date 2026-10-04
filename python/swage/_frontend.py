@@ -256,8 +256,8 @@ class _Kernel:
             if isinstance(error, BackendUnavailableError):
                 cause = error.__cause__ or error
             raise BackendUnavailableError(
-                "Swage emit_mlir() requires the build-tree mlir_swage "
-                "bindings, which the swage-compiler wheel does not include; "
+                "Swage emit_mlir() requires the mlir_swage bindings, which "
+                "this installation does not have; "
                 f"kernel '{self.__name__}' passed the language check",
                 code="native-unavailable",
                 backend="native",

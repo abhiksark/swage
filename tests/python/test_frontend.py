@@ -45,7 +45,7 @@ def _reason(kernel, signature=None, constexprs=None):
 
 def _assert_passes_check(kernel, signature=None, constexprs=None):
     """Assert a body is accepted, so only the native package is missing."""
-    with pytest.raises(RuntimeError, match="requires the build-tree"):
+    with pytest.raises(RuntimeError, match="requires the mlir_swage"):
         kernel.emit_mlir(
             signature=SIGNATURE if signature is None else signature,
             constexprs={"BLOCK": 8} if constexprs is None else constexprs,
@@ -371,7 +371,7 @@ def test_accepted_body_without_native_bindings_names_the_installation_page():
     message = str(caught.value)
     assert not isinstance(caught.value, sw.CompilationError)
     assert message.startswith(
-        "Swage emit_mlir() requires the build-tree mlir_swage bindings"
+        "Swage emit_mlir() requires the mlir_swage bindings"
     )
     assert "kernel 'add_kernel' passed the language check" in message
     assert "docs/getting-started/installation.md" in message
@@ -436,8 +436,8 @@ def test_a_process_with_only_the_pure_package_checks_kernel_bodies(tmp_path):
         f"CompilationError|{script}:14:5: bad: unsupported statement 'For'"
     )
     assert accepted.startswith(
-        "BackendUnavailableError|Swage emit_mlir() requires the build-tree "
-        "mlir_swage bindings"
+        "BackendUnavailableError|Swage emit_mlir() requires the mlir_swage "
+        "bindings"
     )
     assert "kernel 'good' passed the language check" in accepted
     assert "docs/getting-started/installation.md" in accepted

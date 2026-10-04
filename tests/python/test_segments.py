@@ -217,9 +217,9 @@ def test_segmented_calls_name_the_installation_page_without_bindings(
         with pytest.raises(
             swage.BackendUnavailableError,
             match=(
-                f"^Swage {function.__name__}\\(\\) requires the build-tree "
-                "mlir_swage bindings, which the swage-compiler wheel does "
-                "not include; nothing was launched; see "
+                f"^Swage {function.__name__}\\(\\) requires the mlir_swage "
+                "bindings, which this installation does not have; nothing "
+                "was launched; see "
                 "docs/getting-started/installation.md in "
                 "https://github.com/abhiksark/swage for the native build$"
             ),
@@ -277,7 +277,7 @@ def test_missing_bindings_are_reported_before_missing_numpy(
     values, offsets = _inputs(torch)
     monkeypatch.setitem(sys.modules, "numpy", None)
 
-    with pytest.raises(RuntimeError, match="requires the build-tree"):
+    with pytest.raises(RuntimeError, match="requires the mlir_swage"):
         _call(function, values, offsets)
 
 
@@ -414,7 +414,7 @@ def test_an_out_that_ends_where_an_input_begins_does_not_overlap(
 
     for out in (before_values, after_values):
         # The call passes the `out` checks and stops at the missing build.
-        with pytest.raises(RuntimeError, match="requires the build-tree"):
+        with pytest.raises(RuntimeError, match="requires the mlir_swage"):
             _call(function, values, offsets, out=out)
 
 
@@ -431,7 +431,7 @@ def test_a_float64_reduction_takes_a_float64_out(monkeypatch):
     ):
         swage.segment_reduce(values, offsets, "sum", out=narrow)
     # A float64 out passes the `out` checks and stops at the missing build.
-    with pytest.raises(RuntimeError, match="requires the build-tree"):
+    with pytest.raises(RuntimeError, match="requires the mlir_swage"):
         swage.segment_reduce(values, offsets, "sum", out=wide)
 
 
@@ -519,10 +519,10 @@ def test_rank_two_values_reach_the_missing_bindings_error(monkeypatch):
     weights = _Tensor(torch, 6, rank=2, columns=3, pointer=0x9000)
 
     for keywords in ({}, {"out": out}):
-        with pytest.raises(RuntimeError, match="requires the build-tree"):
+        with pytest.raises(RuntimeError, match="requires the mlir_swage"):
             swage.segment_reduce(values, offsets, "mean", **keywords)
     for keywords in ({}, {"out": weights}):
-        with pytest.raises(RuntimeError, match="requires the build-tree"):
+        with pytest.raises(RuntimeError, match="requires the mlir_swage"):
             swage.segment_softmax(values, offsets, **keywords)
 
 

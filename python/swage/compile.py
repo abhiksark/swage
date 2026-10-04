@@ -254,7 +254,7 @@ def _write_artifact(output, target, programs, runtime_library):
 
         raise RuntimeError(
             "writing an artifact requires the mlir_swage bindings, which "
-            f"the swage-compiler wheel does not include. See {_INSTALLATION} "
+            f"this installation does not have. See {_INSTALLATION} "
             "for the native build"
         ) from error
     library = pathlib.Path(runtime_library or _packaged_runtime())

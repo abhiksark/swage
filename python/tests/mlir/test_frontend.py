@@ -869,7 +869,7 @@ def test_an_accepted_body_reports_missing_bindings_only_after_the_check(
     """Raise the installation hint, not a diagnostic, for a good body."""
     monkeypatch.setitem(sys.modules, "mlir_swage", None)
 
-    with pytest.raises(RuntimeError, match="requires the build-tree"):
+    with pytest.raises(RuntimeError, match="requires the mlir_swage"):
         _emit()
 
 

@@ -1963,9 +1963,9 @@ def _native_compiler(kernel_name, backend):
         from ._frontend import _INSTALLATION
 
         raise BackendUnavailableError(
-            "Swage launch requires the build-tree mlir_swage bindings, "
-            "which the swage-compiler wheel does not include; kernel "
-            f"'{kernel_name}' was not compiled",
+            "Swage launch requires the mlir_swage bindings, which this "
+            f"installation does not have; kernel '{kernel_name}' was not "
+            "compiled",
             code="native-unavailable",
             backend=backend,
             remediation=f"see {_INSTALLATION} for the native build",
