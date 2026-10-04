@@ -3268,6 +3268,9 @@ import swage
 
 sampled_at_import = "swage._runtime" in sys.modules
 package = pathlib.Path(swage.__file__).parent
+# The script edits the package it imported, so it must be the copy.
+if package.parent != pathlib.Path(os.environ["PYTHONPATH"]).resolve():
+    sys.exit(f"imported {package}, not the copy on PYTHONPATH")
 if sys.argv[1] == "edit after import":
     with open(package / "_frontend.py", "ab") as source:
         source.write(b"# edited after this process imported swage")
@@ -3336,6 +3339,9 @@ def _run_with_copied_frontend(tmp_path, mode):
     completed = subprocess.run(
         [
             sys.executable,
+            # Without site-packages, an editable install of swage cannot
+            # stand in for the copy on PYTHONPATH.
+            "-S",
             "-c",
             _STALE_FRONTEND_SCRIPT,
             mode,
@@ -3403,6 +3409,9 @@ import warnings
 import swage
 
 package = pathlib.Path(swage.__file__).parent
+# The script edits the package it imported, so it must be the copy.
+if package.parent != pathlib.Path(os.environ["PYTHONPATH"]).resolve():
+    sys.exit(f"imported {package}, not the copy on PYTHONPATH")
 
 
 def compile_in_the_child():
@@ -3480,6 +3489,9 @@ def test_forked_child_does_not_publish_code_its_parent_loaded_earlier(
     completed = subprocess.run(
         [
             sys.executable,
+            # Without site-packages, an editable install of swage cannot
+            # stand in for the copy on PYTHONPATH.
+            "-S",
             "-c",
             _FORKED_CHILD_SCRIPT,
             how,
