@@ -1,5 +1,5 @@
 # python/swage/__init__.pyi
-"""Types for the public fixed vector elementwise contract."""
+"""Types for the public fixed vector and segmented call contracts."""
 
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
@@ -35,3 +35,13 @@ class _Kernel:
     ) -> None: ...
 
 def jit(function: Callable[..., Any]) -> _Kernel: ...
+def segment_reduce(
+    values: Any,
+    offsets: Any,
+    kind: Literal["sum", "max", "min", "mean"],
+    *,
+    out: Any | None = ...,
+) -> Any: ...
+def segment_softmax(
+    values: Any, offsets: Any, *, out: Any | None = ...
+) -> Any: ...

@@ -436,8 +436,8 @@ def test_a_process_with_only_the_pure_package_checks_kernel_bodies(tmp_path):
         f"CompilationError|{script}:14:5: bad: unsupported statement 'For'"
     )
     assert accepted.startswith(
-        "RuntimeError|Swage emit_mlir() requires the build-tree mlir_swage "
-        "bindings"
+        "BackendUnavailableError|Swage emit_mlir() requires the build-tree "
+        "mlir_swage bindings"
     )
     assert "kernel 'good' passed the language check" in accepted
     assert "docs/getting-started/installation.md" in accepted
@@ -882,18 +882,29 @@ def kernel(x_ptr, n, BLOCK: sl.constexpr):
 @pytest.mark.parametrize(
     ("expression", "reason"),
     [
-        ("x * x", "'*' is not supported on f32 vectors; only '+' is"),
-        ("x - x", "'-' is not supported on f32 vectors; only '+' is"),
-        ("x / x", "'/' is not supported on f32 vectors; only '+' is"),
-        ("x * offsets", "'*' is not supported on f32 vectors; only '+' is"),
-        ("x + offsets", "'+' on an f32 vector requires another f32 vector"),
+        (
+            "x - x",
+            "'-' is not supported on float vectors; only '+' and '*' are",
+        ),
+        (
+            "x / x",
+            "'/' is not supported on float vectors; only '+' and '*' are",
+        ),
+        (
+            "x * offsets",
+            "'*' on a float vector requires another float vector",
+        ),
+        (
+            "x + offsets",
+            "'+' on a float vector requires another float vector",
+        ),
         (
             "x + 1.0",
             "float literal 1.0 is unsupported here; a float literal is "
             "accepted only as the other= value of load",
         ),
     ],
-    ids=["mul", "sub", "div", "mul-index", "add-index", "add-literal"],
+    ids=["sub", "div", "mul-index", "add-index", "add-literal"],
 )
 def test_f32_diagnostics_name_what_the_kernel_wrote(
     tmp_path, expression, reason

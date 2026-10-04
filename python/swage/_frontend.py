@@ -6,12 +6,12 @@ import functools
 import hashlib
 import inspect
 import math
-import struct
 import textwrap
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from . import language
+from . import _native, language
+from ._errors import BackendUnavailableError, CompilationError
 
 _INDEX_MIN = -(1 << 63)
 _INDEX_MAX = (1 << 63) - 1
@@ -35,8 +35,62 @@ _INSTALLATION = (
 )
 
 
-class CompilationError(Exception):
-    """A source-located error in a Swage kernel definition."""
+class _FloatFormat(NamedTuple):
+    """What the frontend needs to know about one storage element type.
+
+    `mlir` names the type in MLIR text and in diagnostics, and `binding`
+    the class of the Python bindings that builds it. A finite value is
+    rounded to `mantissa_bits` fraction bits, with the exponent clamped at
+    `min_exponent`, the exponent of the smallest normal value, below which
+    values are subnormal; the largest finite value is `max_finite`.
+    """
+
+    mlir: str
+    binding: str
+    mantissa_bits: int
+    min_exponent: int
+    max_finite: float
+
+
+_FLOAT_FORMATS = {
+    language.float32: _FloatFormat(
+        "f32", "F32Type", 23, -126, 3.4028234663852886e38
+    ),
+    language.float16: _FloatFormat("f16", "F16Type", 10, -14, 65504.0),
+    language.float8_e4m3fn: _FloatFormat(
+        "f8E4M3FN", "Float8E4M3FNType", 3, -6, 448.0
+    ),
+    language.float8_e5m2: _FloatFormat(
+        "f8E5M2", "Float8E5M2Type", 2, -14, 57344.0
+    ),
+}
+
+
+def _round_to_format(value, element):
+    """Round a finite number to the nearest value of one element type.
+
+    Rounding is to nearest with ties to even, as an MLIR float constant of
+    the type rounds. Values below the smallest normal value round to the
+    subnormal grid.
+
+    Args:
+        value: A finite Python float or integer.
+        element: A float type of `swage.language`.
+
+    Returns:
+        The rounded value as a float, or None when it exceeds the largest
+        finite value of the type.
+    """
+    layout = _FLOAT_FORMATS[element]
+    if value == 0:
+        return 0.0
+    magnitude = abs(value)
+    exponent = max(math.frexp(magnitude)[1] - 1, layout.min_exponent)
+    quantum = math.ldexp(1.0, exponent - layout.mantissa_bits)
+    rounded = round(magnitude / quantum) * quantum
+    if rounded > layout.max_finite:
+        return None
+    return math.copysign(rounded, value)
 
 
 class _Value(NamedTuple):
@@ -45,18 +99,22 @@ class _Value(NamedTuple):
     `value` is None while a body is checked without the native package.
     `bounds` is the inclusive `(low, high)` range of an index value whose
     operands are all known at compile time, and None for every other value.
+    `element` is the `swage.language` float type of a pointer or a float
+    vector, and None for every other value.
     """
 
     value: object
     kind: str
     bounds: tuple | None = None
+    element: object = None
 
 
 class _Address(NamedTuple):
-    """A transient base buffer and vector offset pair."""
+    """A transient base buffer, its vector offsets, and its element type."""
 
     base: object
     offsets: object
+    element: object = None
 
 
 class _Kernel:
@@ -119,6 +177,9 @@ class _Kernel:
             if self._is_constexpr_annotation(argument.annotation)
         }
         functools.update_wrapper(self, function)
+        # A weak reference to the native fixed CUDA launcher of the last
+        # Python launch, which `launch` tries first; see `_cuda_backend`.
+        self._cuda_fast_launch = None
         if not (self.__name__.isascii() and self.__name__.isidentifier()):
             self._raise(
                 self.function,
@@ -142,8 +203,25 @@ class _Kernel:
             "use kernel.launch()"
         )
 
-    def launch(self, *, arguments, constexprs, grid):
-        """Asynchronously launch the canonical fixed vector-add subset."""
+    def launch(self, *, arguments, constexprs, grid, backend="cuda"):
+        """Launch the canonical fixed vector addition or multiplication.
+
+        On the `cuda` backend the launch is asynchronous on the current
+        stream. On the `cpu` backend it runs to completion before it
+        returns. After a first CUDA launch, the native launcher that
+        launch prepared serves the same specialization without Python
+        work; it hands any call it cannot serve to the Python path, which
+        applies every check.
+        """
+        if type(backend) is str and backend == "cuda":
+            reference = self._cuda_fast_launch
+            if reference is not None:
+                fast_launch = reference()
+                # Direct method dispatch avoids the callable-instance wrapper.
+                if fast_launch is not None and fast_launch.__call__(
+                    arguments, constexprs, grid
+                ):
+                    return None
         from ._runtime import launch
 
         return launch(
@@ -151,6 +229,7 @@ class _Kernel:
             arguments=arguments,
             constexprs=constexprs,
             grid=grid,
+            backend=backend,
         )
 
     def emit_mlir(self, *, signature=None, arguments=None, constexprs):
@@ -171,15 +250,19 @@ class _Kernel:
 
             # Checks the bindings against this swage before any is used.
             _runtime._native_bindings()
-            from mlir_swage import ir
-            from mlir_swage.dialects import arith, func, swage, vector
-        except ImportError as error:
-            raise RuntimeError(
+            ir, arith, func, swage, vector = _native.load_ir()
+        except (ImportError, OSError, BackendUnavailableError) as error:
+            cause = error
+            if isinstance(error, BackendUnavailableError):
+                cause = error.__cause__ or error
+            raise BackendUnavailableError(
                 "Swage emit_mlir() requires the build-tree mlir_swage "
                 "bindings, which the swage-compiler wheel does not include; "
-                f"kernel '{self.__name__}' passed the language check. See "
-                f"{_INSTALLATION} for the native build"
-            ) from error
+                f"kernel '{self.__name__}' passed the language check",
+                code="native-unavailable",
+                backend="native",
+                remediation=f"see {_INSTALLATION} for the native build",
+            ) from cause
 
         emitter = _Emitter(
             self,
@@ -302,7 +385,8 @@ class _Kernel:
                 continue
             if (
                 isinstance(value, language._PointerType)
-                and value.element_type is language.float32
+                and isinstance(value.element_type, language._ScalarType)
+                and value.element_type in language._FLOAT_TYPES
             ):
                 continue
             self._raise(
@@ -315,7 +399,6 @@ class _Kernel:
         try:
             import torch
 
-            float32 = torch.float32
             strided = torch.strided
             tensor_type = torch.Tensor
         except Exception:
@@ -341,6 +424,7 @@ class _Kernel:
                 rank = value.dim()
                 device_type = value.device.type
                 contiguous = value.is_contiguous()
+                element_type = language._torch_float_type(dtype, torch)
             except Exception:
                 self._raise(
                     self.function,
@@ -349,7 +433,7 @@ class _Kernel:
                 )
             if layout != strided:
                 reason = f"layout {layout}"
-            elif dtype != float32:
+            elif element_type is None:
                 reason = f"dtype {dtype}"
             elif rank != 1:
                 reason = f"rank {rank}"
@@ -358,7 +442,7 @@ class _Kernel:
             elif not contiguous:
                 reason = "non-contiguous"
             else:
-                signature[name] = language.pointer(language.float32)
+                signature[name] = language.pointer(element_type)
                 continue
             self._raise(
                 self.function,
@@ -518,8 +602,12 @@ class _Checker:
             self._runtime_parameters(), values, strict=True
         ):
             declared = self.runtime_types[syntax.arg]
-            kind = "i32" if declared is language.int32 else "pointer"
-            self.symbols[syntax.arg] = _Value(value, kind)
+            if declared is language.int32:
+                self.symbols[syntax.arg] = _Value(value, "i32")
+            else:
+                self.symbols[syntax.arg] = _Value(
+                    value, "pointer", element=declared.element_type
+                )
 
     def _statement(self, node):
         if isinstance(node, ast.Assign):
@@ -591,24 +679,38 @@ class _Checker:
                 and isinstance(right, _Value)
                 and right.kind == "index_vector"
             ):
-                return _Address(left.value, right.value)
+                return _Address(left.value, right.value, left.element)
             self._error(node, "pointers support only addition with offsets")
         if not isinstance(left, _Value) or not isinstance(right, _Value):
             self._error(node, "unsupported binary operands")
         operator = _OPERATORS.get(type(node.op), type(node.op).__name__)
-        if "f32_vector" in {left.kind, right.kind}:
-            if not isinstance(node.op, ast.Add):
+        if "float_vector" in {left.kind, right.kind}:
+            if not isinstance(node.op, (ast.Add, ast.Mult)):
                 self._error(
                     node,
-                    f"'{operator}' is not supported on f32 vectors; only "
-                    "'+' is",
+                    f"'{operator}' is not supported on float vectors; only "
+                    "'+' and '*' are",
                 )
             if left.kind != right.kind:
                 self._error(
                     node,
-                    "'+' on an f32 vector requires another f32 vector",
+                    f"'{operator}' on a float vector requires another float "
+                    "vector",
                 )
-            return _Value(self._build_add_f32(left, right, node), "f32_vector")
+            if left.element is not right.element:
+                operation = (
+                    "addition"
+                    if isinstance(node.op, ast.Add)
+                    else "multiplication"
+                )
+                self._error(
+                    node,
+                    f"floating-point {operation} requires matching element "
+                    f"types; got {_FLOAT_FORMATS[left.element].mlir} and "
+                    f"{_FLOAT_FORMATS[right.element].mlir}",
+                )
+            result = self._build_float_binary(left, right, node)
+            return _Value(result, "float_vector", element=left.element)
         if not isinstance(node.op, (ast.Add, ast.Mult)):
             self._error(
                 node,
@@ -772,18 +874,21 @@ class _Checker:
             self._error(node.args[0], f"{callee} requires pointer + offsets")
         if mask.kind != "bool_vector":
             self._error(keywords["mask"], f"{callee} mask must be a vector")
-        other = self._float32_literal(keywords["other"], callee)
+        other = self._float_literal(keywords["other"], callee, address.element)
         return _Value(
-            self._build_load(address, mask, other, node), "f32_vector"
+            self._build_load(address, mask, other, node),
+            "float_vector",
+            element=address.element,
         )
 
-    def _float32_literal(self, node, callee):
-        """Return the `other` literal, rejecting what float32 cannot hold.
+    def _float_literal(self, node, callee, element):
+        """Return the `other` literal if its element type can hold it.
 
-        A float literal rounds to the nearest float32, as a float32 constant
-        does in any language. It is rejected when the result is not finite
-        or when a nonzero literal rounds to zero. An integer literal is
-        rejected unless float32 represents it exactly.
+        A float literal rounds to the nearest value of the element type of
+        the loaded pointer, as a constant of that type does in any language.
+        It is rejected when the result is not finite or when a nonzero
+        literal rounds to zero. An integer literal is rejected unless the
+        element type represents it exactly.
         """
         literal = node
         negative = isinstance(node, ast.UnaryOp) and isinstance(
@@ -798,21 +903,22 @@ class _Checker:
             self._error(node, f"{callee} other must be a numeric literal")
         value = -literal.value if negative else literal.value
         written = f"{callee} other={ast.unparse(node)}"
+        name = element.value
         try:
             exact = float(value)
-            rounded = struct.unpack("<f", struct.pack("<f", exact))[0]
         except OverflowError:
-            rounded = None
-        if rounded is None:
-            self._error(node, f"{written} is outside the float32 range")
+            self._error(node, f"{written} is outside the {name} range")
         if not math.isfinite(exact):
             self._error(node, f"{callee} other must be a finite literal")
+        rounded = _round_to_format(exact, element)
+        if rounded is None:
+            self._error(node, f"{written} is outside the {name} range")
         if value != 0 and rounded == 0:
-            self._error(node, f"{written} rounds to zero in float32")
+            self._error(node, f"{written} rounds to zero in {name}")
         if type(value) is int and rounded != value:
             self._error(
                 node,
-                f"{written} is an integer that float32 cannot hold exactly",
+                f"{written} is an integer that {name} cannot hold exactly",
             )
         return exact
 
@@ -831,8 +937,15 @@ class _Checker:
         )
         if not isinstance(address, _Address):
             self._error(node.args[0], f"{callee} requires pointer + offsets")
-        if value.kind != "f32_vector" or mask.kind != "bool_vector":
+        if value.kind != "float_vector" or mask.kind != "bool_vector":
             self._error(node, reason)
+        if value.element is not address.element:
+            self._error(
+                node,
+                f"{callee} requires matching value and pointer element "
+                f"types; got {_FLOAT_FORMATS[value.element].mlir} and "
+                f"{_FLOAT_FORMATS[address.element].mlir}",
+            )
         self._build_store(address, value, mask, node)
         return None
 
@@ -871,7 +984,7 @@ class _Checker:
     def _build_index_broadcast(self, scalar, node):
         return None
 
-    def _build_add_f32(self, left, right, node):
+    def _build_float_binary(self, left, right, node):
         return None
 
     def _build_add_index(self, left, right, node):
@@ -927,7 +1040,6 @@ class _Emitter(_Checker):
         context = self.ir.Context()
         with context:
             self.swage.register_dialects(context)
-            self.f32 = self.ir.F32Type.get()
             self.i32 = self.ir.IntegerType.get_signless(32)
             self.index = self.ir.IndexType.get()
             location = self._location(self.kernel.function)
@@ -968,7 +1080,11 @@ class _Emitter(_Checker):
             if declared is language.int32:
                 types.append(self.i32)
             else:
-                types.append(self.ir.MemRefType.get([dynamic], self.f32))
+                types.append(
+                    self.ir.MemRefType.get(
+                        [dynamic], self._element_type(declared.element_type)
+                    )
+                )
         return types
 
     def _build_return(self, node):
@@ -984,8 +1100,13 @@ class _Emitter(_Checker):
             self._index_vector_type(), scalar.value, loc=self._location(node)
         ).result
 
-    def _build_add_f32(self, left, right, node):
-        return self.arith.AddFOp(
+    def _build_float_binary(self, left, right, node):
+        operation = (
+            self.arith.AddFOp
+            if isinstance(node.op, ast.Add)
+            else self.arith.MulFOp
+        )
+        return operation(
             left.value, right.value, loc=self._location(node)
         ).result
 
@@ -1028,13 +1149,14 @@ class _Emitter(_Checker):
 
     def _build_load(self, address, mask, other, node):
         location = self._location(node)
-        constant = self.arith.ConstantOp(self.f32, other, loc=location).result
+        element = self._element_type(address.element)
+        constant = self.arith.ConstantOp(element, other, loc=location).result
         pass_through = self.vector.BroadcastOp(
-            self._float_vector_type(), constant, loc=location
+            self._float_vector_type(element), constant, loc=location
         ).result
         zero = self.arith.ConstantOp(self.index, 0, loc=location).result
         return self.vector.GatherOp(
-            self._float_vector_type(),
+            self._float_vector_type(element),
             address.base,
             [zero],
             address.offsets,
@@ -1059,8 +1181,12 @@ class _Emitter(_Checker):
     def _index_vector_type(self):
         return self.ir.VectorType.get([self.block], self.index)
 
-    def _float_vector_type(self):
-        return self.ir.VectorType.get([self.block], self.f32)
+    def _float_vector_type(self, element):
+        return self.ir.VectorType.get([self.block], element)
+
+    def _element_type(self, element):
+        """Return the MLIR type of a `swage.language` float type."""
+        return getattr(self.ir, _FLOAT_FORMATS[element].binding).get()
 
     def _location(self, node):
         line = self.kernel.source_line + node.lineno - 1
