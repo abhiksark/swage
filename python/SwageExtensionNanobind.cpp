@@ -69,6 +69,7 @@ struct CudaLauncher {
   using CurrentContextFn = int (*)(void **);
   using ContextIdFn = int (*)(void *, unsigned long long *);
   using EventRecordFn = int (*)(void *, void *);
+  using StreamIsCapturingFn = int (*)(void *, int *);
   LaunchFn launch = nullptr;
   ErrorTextFn errorName = nullptr;
   ErrorTextFn errorString = nullptr;
@@ -76,6 +77,7 @@ struct CudaLauncher {
   // Context ids exist from CUDA 12. An older driver has only handles.
   ContextIdFn contextId = nullptr;
   EventRecordFn eventRecord = nullptr;
+  StreamIsCapturingFn streamIsCapturing = nullptr;
 };
 
 const CudaLauncher &cudaLauncher() {
@@ -96,6 +98,9 @@ const CudaLauncher &cudaLauncher() {
         dlsym(library, "cuCtxGetId"));
     resolved.eventRecord = reinterpret_cast<CudaLauncher::EventRecordFn>(
         dlsym(library, "cuEventRecord"));
+    resolved.streamIsCapturing =
+        reinterpret_cast<CudaLauncher::StreamIsCapturingFn>(
+            dlsym(library, "cuStreamIsCapturing"));
     return resolved;
   }();
   return launcher;
@@ -607,9 +612,26 @@ public:
     torchFunctionMode =
         torch.attr("_C").attr("_is_torch_function_mode_enabled");
     // A kernel store is invisible to autograd, so every launch advances the
-    // version counter of its output, as the Python launch does.
+    // version counter of its output, as the Python launch does. The public
+    // increment_version wraps one tensor in a tuple for
+    // torch._C._increment_version; calling that directly saves a Python
+    // frame per launch. It is used only when it takes a tuple, which an empty
+    // one shows without touching any tensor; a single tensor would be read
+    // as the sequence of its elements.
     incrementVersion =
         torch.attr("autograd").attr("graph").attr("increment_version");
+    nb::object versionCounter =
+        nb::getattr(torch.attr("_C"), "_increment_version", nb::none());
+    if (PyCallable_Check(versionCounter.ptr())) {
+      nb::object empty = checkedObject(PyTuple_New(0));
+      if (PyObject *probed =
+              PyObject_CallOneArg(versionCounter.ptr(), empty.ptr())) {
+        Py_DECREF(probed);
+        incrementVersionTuple = std::move(versionCounter);
+      } else {
+        PyErr_Clear();
+      }
+    }
 
     // Ordinary attribute reads stay live. A changed class invalidates the
     // shortcut rather than silently accepting different lookup semantics.
@@ -684,11 +706,14 @@ public:
               checkedObject(deviceMethod(tensor.ptr(), nullptr))) != device)
         return false;
     }
+    const CudaLauncher &launcher = cudaLauncher();
+    // The capture query comes after the current-stream comparison, so the
+    // stream it asks about is the current one.
     if (nb::cast<int32_t>(checkedObject(
             PyObject_CallNoArgs(currentDevice.ptr()))) != device ||
         nb::cast<uint64_t>(callOne(currentRawStream, deviceValue)) !=
             rawStream ||
-        nb::cast<bool>(checkedObject(PyObject_CallNoArgs(isCapturing.ptr()))) ||
+        streamCapturing(launcher) ||
         nb::cast<bool>(callOne(loggingEnabled, debugLevel)))
       return false;
 
@@ -724,7 +749,6 @@ public:
         return false;
     }
 
-    const CudaLauncher &launcher = cudaLauncher();
     if (!launcher.launch || !launcher.currentContext ||
         (rawStream && !launcher.eventRecord))
       return false;
@@ -814,8 +838,30 @@ public:
     }
     if (failure)
       std::rethrow_exception(failure);
-    callOne(incrementVersion, tensors[2]);
+    if (incrementVersionTuple)
+      callOne(incrementVersionTuple,
+              checkedObject(PyTuple_Pack(1, tensors[2].ptr())));
+    else
+      callOne(incrementVersion, tensors[2]);
     return true;
+  }
+
+  /// Whether the launch stream captures a CUDA graph, asked of the driver.
+  ///
+  /// PyTorch's `_cuda_isCurrentStreamCapturing` asks the runtime the same
+  /// question about the current stream, which the caller has just compared
+  /// with `rawStream`; the driver answers it without a Python call. A
+  /// capture that is active or invalidated, or a query that fails, counts as
+  /// capturing, which hands the launch to the Python path. Without the driver
+  /// entry point the PyTorch query answers.
+  bool streamCapturing(const CudaLauncher &launcher) const {
+    if (!launcher.streamIsCapturing)
+      return nb::cast<bool>(
+          checkedObject(PyObject_CallNoArgs(isCapturing.ptr())));
+    int status = 0;
+    return launcher.streamIsCapturing(reinterpret_cast<void *>(rawStream),
+                                      &status) != 0 ||
+           status != 0;
   }
 
   static int traverse(PyObject *self, visitproc visit, void *arg) {
@@ -843,6 +889,7 @@ public:
           value.deviceValue.ptr(),     value.torchFunctionMode.ptr(),
           value.incrementVersion.ptr()})
       Py_VISIT(reference);
+    Py_VISIT(value.incrementVersionTuple.ptr());
     for (const nb::object &name : value.names)
       Py_VISIT(name.ptr());
     for (const nb::object &parameter : value.parameters)
@@ -976,7 +1023,7 @@ private:
   PyCFunction negativeMethod = nullptr, conjugateMethod = nullptr;
   PyCFunction pointerMethod = nullptr;
   nb::object isInBadFork, currentDevice, currentRawStream, isCapturing;
-  nb::object torchFunctionMode, incrementVersion;
+  nb::object torchFunctionMode, incrementVersion, incrementVersionTuple;
   nb::object logger, loggingEnabled, debugLevel, moveToEnd;
   nb::object artifactKey, loadedKey, contextValue, functionValue;
   nb::object rawStreamValue, deviceValue;
