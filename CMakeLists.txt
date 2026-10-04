@@ -98,7 +98,9 @@ if(SWAGE_ENABLE_SANITIZERS)
      NOT CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$")
     message(FATAL_ERROR "SWAGE_ENABLE_SANITIZERS requires Linux GCC or Clang")
   endif()
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  # A finding stops the program, so a test cannot pass over one.
+  add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all
+                      -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
