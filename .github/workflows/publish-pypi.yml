@@ -364,6 +364,9 @@ jobs:
             release-dist/swage_compiler-0.5.2-cp313-cp313-manylinux_2_28_x86_64.whl
           mkdir "$work/evidence"
           echo "RELEASE_WORK=$work" >> "$GITHUB_ENV"
+      # SWAGE_REQUIRE_PERSISTENT_CACHE_TEST=1 makes the persistent cache
+      # reuse test fail, not skip, when this run cannot use the persistent
+      # cache: a qualification must observe the reuse it records.
       - name: Check installed CUDA health and fixed native runtime suite
         working-directory: ${{ runner.temp }}
         env:

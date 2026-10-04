@@ -9,6 +9,39 @@ which reuses the same CUDA Driver wrapper for admitted segmented modules.
 Every path validates its complete host-visible boundary before reading
 pointers, allocating private storage, compiling, or launching.
 
+## Dtypes and rounding
+
+Canonical vector addition and multiplication accept contiguous rank-one
+tensors with matching input and output dtypes:
+
+| PyTorch dtype | Storage | Format |
+|---|---|---|
+| `torch.float32` | 32 bits | IEEE binary32; existing arithmetic unchanged |
+| `torch.float16` | 16 bits | IEEE binary16 |
+| `torch.float8_e4m3fn` | 8 bits | E4M3FN, finite values and NaNs, no infinities |
+| `torch.float8_e5m2` | 8 bits | E5M2, including infinities and NaNs |
+
+FP16 and FP8 values are widened inside the compiled kernel, combined in FP32,
+then rounded to the output format using round-to-nearest, ties-to-even.
+FP8 loads and stores use bytes with scalar software conversion on both
+backends; native FP8 arithmetic or a newer GPU than `sm_86` is not required.
+No temporary promoted tensors or host-side tensor casts are introduced.
+
+Conversion is not saturating: FP16 and E5M2 overflow produce signed infinity;
+E4M3FN overflow produces NaN. Subnormal values and signed zeros follow
+the format's arithmetic. NaN payload and sign are not guaranteed.
+The FP16 reference is `(x.float() op y.float()).to(x.dtype)`. FP8
+qualification uses the same widened operation with a version-independent
+format oracle. This matters for E4M3FN because PyTorch 2.13 saturates results
+above the 464 overflow midpoint while Swage's documented non-saturating
+conversion produces NaN.
+
+Mixed dtypes, `bfloat16`, `float64`, and the FP8 FNUZ formats are rejected,
+including for zero-length work. This does not expand the admitted operation
+beyond one canonical vector addition or multiplication and does not add
+low-precision segmented kernels. Operation chains, floating vector/scalar
+arithmetic, broadcasting, and matrix multiplication remain unsupported.
+
 ## Launch lifecycle
 
 The public path requires three contiguous rank-one `torch.float32` CUDA
@@ -675,7 +708,7 @@ runs only the segmented calls maps no LLVM or MLIR library whether or not
 
 ## Test and development settings
 
-One variable serves the tests and no public call.
+Two variables serve the tests and no public call.
 
 `SWAGE_ORACLE_BUILD_DIR` names the Swage build directory from which the
 private CPU oracle takes its tools. The oracle runs `bin/swage-opt` of that
@@ -685,6 +718,16 @@ it uses. Without the variable the directory is `build` in the checkout that
 `swage` was imported from, which a `swage` installed from a wheel does not
 have. The variable is read at every oracle call. A directory that lacks
 either file raises a `RuntimeError` that names what is missing.
+
+`SWAGE_REQUIRE_PERSISTENT_CACHE_TEST=1` requires that the persistent cache
+is usable in the run that sets it. The test that reuses persistent artifacts
+in a second process skips when this process would not read or write the
+cache, for example when its compiler files changed after it started; with
+the variable set it fails instead and names the reason. The release workflow
+sets it while it qualifies the installed wheel on the A6000, so that a
+qualification never passes without the cache reuse it records. A dirty
+checkout does not count as unusable: it reads and writes the cache like a
+clean one.
 
 ## Debug dumps
 
