@@ -93,7 +93,8 @@ module {
   }
 }
 
-// CHECK: gpu.func @segmented_sum_r2(%[[VALUES:.*]]: !llvm.ptr, %[[OFFSETS:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32, %[[FEATURE_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>} {
+// CHECK: gpu.func @segmented_sum_r2(%[[VALUES:.*]]: !llvm.ptr, %[[OFFSETS:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32, %[[FEATURE_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>,
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}, {kind = "i32", origin = "user", source_index = 5 : i64}], backend = "cuda", entry = "segmented_sum_r2", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
 // CHECK: %[[SEGMENT:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[BLOCK:.*]] = arith.constant 128 : index
@@ -132,11 +133,13 @@ module {
 // CHECK-NEXT: gpu.return
 
 // CHECK: gpu.func @segmented_max_r2(
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}, {kind = "i32", origin = "user", source_index = 5 : i64}], backend = "cuda", entry = "segmented_max_r2", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: arith.constant 0xFF800000 : f32
 // CHECK: arith.maximumf
 
 // A mean of a column divides by the rows of its segment, in every thread.
 // CHECK: gpu.func @segmented_mean_f64_r2(
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}, {kind = "i32", origin = "user", source_index = 5 : i64}], backend = "cuda", entry = "segmented_mean_f64_r2", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK:   %[[MEAN_START_CLAMPED:.*]] = arith.minsi %{{.*}}, %{{.*}} : i32
 // CHECK:   %[[MEAN_END_CLAMPED:.*]] = arith.minsi %{{.*}}, %{{.*}} : i32
 // CHECK-NEXT: %[[MEAN_START:.*]] = arith.index_cast %[[MEAN_START_CLAMPED]] : i32 to index
@@ -151,5 +154,5 @@ module {
 
 // The upstream conversion finds nothing to synchronize.
 // NVVM: llvm.func @segmented_sum_r2(%{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32)
-// NVVM-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
+// NVVM-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>, swage.kernel_contract = {{.+}}}
 // NVVM: llvm.return

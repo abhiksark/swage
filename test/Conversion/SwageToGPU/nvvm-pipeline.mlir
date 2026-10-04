@@ -48,13 +48,15 @@ module {
 }
 
 // The kernel keeps its name, its launch width, and its parameter order: the
-// buffers as pointers, then the i32 counts.
+// buffers as pointers, then the i32 counts. The upstream conversion copies
+// the discardable launch contract onto the LLVM function; code generation
+// validates and removes it before this conversion, so it never reaches PTX.
 // CHECK-LABEL: gpu.module @segmented_sum_module
 // CHECK: llvm.func @segmented_sum(
 // CTA-SAME: %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32)
-// CTA-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
+// CTA-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>, swage.kernel_contract = {{.+}}}
 // WARP-SAME: %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: !llvm.ptr, %{{[^:]+}}: i32, %{{[^:]+}}: i32, %{{[^:]+}}: i32)
-// WARP-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 32, 1, 1>}
+// WARP-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 32, 1, 1>, swage.kernel_contract = {{.+}}}
 // CHECK: nvvm.read.ptx.sreg.ctaid.x
 // CHECK: nvvm.read.ptx.sreg.tid.x
 
@@ -100,6 +102,7 @@ module {
 // CHECK-LABEL: gpu.module @exponential_sum_module
 // CHECK: llvm.func @__nv_exp2f(f32) -> f32
 // CHECK: llvm.func @exponential_sum(
+// CHECK-SAME: swage.kernel_contract = {{.+}}
 // CHECK: llvm.call @__nv_exp2f(
 // CHECK: llvm.return
 
@@ -131,8 +134,8 @@ module {
 // same way. The combine stays an f64 maximum.
 // CHECK-LABEL: gpu.module @segmented_max_f64_module
 // CHECK: llvm.func @segmented_max_f64(
-// CTA-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}
-// WARP-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 32, 1, 1>}
+// CTA-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 128, 1, 1>, swage.kernel_contract = {{.+}}}
+// WARP-SAME: attributes {gpu.kernel, nvvm.kernel, nvvm.reqntid = array<i32: 32, 1, 1>, swage.kernel_contract = {{.+}}}
 // CHECK: llvm.intr.maximum(%{{.*}}) : (f64, f64) -> f64
 // CHECK: llvm.bitcast %{{.*}} : f64 to i64
 // CHECK: nvvm.shfl.sync {{ *}}bfly %{{.*}} : i32 -> i32

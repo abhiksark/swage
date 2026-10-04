@@ -92,7 +92,7 @@ module {
   }
 }
 
-// COLUMN: func.func @segmented_sum_r2(%[[VALUES:.*]]: memref<?x?xf32> {swage.role = #swage.role<values>}, %[[OFFSETS:.*]]: memref<?xi32> {swage.role = #swage.role<offsets>}, %[[OUTPUT:.*]]: memref<?x?xf32> {swage.role = #swage.role<output>}, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>}, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>}, %[[FEATURE_COUNT:.*]]: i32 {swage.role = #swage.role<feature_count>}) attributes {swage_plan.block_threads = 128 : i32} {
+// COLUMN: func.func @segmented_sum_r2(%[[VALUES:.*]]: memref<?x?xf32> {swage.role = #swage.role<values>, swage_plan.source_index = 0 : i32}, %[[OFFSETS:.*]]: memref<?xi32> {swage.role = #swage.role<offsets>, swage_plan.source_index = 1 : i32}, %[[OUTPUT:.*]]: memref<?x?xf32> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32}, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>, swage_plan.source_index = 3 : i32}, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>, swage_plan.source_index = 4 : i32}, %[[FEATURE_COUNT:.*]]: i32 {swage.role = #swage.role<feature_count>, swage_plan.source_index = 5 : i32}) attributes {swage_plan.block_threads = 128 : i32} {
 // COLUMN-NEXT: swage_plan.tasks policy<column> segments(%[[VALUES]], %[[OFFSETS]] : memref<?x?xf32>, memref<?xi32>) value_count(%[[VALUE_COUNT]] : i32) segment_count(%[[SEGMENT_COUNT]] : i32) feature_count(%[[FEATURE_COUNT]] : i32) into(%[[OUTPUT]] : memref<?x?xf32>) {
 // COLUMN-NEXT: ^bb0(%[[COLUMN:.*]]: !swage.segment<f32>):
 // COLUMN-NEXT: %[[SUM:.*]] = swage.reduce %[[COLUMN]] kind<sum> : !swage.segment<f32> -> f32 {

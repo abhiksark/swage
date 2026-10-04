@@ -16,7 +16,7 @@
 // RUN: swage-opt --swage-to-plan='schedule=split-partial' %s \
 // RUN:   | FileCheck %s --check-prefix=PARTIAL \
 // RUN:       --implicit-check-not=swage.extent --implicit-check-not=arith. \
-// RUN:       --implicit-check-not=index
+// RUN:       --implicit-check-not='{{[^_]index}}'
 // RUN: swage-opt --swage-to-plan='schedule=split-merge' %s \
 // RUN:   | FileCheck %s --check-prefix=MERGE --implicit-check-not=swage.extent
 // RUN: swage-opt --swage-to-plan='schedule=sequential' %s \
@@ -81,7 +81,7 @@ module {
 
 // The merge kernel takes the range records as a fourth buffer, after the
 // merge records, and the merge region divides the sum of the partial sums.
-// MERGE: func.func @segmented_mean__merge(%[[SCRATCH:.*]]: memref<?xf32>, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>}, %[[MERGES:.*]]: memref<?xi32>, %[[RANGES:.*]]: memref<?xi32>, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>})
+// MERGE: func.func @segmented_mean__merge(%[[SCRATCH:.*]]: memref<?xf32>, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32}, %[[MERGES:.*]]: memref<?xi32>, %[[RANGES:.*]]: memref<?xi32>, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>, swage_plan.source_index = 4 : i32})
 // MERGE: swage_plan.merge_tasks scratch(%[[SCRATCH]] : memref<?xf32>)
 // MERGE-SAME: merges(%[[MERGES]] : memref<?xi32>)
 // MERGE-SAME: ranges(%[[RANGES]] : memref<?xi32>)

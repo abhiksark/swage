@@ -74,6 +74,33 @@ static bool isKernelParameterType(Type type) {
 }
 
 LogicalResult
+SwagePlanDialect::verifyRegionArgAttribute(Operation *op, unsigned regionIndex,
+                                           unsigned argIndex,
+                                           NamedAttribute attribute) {
+  StringRef name = getSourceIndexAttrName();
+  if (attribute.getName() != name)
+    return op->emitError()
+           << "'" << attribute.getName().strref()
+           << "' is not an argument attribute of the swage_plan dialect; the "
+              "dialect defines "
+           << name;
+  auto function = dyn_cast<func::FuncOp>(op);
+  if (!function || !function->hasAttr(getBlockThreadsAttrName()))
+    return op->emitError() << name
+                           << " belongs on an argument of a plan function, a "
+                              "func.func with "
+                           << getBlockThreadsAttrName() << ", got argument #"
+                           << argIndex << " of '" << op->getName() << "'";
+  auto index = dyn_cast<IntegerAttr>(attribute.getValue());
+  if (!index || !index.getType().isSignlessInteger(32) ||
+      index.getValue().isNegative())
+    return op->emitError() << name << " of argument #" << argIndex
+                           << " must be a nonnegative i32, got "
+                           << attribute.getValue();
+  return success();
+}
+
+LogicalResult
 SwagePlanDialect::verifyOperationAttribute(Operation *op,
                                            NamedAttribute attribute) {
   StringRef name = getBlockThreadsAttrName();

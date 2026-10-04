@@ -12,7 +12,8 @@
 // RUN:   2>&1 | FileCheck %s --check-prefix=SUBGROUPS
 
 // CHECK: gpu.module @fused_module {
-// CHECK-NEXT: gpu.func @fused(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %[[IDS:.*]]: !llvm.ptr, %{{.*}}: i32, %[[WARP_TASK_COUNT:.*]]: i32, %[[CTA_TASK_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>} {
+// CHECK-NEXT: gpu.func @fused(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %[[IDS:.*]]: !llvm.ptr, %{{.*}}: i32, %[[WARP_TASK_COUNT:.*]]: i32, %[[CTA_TASK_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>,
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "read", key = "task_ids", kind = "ptr", origin = "plan"}, {kind = "i32", origin = "user", source_index = 4 : i64}, {key = "warp_task_count", kind = "i32", origin = "derived"}, {key = "cta_task_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 7 : i64}], backend = "cuda", entry = "fused", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
 // CHECK-NEXT: %[[BLOCK:.*]] = gpu.block_id x
 // CHECK-NEXT: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index

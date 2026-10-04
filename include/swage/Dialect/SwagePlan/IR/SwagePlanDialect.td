@@ -39,15 +39,31 @@ def SwagePlan_Dialect : Dialect {
 
     The dialect verifies both. A planning parameter that no kernel reads,
     such as a limit that steers host classification, is not part of plan IR.
+
+    A parameter of a plan function that the segment function declared, such
+    as the values or the segment count, may carry the argument attribute
+    `swage_plan.source_index`: the position of that argument in the segment
+    function, a nonnegative i32. The planner sets it on every such parameter,
+    because a plan function takes its parameters in the order of its kernel
+    and not in the order the segment function declared them. The kernel
+    contract binds the caller's arguments by these positions. A parameter
+    without the attribute, in a plan function written by hand, is bound at
+    its own position: such a plan function is the function its caller calls.
   }];
   let cppNamespace = "::mlir::swage_plan";
   let useDefaultAttributePrinterParser = 1;
   let hasOperationAttrVerify = 1;
+  let hasRegionArgAttrVerify = 1;
   let extraClassDeclaration = [{
     /// The name of the function attribute that makes a function a plan
     /// function and gives the launch width of its kernel in threads.
     static ::llvm::StringRef getBlockThreadsAttrName() {
       return "swage_plan.block_threads";
+    }
+    /// The name of the argument attribute that gives the position, in the
+    /// segment function, of the argument a plan function parameter came from.
+    static ::llvm::StringRef getSourceIndexAttrName() {
+      return "swage_plan.source_index";
     }
   }];
 }

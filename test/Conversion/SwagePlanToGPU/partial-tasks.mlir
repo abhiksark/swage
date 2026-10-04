@@ -9,7 +9,8 @@
 // RUN:   --implicit-check-not=swage --implicit-check-not=func.func
 
 // CHECK: gpu.module @partial_module {
-// CHECK-NEXT: gpu.func @partial(%[[VALUES:.*]]: !llvm.ptr, %[[RANGES:.*]]: !llvm.ptr, %[[SCRATCH:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[PARTIAL_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>} {
+// CHECK-NEXT: gpu.func @partial(%[[VALUES:.*]]: !llvm.ptr, %[[RANGES:.*]]: !llvm.ptr, %[[SCRATCH:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[PARTIAL_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>,
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", key = "partial_ranges", kind = "ptr", origin = "plan"}, {access = "write", key = "scratch", kind = "ptr", origin = "scratch"}, {kind = "i32", origin = "user", source_index = 3 : i64}, {key = "partial_count", kind = "i32", origin = "derived"}], backend = "cuda", entry = "partial", launch = {block = array<i32: 512, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
 // CHECK-NEXT: %[[BLOCK:.*]] = gpu.block_id x
 // CHECK-NEXT: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index

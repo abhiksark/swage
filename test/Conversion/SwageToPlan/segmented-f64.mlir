@@ -30,15 +30,15 @@ module {
   }
 }
 
-// TASKS: func.func @segmented_sum_f64(%{{.*}}: memref<?xf64> {swage.role = #swage.role<values>}, %{{.*}}: memref<?xi32> {swage.role = #swage.role<offsets>}, %{{.*}}: memref<?xf64> {swage.role = #swage.role<output>}, %{{.*}}: memref<?xi32>,
+// TASKS: func.func @segmented_sum_f64(%{{.*}}: memref<?xf64> {swage.role = #swage.role<values>, swage_plan.source_index = 0 : i32}, %{{.*}}: memref<?xi32> {swage.role = #swage.role<offsets>, swage_plan.source_index = 1 : i32}, %{{.*}}: memref<?xf64> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32}, %{{.*}}: memref<?xi32>,
 // TASKS: swage_plan.tasks policy<cta>
 // TASKS: %[[SUM:.*]] = swage.reduce %{{.*}} kind<sum> : !swage.segment<f64> -> f64 {
 // TASKS: swage_plan.yield %[[SUM]] : f64
 
-// SPLIT: func.func @segmented_sum_f64__partial(%[[VALUES:.*]]: memref<?xf64> {swage.role = #swage.role<values>}, %[[RANGES:.*]]: memref<?xi32>, %[[SCRATCH:.*]]: memref<?xf64>,
+// SPLIT: func.func @segmented_sum_f64__partial(%[[VALUES:.*]]: memref<?xf64> {swage.role = #swage.role<values>, swage_plan.source_index = 0 : i32}, %[[RANGES:.*]]: memref<?xi32>, %[[SCRATCH:.*]]: memref<?xf64>,
 // SPLIT: swage_plan.partial_tasks values(%[[VALUES]] : memref<?xf64>)
 // SPLIT-SAME: into(%[[SCRATCH]] : memref<?xf64>)
-// SPLIT: func.func @segmented_sum_f64__merge(%[[PARTIALS:.*]]: memref<?xf64>, %[[OUTPUT:.*]]: memref<?xf64> {swage.role = #swage.role<output>},
+// SPLIT: func.func @segmented_sum_f64__merge(%[[PARTIALS:.*]]: memref<?xf64>, %[[OUTPUT:.*]]: memref<?xf64> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32},
 // SPLIT: swage_plan.merge_tasks scratch(%[[PARTIALS]] : memref<?xf64>)
 // SPLIT: ^bb0(%[[RANGE:.*]]: !swage.segment<f64>):
 // SPLIT-NEXT: swage.reduce %[[RANGE]] kind<sum> : !swage.segment<f64> -> f64 {

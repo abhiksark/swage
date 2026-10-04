@@ -20,7 +20,7 @@
 // PARTIAL: arith.addf
 // PARTIAL: return
 
-// MERGE: func.func @segmented_max__merge(%[[SCRATCH:.*]]: memref<?xf32>, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>}, %[[MERGES:.*]]: memref<?xi32>, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>}) attributes {swage_plan.block_threads = 512 : i32} {
+// MERGE: func.func @segmented_max__merge(%[[SCRATCH:.*]]: memref<?xf32>, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32}, %[[MERGES:.*]]: memref<?xi32>, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>, swage_plan.source_index = 4 : i32}) attributes {swage_plan.block_threads = 512 : i32} {
 // MERGE-NEXT: swage_plan.merge_tasks scratch(%[[SCRATCH]] : memref<?xf32>) partial_count(%[[PARTIAL_COUNT]] : i32) merges(%[[MERGES]] : memref<?xi32>) merge_count(%[[MERGE_COUNT]] : i32) segment_count(%[[SEGMENT_COUNT]] : i32) into(%[[OUTPUT]] : memref<?xf32>) {
 // MERGE-NEXT: ^bb0(%[[PARTIALS:.*]]: !swage.segment<f32>):
 // MERGE-NEXT: %[[MAX:.*]] = swage.reduce %[[PARTIALS]] kind<max> : !swage.segment<f32> -> f32 {

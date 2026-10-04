@@ -52,6 +52,7 @@ module {
 
 // CHECK: gpu.module @ragged_softmax_module
 // CHECK: gpu.func @ragged_softmax(%[[VALUES:[^,]+]]: !llvm.ptr, %{{[^,]+}}: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "ragged_softmax", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: %[[SID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[BLOCK:.*]] = arith.constant 128 : index

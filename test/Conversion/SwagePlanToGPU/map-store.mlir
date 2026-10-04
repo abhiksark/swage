@@ -8,6 +8,7 @@
 // RUN:   --implicit-check-not=swage --implicit-check-not=func.func
 
 // CHECK: gpu.func @map_store(%[[VALUES:.*]]: !llvm.ptr, %{{.*}}: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %{{.*}}: i32, %{{.*}}: i32) kernel
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "map_store", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[FIRST:.*]] = arith.addi %{{.*}}, %[[THREAD]] : index
 // CHECK: %[[LOCAL_MAX:.*]] = scf.for %{{.*}} = %[[FIRST]] to %[[END:.*]] step %[[STRIDE:.*]] iter_args(

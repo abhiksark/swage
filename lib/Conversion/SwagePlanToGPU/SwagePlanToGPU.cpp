@@ -30,9 +30,11 @@
 #include "swage/Conversion/SwageToPlan/Admission.h"
 #include "swage/Dialect/Swage/IR/SwageDialect.h"
 #include "swage/Dialect/Swage/IR/SwageOps.h"
+#include "swage/Dialect/SwagePlan/IR/KernelLayout.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanDialect.h"
 #include "swage/Dialect/SwagePlan/IR/SwagePlanOps.h"
 #include "swage/Dialect/SwagePlan/IR/TaskRecords.h"
+#include "swage/Support/KernelContract.h"
 #include "swage/Target/TargetDescription.h"
 
 namespace mlir::swage {
@@ -55,10 +57,379 @@ IntegerAttr blockThreadsOf(Operation *op) {
       SwagePlanDialect::getBlockThreadsAttrName());
 }
 
+//===----------------------------------------------------------------------===//
+// Kernel launch contracts
+//===----------------------------------------------------------------------===//
+
+using swage_plan::KernelKind;
+using swage_plan::KernelLayout;
+using LayoutArgument = swage_plan::KernelArgument;
+
+/// The parameter types of the kernel a plan function becomes: every buffer
+/// becomes a pointer and every count stays as it is.
+SmallVector<Type> kernelInputsOf(func::FuncOp function) {
+  Type pointer = LLVM::LLVMPointerType::get(function.getContext());
+  SmallVector<Type> inputs;
+  for (Type input : function.getFunctionType().getInputs())
+    inputs.push_back(isa<MemRefType>(input) ? pointer : input);
+  return inputs;
+}
+
+/// The kernel the task operation of a plan function becomes, which fixes the
+/// parameter list in `KernelLayout.h`. None for a task operation that no
+/// kernel takes in that form.
+std::optional<KernelKind> kernelKindOf(Operation *task) {
+  if (auto tasks = dyn_cast<TasksOp>(task)) {
+    if (tasks.getFeatureCount())
+      return tasks.getIds() ? std::nullopt
+                            : std::optional(KernelKind::DirectColumns);
+    return tasks.getIds() ? KernelKind::TaskIds : KernelKind::Direct;
+  }
+  if (isa<FusedTasksOp>(task))
+    return KernelKind::FusedMixed;
+  if (isa<PartialTasksOp>(task))
+    return KernelKind::SplitPartial;
+  if (auto merge = dyn_cast<MergeTasksOp>(task))
+    return merge.getRanges() ? KernelKind::SplitMergeExtent
+                             : KernelKind::SplitMerge;
+  if (isa<PersistentTasksOp>(task))
+    return KernelKind::Persistent;
+  return std::nullopt;
+}
+
+/// The name of a kernel in diagnostics.
+StringRef kernelKindName(KernelKind kind) {
+  switch (kind) {
+  case KernelKind::Direct:
+    return "direct";
+  case KernelKind::DirectColumns:
+    return "direct column";
+  case KernelKind::TaskIds:
+    return "task-id";
+  case KernelKind::FusedMixed:
+    return "fused mixed";
+  case KernelKind::SplitPartial:
+    return "split partial";
+  case KernelKind::SplitMerge:
+    return "split merge";
+  case KernelKind::SplitMergeExtent:
+    return "split merge with extents";
+  case KernelKind::Persistent:
+    return "persistent";
+  }
+  llvm_unreachable("unknown kernel kind");
+}
+
+/// The operand through which the task operation reads the kernel parameter
+/// `argument`, or a null value when it takes none for it.
+Value taskOperandOf(Operation *task, LayoutArgument argument) {
+  if (auto tasks = dyn_cast<TasksOp>(task)) {
+    switch (argument) {
+    case LayoutArgument::Values:
+      return tasks.getValues();
+    case LayoutArgument::Offsets:
+      return tasks.getOffsets();
+    case LayoutArgument::Output:
+      return tasks.getOutput();
+    case LayoutArgument::TaskIds:
+      return tasks.getIds();
+    case LayoutArgument::ValueCount:
+      return tasks.getValueCount();
+    case LayoutArgument::TaskCount:
+      return tasks.getTaskCount();
+    case LayoutArgument::SegmentCount:
+      return tasks.getSegmentCount();
+    case LayoutArgument::FeatureCount:
+      return tasks.getFeatureCount();
+    default:
+      return Value();
+    }
+  }
+  if (auto fused = dyn_cast<FusedTasksOp>(task)) {
+    switch (argument) {
+    case LayoutArgument::Values:
+      return fused.getValues();
+    case LayoutArgument::Offsets:
+      return fused.getOffsets();
+    case LayoutArgument::Output:
+      return fused.getOutput();
+    case LayoutArgument::TaskIds:
+      return fused.getIds();
+    case LayoutArgument::ValueCount:
+      return fused.getValueCount();
+    case LayoutArgument::WarpTaskCount:
+      return fused.getWarpTaskCount();
+    case LayoutArgument::CtaTaskCount:
+      return fused.getCtaTaskCount();
+    case LayoutArgument::SegmentCount:
+      return fused.getSegmentCount();
+    default:
+      return Value();
+    }
+  }
+  if (auto partial = dyn_cast<PartialTasksOp>(task)) {
+    switch (argument) {
+    case LayoutArgument::Values:
+      return partial.getValues();
+    case LayoutArgument::PartialRanges:
+      return partial.getRanges();
+    case LayoutArgument::Scratch:
+      return partial.getScratch();
+    case LayoutArgument::ValueCount:
+      return partial.getValueCount();
+    case LayoutArgument::PartialCount:
+      return partial.getPartialCount();
+    default:
+      return Value();
+    }
+  }
+  if (auto merge = dyn_cast<MergeTasksOp>(task)) {
+    switch (argument) {
+    case LayoutArgument::Scratch:
+      return merge.getScratch();
+    case LayoutArgument::Output:
+      return merge.getOutput();
+    case LayoutArgument::MergeRecords:
+      return merge.getMerges();
+    case LayoutArgument::PartialRanges:
+      return merge.getRanges();
+    case LayoutArgument::PartialCount:
+      return merge.getPartialCount();
+    case LayoutArgument::MergeCount:
+      return merge.getMergeCount();
+    case LayoutArgument::SegmentCount:
+      return merge.getSegmentCount();
+    default:
+      return Value();
+    }
+  }
+  if (auto persistent = dyn_cast<PersistentTasksOp>(task)) {
+    switch (argument) {
+    case LayoutArgument::Values:
+      return persistent.getValues();
+    case LayoutArgument::Offsets:
+      return persistent.getOffsets();
+    case LayoutArgument::Output:
+      return persistent.getOutput();
+    case LayoutArgument::WarpIds:
+      return persistent.getWarpIds();
+    case LayoutArgument::CtaIds:
+      return persistent.getCtaIds();
+    case LayoutArgument::PartialRanges:
+      return persistent.getRanges();
+    case LayoutArgument::PartialMergeIds:
+      return persistent.getMergeIds();
+    case LayoutArgument::MergeRecords:
+      return persistent.getMerges();
+    case LayoutArgument::Scratch:
+      return persistent.getScratch();
+    case LayoutArgument::Counters:
+      return persistent.getCounters();
+    case LayoutArgument::ValueCount:
+      return persistent.getValueCount();
+    case LayoutArgument::WarpTaskCount:
+      return persistent.getWarpTaskCount();
+    case LayoutArgument::CtaTaskCount:
+      return persistent.getCtaTaskCount();
+    case LayoutArgument::PartialCount:
+      return persistent.getPartialCount();
+    case LayoutArgument::MergeCount:
+      return persistent.getMergeCount();
+    case LayoutArgument::SegmentCount:
+      return persistent.getSegmentCount();
+    default:
+      return Value();
+    }
+  }
+  return Value();
+}
+
+/// The contract kind of a count parameter.
+std::optional<KernelArgumentKind> countKindOf(Type type) {
+  switch (type.getIntOrFloatBitWidth()) {
+  case 1:
+    return KernelArgumentKind::I1;
+  case 8:
+    return KernelArgumentKind::I8;
+  case 16:
+    return KernelArgumentKind::I16;
+  case 32:
+    return KernelArgumentKind::I32;
+  case 64:
+    return KernelArgumentKind::I64;
+  default:
+    return std::nullopt;
+  }
+}
+
+/// How the kernel `kind` uses its scratch buffer: a partial task writes its
+/// slot, a merge reads the slots of its segment, and the persistent kernel
+/// does both.
+KernelArgumentAccess scratchAccess(KernelKind kind) {
+  switch (kind) {
+  case KernelKind::SplitPartial:
+    return KernelArgumentAccess::Write;
+  case KernelKind::Persistent:
+    return KernelArgumentAccess::ReadWrite;
+  default:
+    return KernelArgumentAccess::Read;
+  }
+}
+
+/// The contract entry of one kernel parameter.
+///
+/// The arguments the segment function declares, which carry a role, bind
+/// the caller's arguments at their source index: the values, the offsets,
+/// the output, and the counts of values, segments, and features, which the
+/// caller states (ADR-0020). The task records the host classifier produces
+/// are plan arguments, the buffers the host allocates for the kernel are
+/// scratch, and the record counts follow from the records and are derived.
+/// Every keyed argument is keyed by its name in `KernelLayout.h`.
+std::optional<KernelArgument> contractArgumentOf(LayoutArgument argument,
+                                                 KernelKind kind, Type type,
+                                                 uint32_t sourceIndex) {
+  using Access = KernelArgumentAccess;
+  using Origin = KernelArgumentOrigin;
+  StringRef key = swage_plan::kernelArgumentName(argument);
+  switch (argument) {
+  case LayoutArgument::Values:
+  case LayoutArgument::Offsets:
+    return KernelArgument::userPointer(sourceIndex, Access::Read);
+  case LayoutArgument::Output:
+    return KernelArgument::userPointer(sourceIndex, Access::Write);
+  case LayoutArgument::TaskIds:
+  case LayoutArgument::WarpIds:
+  case LayoutArgument::CtaIds:
+  case LayoutArgument::PartialRanges:
+  case LayoutArgument::PartialMergeIds:
+  case LayoutArgument::MergeRecords:
+    return KernelArgument::keyedPointer(Origin::Plan, key, Access::Read);
+  case LayoutArgument::Scratch:
+    return KernelArgument::keyedPointer(Origin::Scratch, key,
+                                        scratchAccess(kind));
+  case LayoutArgument::Counters:
+    return KernelArgument::keyedPointer(Origin::Scratch, key,
+                                        Access::ReadWrite);
+  case LayoutArgument::ValueCount:
+  case LayoutArgument::SegmentCount:
+  case LayoutArgument::FeatureCount:
+    if (std::optional<KernelArgumentKind> count = countKindOf(type))
+      return KernelArgument::userScalar(*count, sourceIndex);
+    return std::nullopt;
+  case LayoutArgument::TaskCount:
+  case LayoutArgument::WarpTaskCount:
+  case LayoutArgument::CtaTaskCount:
+  case LayoutArgument::PartialCount:
+  case LayoutArgument::MergeCount:
+    if (std::optional<KernelArgumentKind> count = countKindOf(type))
+      return KernelArgument::keyedScalar(*count, Origin::Derived, key);
+    return std::nullopt;
+  }
+  llvm_unreachable("unknown kernel argument");
+}
+
+/// The parameter of `function` that the task operation reads as the kernel
+/// argument `argument`, or a null value when it reads none. The output of a
+/// program that stores through `swage.map_store` is no operand of its task
+/// operation: the map store in the region writes it.
+BlockArgument parameterOf(func::FuncOp function, Operation *task,
+                          LayoutArgument argument) {
+  Value operand = taskOperandOf(task, argument);
+  if (!operand && argument == LayoutArgument::Output && isa<TasksOp>(task))
+    task->walk([&](MapStoreOp store) {
+      operand = store.getOutput();
+      return WalkResult::interrupt();
+    });
+  auto parameter = dyn_cast_or_null<BlockArgument>(operand);
+  if (!parameter || parameter.getOwner() != &function.getBody().front())
+    return BlockArgument();
+  return parameter;
+}
+
+/// Build the launch contract of the kernel a plan function becomes.
+///
+/// The parameter layout of the kernel names the arguments it takes. Each
+/// one is found among the parameters of the plan function through the
+/// operand of the task operation that reads it, so the contract describes
+/// the parameters in the order the function declares them, which is the
+/// order of the kernel. Every parameter must be exactly one argument of the
+/// layout. A failure is reported on the function.
+FailureOr<KernelContract> buildKernelContract(func::FuncOp function) {
+  Operation *task = &function.getBody().front().front();
+  std::optional<KernelKind> kind = kernelKindOf(task);
+  if (!kind)
+    return function.emitError()
+           << "plan function @" << function.getName()
+           << " holds a task operation that no kernel layout describes, '"
+           << task->getName() << "' with both ids and a feature_count";
+  KernelLayout layout = swage_plan::kernelLayout(*kind);
+
+  SmallVector<std::optional<LayoutArgument>> roles(function.getNumArguments());
+  for (LayoutArgument argument : layout.arguments()) {
+    StringRef name = swage_plan::kernelArgumentName(argument);
+    BlockArgument parameter = parameterOf(function, task, argument);
+    if (!parameter)
+      return function.emitError()
+             << "plan function @" << function.getName() << " must pass the "
+             << name << " of the " << kernelKindName(*kind)
+             << " kernel as a parameter of the function";
+    std::optional<LayoutArgument> &role = roles[parameter.getArgNumber()];
+    if (role)
+      return function.emitError()
+             << "plan function @" << function.getName() << " parameter #"
+             << parameter.getArgNumber() << " is both the "
+             << swage_plan::kernelArgumentName(*role) << " and the " << name
+             << " of the " << kernelKindName(*kind)
+             << " kernel; a kernel parameter has one meaning";
+    role = argument;
+  }
+
+  SmallVector<Type> inputs = kernelInputsOf(function);
+  KernelContract contract;
+  contract.backend = KernelBackend::CUDA;
+  contract.entry = function.getName().str();
+  contract.launch = {
+      KernelLaunchModel::SPMDGrid,
+      std::array<int32_t, 3>{
+          static_cast<int32_t>(blockThreadsOf(function).getInt()), 1, 1}};
+  for (auto [index, role] : llvm::enumerate(roles)) {
+    auto position = static_cast<unsigned>(index);
+    if (!role)
+      return function.emitError()
+             << "plan function @" << function.getName() << " parameter #"
+             << position << " is none of the " << layout.size()
+             << " arguments of the " << kernelKindName(*kind)
+             << " kernel, which its task operation reads";
+    uint32_t sourceIndex = position;
+    if (auto recorded = function.getArgAttrOfType<IntegerAttr>(
+            position, SwagePlanDialect::getSourceIndexAttrName()))
+      sourceIndex = static_cast<uint32_t>(recorded.getInt());
+    std::optional<KernelArgument> entry =
+        contractArgumentOf(*role, *kind, inputs[position], sourceIndex);
+    if (!entry)
+      return function.emitError()
+             << "plan function @" << function.getName() << " parameter #"
+             << position << ", the " << swage_plan::kernelArgumentName(*role)
+             << ", must be an integer of 1, 8, 16, 32, or 64 bits, got "
+             << inputs[position];
+    contract.arguments.push_back(std::move(*entry));
+  }
+
+  FunctionType type = FunctionType::get(function.getContext(), inputs, {});
+  if (llvm::Error error = validateCUDAKernelContract(
+          contract, function.getName(), type, *contract.launch.block))
+    return function.emitError() << "plan function @" << function.getName()
+                                << " gives an invalid kernel contract: "
+                                << llvm::toString(std::move(error));
+  return contract;
+}
+
 /// A plan function becomes a `gpu.module` named after it that holds the
 /// kernel: every buffer argument becomes a pointer, every count stays as it
-/// is, and the launch width is pinned through the target. The kernel of a
-/// persistent task operation also gets the two claim slots its blocks share.
+/// is, and the launch width is pinned through the target. The kernel carries
+/// its launch contract as the discardable attribute `swage.kernel_contract`,
+/// which code generation validates and removes. The kernel of a persistent
+/// task operation also gets the two claim slots its blocks share.
 ///
 /// The body is legalized while the function is still its parent, so the
 /// task pattern reads the launch width from the function it sits in, and
@@ -77,20 +448,24 @@ public:
     MLIRContext *context = function.getContext();
     Location loc = function.getLoc();
 
+    // The pass built the contract once before the conversion, which
+    // reported any failure, so this build succeeds.
+    FailureOr<KernelContract> contract = buildKernelContract(function);
+    if (failed(contract))
+      return failure();
+
     rewriter.setInsertionPoint(function);
     auto gpuModule = gpu::GPUModuleOp::create(
         rewriter, loc, function.getName().str() + "_module");
     rewriter.setInsertionPointToStart(gpuModule.getBody());
-    Type pointer = LLVM::LLVMPointerType::get(context);
-    SmallVector<Type> inputs;
-    for (Type input : function.getFunctionType().getInputs())
-      inputs.push_back(isa<MemRefType>(input) ? pointer : input);
-    auto kernel =
-        gpu::GPUFuncOp::create(rewriter, loc, function.getName(),
-                               FunctionType::get(context, inputs, {}));
+    auto kernel = gpu::GPUFuncOp::create(
+        rewriter, loc, function.getName(),
+        FunctionType::get(context, kernelInputsOf(function), {}));
     kernel->setAttr(gpu::GPUDialect::getKernelFuncAttrName(),
                     rewriter.getUnitAttr());
     target.pinLaunchWidth(kernel, static_cast<int32_t>(threads.getInt()));
+    kernel->setDiscardableAttr(kernelContractAttrName,
+                               buildKernelContractAttr(rewriter, *contract));
 
     Block &body = function.getBody().front();
     Block *entry = &kernel.getBody().front();
@@ -1189,7 +1564,8 @@ LogicalResult convertPlanToGPU(ModuleOp module,
                                const TargetDescription &target) {
   for (func::FuncOp function : module.getOps<func::FuncOp>())
     if (blockThreadsOf(function) &&
-        failed(verifyPlanFunction(module, function, target)))
+        (failed(verifyPlanFunction(module, function, target)) ||
+         failed(buildKernelContract(function))))
       return failure();
 
   auto isPlanFunction = [](Operation *op) {

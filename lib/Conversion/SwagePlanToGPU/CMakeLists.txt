@@ -19,6 +19,7 @@ add_mlir_conversion_library(MLIRSwagePlanToGPU
   MLIRSCFDialect
   MLIRSwage
   MLIRSwagePlan
+  MLIRSwageSupport
   MLIRSwageTarget
   MLIRSwageToPlan
   MLIRTransformUtils

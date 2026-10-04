@@ -54,6 +54,7 @@ module {
 // CHECK: gpu.module @segmented_max__merge_module
 // CHECK: gpu.func @segmented_max__merge(%[[SCRATCH:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[RECORDS:[^,]+]]: !llvm.ptr, %{{[^,]+}}: i32, %[[MERGE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 512, 1, 1>
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", key = "scratch", kind = "ptr", origin = "scratch"}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "read", key = "merge_records", kind = "ptr", origin = "plan"}, {key = "partial_count", kind = "i32", origin = "derived"}, {key = "merge_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "segmented_max__merge", launch = {block = array<i32: 512, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: %[[TASK:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK-DAG: %[[ZERO:.*]] = arith.constant 0 : index

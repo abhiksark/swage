@@ -24,7 +24,7 @@
 // TASKS: return
 
 // The partial width is the target's, whatever block-threads says.
-// PARTIAL: func.func @segmented_sum__partial(%[[VALUES:.*]]: memref<?xf32> {swage.role = #swage.role<values>}, %[[RANGES:.*]]: memref<?xi32>, %[[SCRATCH:.*]]: memref<?xf32>, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>}, %[[PARTIAL_COUNT:.*]]: i32) attributes {swage_plan.block_threads = 512 : i32} {
+// PARTIAL: func.func @segmented_sum__partial(%[[VALUES:.*]]: memref<?xf32> {swage.role = #swage.role<values>, swage_plan.source_index = 0 : i32}, %[[RANGES:.*]]: memref<?xi32>, %[[SCRATCH:.*]]: memref<?xf32>, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>, swage_plan.source_index = 3 : i32}, %[[PARTIAL_COUNT:.*]]: i32) attributes {swage_plan.block_threads = 512 : i32} {
 // PARTIAL-NEXT: swage_plan.partial_tasks values(%[[VALUES]] : memref<?xf32>) value_count(%[[VALUE_COUNT]] : i32) ranges(%[[RANGES]] : memref<?xi32>) partial_count(%[[PARTIAL_COUNT]] : i32) into(%[[SCRATCH]] : memref<?xf32>) {
 // PARTIAL-NEXT: ^bb0(%[[CHUNK:.*]]: !swage.segment<f32>):
 // PARTIAL-NEXT: %[[SUM:.*]] = swage.reduce %[[CHUNK]] kind<sum> : !swage.segment<f32> -> f32 {

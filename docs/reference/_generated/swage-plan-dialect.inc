@@ -28,3 +28,13 @@ func.func @segmented_sum(
 
 The dialect verifies both. A planning parameter that no kernel reads,
 such as a limit that steers host classification, is not part of plan IR.
+
+A parameter of a plan function that the segment function declared, such
+as the values or the segment count, may carry the argument attribute
+`swage_plan.source_index`: the position of that argument in the segment
+function, a nonnegative i32. The planner sets it on every such parameter,
+because a plan function takes its parameters in the order of its kernel
+and not in the order the segment function declared them. The kernel
+contract binds the caller's arguments by these positions. A parameter
+without the attribute, in a plan function written by hand, is bound at
+its own position: such a plan function is the function its caller calls.

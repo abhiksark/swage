@@ -270,3 +270,53 @@ module {
     return
   }
 }
+
+// -----
+
+// The kernel contract describes every parameter as one argument of the
+// kernel layout, so a parameter that the task operation does not read, or
+// reads as two arguments, has no contract.
+module {
+  // expected-error@+1 {{plan function @unread parameter #5 is none of the 5 arguments of the direct kernel, which its task operation reads}}
+  func.func @unread(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %value_count: i32, %segment_count: i32,
+      %unread: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{plan function @shared parameter #3 is both the value_count and the segment_count of the direct kernel; a kernel parameter has one meaning}}
+  func.func @shared(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>, %count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%count : i32) segment_count(%count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}

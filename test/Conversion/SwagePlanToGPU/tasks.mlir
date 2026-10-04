@@ -11,7 +11,8 @@ module {
   // the segment count. The loaded range is clamped to the value count, the
   // block reduces as a whole, and thread 0 stores.
   // CHECK: gpu.module @direct_module {
-  // CHECK-NEXT: gpu.func @direct(%[[VALUES:.*]]: !llvm.ptr, %[[OFFSETS:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>} {
+  // CHECK-NEXT: gpu.func @direct(%[[VALUES:.*]]: !llvm.ptr, %[[OFFSETS:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 128, 1, 1>,
+  // CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "direct", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
   // CHECK-NEXT: %[[BLOCK:.*]] = gpu.block_id x
   // CHECK-NEXT: %[[THREAD:.*]] = gpu.thread_id x
   // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
@@ -57,7 +58,8 @@ module {
   // segment count, and an id that fails reads offsets[0] twice and stores
   // nothing. A warp task combines through a shuffle tree.
   // CHECK: gpu.module @warp_tasks_module {
-  // CHECK-NEXT: gpu.func @warp_tasks(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %[[IDS:.*]]: !llvm.ptr, %{{.*}}: i32, %[[TASK_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 32, 1, 1>} {
+  // CHECK-NEXT: gpu.func @warp_tasks(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %[[IDS:.*]]: !llvm.ptr, %{{.*}}: i32, %[[TASK_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 32, 1, 1>,
+  // CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "read", key = "task_ids", kind = "ptr", origin = "plan"}, {kind = "i32", origin = "user", source_index = 4 : i64}, {key = "task_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 6 : i64}], backend = "cuda", entry = "warp_tasks", launch = {block = array<i32: 32, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
   // CHECK: %[[C0:.*]] = arith.constant 0 : index
   // CHECK: %[[TASKS:.*]] = arith.index_cast %[[TASK_COUNT]] : i32 to index
   // CHECK-NEXT: %[[HAS_TASK:.*]] = arith.cmpi slt, %{{.*}}, %[[TASKS]] : index
@@ -94,7 +96,8 @@ module {
 
   // A block task combines across the block.
   // CHECK: gpu.module @cta_tasks_module {
-  // CHECK-NEXT: gpu.func @cta_tasks({{.*}}) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>} {
+  // CHECK-NEXT: gpu.func @cta_tasks({{.*}}) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>,
+  // CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "read", key = "task_ids", kind = "ptr", origin = "plan"}, {kind = "i32", origin = "user", source_index = 4 : i64}, {key = "task_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 6 : i64}], backend = "cuda", entry = "cta_tasks", launch = {block = array<i32: 512, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
   // CHECK: arith.cmpi ult,
   // CHECK: gpu.all_reduce add %{{.*}} uniform {
   func.func @cta_tasks(

@@ -10,7 +10,8 @@
 // RUN:   --implicit-check-not=swage --implicit-check-not=func.func
 
 // CHECK: gpu.module @merge_module {
-// CHECK-NEXT: gpu.func @merge(%[[SCRATCH:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[MERGES:.*]]: !llvm.ptr, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>} {
+// CHECK-NEXT: gpu.func @merge(%[[SCRATCH:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[MERGES:.*]]: !llvm.ptr, %[[PARTIAL_COUNT:.*]]: i32, %[[MERGE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) kernel attributes {nvvm.reqntid = array<i32: 512, 1, 1>,
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", key = "scratch", kind = "ptr", origin = "scratch"}, {access = "write", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "read", key = "merge_records", kind = "ptr", origin = "plan"}, {key = "partial_count", kind = "i32", origin = "derived"}, {key = "merge_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 5 : i64}], backend = "cuda", entry = "merge", launch = {block = array<i32: 512, 1, 1>, model = "spmd-grid"}, version = 2 : i64}} {
 // CHECK-NEXT: %[[BLOCK:.*]] = gpu.block_id x
 // CHECK-NEXT: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index

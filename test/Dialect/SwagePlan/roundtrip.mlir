@@ -3,10 +3,35 @@
 // RUN: swage-opt --mlir-print-op-generic %s | swage-opt | FileCheck %s
 
 // Parse -> print -> parse round trip of plan functions: the launch width
-// attribute, the task operation with and without a task buffer and an into
+// attribute, the source index of a parameter, the task operation with and without a task buffer and an into
 // buffer, and both forms of the yield.
 
 module {
+  // The source index of each parameter the segment function declared.
+  // CHECK-LABEL: func.func @sourced(
+  // CHECK-SAME: %{{.*}}: memref<?xf32> {swage.role = #swage.role<values>, swage_plan.source_index = 4 : i32}, %{{.*}}: memref<?xi32> {swage_plan.source_index = 3 : i32}, %{{.*}}: memref<?xf32> {swage_plan.source_index = 1 : i32}, %{{.*}}: i32 {swage_plan.source_index = 2 : i32}, %{{.*}}: i32 {swage_plan.source_index = 0 : i32}) attributes {swage_plan.block_threads = 128 : i32} {
+  func.func @sourced(
+      %values: memref<?xf32> {swage.role = #swage.role<values>,
+                              swage_plan.source_index = 4 : i32},
+      %offsets: memref<?xi32> {swage_plan.source_index = 3 : i32},
+      %output: memref<?xf32> {swage_plan.source_index = 1 : i32},
+      %value_count: i32 {swage_plan.source_index = 2 : i32},
+      %segment_count: i32 {swage_plan.source_index = 0 : i32})
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+
   // CHECK-LABEL: func.func @direct(
   // CHECK-SAME: %[[VALUES:.*]]: memref<?xf32>, %[[OFFSETS:.*]]: memref<?xi32>, %[[OUTPUT:.*]]: memref<?xf32>, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32) attributes {swage_plan.block_threads = 128 : i32} {
   // CHECK-NEXT: swage_plan.tasks policy<cta> segments(%[[VALUES]], %[[OFFSETS]] : memref<?xf32>, memref<?xi32>) value_count(%[[VALUE_COUNT]] : i32) segment_count(%[[SEGMENT_COUNT]] : i32) into(%[[OUTPUT]] : memref<?xf32>) {

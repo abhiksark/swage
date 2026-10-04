@@ -40,6 +40,75 @@ module {
 
 // -----
 
+// The source index of a plan function parameter is the position of the
+// argument it came from in the segment function. The dialect defines no
+// other argument attribute, and the source index belongs on a plan function.
+
+module {
+  // expected-error@+1 {{'swage_plan.position' is not an argument attribute of the swage_plan dialect; the dialect defines swage_plan.source_index}}
+  func.func private @unknown_argument_attribute(
+      %count: i32 {swage_plan.position = 0 : i32})
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.source_index belongs on an argument of a plan function, a func.func with swage_plan.block_threads, got argument #0 of 'func.func'}}
+  func.func private @not_a_plan_function(
+      %count: i32 {swage_plan.source_index = 0 : i32})
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.source_index of argument #3 must be a nonnegative i32, got -1 : i32}}
+  func.func @negative_source_index(
+      %values: memref<?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?xf32>,
+      %value_count: i32 {swage_plan.source_index = -1 : i32},
+      %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{swage_plan.source_index of argument #0 must be a nonnegative i32, got 4 : i64}}
+  func.func @wide_source_index(
+      %values: memref<?xf32> {swage_plan.source_index = 4 : i64},
+      %offsets: memref<?xi32>, %output: memref<?xf32>, %value_count: i32,
+      %segment_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        into(%output : memref<?xf32>) {
+    ^bb0(%segment: !swage.segment<f32>):
+      %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+}
+
+// -----
+
 module {
   // expected-error@+1 {{swage_plan.block_threads must be a positive i32, got 128 : i64}}
   func.func @wide_threads(

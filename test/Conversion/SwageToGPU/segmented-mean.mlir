@@ -102,6 +102,7 @@ module {
 // PARTIAL: llvm.store %[[PARTIAL_SUM]], %{{.*}} : f32, !llvm.ptr
 
 // MERGE: gpu.func @segmented_mean__merge(%[[SCRATCH:.*]]: !llvm.ptr, %[[OUTPUT:.*]]: !llvm.ptr, %[[MERGES:.*]]: !llvm.ptr, %[[RANGES:.*]]: !llvm.ptr, %[[PARTIAL_COUNT:.*]]: i32, %{{.*}}: i32, %{{.*}}: i32)
+// MERGE-SAME: swage.kernel_contract = {arguments = [{access = "read", key = "scratch", kind = "ptr", origin = "scratch"}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "read", key = "merge_records", kind = "ptr", origin = "plan"}, {access = "read", key = "partial_ranges", kind = "ptr", origin = "plan"}, {key = "partial_count", kind = "i32", origin = "derived"}, {key = "merge_count", kind = "i32", origin = "derived"}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "segmented_mean__merge", launch = {block = array<i32: 512, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // The range of partials is clamped to the partial count before it is used.
 // MERGE: %[[BEGIN_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[PARTIAL_COUNT]] : i32
 // MERGE: %[[END_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[PARTIAL_COUNT]] : i32

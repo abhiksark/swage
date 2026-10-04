@@ -29,6 +29,7 @@
 // RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s --check-prefix=ONE-PARTIAL
 
+// Each kernel carries the launch contract of its own entry.
 // ALL-NOT: swage.
 // ALL: gpu.module @first_module {
 // DIRECT-NEXT: gpu.func @first(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: i32, %{{.*}}: i32) kernel
@@ -39,22 +40,27 @@
 // ALL-NEXT: return %{{.*}} : i32
 // ALL: gpu.module @second_module {
 // ALL-NEXT: gpu.func @second(
+// ALL-SAME: swage.kernel_contract = {{.*}} entry = "second"
 // ALL: arith.maximumf
 // ALL-NOT: func.func @second
 // ALL-NOT: swage.
 
 // PARTIAL: gpu.module @first__partial_module {
 // PARTIAL-NEXT: gpu.func @first__partial(
+// PARTIAL-SAME: swage.kernel_contract = {{.*}} entry = "first__partial"
 // PARTIAL: func.func @bystander(
 // PARTIAL: gpu.module @second__partial_module {
 // PARTIAL-NEXT: gpu.func @second__partial(
+// PARTIAL-SAME: swage.kernel_contract = {{.*}} entry = "second__partial"
 // PARTIAL-NOT: swage.
 
 // MERGE: gpu.module @first__merge_module {
 // MERGE-NEXT: gpu.func @first__merge(
+// MERGE-SAME: swage.kernel_contract = {{.*}} entry = "first__merge"
 // MERGE: func.func @bystander(
 // MERGE: gpu.module @second__merge_module {
 // MERGE-NEXT: gpu.func @second__merge(
+// MERGE-SAME: swage.kernel_contract = {{.*}} entry = "second__merge"
 // MERGE-NOT: swage.
 
 // The function that is not named keeps its Swage operations and its roles.
@@ -64,6 +70,7 @@
 // ONE: func.func @bystander(
 // ONE: gpu.module @second_module {
 // ONE-NEXT: gpu.func @second(
+// ONE-SAME: swage.kernel_contract = {{.*}} entry = "second"
 // ONE-NOT: swage.
 
 // ONE-PARTIAL: gpu.module @first__partial_module {

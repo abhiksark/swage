@@ -24,7 +24,7 @@
 // The segment id, the segment construction, and the scalar store are gone:
 // the task operation binds the segment and stores the yielded scalar.
 // DIRECT: module {
-// DIRECT-NEXT: func.func @segmented_sum(%[[VALUES:.*]]: memref<?xf32> {swage.role = #swage.role<values>}, %[[OFFSETS:.*]]: memref<?xi32> {swage.role = #swage.role<offsets>}, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>}, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>}, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>}) attributes {swage_plan.block_threads = 128 : i32} {
+// DIRECT-NEXT: func.func @segmented_sum(%[[VALUES:.*]]: memref<?xf32> {swage.role = #swage.role<values>, swage_plan.source_index = 0 : i32}, %[[OFFSETS:.*]]: memref<?xi32> {swage.role = #swage.role<offsets>, swage_plan.source_index = 1 : i32}, %[[OUTPUT:.*]]: memref<?xf32> {swage.role = #swage.role<output>, swage_plan.source_index = 2 : i32}, %[[VALUE_COUNT:.*]]: i32 {swage.role = #swage.role<value_count>, swage_plan.source_index = 3 : i32}, %[[SEGMENT_COUNT:.*]]: i32 {swage.role = #swage.role<segment_count>, swage_plan.source_index = 4 : i32}) attributes {swage_plan.block_threads = 128 : i32} {
 // DIRECT-NEXT: swage_plan.tasks policy<cta> segments(%[[VALUES]], %[[OFFSETS]] : memref<?xf32>, memref<?xi32>) value_count(%[[VALUE_COUNT]] : i32) segment_count(%[[SEGMENT_COUNT]] : i32) into(%[[OUTPUT]] : memref<?xf32>) {
 // DIRECT-NEXT: ^bb0(%[[SEGMENT:.*]]: !swage.segment<f32>):
 // DIRECT-NEXT: %[[SUM:.*]] = swage.reduce %[[SEGMENT]] kind<sum> : !swage.segment<f32> -> f32 {

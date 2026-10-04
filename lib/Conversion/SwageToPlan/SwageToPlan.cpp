@@ -279,11 +279,17 @@ void buildKernelPlan(func::FuncOp source, SegmentProgramAnalysis &analysis,
                                    FunctionType::get(context, inputs, {}));
   plan->setAttr(SwagePlanDialect::getBlockThreadsAttrName(),
                 builder.getI32IntegerAttr(static_cast<int32_t>(blockThreads)));
+  // A parameter the segment function declared keeps its role and records
+  // where the segment function took it, which the kernel contract binds by.
   for (auto [index, argument] : llvm::enumerate(layout.arguments()))
-    if (std::optional<ArgumentRole> role = roleOf(argument))
-      plan.setArgAttr(static_cast<unsigned>(index),
-                      SwageDialect::getRoleAttrName(),
+    if (std::optional<ArgumentRole> role = roleOf(argument)) {
+      auto position = static_cast<unsigned>(index);
+      plan.setArgAttr(position, SwageDialect::getRoleAttrName(),
                       ArgumentRoleAttr::get(context, *role));
+      plan.setArgAttr(position, SwagePlanDialect::getSourceIndexAttrName(),
+                      builder.getI32IntegerAttr(static_cast<int32_t>(
+                          sourceIndexOf(analysis.abi, *role))));
+    }
   Block *entry = plan.addEntryBlock();
   auto argument = [&](KernelArgument parameter) {
     return Value(entry->getArgument(layout.indexOf(parameter)));
