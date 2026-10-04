@@ -13,17 +13,20 @@
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/NVVMToLLVM/NVVMToLLVM.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/Pass.h"
@@ -69,6 +72,14 @@ namespace {
 /// The kernel a compile lowers: the schedule of a segment function, or no
 /// schedule for the fixed-block kernel.
 using KernelSchedule = std::optional<swage::PlanSchedule>;
+
+/// What a SwageHostExecutable owns: the native code of one host-call kernel
+/// and the shape of its packed call.
+struct HostExecutable {
+  std::unique_ptr<ExecutionEngine> engine;
+  std::string entry;
+  intptr_t argumentCount;
+};
 
 /// The NVPTX assembly printer calls report_fatal_error on symbols it cannot
 /// print, which aborts the embedding process, so names must be rejected here
@@ -262,38 +273,67 @@ FailureOr<gpu::GPUModuleOp> lowerToGPU(ModuleOp source, ModuleOp module,
   return gpuModule;
 }
 
-/// Validate the launch contract a lowering attached to the kernel and remove
-/// it. The attribute is discardable: it describes the kernel to code
-/// generation and must not reach the lowered text or the LLVM IR, which the
-/// NVVM conversion would copy it into.
-LogicalResult eraseKernelContract(ModuleOp source, gpu::GPUModuleOp gpuModule,
-                                  llvm::StringRef kernelName,
-                                  KernelSchedule schedule) {
-  auto kernel = gpuModule.lookupSymbol<gpu::GPUFuncOp>(
-      expectedKernelName(kernelName, schedule));
-  if (!kernel)
-    return success();
+/// Take the launch contract of the kernel off its lowering and validate it.
+///
+/// A module may hold several segment functions, and a compile lowers the one
+/// `kernelName` names into the module `<kernel>_module`. That module must
+/// hold exactly one function, the kernel, and the kernel must carry exactly
+/// one contract, which must describe its name, its parameters, and its
+/// launch width. The attribute is discardable: it is removed here, before
+/// the NVVM conversion copies it onto the LLVM function, so it reaches
+/// neither the lowered text nor the LLVM IR.
+FailureOr<swage::KernelContract>
+extractKernelContract(ModuleOp source, gpu::GPUModuleOp gpuModule,
+                      llvm::StringRef kernelName, KernelSchedule schedule) {
+  std::string expected = expectedKernelName(kernelName, schedule);
+  SmallVector<gpu::GPUFuncOp> functions =
+      llvm::to_vector(gpuModule.getOps<gpu::GPUFuncOp>());
+  if (functions.size() != 1) {
+    source.emitError() << "the lowering of kernel_name '" << kernelName
+                       << "' must produce exactly one function in @"
+                       << gpuModule.getName() << ", found " << functions.size();
+    return failure();
+  }
+  gpu::GPUFuncOp kernel = functions.front();
+  if (kernel.getName() != expected) {
+    source.emitError() << "kernel_name '" << kernelName
+                       << "' does not match the compiled kernel @"
+                       << kernel.getName() << "; expected @" << expected;
+    return failure();
+  }
   Attribute attribute =
       kernel->getDiscardableAttr(swage::kernelContractAttrName);
-  if (!attribute)
-    return success();
+  if (!attribute) {
+    source.emitError() << "the lowering of kernel @" << expected
+                       << " attached no " << swage::kernelContractAttrName;
+    return failure();
+  }
   llvm::Expected<swage::KernelContract> contract =
       swage::parseKernelContractAttr(attribute);
-  if (!contract)
-    return source.emitError("malformed swage.kernel_contract: ")
-           << llvm::toString(contract.takeError());
+  if (!contract) {
+    source.emitError() << "malformed " << swage::kernelContractAttrName
+                       << " on kernel @" << expected << ": "
+                       << llvm::toString(contract.takeError());
+    return failure();
+  }
   auto requiredBlock = kernel->getAttrOfType<DenseI32ArrayAttr>(
       NVVM::NVVMDialect::getReqntidAttrName());
-  if (!requiredBlock)
-    return source.emitError(
-        "contract-bearing GPU function requires nvvm.reqntid");
+  if (!requiredBlock) {
+    source.emitError() << "kernel @" << expected
+                       << " carries a launch contract and no "
+                       << NVVM::NVVMDialect::getReqntidAttrName();
+    return failure();
+  }
   if (llvm::Error error = swage::validateCUDAKernelContract(
           *contract, kernel.getName(), kernel.getFunctionType(),
-          requiredBlock.asArrayRef()))
-    return source.emitError("invalid swage.kernel_contract: ")
-           << llvm::toString(std::move(error));
+          requiredBlock.asArrayRef())) {
+    source.emitError() << "invalid " << swage::kernelContractAttrName
+                       << " on kernel @" << expected << ": "
+                       << llvm::toString(std::move(error));
+    return failure();
+  }
   kernel->removeDiscardableAttr(swage::kernelContractAttrName);
-  return success();
+  return std::move(*contract);
 }
 
 /// Convert every GPU module of `module` to the NVVM and LLVM dialects.
@@ -433,7 +473,7 @@ LogicalResult emitPTX(ModuleOp source, gpu::GPUModuleOp gpuModule,
 LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
                          int64_t blockSize, llvm::StringRef target,
                          KernelSchedule schedule, std::string &lowered,
-                         std::string &ptx) {
+                         std::string &ptx, std::string &contractJSON) {
   if (failed(validateCompileRequest(source, kernelName, blockSize, target)))
     return failure();
   // The caller gives the launch width of the direct and task-id kernels.
@@ -456,8 +496,12 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
   if (failed(loweredGPU))
     return failure();
   gpu::GPUModuleOp gpuModule = *loweredGPU;
-  if (failed(eraseKernelContract(source, gpuModule, kernelName, schedule)) ||
-      failed(lowerGPUToNVVM(*module)) ||
+  FailureOr<swage::KernelContract> contract =
+      extractKernelContract(source, gpuModule, kernelName, schedule);
+  if (failed(contract))
+    return failure();
+  contractJSON = swage::serializeKernelContractJSON(*contract);
+  if (failed(lowerGPUToNVVM(*module)) ||
       failed(replaceLibdeviceCalls(gpuModule)))
     return failure();
   gpuModule.setTargetsAttr(ArrayAttr::get(
@@ -475,14 +519,155 @@ LogicalResult compilePTX(ModuleOp source, llvm::StringRef kernelName,
 /// a diagnostic behind.
 LogicalResult verifyStringCallbacks(MlirModule module,
                                     SwageStringCallback loweredCallback,
-                                    SwageStringCallback ptxCallback) {
+                                    SwageStringCallback ptxCallback,
+                                    SwageStringCallback contractCallback) {
   if (mlirModuleIsNull(module))
     return failure();
   if (!loweredCallback)
     return unwrap(module).emitError("loweredCallback must not be null");
   if (!ptxCallback)
     return unwrap(module).emitError("ptxCallback must not be null");
+  if (!contractCallback)
+    return unwrap(module).emitError("contractCallback must not be null");
   return success();
+}
+
+/// Run the three callbacks of a successful compile, in the documented order.
+void deliverCompiled(const std::string &lowered, const std::string &ptx,
+                     const std::string &contract,
+                     SwageStringCallback loweredCallback, void *loweredUserData,
+                     SwageStringCallback ptxCallback, void *ptxUserData,
+                     SwageStringCallback contractCallback,
+                     void *contractUserData) {
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  contractCallback(wrap(llvm::StringRef(contract)), contractUserData);
+}
+
+LogicalResult validateHostCompileRequest(ModuleOp source,
+                                         llvm::StringRef kernelName,
+                                         int64_t blockSize) {
+  if (blockSize <= 0)
+    return source.emitError()
+           << "block_size must be a positive integer, got " << blockSize;
+  if (blockSize > swage::nvidiaTarget().maxBlockThreads)
+    return source.emitError()
+           << "block_size must be at most "
+           << swage::nvidiaTarget().maxBlockThreads << ", got " << blockSize;
+  if (failed(verify(source)))
+    return failure();
+  if (!source.lookupSymbol<func::FuncOp>(kernelName))
+    return source.emitError() << "kernel_name '" << kernelName
+                              << "' does not name a function of the module";
+  return success();
+}
+
+/// Take the host-call contract off the lowered fixed kernel and validate it.
+/// The lowering leaves one function, the kernel.
+FailureOr<swage::KernelContract>
+extractHostKernelContract(ModuleOp source, ModuleOp module,
+                          llvm::StringRef kernelName) {
+  SmallVector<func::FuncOp> functions =
+      llvm::to_vector(module.getOps<func::FuncOp>());
+  if (functions.size() != 1 ||
+      !functions.front()->getDiscardableAttr(swage::kernelContractAttrName)) {
+    source.emitError()
+        << "the host lowering must produce exactly one function, which "
+           "carries a launch contract, found "
+        << functions.size() << " functions";
+    return failure();
+  }
+  func::FuncOp function = functions.front();
+  if (function.getName() != kernelName) {
+    source.emitError() << "kernel_name '" << kernelName
+                       << "' does not match the compiled kernel @"
+                       << function.getName();
+    return failure();
+  }
+  llvm::Expected<swage::KernelContract> contract =
+      swage::parseKernelContractAttr(
+          function->getDiscardableAttr(swage::kernelContractAttrName));
+  if (!contract) {
+    source.emitError() << "malformed " << swage::kernelContractAttrName
+                       << " on kernel @" << kernelName << ": "
+                       << llvm::toString(contract.takeError());
+    return failure();
+  }
+  if (llvm::Error error = swage::validateHostKernelContract(
+          *contract, function.getName(), function.getFunctionType())) {
+    source.emitError() << "invalid " << swage::kernelContractAttrName
+                       << " on kernel @" << kernelName << ": "
+                       << llvm::toString(std::move(error));
+    return failure();
+  }
+  function->removeDiscardableAttr(swage::kernelContractAttrName);
+  return std::move(*contract);
+}
+
+LogicalResult lowerHostToLLVM(ModuleOp module) {
+  PassManager manager(module.getContext());
+  manager.addPass(createSCFToControlFlowPass());
+  manager.addPass(createConvertIndexToLLVMPass());
+  manager.addPass(createArithToLLVMConversionPass());
+  manager.addPass(createConvertControlFlowToLLVMPass());
+  manager.addPass(createConvertFuncToLLVMPass());
+  manager.addPass(createReconcileUnrealizedCastsPass());
+  return manager.run(module);
+}
+
+void initializeNativeTarget() {
+  static llvm::once_flag initializeOnce;
+  llvm::call_once(initializeOnce, []() {
+    if (llvm::InitializeNativeTarget())
+      llvm::report_fatal_error("failed to initialize the native LLVM target");
+    if (llvm::InitializeNativeTargetAsmPrinter())
+      llvm::report_fatal_error(
+          "failed to initialize the native LLVM assembly printer");
+  });
+}
+
+std::unique_ptr<HostExecutable>
+compileHost(ModuleOp source, llvm::StringRef kernelName, int64_t blockSize,
+            std::string &lowered, std::string &contractJSON) {
+  if (failed(validateHostCompileRequest(source, kernelName, blockSize)))
+    return nullptr;
+
+  OwningOpRef<ModuleOp> module = source.clone();
+  MLIRContext *context = module->getContext();
+  registerCodegenInterfaces(*context);
+  PassManager manager(context);
+  manager.addPass(swage::createFixedBlockToHostPass(blockSize));
+  if (failed(manager.run(*module)))
+    return nullptr;
+
+  FailureOr<swage::KernelContract> contract =
+      extractHostKernelContract(source, *module, kernelName);
+  if (failed(contract))
+    return nullptr;
+  contractJSON = swage::serializeKernelContractJSON(*contract);
+  if (failed(lowerHostToLLVM(*module)))
+    return nullptr;
+  printLoweredModule(*module, lowered);
+
+  initializeNativeTarget();
+  llvm::Expected<std::unique_ptr<ExecutionEngine>> engine =
+      ExecutionEngine::create(module->getOperation());
+  if (!engine) {
+    source.emitError("failed to create the native execution engine: ")
+        << llvm::toString(engine.takeError());
+    return nullptr;
+  }
+  (*engine)->initialize();
+  llvm::Expected<void (*)(void **)> packed =
+      (*engine)->lookupPacked(contract->entry);
+  if (!packed) {
+    source.emitError("failed to resolve the packed host entry: ")
+        << llvm::toString(packed.takeError());
+    return nullptr;
+  }
+  return std::make_unique<HostExecutable>(
+      HostExecutable{std::move(*engine), contract->entry,
+                     static_cast<intptr_t>(contract->arguments.size())});
 }
 
 /// Reports why swageMaterializeSegmentedPlan refused its buffer or callback
@@ -508,107 +693,192 @@ MlirLogicalResult reportInvalidPlanArguments(MlirModule module,
 
 } // namespace
 
+SwageHostExecutable swageCompileFixedBlockToHost(
+    MlirModule module, MlirStringRef kernelName, int64_t blockSize,
+    SwageStringCallback loweredCallback, void *loweredUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  SwageHostExecutable result{nullptr};
+  if (mlirModuleIsNull(module))
+    return result;
+  if (!loweredCallback) {
+    unwrap(module).emitError("loweredCallback must not be null");
+    return result;
+  }
+  if (!contractCallback) {
+    unwrap(module).emitError("contractCallback must not be null");
+    return result;
+  }
+  std::string lowered;
+  std::string contract;
+  std::unique_ptr<HostExecutable> executable = compileHost(
+      unwrap(module), unwrap(kernelName), blockSize, lowered, contract);
+  if (!executable)
+    return result;
+  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
+  contractCallback(wrap(llvm::StringRef(contract)), contractUserData);
+  result.ptr = executable.release();
+  return result;
+}
+
+bool swageHostExecutableIsNull(SwageHostExecutable executable) {
+  return executable.ptr == nullptr;
+}
+
+MlirLogicalResult swageHostExecutableInvoke(SwageHostExecutable executable,
+                                            void **arguments,
+                                            intptr_t argumentCount,
+                                            SwageStringCallback errorCallback,
+                                            void *errorUserData) {
+  if (!errorCallback)
+    return mlirLogicalResultFailure();
+  auto report = [&](const llvm::Twine &reason) {
+    std::string message = reason.str();
+    errorCallback(wrap(llvm::StringRef(message)), errorUserData);
+    return mlirLogicalResultFailure();
+  };
+  if (!executable.ptr)
+    return report("the host executable is null");
+  auto *owned = static_cast<HostExecutable *>(executable.ptr);
+  if (argumentCount != owned->argumentCount)
+    return report(
+        "the host executable takes " + llvm::Twine(owned->argumentCount) +
+        " arguments by its contract, got " + llvm::Twine(argumentCount));
+  if (argumentCount != 0 && !arguments)
+    return report("arguments must not be null when argumentCount is " +
+                  llvm::Twine(argumentCount));
+  llvm::MutableArrayRef<void *> packed(arguments,
+                                       static_cast<size_t>(argumentCount));
+  if (llvm::Error error = owned->engine->invokePacked(owned->entry, packed))
+    return report(llvm::toString(std::move(error)));
+  return mlirLogicalResultSuccess();
+}
+
+void swageHostExecutableDestroy(SwageHostExecutable executable) {
+  delete static_cast<HostExecutable *>(executable.ptr);
+}
+
 MlirLogicalResult swageCompileFixedBlockToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, SwageStringCallback loweredCallback,
-    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
-                        unwrap(target), std::nullopt, lowered, ptx)))
+                        unwrap(target), std::nullopt, lowered, ptx, contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult swageCompileSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, int64_t blockSize,
     MlirStringRef target, bool useTaskIds, SwageStringCallback loweredCallback,
-    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    void *loweredUserData, SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName), blockSize,
                         unwrap(target),
                         useTaskIds ? swage::PlanSchedule::TaskIds
                                    : swage::PlanSchedule::Direct,
-                        lowered, ptx)))
+                        lowered, ptx, contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult swageCompileFusedSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
-    SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName),
                         swage::nvidiaTarget().ctaBlockThreads, unwrap(target),
-                        swage::PlanSchedule::FusedMixed, lowered, ptx)))
+                        swage::PlanSchedule::FusedMixed, lowered, ptx,
+                        contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult swageCompilePersistentSegmentedReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
-    SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName),
                         swage::nvidiaTarget().persistentBlockThreads,
                         unwrap(target), swage::PlanSchedule::Persistent,
-                        lowered, ptx)))
+                        lowered, ptx, contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult swageCompileSplitPartialReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
-    SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName),
                         swage::nvidiaTarget().splitBlockThreads, unwrap(target),
-                        swage::PlanSchedule::SplitPartial, lowered, ptx)))
+                        swage::PlanSchedule::SplitPartial, lowered, ptx,
+                        contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 
 MlirLogicalResult swageCompileSplitMergeReductionToPTX(
     MlirModule module, MlirStringRef kernelName, MlirStringRef target,
     SwageStringCallback loweredCallback, void *loweredUserData,
-    SwageStringCallback ptxCallback, void *ptxUserData) {
-  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback)))
+    SwageStringCallback ptxCallback, void *ptxUserData,
+    SwageStringCallback contractCallback, void *contractUserData) {
+  if (failed(verifyStringCallbacks(module, loweredCallback, ptxCallback,
+                                   contractCallback)))
     return mlirLogicalResultFailure();
   std::string lowered;
   std::string ptx;
+  std::string contract;
   if (failed(compilePTX(unwrap(module), unwrap(kernelName),
                         swage::nvidiaTarget().splitBlockThreads, unwrap(target),
-                        swage::PlanSchedule::SplitMerge, lowered, ptx)))
+                        swage::PlanSchedule::SplitMerge, lowered, ptx,
+                        contract)))
     return mlirLogicalResultFailure();
-  loweredCallback(wrap(llvm::StringRef(lowered)), loweredUserData);
-  ptxCallback(wrap(llvm::StringRef(ptx)), ptxUserData);
+  deliverCompiled(lowered, ptx, contract, loweredCallback, loweredUserData,
+                  ptxCallback, ptxUserData, contractCallback, contractUserData);
   return mlirLogicalResultSuccess();
 }
 

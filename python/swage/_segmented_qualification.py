@@ -627,11 +627,11 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
 
                 with ir.Context() as context:
                     swage.register_dialects(context)
-                    _, ptx = compile_ptx(
+                    _, ptx, _ = compile_ptx(
                         ir.Module.parse(module_text), **options
                     )
             else:
-                _, ptx = compile_ptx(module, **options)
+                _, ptx, _ = compile_ptx(module, **options)
             _ptx_memo[key] = ptx
     return ptx
 

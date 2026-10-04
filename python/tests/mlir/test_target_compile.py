@@ -68,7 +68,7 @@ def _emit_public_kernel():
 @pytest.mark.parametrize("sm", _ADMITTED)
 def test_public_kernel_compiles_for_every_admitted_processor(sm):
     """Emit PTX for the one launchable kernel on each admitted processor."""
-    lowered, ptx = native_swage._compile_ptx(
+    lowered, ptx, _ = native_swage._compile_ptx(
         _emit_public_kernel(),
         kernel_name="add_kernel",
         block_size=128,
@@ -89,7 +89,7 @@ def test_segmented_kernels_compile_for_every_admitted_processor(schedule, sm):
         swage.register_dialects(context)
         module = ir.Module.parse(reduction_module("sum", "identity"))
 
-        lowered, ptx = getattr(native_swage, compiler)(
+        lowered, ptx, _ = getattr(native_swage, compiler)(
             module,
             kernel_name="segmented_sum",
             target=f"sm_{sm}",

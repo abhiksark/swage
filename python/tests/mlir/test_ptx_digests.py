@@ -256,7 +256,7 @@ def _compile(program, processor):
         swage.register_dialects(context)
         module = ir.Module.parse(text)
         for variant, function, options in variants:
-            lowered, ptx = getattr(native_swage, function)(
+            lowered, ptx, _ = getattr(native_swage, function)(
                 module, kernel_name=kernel_name, target=target, **options
             )
             digests[f"{program}/{variant}/{target}"] = [

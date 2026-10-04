@@ -163,7 +163,7 @@ class _FakeCompiler:
 
     def __call__(self, module, **options):
         self.calls.append((module, options))
-        return "lowered", f"ptx{len(self.calls)}"
+        return "lowered", f"ptx{len(self.calls)}", "{}"
 
 
 class _FakeDriver:

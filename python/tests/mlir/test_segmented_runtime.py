@@ -1698,7 +1698,7 @@ def test_persistent_allocation_failure_precedes_launch(monkeypatch):
     monkeypatch.setattr(
         native_swage,
         "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx"),
+        lambda *_args, **_kwargs: ("", "ptx", "{}"),
     )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
@@ -1737,7 +1737,7 @@ def test_persistent_launch_failure_has_no_static_fallback(monkeypatch):
     monkeypatch.setattr(
         native_swage,
         "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx"),
+        lambda *_args, **_kwargs: ("", "ptx", "{}"),
     )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
@@ -1772,7 +1772,7 @@ def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
     monkeypatch.setattr(
         native_swage,
         "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx"),
+        lambda *_args, **_kwargs: ("", "ptx", "{}"),
     )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
@@ -1808,7 +1808,7 @@ def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
     monkeypatch.setattr(
         native_swage,
         "_compile_persistent_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx"),
+        lambda *_args, **_kwargs: ("", "ptx", "{}"),
     )
     monkeypatch.setattr(_runtime, "_get_driver", _Driver)
     original_empty = torch.empty
@@ -2252,7 +2252,7 @@ def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
     monkeypatch.setattr(
         native_swage,
         "_compile_segmented_reduction_ptx",
-        lambda *_args, **_kwargs: ("", "ptx"),
+        lambda *_args, **_kwargs: ("", "ptx", "{}"),
     )
     monkeypatch.setattr(
         native_swage, "_compile_split_partial_reduction_ptx", fail
@@ -2299,7 +2299,7 @@ def test_split_allocation_failure_precedes_launch(monkeypatch):
         "_compile_split_merge_reduction_ptx",
     ):
         monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx")
+            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
         )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
@@ -2366,7 +2366,7 @@ def test_split_launch_failures_stop_later_phases(
         "_compile_split_merge_reduction_ptx",
     ):
         monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx")
+            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
         )
     driver = _Driver()
     monkeypatch.setattr(_runtime, "_get_driver", lambda: driver)
@@ -2405,7 +2405,7 @@ def test_prepared_sum_retains_private_split_storage(monkeypatch):
         "_compile_split_merge_reduction_ptx",
     ):
         monkeypatch.setattr(
-            native_swage, name, lambda *_args, **_kwargs: ("", "ptx")
+            native_swage, name, lambda *_args, **_kwargs: ("", "ptx", "{}")
         )
     monkeypatch.setattr(_runtime, "_get_driver", _Driver)
     original_arange = torch.arange
@@ -2976,7 +2976,7 @@ def test_mismatched_blockdim_fails_at_launch_instead_of_wrong_sums():
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
         module = ir.Module.parse(_semantic_module("sum"))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=128,

@@ -3751,11 +3751,11 @@ options = {"kernel_name": "segmented_sum", "target": "sm_86"}
 def slow_compile(_module, **_options):
     in_flight.set()
     time.sleep(0.4)
-    return "lowered", "ptx of the parent"
+    return "lowered", "ptx of the parent", "{}"
 
 
 def fast_compile(_module, **_options):
-    return "lowered", "ptx of the child"
+    return "lowered", "ptx of the child", "{}"
 
 
 thread = threading.Thread(

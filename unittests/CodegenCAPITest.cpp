@@ -155,14 +155,16 @@ bool anyContains(const std::vector<std::string> &diagnostics,
   return false;
 }
 
-/// What one compile call reported back: its result, the two strings, and how
-/// often each callback ran.
+/// What one compile call reported back: its result, the three strings, and
+/// how often each callback ran.
 struct Compiled {
   bool succeeded = false;
   std::string lowered;
   std::string ptx;
+  std::string contract;
   int loweredCalls = 0;
   int ptxCalls = 0;
+  int contractCalls = 0;
 };
 
 struct StringSink {
@@ -180,7 +182,8 @@ void storeString(MlirStringRef value, void *userData) {
 /// point can run through the same checks.
 using CompileFn = std::function<MlirLogicalResult(
     MlirModule, MlirStringRef kernelName, MlirStringRef target,
-    SwageStringCallback, void *, SwageStringCallback, void *)>;
+    SwageStringCallback, void *, SwageStringCallback, void *,
+    SwageStringCallback, void *)>;
 
 struct EntryPoint {
   const char *name;
@@ -196,26 +199,30 @@ std::vector<EntryPoint> entryPoints() {
       {"fixed block", fixedVectorAdd, "add_kernel", "add_kernel",
        [](MlirModule module, MlirStringRef kernel, MlirStringRef target,
           SwageStringCallback lowered, void *loweredData,
-          SwageStringCallback ptx, void *ptxData) {
+          SwageStringCallback ptx, void *ptxData, SwageStringCallback contract,
+          void *contractData) {
          return swageCompileFixedBlockToPTX(module, kernel, 128, target,
-                                            lowered, loweredData, ptx, ptxData);
+                                            lowered, loweredData, ptx, ptxData,
+                                            contract, contractData);
        }},
       {"segmented", segmentedSum, "segmented_sum", "segmented_sum",
        [](MlirModule module, MlirStringRef kernel, MlirStringRef target,
           SwageStringCallback lowered, void *loweredData,
-          SwageStringCallback ptx, void *ptxData) {
-         return swageCompileSegmentedReductionToPTX(module, kernel, 128, target,
-                                                    false, lowered, loweredData,
-                                                    ptx, ptxData);
+          SwageStringCallback ptx, void *ptxData, SwageStringCallback contract,
+          void *contractData) {
+         return swageCompileSegmentedReductionToPTX(
+             module, kernel, 128, target, false, lowered, loweredData, ptx,
+             ptxData, contract, contractData);
        }},
       {"segmented with task ids", segmentedSum, "segmented_sum",
        "segmented_sum",
        [](MlirModule module, MlirStringRef kernel, MlirStringRef target,
           SwageStringCallback lowered, void *loweredData,
-          SwageStringCallback ptx, void *ptxData) {
-         return swageCompileSegmentedReductionToPTX(module, kernel, 32, target,
-                                                    true, lowered, loweredData,
-                                                    ptx, ptxData);
+          SwageStringCallback ptx, void *ptxData, SwageStringCallback contract,
+          void *contractData) {
+         return swageCompileSegmentedReductionToPTX(
+             module, kernel, 32, target, true, lowered, loweredData, ptx,
+             ptxData, contract, contractData);
        }},
       {"fused", segmentedSum, "segmented_sum", "segmented_sum",
        swageCompileFusedSegmentedReductionToPTX},
@@ -262,9 +269,10 @@ public:
     Compiled compiled;
     StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
     StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+    StringSink contract{&compiled.contract, &compiled.contractCalls};
     compiled.succeeded = mlirLogicalResultIsSuccess(
         function(module, ref(kernelName), ref(target), storeString, &lowered,
-                 storeString, &ptx));
+                 storeString, &ptx, storeString, &contract));
     return compiled;
   }
 
@@ -308,7 +316,7 @@ private:
   std::vector<MlirModule> modules;
 };
 
-/// A failed call leaves a diagnostic that names the cause and runs neither
+/// A failed call leaves a diagnostic that names the cause and runs no
 /// callback.
 void expectRejected(const Compiled &compiled, const Session &session,
                     const std::string &message) {
@@ -317,6 +325,7 @@ void expectRejected(const Compiled &compiled, const Session &session,
       << "expected '" << message << "' among:" << joined(session.diagnostics);
   EXPECT_EQ(compiled.loweredCalls, 0);
   EXPECT_EQ(compiled.ptxCalls, 0);
+  EXPECT_EQ(compiled.contractCalls, 0);
 }
 
 TEST(CodegenCAPITest, EveryEntryPointCompilesItsKernel) {
@@ -330,12 +339,206 @@ TEST(CodegenCAPITest, EveryEntryPointCompilesItsKernel) {
     EXPECT_TRUE(session.diagnostics.empty()) << joined(session.diagnostics);
     EXPECT_EQ(compiled.loweredCalls, 1);
     EXPECT_EQ(compiled.ptxCalls, 1);
+    EXPECT_EQ(compiled.contractCalls, 1);
     EXPECT_TRUE(contains(compiled.lowered, "gpu.module"));
     EXPECT_FALSE(contains(compiled.lowered, "swage."));
     EXPECT_TRUE(contains(compiled.ptx, ".target sm_86"));
     EXPECT_TRUE(contains(compiled.ptx,
                          std::string(".entry ") + entryPoint.entry + "("));
+    // The contract describes the kernel of the PTX and nothing else carries
+    // it: the attribute is gone from the lowered module and from the PTX.
+    EXPECT_TRUE(contains(compiled.contract,
+                         std::string(R"({"version":2,"backend":"cuda",)") +
+                             R"("entry":")" + entryPoint.entry + R"(",)"))
+        << compiled.contract;
+    EXPECT_FALSE(contains(compiled.ptx, "kernel_contract"));
   }
+}
+
+TEST(CodegenCAPITest, TheContractBindsUserArgumentsAtTheirDeclaredPositions) {
+  // The segment function of segmentedSum with its arguments reversed: the
+  // kernel keeps the layout order, and each user argument of the contract
+  // names where the function declares it.
+  std::string program = segmentedSum;
+  const std::string declared =
+      "%values: memref<?xf32> {swage.role = #swage.role<values>},\n"
+      "      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},\n"
+      "      %output: memref<?xf32> {swage.role = #swage.role<output>},\n"
+      "      %value_count: i32 {swage.role = #swage.role<value_count>},\n"
+      "      %segment_count: i32 {swage.role = #swage.role<segment_count>}";
+  const std::string reversed =
+      "%segment_count: i32 {swage.role = #swage.role<segment_count>},\n"
+      "      %value_count: i32 {swage.role = #swage.role<value_count>},\n"
+      "      %output: memref<?xf32> {swage.role = #swage.role<output>},\n"
+      "      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},\n"
+      "      %values: memref<?xf32> {swage.role = #swage.role<values>}";
+  ASSERT_NE(program.find(declared), std::string::npos);
+  program.replace(program.find(declared), declared.size(), reversed);
+  Session session;
+
+  Compiled compiled =
+      session.compile(entryPoints()[1].compile, session.parse(program),
+                      "segmented_sum", "sm_86");
+
+  ASSERT_TRUE(compiled.succeeded) << joined(session.diagnostics);
+  EXPECT_TRUE(contains(
+      compiled.contract,
+      R"("arguments":[)"
+      R"({"kind":"ptr","origin":"user","source_index":4,"access":"read"},)"
+      R"({"kind":"ptr","origin":"user","source_index":3,"access":"read"},)"
+      R"({"kind":"ptr","origin":"user","source_index":2,"access":"write"},)"
+      R"({"kind":"i32","origin":"user","source_index":1},)"
+      R"({"kind":"i32","origin":"user","source_index":0}])"))
+      << compiled.contract;
+}
+
+TEST(CodegenCAPITest, TheContractNamesThePlanAndScratchArgumentsByKey) {
+  Session session;
+
+  Compiled compiled =
+      session.compile(swageCompilePersistentSegmentedReductionToPTX,
+                      session.parse(segmentedSum), "segmented_sum", "sm_86");
+
+  ASSERT_TRUE(compiled.succeeded) << joined(session.diagnostics);
+  for (
+      const char *argument :
+      {R"({"kind":"ptr","origin":"plan","key":"warp_ids","access":"read"})",
+       R"({"kind":"ptr","origin":"scratch","key":"scratch","access":"readwrite"})",
+       R"({"kind":"ptr","origin":"scratch","key":"counters","access":"readwrite"})",
+       R"({"kind":"i32","origin":"derived","key":"merge_count"})",
+       R"("launch":{"model":"spmd-grid","block":[512,1,1]})"})
+    EXPECT_TRUE(contains(compiled.contract, argument))
+        << argument << " in " << compiled.contract;
+}
+
+/// What one host compile reported back: the executable, which the caller
+/// destroys, the two strings, and how often each callback ran.
+struct HostCompiled {
+  SwageHostExecutable executable{nullptr};
+  std::string lowered;
+  std::string contract;
+  int loweredCalls = 0;
+  int contractCalls = 0;
+};
+
+HostCompiled compileForHost(MlirModule module, const char *kernelName,
+                            int64_t blockSize, bool dropLowered = false,
+                            bool dropContract = false) {
+  HostCompiled compiled;
+  StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
+  StringSink contract{&compiled.contract, &compiled.contractCalls};
+  compiled.executable = swageCompileFixedBlockToHost(
+      module, ref(kernelName), blockSize, dropLowered ? nullptr : storeString,
+      &lowered, dropContract ? nullptr : storeString, &contract);
+  return compiled;
+}
+
+void storeError(MlirStringRef value, void *userData) {
+  static_cast<std::string *>(userData)->assign(value.data, value.length);
+}
+
+TEST(CodegenCAPITest, TheHostExecutableComputesTheFixedKernel) {
+  Session session;
+
+  HostCompiled compiled =
+      compileForHost(session.parse(fixedVectorAdd), "add_kernel", 128);
+
+  ASSERT_FALSE(swageHostExecutableIsNull(compiled.executable))
+      << joined(session.diagnostics);
+  EXPECT_TRUE(session.diagnostics.empty()) << joined(session.diagnostics);
+  EXPECT_EQ(compiled.loweredCalls, 1);
+  EXPECT_EQ(compiled.contractCalls, 1);
+  EXPECT_TRUE(contains(compiled.lowered, "llvm.func @add_kernel("));
+  EXPECT_FALSE(contains(compiled.lowered, "swage."));
+  EXPECT_EQ(
+      compiled.contract,
+      R"({"version":2,"backend":"cpu","entry":"add_kernel",)"
+      R"("launch":{"model":"host-call"},"arguments":[)"
+      R"({"kind":"ptr","origin":"user","source_index":0,"access":"read"},)"
+      R"({"kind":"ptr","origin":"user","source_index":1,"access":"read"},)"
+      R"({"kind":"ptr","origin":"user","source_index":2,"access":"write"},)"
+      R"({"kind":"i32","origin":"user","source_index":3}]})");
+
+  // More elements than one vector width, and not a multiple of it.
+  constexpr int32_t count = 200;
+  std::vector<float> x(count), y(count), output(count, -1.0f);
+  for (int32_t index = 0; index < count; ++index) {
+    x[index] = 0.5f * static_cast<float>(index);
+    y[index] = 3.0f - static_cast<float>(index);
+  }
+  float *xData = x.data();
+  float *yData = y.data();
+  float *outputData = output.data();
+  int32_t n = count;
+  void *arguments[] = {&xData, &yData, &outputData, &n};
+  std::string error;
+  ASSERT_TRUE(mlirLogicalResultIsSuccess(swageHostExecutableInvoke(
+      compiled.executable, arguments, 4, storeError, &error)))
+      << error;
+  for (int32_t index = 0; index < count; ++index)
+    EXPECT_EQ(output[index], x[index] + y[index]) << index;
+  swageHostExecutableDestroy(compiled.executable);
+}
+
+TEST(CodegenCAPITest, TheHostExecutableRefusesAnArgumentListOffItsContract) {
+  Session session;
+  HostCompiled compiled =
+      compileForHost(session.parse(fixedVectorAdd), "add_kernel", 128);
+  ASSERT_FALSE(swageHostExecutableIsNull(compiled.executable));
+  std::string error;
+  void *arguments[3] = {nullptr, nullptr, nullptr};
+
+  EXPECT_FALSE(mlirLogicalResultIsSuccess(swageHostExecutableInvoke(
+      compiled.executable, arguments, 3, storeError, &error)));
+  EXPECT_EQ(error,
+            "the host executable takes 4 arguments by its contract, got 3");
+  EXPECT_FALSE(mlirLogicalResultIsSuccess(swageHostExecutableInvoke(
+      compiled.executable, nullptr, 4, storeError, &error)));
+  EXPECT_EQ(error, "arguments must not be null when argumentCount is 4");
+  EXPECT_FALSE(mlirLogicalResultIsSuccess(swageHostExecutableInvoke(
+      compiled.executable, arguments, 3, nullptr, nullptr)));
+  swageHostExecutableDestroy(compiled.executable);
+
+  EXPECT_FALSE(mlirLogicalResultIsSuccess(swageHostExecutableInvoke(
+      SwageHostExecutable{nullptr}, arguments, 3, storeError, &error)));
+  EXPECT_EQ(error, "the host executable is null");
+  swageHostExecutableDestroy(SwageHostExecutable{nullptr});
+}
+
+TEST(CodegenCAPITest, AFailedHostCompileReportsItsCauseOnTheModule) {
+  struct Case {
+    int64_t blockSize;
+    bool dropLowered;
+    bool dropContract;
+    const char *message;
+  };
+  const Case cases[] = {
+      {128, true, false, "loweredCallback must not be null"},
+      {128, false, true, "contractCallback must not be null"},
+      {0, false, false, "block_size must be a positive integer, got 0"},
+      {64, false, false,
+       "vector width 128 does not match requested block size 64"},
+  };
+  for (const Case &testCase : cases) {
+    SCOPED_TRACE(testCase.message);
+    Session session;
+
+    HostCompiled compiled = compileForHost(
+        session.parse(fixedVectorAdd), "add_kernel", testCase.blockSize,
+        testCase.dropLowered, testCase.dropContract);
+
+    EXPECT_TRUE(swageHostExecutableIsNull(compiled.executable));
+    EXPECT_TRUE(anyContains(session.diagnostics, testCase.message))
+        << joined(session.diagnostics);
+    EXPECT_EQ(compiled.loweredCalls + compiled.contractCalls, 0);
+  }
+
+  // There is no context to report a null module on.
+  Session session;
+  HostCompiled compiled =
+      compileForHost(MlirModule{nullptr}, "add_kernel", 128);
+  EXPECT_TRUE(swageHostExecutableIsNull(compiled.executable));
+  EXPECT_TRUE(session.diagnostics.empty());
 }
 
 TEST(CodegenCAPITest, ACallLeavesItsModuleUnchanged) {
@@ -393,26 +596,31 @@ TEST(CodegenCAPITest, RepeatedCompilesInOneContextGiveTheSamePTX) {
     ASSERT_TRUE(second.succeeded);
     EXPECT_EQ(first.lowered, second.lowered);
     EXPECT_EQ(first.ptx, second.ptx);
+    EXPECT_EQ(first.contract, second.contract);
   }
 }
 
 TEST(CodegenCAPITest, ANullCallbackIsReportedOnTheModule) {
   for (const EntryPoint &entryPoint : entryPoints()) {
     SCOPED_TRACE(entryPoint.name);
-    for (bool dropLowered : {true, false}) {
+    const char *const names[] = {"loweredCallback", "ptxCallback",
+                                 "contractCallback"};
+    for (int dropped = 0; dropped < 3; ++dropped) {
       Session session;
       Compiled compiled;
       StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
       StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+      StringSink contract{&compiled.contract, &compiled.contractCalls};
+      SwageStringCallback callbacks[] = {storeString, storeString, storeString};
+      callbacks[dropped] = nullptr;
 
       compiled.succeeded = mlirLogicalResultIsSuccess(entryPoint.compile(
           session.parse(entryPoint.program), ref(entryPoint.kernelName),
-          ref("sm_86"), dropLowered ? nullptr : storeString, &lowered,
-          dropLowered ? storeString : nullptr, &ptx));
+          ref("sm_86"), callbacks[0], &lowered, callbacks[1], &ptx,
+          callbacks[2], &contract));
 
       expectRejected(compiled, session,
-                     dropLowered ? "loweredCallback must not be null"
-                                 : "ptxCallback must not be null");
+                     std::string(names[dropped]) + " must not be null");
     }
   }
 }
@@ -427,7 +635,8 @@ TEST(CodegenCAPITest, ANullModuleFailsWithoutACrash) {
 
     // There is no context to report on, so this is the one silent failure.
     EXPECT_FALSE(compiled.succeeded);
-    EXPECT_EQ(compiled.loweredCalls + compiled.ptxCalls, 0);
+    EXPECT_EQ(
+        compiled.loweredCalls + compiled.ptxCalls + compiled.contractCalls, 0);
     EXPECT_TRUE(session.diagnostics.empty()) << joined(session.diagnostics);
   }
 }
@@ -477,16 +686,17 @@ TEST(CodegenCAPITest, RejectsBlockSizesNoDeviceLaunches) {
       Compiled compiled;
       StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
       StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+      StringSink contract{&compiled.contract, &compiled.contractCalls};
 
       MlirLogicalResult result =
           segmented ? swageCompileSegmentedReductionToPTX(
                           session.parse(segmentedSum), ref("segmented_sum"),
                           testCase.blockSize, ref("sm_86"), false, storeString,
-                          &lowered, storeString, &ptx)
+                          &lowered, storeString, &ptx, storeString, &contract)
                     : swageCompileFixedBlockToPTX(
                           session.parse(fixedVectorAdd), ref("add_kernel"),
                           testCase.blockSize, ref("sm_86"), storeString,
-                          &lowered, storeString, &ptx);
+                          &lowered, storeString, &ptx, storeString, &contract);
       compiled.succeeded = mlirLogicalResultIsSuccess(result);
 
       expectRejected(compiled, session, testCase.message);
@@ -512,10 +722,12 @@ TEST(CodegenCAPITest, RejectsBlockSizesWithoutAPowerOfTwoWarpCount) {
       Compiled compiled;
       StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
       StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+      StringSink contract{&compiled.contract, &compiled.contractCalls};
 
       MlirLogicalResult result = swageCompileSegmentedReductionToPTX(
           session.parse(segmentedSum), ref("segmented_sum"), testCase.blockSize,
-          ref("sm_86"), useTaskIds, storeString, &lowered, storeString, &ptx);
+          ref("sm_86"), useTaskIds, storeString, &lowered, storeString, &ptx,
+          storeString, &contract);
       compiled.succeeded = mlirLogicalResultIsSuccess(result);
 
       expectRejected(compiled, session, testCase.message);
@@ -616,10 +828,11 @@ TEST(CodegenCAPITest, ReportsTheDiagnosticOfAFailedLowering) {
   Compiled compiled;
   StringSink lowered{&compiled.lowered, &compiled.loweredCalls};
   StringSink ptx{&compiled.ptx, &compiled.ptxCalls};
+  StringSink contract{&compiled.contract, &compiled.contractCalls};
 
   compiled.succeeded = mlirLogicalResultIsSuccess(swageCompileFixedBlockToPTX(
       session.parse(fixedVectorAdd), ref("add_kernel"), 64, ref("sm_86"),
-      storeString, &lowered, storeString, &ptx));
+      storeString, &lowered, storeString, &ptx, storeString, &contract));
 
   expectRejected(compiled, session,
                  "vector width 128 does not match requested block size 64");

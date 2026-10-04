@@ -453,7 +453,7 @@ def test_native_launcher_runs_the_fixed_kernel():
         constexprs={"BLOCK": block},
     )
     major, minor = torch.cuda.get_device_capability()
-    _, ptx = native_swage._compile_ptx(
+    _, ptx, _ = native_swage._compile_ptx(
         module, kernel_name="add_kernel", block_size=block,
         target=f"sm_{major}{minor}",
     )

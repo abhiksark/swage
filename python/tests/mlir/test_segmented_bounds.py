@@ -191,7 +191,7 @@ def _compile(
 def _load(compiler, entry=_KERNEL, **arguments):
     """Compile for the current device and return the loaded function."""
     major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-    _, ptx = _compile(compiler, f"sm_{major}{minor}", **arguments)
+    _, ptx, _ = _compile(compiler, f"sm_{major}{minor}", **arguments)
     _, function = _runtime._get_driver().load(ptx, entry)
     return function
 
@@ -325,7 +325,7 @@ def test_loaded_ranges_are_clamped_against_the_abi_buffer_length(
     compiler, arguments, bounds
 ):
     """Bound every loaded range by the buffer length its own ABI carries."""
-    lowered, _ = _compile(compiler, "sm_86", **arguments)
+    lowered, _, _ = _compile(compiler, "sm_86", **arguments)
 
     signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
     assert signature is not None
@@ -353,7 +353,7 @@ def test_loaded_ids_are_compared_with_the_abi_count(
     compiler, arguments, bounds
 ):
     """Bound every loaded index by the count its own ABI carries."""
-    lowered, _ = _compile(compiler, "sm_86", **arguments)
+    lowered, _, _ = _compile(compiler, "sm_86", **arguments)
 
     signature = re.search(r"llvm\.func @\w+\(([^)]*)\)", lowered)
     assert signature is not None

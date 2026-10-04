@@ -20,15 +20,21 @@
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "nanobind/ndarray.h"
 #include "nanobind/stl/pair.h"
+#include "nanobind/stl/string.h"
 #include "nanobind/stl/tuple.h"
 #include "nanobind/stl/vector.h"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/JSON.h"
 
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -181,10 +187,11 @@ private:
   const void *context;
 };
 
-/// `blockSize` and `useTaskIds` reach only the kinds whose C entry point
-/// takes them, the fixed and the segmented one. The other kinds compile at a
-/// width the C API fixes, so their callers pass neither.
-std::pair<std::string, std::string>
+/// Returns the lowered module, the PTX, and the launch contract of the
+/// kernel as JSON. `blockSize` and `useTaskIds` reach only the kinds whose C
+/// entry point takes them, the fixed and the segmented one. The other kinds
+/// compile at a width the C API fixes, so their callers pass neither.
+std::tuple<std::string, std::string, std::string>
 compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
            PTXKind kind, int64_t blockSize = 0, bool useTaskIds = false) {
   MlirModule module = unwrapModule(moduleObject);
@@ -192,6 +199,7 @@ compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
 
   std::string lowered;
   std::string ptx;
+  std::string contract;
   std::string message;
   auto store = [](MlirStringRef value, void *output) {
     static_cast<std::string *>(output)->assign(value.data, value.length);
@@ -211,36 +219,240 @@ compilePTX(nb::object moduleObject, std::string kernelName, std::string target,
     mlir::python::CollectDiagnosticsToStringScope diagnostics(context);
     switch (kind) {
     case PTXKind::Fixed:
-      result = swageCompileFixedBlockToPTX(module, kernel, blockSize, chip,
-                                           store, &lowered, store, &ptx);
+      result =
+          swageCompileFixedBlockToPTX(module, kernel, blockSize, chip, store,
+                                      &lowered, store, &ptx, store, &contract);
       break;
     case PTXKind::Segmented:
-      result = swageCompileSegmentedReductionToPTX(module, kernel, blockSize,
-                                                   chip, useTaskIds, store,
-                                                   &lowered, store, &ptx);
+      result = swageCompileSegmentedReductionToPTX(
+          module, kernel, blockSize, chip, useTaskIds, store, &lowered, store,
+          &ptx, store, &contract);
       break;
     case PTXKind::Fused:
       result = swageCompileFusedSegmentedReductionToPTX(
-          module, kernel, chip, store, &lowered, store, &ptx);
+          module, kernel, chip, store, &lowered, store, &ptx, store, &contract);
       break;
     case PTXKind::Persistent:
       result = swageCompilePersistentSegmentedReductionToPTX(
-          module, kernel, chip, store, &lowered, store, &ptx);
+          module, kernel, chip, store, &lowered, store, &ptx, store, &contract);
       break;
     case PTXKind::SplitPartial:
       result = swageCompileSplitPartialReductionToPTX(
-          module, kernel, chip, store, &lowered, store, &ptx);
+          module, kernel, chip, store, &lowered, store, &ptx, store, &contract);
       break;
     case PTXKind::SplitMerge:
-      result = swageCompileSplitMergeReductionToPTX(module, kernel, chip, store,
-                                                    &lowered, store, &ptx);
+      result = swageCompileSplitMergeReductionToPTX(
+          module, kernel, chip, store, &lowered, store, &ptx, store, &contract);
       break;
     }
     message = diagnostics.takeMessage();
   }
   if (mlirLogicalResultIsFailure(result))
     throw nb::value_error(message.c_str());
-  return {std::move(lowered), std::move(ptx)};
+  return {std::move(lowered), std::move(ptx), std::move(contract)};
+}
+
+/// The storage of the arguments of one host call: one eight-byte slot per
+/// argument, and the pointer to each slot that the packed call reads.
+struct alignas(uint64_t) ArgumentSlot {
+  std::array<unsigned char, sizeof(uint64_t)> bytes{};
+};
+
+struct ArgumentBuffer {
+  std::vector<ArgumentSlot> slots;
+  std::vector<void *> parameters;
+};
+
+/// The width in bits of an argument of contract kind `kind`.
+unsigned argumentBitWidth(const std::string &kind, size_t index) {
+  if (kind == "i1")
+    return 1;
+  if (kind == "i8")
+    return 8;
+  if (kind == "i16" || kind == "f16" || kind == "bf16")
+    return 16;
+  if (kind == "i32" || kind == "f32")
+    return 32;
+  if (kind == "ptr" || kind == "i64" || kind == "f64")
+    return 64;
+  throw nb::value_error(("argument " + std::to_string(index) +
+                         " has the unknown contract kind '" + kind + "'")
+                            .c_str());
+}
+
+/// The raw bits of one argument, given as a Python integer that fits the
+/// width of its kind.
+uint64_t parseRawArgument(PyObject *value, const std::string &kind,
+                          size_t index, unsigned bitWidth) {
+  if (!PyLong_CheckExact(value))
+    throw nb::type_error(
+        ("argument " + std::to_string(index) + " must be a Python integer")
+            .c_str());
+  unsigned long long converted = PyLong_AsUnsignedLongLong(value);
+  if (PyErr_Occurred()) {
+    PyErr_Clear();
+    throw nb::value_error(
+        (kind + " argument " + std::to_string(index) + " is out of range")
+            .c_str());
+  }
+  auto raw = static_cast<uint64_t>(converted);
+  if (bitWidth < 64 && raw >= (uint64_t{1} << bitWidth))
+    throw nb::value_error(
+        (kind + " argument " + std::to_string(index) + " is out of range")
+            .c_str());
+  return raw;
+}
+
+/// Pack the arguments of one host call. A value keeps its low bytes, which
+/// are the value only on a little-endian host.
+ArgumentBuffer packArguments(const std::vector<std::string> &argumentKinds,
+                             nb::sequence argumentValues) {
+  const uint16_t probe = 1;
+  if (*reinterpret_cast<const unsigned char *>(&probe) != 1)
+    throw std::runtime_error("host calls require a little-endian host");
+  const size_t valueCount = nb::len(argumentValues);
+  if (argumentKinds.size() != valueCount)
+    throw nb::value_error(("the call has " +
+                           std::to_string(argumentKinds.size()) +
+                           " argument kinds and " + std::to_string(valueCount) +
+                           " argument values")
+                              .c_str());
+  ArgumentBuffer buffer;
+  buffer.slots.resize(argumentKinds.size());
+  buffer.parameters.resize(argumentKinds.size());
+  for (size_t index = 0; index < argumentKinds.size(); ++index) {
+    const std::string &kind = argumentKinds[index];
+    unsigned bitWidth = argumentBitWidth(kind, index);
+    uint64_t raw =
+        parseRawArgument(argumentValues[index].ptr(), kind, index, bitWidth);
+    std::memcpy(buffer.slots[index].bytes.data(), &raw, (bitWidth + 7) / 8);
+    buffer.parameters[index] = buffer.slots[index].bytes.data();
+  }
+  return buffer;
+}
+
+/// The entry and the argument kinds of a host-call contract.
+std::pair<std::string, std::vector<std::string>>
+parseContractABI(const std::string &contract) {
+  llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(contract);
+  if (!parsed)
+    throw std::runtime_error("invalid host launch contract: " +
+                             llvm::toString(parsed.takeError()));
+  const llvm::json::Object *object = parsed->getAsObject();
+  const llvm::json::Array *arguments =
+      object ? object->getArray("arguments") : nullptr;
+  std::optional<llvm::StringRef> entry =
+      object ? object->getString("entry") : std::nullopt;
+  if (!entry || !arguments)
+    throw std::runtime_error(
+        "invalid host launch contract: it has no entry or no arguments");
+  std::vector<std::string> kinds;
+  kinds.reserve(arguments->size());
+  for (const llvm::json::Value &value : *arguments) {
+    const llvm::json::Object *argument = value.getAsObject();
+    std::optional<llvm::StringRef> kind =
+        argument ? argument->getString("kind") : std::nullopt;
+    if (!kind)
+      throw std::runtime_error(
+          "invalid host launch contract: an argument has no kind");
+    kinds.push_back(kind->str());
+  }
+  return {entry->str(), std::move(kinds)};
+}
+
+/// A native executable of the fixed elementwise kernel, owned by Python.
+class BoundHostExecutable {
+public:
+  explicit BoundHostExecutable(SwageHostExecutable handle) : handle(handle) {}
+  BoundHostExecutable(const BoundHostExecutable &) = delete;
+  BoundHostExecutable &operator=(const BoundHostExecutable &) = delete;
+  BoundHostExecutable(BoundHostExecutable &&other) noexcept
+      : handle(other.handle), entryName(std::move(other.entryName)),
+        expectedKinds(std::move(other.expectedKinds)) {
+    other.handle.ptr = nullptr;
+  }
+  BoundHostExecutable &operator=(BoundHostExecutable &&other) noexcept {
+    if (this == &other)
+      return *this;
+    swageHostExecutableDestroy(handle);
+    handle = other.handle;
+    entryName = std::move(other.entryName);
+    expectedKinds = std::move(other.expectedKinds);
+    other.handle.ptr = nullptr;
+    return *this;
+  }
+  ~BoundHostExecutable() { swageHostExecutableDestroy(handle); }
+
+  /// Record the entry and the argument kinds of the contract.
+  void setABI(std::string entry, std::vector<std::string> kinds) {
+    entryName = std::move(entry);
+    expectedKinds = std::move(kinds);
+  }
+
+  const std::string &entry() const { return entryName; }
+
+  /// Run the executable once. The kinds must be those of the contract, and
+  /// each value is the raw bits of its argument: a buffer address or a
+  /// scalar. The call runs without the GIL.
+  void invoke(const std::vector<std::string> &argumentKinds,
+              nb::sequence argumentValues) {
+    if (argumentKinds != expectedKinds)
+      throw nb::value_error(
+          "the argument kinds of a host call differ from its contract");
+    ArgumentBuffer arguments = packArguments(argumentKinds, argumentValues);
+    std::string error;
+    auto store = [](MlirStringRef value, void *output) {
+      static_cast<std::string *>(output)->assign(value.data, value.length);
+    };
+    MlirLogicalResult result;
+    {
+      nb::gil_scoped_release release;
+      result = swageHostExecutableInvoke(
+          handle, arguments.parameters.data(),
+          static_cast<intptr_t>(arguments.parameters.size()), store, &error);
+    }
+    if (mlirLogicalResultIsFailure(result))
+      throw std::runtime_error(error.empty() ? "the host call failed" : error);
+  }
+
+private:
+  SwageHostExecutable handle;
+  std::string entryName;
+  std::vector<std::string> expectedKinds;
+};
+
+/// Compile the fixed elementwise kernel for the host. Returns the lowered
+/// module, the executable, and the launch contract as JSON. The compile runs
+/// without the GIL and under the guard of its context, like compilePTX.
+std::tuple<std::string, BoundHostExecutable, std::string>
+compileFixedHost(nb::object moduleObject, std::string kernelName,
+                 int64_t blockSize) {
+  MlirModule module = unwrapModule(moduleObject);
+  MlirContext context = mlirModuleGetContext(module);
+  std::string lowered;
+  std::string contract;
+  std::string message;
+  auto store = [](MlirStringRef value, void *output) {
+    static_cast<std::string *>(output)->assign(value.data, value.length);
+  };
+  MlirStringRef kernel =
+      mlirStringRefCreate(kernelName.data(), kernelName.size());
+  SwageHostExecutable handle{nullptr};
+  {
+    nb::gil_scoped_release release;
+    ContextUse use(context);
+    mlir::python::CollectDiagnosticsToStringScope diagnostics(context);
+    handle = swageCompileFixedBlockToHost(module, kernel, blockSize, store,
+                                          &lowered, store, &contract);
+    message = diagnostics.takeMessage();
+  }
+  if (swageHostExecutableIsNull(handle))
+    throw nb::value_error(message.c_str());
+  // The executable is owned before anything below can throw.
+  BoundHostExecutable executable(handle);
+  auto [entry, kinds] = parseContractABI(contract);
+  executable.setABI(std::move(entry), std::move(kinds));
+  return {std::move(lowered), std::move(executable), std::move(contract)};
 }
 
 std::tuple<std::vector<int32_t>, std::vector<int32_t>, std::vector<int32_t>,
@@ -475,6 +687,15 @@ NB_MODULE(_swageDialectsNanobind, m) {
     return swageSegmentTypeGetElementType(self);
   });
 
+  nb::class_<BoundHostExecutable>(swageM, "_HostExecutable")
+      .def_prop_ro("entry", &BoundHostExecutable::entry)
+      .def("invoke", &BoundHostExecutable::invoke, nb::arg("argument_kinds"),
+           nb::arg("argument_values"));
+  swageM.def("_compile_fixed_host", &compileFixedHost, nb::arg("module"),
+             nb::arg("kernel_name"), nb::arg("block_size"));
+
+  // Each compile function returns the lowered module, the PTX, and the
+  // launch contract of the kernel as JSON.
   swageM.def(
       "_compile_ptx",
       [](nb::object module, std::string kernelName, int64_t blockSize,

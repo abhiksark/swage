@@ -186,7 +186,7 @@ def test_static_schedules_share_reduction_program(kind, transform, element):
                 target="sm_86",
                 **arguments,
             )
-            lowered, ptx = first
+            lowered, ptx, _ = first
             merge = name == "_compile_split_merge_reduction_ptx"
             partial = name == "_compile_split_partial_reduction_ptx"
             assert ("llvm.fmul" in lowered) == (
@@ -233,7 +233,7 @@ def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
         module = ir.Module.parse(_semantic_module(kind, element, 2))
         original = module.operation.get_asm(enable_debug_info=False)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module, kernel_name=kernel_name, block_size=128, target="sm_86"
         )
 
@@ -285,7 +285,7 @@ def test_the_rank_two_softmax_has_one_kernel_and_one_scalar_per_stage():
         module = ir.Module.parse(_softmax_text(2))
         original = module.operation.get_asm(enable_debug_info=False)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="ragged_softmax_r2",
             block_size=128,
@@ -430,7 +430,7 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, _ = first
         assert "swage." not in lowered
         assert "gpu.all_reduce" not in lowered
         assert "llvm.func @segmented_sum" in lowered
@@ -449,7 +449,7 @@ def test_compiles_identity_sum_with_task_id_indirection():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=32,
@@ -488,7 +488,7 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, _ = first
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
@@ -601,7 +601,7 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, _ = first
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 10
@@ -647,7 +647,7 @@ def test_fused_mixed_lowering_accepts_element_program():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-        lowered, ptx = native_swage._compile_fused_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_fused_segmented_reduction_ptx(
             module, kernel_name="segmented_sum", target="sm_80"
         )
         assert lowered.count("llvm.intr.exp2") == 2
@@ -686,7 +686,7 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry, counts):
         )
 
         assert first == second
-        lowered, ptx = first
+        lowered, ptx, _ = first
         signature = re.search(rf"llvm.func @{entry}\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 3
@@ -750,7 +750,7 @@ def test_split_lowering_transforms_only_input_elements(compiler):
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
-        lowered, ptx = getattr(native_swage, compiler)(
+        lowered, ptx, _ = getattr(native_swage, compiler)(
             module, kernel_name="segmented_sum", target="sm_80"
         )
         partial = compiler == "_compile_split_partial_reduction_ptx"
@@ -967,7 +967,7 @@ def test_region_exponential_compiles_without_libdevice():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_EXPONENTIAL_SUM)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=128,
@@ -1030,7 +1030,7 @@ def test_ragged_softmax_reductions_use_disjoint_workgroup_buffers():
         swage.register_dialects(context)
         module = ir.Module.parse(RAGGED_SOFTMAX)
 
-        lowered, ptx = native_swage._compile_segmented_reduction_ptx(
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="ragged_softmax",
             block_size=128,
@@ -1054,7 +1054,7 @@ def test_segmented_kernels_pin_their_launch_width_with_reqntid(block_size):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=block_size,
@@ -1076,7 +1076,7 @@ def test_fixed_width_kernels_carry_their_reqntid(compiler, width):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
-        _, ptx = getattr(native_swage, compiler)(
+        _, ptx, _ = getattr(native_swage, compiler)(
             module,
             kernel_name="segmented_sum",
             target="sm_80",
@@ -1114,7 +1114,7 @@ def test_kernel_name_matching_survives_bystander_functions():
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(BYSTANDER_MODULE)
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="segmented_sum",
             block_size=128,

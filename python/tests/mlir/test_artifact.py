@@ -286,7 +286,7 @@ def test_each_kernel_is_what_the_runner_compiles(
     # A compile of its own, not the memo the command filled.
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
-        _, compiled = getattr(native_swage, known.compiler)(
+        _, compiled, _ = getattr(native_swage, known.compiler)(
             ir.Module.parse(_PROGRAMS[program]),
             kernel_name=program,
             target="sm_87",

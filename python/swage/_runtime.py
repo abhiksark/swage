@@ -1456,12 +1456,16 @@ def _compile_native(module, kernel_name, block_size, target):
             f"'{kernel_name}' was not compiled. See {_INSTALLATION} for "
             "the native build"
         ) from error
-    return native_swage._compile_ptx(
+    # The bindings also return the launch contract of the kernel, which this
+    # launch path does not read: it passes the fixed kernel's arguments in
+    # their declared order.
+    lowered, ptx, _contract = native_swage._compile_ptx(
         module,
         kernel_name=kernel_name,
         block_size=block_size,
         target=target,
     )
+    return lowered, ptx
 
 
 def _cache_dir():

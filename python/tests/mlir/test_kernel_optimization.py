@@ -208,7 +208,7 @@ def _compile(text, compiler, kernel_name, options, target):
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(text)
-        _, ptx = getattr(native_swage, compiler)(
+        _, ptx, _ = getattr(native_swage, compiler)(
             module, kernel_name=kernel_name, target=target, **options
         )
     return ptx
@@ -388,7 +388,7 @@ def test_public_kernel_has_no_synchronization(block_size, target):
         constexprs={"BLOCK": block_size},
     )
 
-    _, ptx = native_swage._compile_ptx(
+    _, ptx, _ = native_swage._compile_ptx(
         module, kernel_name="add_kernel", block_size=block_size, target=target
     )
 

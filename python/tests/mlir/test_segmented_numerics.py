@@ -914,7 +914,7 @@ def test_f64_kernels_hold_f64_round_to_nearest_arithmetic_only(
         with ir.Context() as context:
             swage_dialect.register_dialects(context)
             module = ir.Module.parse(reduction_module(kind, transform, "f64"))
-            _, ptx = getattr(native_swage, compiler)(
+            _, ptx, _ = getattr(native_swage, compiler)(
                 module,
                 kernel_name=_reduction_kernel(kind, "f64"),
                 target=target,
@@ -1069,7 +1069,7 @@ def test_mean_kernels_divide_once_per_task_and_never_per_chunk(
             module = ir.Module.parse(
                 reduction_module("mean", "identity", element)
             )
-            _, ptx = getattr(native_swage, compiler)(
+            _, ptx, _ = getattr(native_swage, compiler)(
                 module,
                 kernel_name=_reduction_kernel("mean", element),
                 target=target,
@@ -1101,7 +1101,7 @@ def test_column_kernels_hold_arithmetic_of_their_element_type(
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
         module = ir.Module.parse(_semantic_module(kind, element, 2))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name=_reduction_kernel(kind, element, 2),
             block_size=128,
@@ -1184,7 +1184,7 @@ def test_sum_kernels_add_in_round_to_nearest_without_contraction(
         with ir.Context() as context:
             swage_dialect.register_dialects(context)
             module = ir.Module.parse(reduction_module("sum", transform))
-            _, ptx = getattr(native_swage, compiler)(
+            _, ptx, _ = getattr(native_swage, compiler)(
                 module, kernel_name="segmented_sum", target=target, **options
             )
 
@@ -1214,7 +1214,7 @@ def test_softmax_kernel_rounds_to_nearest_around_the_approximate_exp2(
     with ir.Context() as context:
         swage_dialect.register_dialects(context)
         module = ir.Module.parse(_softmax_text(rank))
-        _, ptx = native_swage._compile_segmented_reduction_ptx(
+        _, ptx, _ = native_swage._compile_segmented_reduction_ptx(
             module,
             kernel_name="ragged_softmax" + "_r2" * (rank == 2),
             target=target,
