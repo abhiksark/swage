@@ -230,6 +230,8 @@ semantic versioning (`0.x`; anything may change).
   importable.
 - `SWAGE_ORACLE_BUILD_DIR` names the build directory of the private CPU
   oracle, for a `swage` that is not imported from a checkout.
+  `check-swage-python` sets it to its own build directory, so the target
+  runs from a build outside the checkout.
 - Benchmarks: `swage_public_call` in the fresh-offsets harness times the
   public call itself. No record holds it yet.
 - A segment function declares its arguments with `swage.role`, in any order,
