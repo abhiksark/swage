@@ -19,7 +19,9 @@ import json
 import os
 import pathlib
 import platform
+import re
 import stat
+import struct
 import types
 from typing import NamedTuple
 
@@ -164,37 +166,27 @@ _MEAN_KERNELS = _reduction_kernels("float", reads_extent=True)
 _MEAN_KERNELS_F64 = _reduction_kernels("double", reads_extent=True)
 
 
-def _column_kernels(scalar):
-    """Return the one kernel of a program over rank-two values.
+def _row_kernels(scalar, reads_extent=False):
+    """Return the kernels `segment_reduce` can request for rank-two values.
 
-    The kernel is the direct schedule of the program: one block per
-    segment, in which a thread takes a column. It takes the number of
-    columns after the counts of the direct kernel.
+    They are the row-stripe tiles of the task-id, partial, and merge
+    schedules: the kernels of `_reduction_kernels` without the fused one,
+    each of which takes the number of columns after its counts.
 
     Args:
-        scalar: The C type of one element of the values and the output.
+        scalar: The C type of one element of the values, the scratch, and
+            the output.
+        reads_extent: Whether the program divides by the extent of its
+            segment, as a mean does.
     """
-    return (
-        _Kernel(
-            "column",
-            _SEGMENTED,
-            (("block_size", _CTA_BLOCK),),
-            _CTA_BLOCK,
-            "",
-            (
-                ("values", f"const {scalar}*"),
-                _OFFSETS,
-                ("output", f"{scalar}*"),
-                _VALUE_COUNT,
-                _SEGMENT_COUNT,
-                ("feature_count", "int32_t"),
-            ),
-        ),
+    return tuple(
+        kernel._replace(
+            arguments=(*kernel.arguments, ("feature_count", "int32_t"))
+        )
+        for kernel in _reduction_kernels(scalar, reads_extent)
+        if kernel.role != "mixed"
     )
 
-
-_COLUMN_KERNELS = _column_kernels("float")
-_COLUMN_KERNELS_F64 = _column_kernels("double")
 # The one kernel `segment_softmax` launches for rank-one values. Its value
 # count is the length of the shorter of the values and output buffers.
 _SOFTMAX_KERNELS = (
@@ -220,15 +212,14 @@ _PROGRAMS = {
     "segmented_min_f64": _REDUCTION_KERNELS_F64,
     "segmented_mean_f64": _MEAN_KERNELS_F64,
     **{
-        f"segmented_{kind}{element}_r2": kernels
-        for element, kernels in (
-            ("", _COLUMN_KERNELS),
-            ("_f64", _COLUMN_KERNELS_F64),
-        )
+        f"segmented_{kind}{element}_r2": _row_kernels(scalar, kind == "mean")
+        for element, scalar in (("", "float"), ("_f64", "double"))
         for kind in ("sum", "max", "min", "mean")
     },
     "ragged_softmax": _SOFTMAX_KERNELS,
-    "ragged_softmax_r2": _COLUMN_KERNELS,
+    # `segment_softmax` launches the task-id kernel of rank-two values with
+    # one task per segment.
+    "ragged_softmax_r2": _row_kernels("float")[:1],
 }
 
 # The directory `SWAGE_ARTIFACT_DIR` named when an artifact was last loaded,
@@ -348,6 +339,133 @@ class _CompileFunction:
     def __init__(self, name):
         """Name the native compile function this object stands in for."""
         self.__name__ = name
+
+
+# The ELF section type of the version needs of a shared object.
+_SHT_GNU_VERNEED = 0x6FFFFFFE
+_GLIBC_VERSION = re.compile(r"GLIBC_(\d+)\.(\d+)(?:\.\d+)?")
+
+
+def _glibc_requirement(contents):
+    """Return the newest glibc version a 64-bit ELF library needs, or None.
+
+    The version needs of a library name, for each library it links, the
+    symbol versions it uses. The entries for `libc.so.6` name versions such
+    as `GLIBC_2.34`, which a glibc older than that version does not have,
+    so the library does not load on it.
+
+    Args:
+        contents: The bytes of the library.
+
+    Returns:
+        `(major, minor)` of the newest `GLIBC_` version, or None for a file
+        that is not a little-endian 64-bit ELF file with section headers or
+        that names no such version.
+    """
+    try:
+        if contents[:6] != b"\x7fELF\x02\x01":
+            return None
+        (table,) = struct.unpack_from("<Q", contents, 0x28)
+        size, count = struct.unpack_from("<HH", contents, 0x3A)
+        sections = [
+            struct.unpack_from("<IIQQQQIIQQ", contents, table + index * size)
+            for index in range(count)
+        ]
+
+        def name(strings, at):
+            start = sections[strings][4] + at
+            return contents[start : contents.index(b"\0", start)]
+
+        newest = None
+        for section in sections:
+            _, kind, _, _, entry, _, strings, entries, _, _ = section
+            if kind != _SHT_GNU_VERNEED:
+                continue
+            for _ in range(entries):
+                _, versions, file, auxiliary, following = struct.unpack_from(
+                    "<HHIII", contents, entry
+                )
+                at = entry + auxiliary
+                if name(strings, file) != b"libc.so.6":
+                    versions = 0
+                for _ in range(versions):
+                    _, _, _, version, step = struct.unpack_from(
+                        "<IHHII", contents, at
+                    )
+                    matched = _GLIBC_VERSION.fullmatch(
+                        name(strings, version).decode("ascii", "replace")
+                    )
+                    if matched:
+                        found = (int(matched[1]), int(matched[2]))
+                        newest = max(newest or found, found)
+                    at += step
+                entry += following
+        return newest
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def _host_glibc():
+    """Return the glibc of this process, such as `glibc 2.35`, or None."""
+    try:
+        return os.confstr("CS_GNU_LIBC_VERSION")
+    except (ValueError, OSError):
+        return None
+
+
+def _require_glibc(contents, subject):
+    """Refuse a runtime library that needs a newer glibc than the host has.
+
+    The dynamic loader would refuse it too, with a message about symbol
+    versions. This names the requirement and what to do about it.
+
+    Raises:
+        RuntimeError: The library needs a glibc version the host lacks.
+    """
+    needed = _glibc_requirement(contents)
+    if needed is None:
+        return
+    host = re.fullmatch(r"glibc (\d+)\.(\d+)\b.*", _host_glibc() or "")
+    have = (int(host[1]), int(host[2])) if host else None
+    if have is not None and have >= needed:
+        return
+    found = f"glibc {have[0]}.{have[1]}" if have else "no glibc"
+    raise RuntimeError(
+        f"{subject} needs glibc {needed[0]}.{needed[1]} or newer, and this "
+        f"host has {found}; write the artifact with a runtime library built "
+        "for the glibc of this host, which python -m swage.compile takes "
+        "with --runtime-library"
+    )
+
+
+# The anonymous memory files that hold a loaded runtime library. They stay
+# open for the life of the process, as the library stays loaded: the dynamic
+# loader knows a library by the path it was opened by, and a closed file's
+# number could name another library later.
+_LOADED_LIBRARIES = []
+
+
+def _verified_library_path(contents):
+    """Return a path that opens exactly `contents`, for the dynamic loader.
+
+    The bytes go to an anonymous memory file that nothing else can reach,
+    and the loader opens it through `/proc/self/fd`. So the library that
+    is loaded is the one whose digest was checked, whatever happens to the
+    file of the artifact after that check.
+
+    Raises:
+        OSError: The memory file cannot be created or written.
+    """
+    descriptor = os.memfd_create("libSwageRuntime.so", os.MFD_CLOEXEC)
+    try:
+        view = memoryview(contents)
+        while view:
+            view = view[os.write(descriptor, view) :]
+    except BaseException:
+        os.close(descriptor)
+        raise
+    _LOADED_LIBRARIES.append(descriptor)
+    return f"/proc/self/fd/{descriptor}"
 
 
 class _Artifact:
@@ -693,12 +811,13 @@ class _Artifact:
         calls = f"this swage calls ABI version {_RUNTIME_ABI_VERSION}"
         if version != _RUNTIME_ABI_VERSION:
             raise RuntimeError(f"{subject} has ABI version {version}; {calls}")
-        self._read_verified(entry)
+        contents = self._read_verified(entry)
+        _require_glibc(contents, f"{subject}, {entry['file']},")
         try:
             # The functions run for microseconds and never call back into
             # Python, so the GIL stays held, as it is for the launcher of
             # the native bindings.
-            library = ctypes.PyDLL(str(self.directory / entry["file"]))
+            library = ctypes.PyDLL(_verified_library_path(contents))
             reported = library.swageRuntimeAbiVersion
             count = library.swageRuntimeCountTasks
             write = library.swageRuntimeWriteTasks
@@ -706,7 +825,8 @@ class _Artifact:
             describe = library.swageRuntimeDescribe
         except (OSError, AttributeError) as error:
             raise RuntimeError(
-                f"{subject} cannot be loaded: {error}"
+                f"{subject}, {entry['file']}, cannot be loaded from its "
+                f"verified bytes: {error}"
             ) from error
         reported.argtypes = []
         reported.restype = ctypes.c_int32

@@ -65,8 +65,16 @@ _FAMILIES = (
     (_MATCHED, _MATCHED),
     ("triton_planned_w", "triton_planned"),
     ("triton_looped_b", "triton_looped"),
+    ("triton_rows_looped_r", "triton_rows_looped"),
     ("triton_b", "triton_fixed"),
 )
+# Rows per loop step and warps of the rank-two looped Triton sweep.
+_ROWS_LOOPED_CONFIGS = ((4, 1), (4, 4), (16, 1), (16, 4), (64, 4))
+# The column block of the rank-two looped kernel is a power of two between
+# these bounds; the floor keeps a block of 1 or 2 lanes out of the kernel.
+_ROWS_COLUMNS_FLOOR = 4
+_ROWS_COLUMNS_CEILING = 64
+_KIND_CODES = {"sum": 0, "max": 1, "min": 2, "mean": 3}
 _I32_MAX = (1 << 31) - 1
 _SYNTHETIC_DISTRIBUTIONS = (
     "many-tiny",
@@ -84,6 +92,22 @@ _OPTIONAL_DISTRIBUTIONS = ("alternating-empty", "power-law")
 _QUANTUM = {"ones": 1.0, "quarters": 0.25, "normal": None}
 _F32_UNIT_ROUNDOFF = 2.0**-24
 _F32_EXACT_INTEGERS = 1 << 24
+_UNIT_ROUNDOFF = {"float32": _F32_UNIT_ROUNDOFF, "float64": 2.0**-53}
+_EXACT_INTEGERS = {"float32": _F32_EXACT_INTEGERS, "float64": 1 << 53}
+# The value an output of a mean holds before a candidate writes it. A mean of
+# an empty segment is NaN, so NaN cannot mark an unwritten mean.
+_MEAN_MARKER = 1.0e30
+
+
+def _padded_bytes_per_element(itemsize: int) -> int:
+    """Return an upper bound of the bytes per padded element alive at once.
+
+    While padding and reducing: an i32 index, a bool mask, and the
+    gathered, the padded, and the masked values, each of ``itemsize``.
+    """
+    return 4 + 1 + 3 * itemsize
+
+
 # An upper bound of the bytes per padded element alive at once while padding:
 # an i32 index, a bool mask, the gathered f32, the zeros f32, and the padded
 # f32.
@@ -1081,35 +1105,92 @@ def _values(torch, kind: str, count: int, seed: int):
     raise ValueError(f"unknown values kind {kind!r}")
 
 
-def _sum_tolerance(torch, lengths, magnitude, quantum):
-    """Return how far a correct f32 segment sum may be from the exact sum.
+def _sum_tolerance(torch, lengths, magnitude, quantum, *,
+                   unit=_F32_UNIT_ROUNDOFF,
+                   exact_integers=_F32_EXACT_INTEGERS):
+    """Return how far a correct segment sum may be from the exact sum.
 
     Args:
         torch: The PyTorch module.
-        lengths: Segment lengths as float64.
+        lengths: Segment lengths as float64; they broadcast against
+            ``magnitude``, so a column of lengths serves rank-two values.
         magnitude: Float64 sum of the absolute values of each segment.
         quantum: Grid that every value is a multiple of, or None.
+        unit: Unit roundoff of the summed type, ``2 ** -24`` for f32.
+        exact_integers: Largest count of grid steps the summed type holds
+            exactly, ``2 ** 24`` for f32.
 
     Returns:
         One float64 tolerance per segment. It is zero where every partial
         sum in any order is exactly representable: the values lie on the
-        grid and their magnitudes add up to at most ``2 ** 24`` grid steps.
-        Elsewhere it is ``gamma(n - 1) * magnitude`` with ``gamma(k) =
-        k * u / (1 - k * u)`` and ``u = 2 ** -24``, the bound that holds for
-        n f32 values added in any order. Past ``k * u = 1 / 2`` the bound
-        says nothing and the tolerance is infinite: the segment is not
-        checked beyond having been written.
+        grid and their magnitudes add up to at most ``exact_integers`` grid
+        steps. Elsewhere it is ``gamma(n - 1) * magnitude`` with
+        ``gamma(k) = k * u / (1 - k * u)``, the bound that holds for n
+        values added in any order. Past ``k * u = 1 / 2`` the bound says
+        nothing and the tolerance is infinite: the segment is not checked
+        beyond having been written.
     """
-    steps = (lengths - 1).clamp(min=0) * _F32_UNIT_ROUNDOFF
+    steps = (lengths - 1).clamp(min=0) * unit
     tolerance = torch.where(
         steps < 0.5,
         steps / (1 - steps) * magnitude,
         torch.full_like(magnitude, float("inf")),
     )
     if quantum is not None:
-        exact = magnitude <= _F32_EXACT_INTEGERS * quantum
+        exact = magnitude <= exact_integers * quantum
         tolerance = torch.where(exact, torch.zeros_like(tolerance), tolerance)
     return tolerance
+
+
+def _reduction_reference(torch, values, offsets, kind, *, quantum, dtype):
+    """Return the float64 results of one reduction and their tolerances.
+
+    Args:
+        torch: The PyTorch module.
+        values: Host float64 values, ``[N]`` or ``[N, D]``.
+        offsets: Host offsets of the segments, over the rows.
+        kind: ``sum``, ``max``, ``min``, or ``mean``.
+        quantum: Grid that every value is a multiple of, or None.
+        dtype: ``float32`` or ``float64``, the type the candidates compute
+            in.
+
+    Returns:
+        The reference, ``[S]`` or ``[S, D]``, with
+        ``torch.segment_reduce(axis=0)`` semantics, and one tolerance per
+        result. A maximum and a minimum are exact. A sum has the bound of
+        ``_sum_tolerance`` in the unit of ``dtype``; in float64 it is
+        doubled, because the float64 reference rounds as well. A mean has
+        that bound divided by the segment length, plus two units of its own
+        magnitude for the division and its reference. An empty segment has
+        tolerance zero; its result must equal the reference, infinite for a
+        maximum or a minimum and NaN for a mean.
+    """
+    reference = torch.segment_reduce(values, kind, offsets=offsets, axis=0)
+    if kind in ("max", "min"):
+        return reference, torch.zeros_like(reference)
+    magnitude = torch.segment_reduce(
+        values.abs(), "sum", offsets=offsets, axis=0
+    )
+    lengths = (offsets[1:] - offsets[:-1]).double()
+    lengths = lengths.reshape(-1, *[1] * (values.dim() - 1))
+    unit = _UNIT_ROUNDOFF[dtype]
+    tolerance = _sum_tolerance(
+        torch,
+        lengths,
+        magnitude,
+        quantum,
+        unit=unit,
+        exact_integers=_EXACT_INTEGERS[dtype],
+    )
+    if dtype == "float64":
+        tolerance = 2 * tolerance
+    if kind == "mean":
+        tolerance = torch.where(
+            lengths > 0,
+            tolerance / lengths.clamp(min=1) + 2 * unit * reference.abs(),
+            torch.zeros_like(tolerance),
+        )
+    return reference, tolerance
 
 
 def _sum_reference(torch, host_values, host_offsets, quantum):
@@ -1239,6 +1320,50 @@ def _check_triton_looped(torch, kernel, configs, offsets, segment_count):
 
     _check_on_exact_values(
         torch, "triton_looped", launch, configs, offsets, segment_count
+    )
+
+
+def _check_reduction(torch, label: str, result, reference, tolerance,
+                     kind: str):
+    """Require every result of a reduction to be within its tolerance.
+
+    Args:
+        torch: The PyTorch module.
+        label: Candidate and row, for the failure message.
+        result: The candidate's result, ``[S]`` or ``[S, D]``.
+        reference: The float64 reference from ``_reduction_reference``. The
+            result is compared where the reference is, so a reference kept
+            on the host costs a copy of the result outside the timer.
+        tolerance: Its tolerances.
+        kind: The reduction kind.
+
+    Raises:
+        AssertionError: If a result is outside its tolerance, differs from
+            an infinite or NaN reference, or was never written: NaN marks
+            an unwritten sum, maximum, and minimum, and ``_MEAN_MARKER`` an
+            unwritten mean, also where the tolerance is infinite.
+    """
+    unwritten = (result == _MEAN_MARKER) if kind == "mean" else None
+    result = result.to(device=reference.device, dtype=torch.float64)
+    ok = ((result - reference).abs() <= tolerance) | (result == reference)
+    ok |= result.isnan() & reference.isnan()
+    if unwritten is not None:
+        ok &= ~unwritten.to(reference.device)
+    wrong = ~ok
+    if not wrong.any():
+        return
+    index = int(wrong.flatten().nonzero()[0])
+    if result.dim() == 2:
+        features = result.shape[1]
+        segment, column = divmod(index, features)
+        where = f"segment {segment}, column {column}"
+    else:
+        where = f"segment {index}"
+    flat = (result.flatten(), reference.flatten(), tolerance.flatten())
+    raise AssertionError(
+        f"{label}: {int(wrong.sum())} of {wrong.numel()} results are outside "
+        f"their tolerance; {where} is {flat[0][index].item()!r}, expected "
+        f"{flat[1][index].item()!r} within {flat[2][index].item()!r}"
     )
 
 
@@ -1492,8 +1617,103 @@ def _make_triton_looped_task_sum():
     return looped_task_kernel
 
 
+def _make_triton_rows_looped():
+    """Define a looping Triton reduction of rank-two values lazily.
+
+    One program reduces one block of columns of one segment: it walks the
+    rows of the segment in fixed blocks and keeps one partial result per
+    row slot and column, then combines the row slots. The kind is a
+    compile-time constant, and the partial results have the type of the
+    values. A masked load reads the identity of the kind. A mean divides
+    the sum once, rounded to nearest. The maximum and the minimum do not
+    propagate NaN; the timed values hold none.
+    """
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def rows_looped_kernel(values, offsets, output, features,
+                           KIND: tl.constexpr, FLOAT64: tl.constexpr,
+                           BLOCK_ROWS: tl.constexpr,
+                           BLOCK_COLUMNS: tl.constexpr):
+        segment = tl.program_id(0)
+        begin = tl.load(offsets + segment).to(tl.int64)
+        end = tl.load(offsets + segment + 1).to(tl.int64)
+        columns = tl.program_id(1) * BLOCK_COLUMNS + tl.arange(
+            0, BLOCK_COLUMNS
+        )
+        in_columns = columns < features
+        rows = tl.arange(0, BLOCK_ROWS)
+        element = values.dtype.element_ty
+        if KIND == 1:
+            total = tl.full(
+                (BLOCK_ROWS, BLOCK_COLUMNS), float("-inf"), element
+            )
+        elif KIND == 2:
+            total = tl.full(
+                (BLOCK_ROWS, BLOCK_COLUMNS), float("inf"), element
+            )
+        else:
+            total = tl.zeros((BLOCK_ROWS, BLOCK_COLUMNS), element)
+        for start in range(begin, end, BLOCK_ROWS):
+            row = start + rows
+            mask = (row < end)[:, None] & in_columns[None, :]
+            index = row[:, None] * features + columns[None, :]
+            if KIND == 1:
+                tile = tl.load(values + index, mask=mask, other=float("-inf"))
+                total = tl.maximum(total, tile)
+            elif KIND == 2:
+                tile = tl.load(values + index, mask=mask, other=float("inf"))
+                total = tl.minimum(total, tile)
+            else:
+                total += tl.load(values + index, mask=mask, other=0.0)
+        if KIND == 1:
+            result = tl.max(total, axis=0)
+        elif KIND == 2:
+            result = tl.min(total, axis=0)
+        else:
+            result = tl.sum(total, axis=0)
+            if KIND == 3 and FLOAT64:
+                result = result / (end - begin).to(element)
+            elif KIND == 3:
+                # Rounded to nearest, as the mean of Swage and of PyTorch;
+                # the default float32 division of Triton is approximate.
+                result = tl.math.div_rn(result, (end - begin).to(element))
+        tl.store(
+            output + segment * features + columns, result, mask=in_columns
+        )
+
+    return rows_looped_kernel
+
+
+def _rows_columns(features: int) -> tuple[int, int]:
+    """Return the column block of the rank-two kernel and the block count."""
+    block = _ROWS_COLUMNS_FLOOR
+    while block < min(features, _ROWS_COLUMNS_CEILING):
+        block *= 2
+    return block, -(-features // block)
+
+
+def _launch_triton_rows(kernel, values, offsets, output, segment_count,
+                        features, kind, block_rows, warps):
+    """Launch the looped rank-two reduction over every segment."""
+    block_columns, column_blocks = _rows_columns(features)
+    kernel[(segment_count, column_blocks)](
+        values,
+        offsets,
+        output,
+        features,
+        KIND=_KIND_CODES[kind],
+        FLOAT64=values.element_size() == 8,
+        BLOCK_ROWS=block_rows,
+        BLOCK_COLUMNS=block_columns,
+        num_warps=warps,
+    )
+    return output
+
+
 def _make_triton_kernels():
-    """Define every Triton segmented-sum kernel of the harnesses lazily."""
+    """Define every Triton segmented kernel of the harnesses lazily."""
     packed, cta = _make_triton_matched_task_partition()
     return types.SimpleNamespace(
         fixed=_make_triton_segmented_sum(),
@@ -1502,6 +1722,7 @@ def _make_triton_kernels():
         cta=cta,
         cta_looped=_make_triton_looped_task_sum(),
         fused=_make_triton_fused_sum(),
+        rows=_make_triton_rows_looped(),
     )
 
 

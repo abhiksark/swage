@@ -15,7 +15,8 @@ Two functions run a fixed program over every segment of a ragged batch:
 These two calls are the whole public segmented surface. The programs are
 fixed. There is no public segment syntax, so an element expression, another
 reduction kind, a dtype outside the admitted ones, and values of rank three
-or above cannot be written. The calls record no gradient.
+or above cannot be written. A call records a gradient for `values` that
+require grad; [Gradients](#gradients) states which.
 [Ragged Data](ragged-data.md) defines the storage they read. This page
 shows a call, states what it returns and what it costs, and lists where it
 is refused.
@@ -106,6 +107,7 @@ returns the same tensor. It must meet all of these rules:
   resized.
 - It shares no memory with `values` or `offsets`.
 - It does not require grad, and it is not a lazy negation or conjugate view.
+  A call that records a gradient takes no `out`.
 
 Without `out`, the call allocates the result on the device of `values`.
 
@@ -119,8 +121,9 @@ segment, leaves the counter of `out` alone. The counters of `values` and
 ## Results
 
 The results below are pinned by tests on the GPU. `torch.segment_reduce`
-returns the same value in every case on PyTorch 2.12, the version the GPU
-tests run with.
+returns the same value in every case but one on PyTorch 2.12, the version
+the GPU tests run with: the sign of a maximum or a minimum of zeros of both
+signs, which the two lists below state.
 
 A sum follows IEEE-754 addition:
 
@@ -139,6 +142,11 @@ A maximum propagates NaN:
 - A positive infinity gives positive infinity, also beside a negative one.
 - A negative infinity among finite elements gives the largest finite
   element.
+- Zeros of both signs give `+0.0`, wherever each sits, because IEEE-754
+  `maximum` orders `-0.0` below `+0.0`. Every schedule and the kernel of
+  rows return it. `torch.segment_reduce` returns the sign of the first zero
+  of the segment instead, on the GPU and on the CPU. The two results
+  compare equal, so only a comparison of bits tells them apart.
 
 A minimum is its mirror:
 
@@ -147,6 +155,8 @@ A minimum is its mirror:
 - A negative infinity gives negative infinity, also beside a positive one.
 - A positive infinity among finite elements gives the smallest finite
   element.
+- Zeros of both signs give `-0.0`, wherever each sits, where
+  `torch.segment_reduce` returns the sign of the first zero.
 
 A mean is the sum divided by the length of the segment:
 
@@ -264,41 +274,44 @@ result row for an empty segment. The values must be contiguous in row
 order: a transposed tensor and a slice of columns are refused, and nothing
 is copied. Values of rank three or above are refused.
 
-A call on rows runs another kernel than a call on scalars, with one
-schedule:
+A call on rows runs another kernel than a call on scalars, the row-stripe
+tile:
 
-- One block of 128 threads per segment. Thread `t` takes the columns `t`,
-  `t + 128`, and so on, one after the other, each in row order.
-- No split. A segment occupies one block for its whole length, whatever
-  that length is.
-- No thread combines with another, so a column is reduced, or normalized,
-  by one thread. A softmax thread walks the rows of its column three
-  times: for the maximum, for the sum of the exponentials, and for the
-  results it stores.
+- A block of 128 threads takes a group of `W` adjacent columns of one
+  segment, `W` the smallest power of two that is at least `D`, capped at
+  32. Its threads are `128 / W` stripes of rows for each column of the
+  group, and the stripes of one column combine across the block.
+- A reduction classifies the rows of each segment as a call on scalars
+  classifies elements, with limits that follow from `W`. A segment of more
+  than `4096 / W` rows is cut into chunks of that many rows, each reduced
+  by a block of 512 threads, and the chunks of a segment are merged.
+- A softmax splits no segment. Its stripes walk their rows three times:
+  for the maximum, for the sum of the exponentials, and for the results
+  they store.
 
-That schedule has these consequences, which are limits of this call and not
-of the data:
+That schedule has these consequences:
 
-| | Few columns (1 to 8) | Many columns (64 to 1024) |
-|---|---|---|
-| Threads of a block that work | `D` of 128 | 64 to 128 |
-| Additions of one thread per segment | `n` rows | `n * ceil(D / 128)` |
-| Weakness | A long segment is taken by `D` threads: 10,000 rows of three columns are 10,000 additions, one after the other, in each of three threads | A long segment occupies one block for its whole length |
-
-- **Rounding.** A column sum is added in row order, one addition per row.
-  It lies within `(n - 1) * eps * sum(|x|)` of the exact sum of its `n`
-  rows, with the `eps` of the dtype. For a long segment that bound is
-  weaker than the bound of rank-one values, whose trees add in parallel. A
-  column mean divides that sum once and lies within `eps * sum(|x|)` of the
-  exact mean, under the conditions of the rank-one mean. A maximum and a
-  minimum are exact. A softmax of rows has the bound of
-  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) with
-  `k = n - 1`, the additions of its normalizer in row order.
-- **Bits.** The bits of a column do not depend on the other segments of the
-  batch, on the block width, or on the GPU model: a rank-two call has no
-  schedule selection.
-- **Host work.** A call on rows validates its offsets on the host and
-  classifies nothing. It uploads no task record and allocates no scratch.
+- **Rounding.** A column sum of `n` rows in one block has
+  `k = ceil(n / R) - 1 + log2(R)` additions on its longest path, for the
+  `R = 128 / W` stripes of a column. A segment split into `P` chunks has
+  `k = 6 + 2 log2(R) + ceil(P / R)`, for the `R = 512 / W` stripes of a
+  split block. No path has more than `n - 1` additions of nonzero terms.
+  A sum lies within `k * eps * sum(|x|)` of the exact sum of its `n` rows,
+  with the `eps` of the dtype. A column mean divides that sum once and
+  lies within `eps * sum(|x|)` of the exact mean, under the conditions of
+  the rank-one mean. A maximum and a minimum are exact. A softmax of rows
+  has the bound of
+  [Ragged Softmax](../internals/ragged-softmax.md#accuracy) with the `k`
+  of one block.
+- **Bits.** The bits of a column depend on its row count and on `D`
+  through `W`. They do not depend on the other segments of the batch or on
+  the GPU model: the kernels of a segment follow from its row count and
+  `D` alone.
+- **Host work.** A reduction of rows validates and classifies its
+  offsets in one pass. When a segment is split, it uploads its task
+  records and allocates one scratch row per chunk; otherwise it launches
+  one task per segment. A softmax of rows launches one task per segment
+  and classifies nothing.
 - **One column and no column.** `[N, 1]` values are a run of scalars. They
   are reduced by the schedules of rank-one values, with their rounding and
   their selection, and the result is `[S, 1]`. A softmax of `[N, 1]`
@@ -306,10 +319,96 @@ of the data:
   values return an `[S, 0]` result from a reduction and an `[N, 0]` result
   from a softmax, and launch nothing.
 
-The schedules of rank-one values take a long run of scalars in parallel,
-and those of a reduction split it. A caller reaches them for rows by
-passing each column as a contiguous `[N]` or `[N, 1]` tensor, at the price
-of one call per column.
+## Gradients
+
+A call records a gradient when `values` require grad and gradient
+recording is on, as a PyTorch operation does: the result has a `grad_fn`,
+and a backward pass sends a gradient to `values`. The offsets are integers
+and receive none. Under `torch.no_grad()` and inside
+`torch.inference_mode()` a call records nothing, also for `values` that
+require grad, and its result does not require grad.
+
+Every kind of `segment_reduce` and the softmax record a gradient. The
+gradient of a reduction, for the gradient `g` of a segment:
+
+- A sum gives every element of the segment `g`, unchanged.
+- A mean gives every element `g` divided once by the length of the
+  segment, converted to the dtype of `values` as the mean converts it.
+- A maximum or a minimum gives `g` to the elements of the segment that
+  equal its result, in equal shares: each receives `g` divided once by
+  their number. `-0.0` and `0.0` are equal. When the result is NaN, the NaN
+  elements share `g`. Every other element receives exactly `0.0`, also when
+  `g` is infinite or NaN.
+- An empty segment has no element, and its `g` reaches nothing. A value
+  past the final offset receives `0.0`.
+
+A softmax gives an element with result `y` and gradient `g` the value
+`y * (g - s)`, where `s` is the sum of `g * y` over its segment. A segment
+whose result is NaN gives NaN to each of its elements, as the gradient of
+`torch.softmax` does. For `[N, D]` values all of this holds per column.
+
+The backward of a reduction runs PyTorch operations: it finds the segment
+of every element from the offsets on the device, copies the gradient of
+that segment to the element, and for a mean, a maximum, or a minimum
+divides once. For a maximum or a minimum it finds the tied elements by
+comparing every element with the result, which the forward computes
+exactly, and counts them with an integer prefix sum. It copies nothing to
+the host and waits for nothing, and its bits do not depend on the other
+segments of the batch. The backward of a softmax sums `g * y` with the sum
+kernel of `segment_reduce`, with the rounding and the host work of a call:
+[Sum rounding](#sum-rounding) holds for that sum, and it raises where a
+call raises. Neither is a fallback: the forward always runs Swage kernels,
+which step of a backward runs where is fixed, and a backward that cannot
+run its sum kernel raises.
+
+The gradient of a sum is exact, and the gradient of a mean, a maximum, or a
+minimum is one correctly rounded division. A float32 count of more than
+16,777,216 tied elements is rounded. A softmax gradient lies within
+`(k + 3) * eps32 * max|g| * y` of `y * (g - s)` for the `y` the call
+returned, with `max|g|` over the segment, `k` the additions of the sum on
+its schedule, and a factor of the sum of `y` when that exceeds one. The
+product of a softmax second derivative with a vector `v` lies within
+`(7k + 43) * eps32 * max|g| * max|v| * y` of its formula on the same `y`,
+with a factor of the square of the sum of `y` when that exceeds one.
+Against the float64 gradient of `torch.softmax`, the error of the forward,
+at most `b` relative with `b` the bound of
+[Ragged Softmax](../internals/ragged-softmax.md#accuracy), adds at most
+`3 * b * max|g| * y` to a gradient, and `13 * b` times the scale of the
+product bound, `max|g| * max|v| * y` with its factor, to that product.
+
+On PyTorch 2.12, on the CPU and on CUDA, the gradient of
+`torch.segment_reduce` equals this one for a sum, agrees with it to within
+one rounding of the dtype for a mean, and equals it for a maximum and a
+minimum except on a tie with a negative `g`. There `torch.segment_reduce`
+gives every tied element the whole `g` instead of a share; with a NaN `g`
+both give the tied elements NaN. On ties its gradient on CUDA has the bits
+of its gradient on the CPU.
+`Tensor.scatter_reduce` with `"amax"` or `"amin"` also shares equally, but
+counts an element of its destination that equals the result, and gives
+NaN to every element of a segment whose result is NaN.
+
+Second derivatives are supported for every call. Each runs the sum kernel
+of `segment_reduce` on the gradient it differentiates, with the rounding
+and the host work of a call.
+
+A backward of a softmax, and every second derivative, raise where a call
+raises: on a stream that is capturing a CUDA graph, in a message that names
+the backward or the second derivative, and with `SWAGE_NO_COMPILE=1` when
+the sum kernel is not held. The autograd engine runs a backward on the
+stream on which its call ran.
+
+The backward keeps the offsets of the call, the values and the result for a
+maximum and a minimum, and the result for a softmax. They stay alive until
+the backward runs even when the caller drops them. A backward pass raises
+when one of them was changed in place after the call, as PyTorch does.
+Offsets created inside `torch.inference_mode()` are kept as a copy.
+
+Inside a function compiled by `torch.compile` a call that records a
+gradient is the same graph break, and its backward runs eagerly in the
+autograd engine. Not supported: an `out` while recording, forward-mode
+differentiation, `torch.func` transforms, and compiled autograd.
+[ADR-0024](../adr/ADR-0024-gradients-of-the-segmented-calls.md) records the
+decision.
 
 ## What a call costs
 
@@ -318,21 +417,37 @@ preparation for the next call:
 
 1. It copies the offsets to the host. The copy waits for the work already
    queued on the current stream.
-2. It validates the offsets on the host and, for `segment_reduce` of
-   rank-one values, classifies every segment into warp, CTA, and split
-   tasks.
-3. For `segment_reduce` of rank-one values, it uploads the task records and
-   allocates scratch for split segments. With int64 offsets it also uploads the narrowed
-   int32 copy the kernels read.
+2. It validates the offsets on the host and, for `segment_reduce`,
+   classifies every segment: rank-one values into warp, CTA, and split
+   tasks, and `[N, D]` values into one-block and split tasks with limits
+   that follow from `W`.
+3. For `segment_reduce`, it uploads the task records and allocates scratch
+   for split segments. An `[N, D]` batch without a split segment uploads
+   no records: it launches one task per segment from a list of task ids
+   already on the device. With int64 offsets a call also uploads the
+   narrowed int32 copy the kernels read.
 4. It enqueues the kernels.
 
 A second call with the same offsets tensor repeats all four steps. The task
 records and the scratch are released when the call returns.
 
 `torch.segment_reduce` does none of the host work. When the offsets change on
-every call, expect `segment_reduce` to be slower than `torch.segment_reduce`.
-One committed record measures that regime, on one NVIDIA RTX A6000 at
-revision `453c56e`:
+every call, expect `segment_reduce` to be slower than `torch.segment_reduce`
+on rank-one values and on `[N, D]` values whose segments have at most 32
+rows. The newest committed record of the call, on one NVIDIA RTX A6000 at
+revision `2cf88ae`, measures that regime for both ranks:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-public-statement.inc"
+
+[Benchmarks](../internals/benchmarks.md#public-segment_reduce-calls-at-2cf88ae)
+reports the record and its limits: one GPU, one seed per distribution, and a
+machine that was not quiet. It also compares the record with the older
+record of the call at `c6099ec`, taken before `[N, D]` values ran the
+row-stripe tile. The `[N, D]` figures of that older record describe the
+kernel that ran before, not the current call.
+
+An older record, at revision `453c56e`, measures a private preparation in
+the same regime:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
@@ -341,12 +456,10 @@ three scheduling policies with schedule selection disabled, followed by the
 mixed launch into a caller's output. `segment_reduce` validates and
 classifies in the same way, prepares only the schedule it launches, selects
 the schedule automatically, and allocates its result when no `out` is
-passed. The harness has since gained a candidate that times the call
-itself, and no committed record holds it. Read the figures as a measurement
-of that private preparation, not of the call.
+passed. Read the figures above as a measurement of that private
+preparation, not of the call.
 [Benchmarks](../internals/benchmarks.md#fresh-offsets-and-the-frozen-comparison-at-453c56e)
-reports the record and its limits: one GPU, one seed per distribution, and a
-machine that was not quiet.
+reports the record and its limits.
 
 The other recorded comparisons on that page were taken with a private
 prepared launch, which prepares one layout once and launches it many times.
@@ -359,8 +472,9 @@ The first calls of a process cost more:
   kernels per dtype that a batch of rank-one values can need: one for
   segments of up to 4096 elements, two for longer segments, and one for a
   batch that the selection rule of [Sum rounding](#sum-rounding) sends to
-  the 128-lane tree. A reduction kind has one more kernel per dtype for
-  rows of features. The softmax has one kernel for scalars and one for
+  the 128-lane tree. A reduction kind has three more kernels per dtype
+  for rows of features: one for segments of up to `4096 / W` rows and two
+  for longer segments. The softmax has one kernel for scalars and one for
   rows. Kernels stay in the process for later calls and are never written
   to the persistent cache. With an artifact selected, a call
   compiles nothing: the first call reads and verifies the directory, and
@@ -373,14 +487,18 @@ The first calls of a process cost more:
 
 Every refusal below raises before anything is enqueued.
 
-- **Gradients.** `values` that require grad raise a `ValueError` that names
-  `values.detach()`. The calls have no backward function, and a result is
-  never part of an autograd graph.
+- **`out` while recording a gradient.** `out` with `values` that require
+  grad, outside `torch.no_grad()` and `torch.inference_mode()`, raises a
+  `ValueError`: `out must be None while values require grad: a call that
+  records a gradient allocates its result; call without out, or under
+  torch.no_grad()`.
 - **CUDA graph capture.** A call on a stream that is capturing a CUDA graph
   raises a `RuntimeError`. Every call copies its offsets to the host, which
   a capturing stream cannot do, and a replay would not repeat the
   preparation. The check comes first, so the capture stays usable for the
-  PyTorch work around the call.
+  PyTorch work around the call. A backward pass of `segment_softmax`, and
+  every second derivative, run a segmented sum and raise the same way,
+  naming the backward.
 - **A missing `numpy`.** A call raises a `BackendUnavailableError`, a
   `RuntimeError`, with the code `numpy-unavailable`, that names `numpy` and
   the installation page. The calls copy the offsets into a `numpy` array on
@@ -405,8 +523,8 @@ Every refusal below raises before anything is enqueued.
   of `launch()`, with the code `pytorch-unsupported`, before it looks at an
   argument.
 
-Three more rules follow from how PyTorch handles streams, threads, and
-inference mode:
+More rules follow from how PyTorch handles streams, threads, inference
+mode, and `torch.compile`:
 
 - A call enqueues on the stream that is current when it is made. Inputs
   that were produced on another stream must be complete before the call, as
@@ -416,6 +534,22 @@ inference mode:
   and `out` may be tensors that were created inside it. A call enqueues
   what it classified before it returns, so it has no need to detect a later
   change to the offsets.
+- The kernels read int32 offsets from the caller's tensor when they
+  execute, which may be after the call has returned. A write to that tensor
+  from another stream before they have run, the race any PyTorch operation
+  has with its inputs, reaches them: they then work from offsets the call
+  never validated, and a reduction mixes them with the task records it
+  classified from the old offsets. Every access stays inside the buffers,
+  and the results match neither layout. int64 offsets are read from the
+  private int32 copy that the call uploads, so a later write to the
+  caller's tensor does not reach the kernels.
+- Under `torch.compile`, Dynamo does not trace into either call. A call is
+  a graph break: it runs eagerly between the compiled graphs around it and
+  returns the bits of the same call outside `torch.compile`, for values of
+  rank one and of rank two. `torch.compile(..., fullgraph=True)` refuses a
+  function that makes a call, because it forbids the graph break. Neither
+  call is a PyTorch custom operator, so neither can sit inside a compiled
+  graph.
 
 Continue with [Running Without the Compiler](deployment.md), which compiles
 the kernels of these two calls ahead of time and serves the calls from the

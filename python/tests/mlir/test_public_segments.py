@@ -13,9 +13,9 @@ This file pins what the wrapper adds and what a caller can rely on:
   float64 sum is held to an exactly rounded reference instead.
 - That a sum is the documented schedule of its batch and nothing a caller
   can pin.
-- The behavior under CUDA graph capture, on another stream, on a thread
-  that has not used CUDA, under `torch.inference_mode()`, and with
-  `SWAGE_NO_COMPILE=1`.
+- The behavior under CUDA graph capture, under `torch.compile`, on
+  another stream, on a thread that has not used CUDA, under
+  `torch.inference_mode()`, and with `SWAGE_NO_COMPILE=1`.
 - That calls with fresh offsets leave no task storage, event, or module
   behind.
 """
@@ -33,7 +33,7 @@ from itertools import pairwise
 import pytest
 import swage
 import torch
-from swage import _cuda_backend, _runtime
+from swage import _cuda_backend, _runtime, _segments
 from swage import _segmented_plan as _plan
 from swage import _segmented_programs as _programs
 from swage import _segmented_qualification as qualification
@@ -342,26 +342,6 @@ def test_segmented_calls_reject_an_input_that_is_not_a_tensor(function, name):
 
     with pytest.raises(TypeError, match=f"^{name} must be a torch.Tensor$"):
         _call(function, arguments["values"], arguments["offsets"])
-
-
-@pytest.mark.parametrize("function", FUNCTIONS)
-def test_segmented_calls_reject_values_that_require_grad(function):
-    """Refuse instead of returning a result cut from the autograd graph."""
-    values, offsets = _host_segments()
-    values.requires_grad_()
-
-    with pytest.raises(
-        ValueError,
-        match=(
-            "^values must not require grad; a segmented call records no "
-            r"gradient, so pass values.detach\(\)$"
-        ),
-    ):
-        _call(function, values, offsets)
-
-    # The remedy the message names passes this check and reaches the next.
-    with pytest.raises((TypeError, RuntimeError), match="CUDA"):
-        _call(function, values.detach(), offsets)
 
 
 def _wrong_values(case):
@@ -1276,6 +1256,63 @@ def test_segment_reduce_min_propagates_nan_and_orders_infinities(length, dtype):
     assert _bits(actual[2:]) == _bits(theirs[2:])
 
 
+def _signed_zero_segments(length, dtype):
+    """Return segments of zeros of both signs and their IEEE extremes.
+
+    Returns:
+        A list of `(segment, maximum, minimum)`, where the maximum is +0.0
+        when the segment holds +0.0 and the minimum -0.0 when it holds
+        -0.0, wherever that zero sits.
+    """
+    negative = torch.full((length,), -0.0, dtype=dtype)
+    positive = torch.zeros(length, dtype=dtype)
+    last_positive, first_positive = negative.clone(), negative.clone()
+    last_positive[-1] = 0.0
+    first_positive[0] = 0.0
+    middle_negative = positive.clone()
+    middle_negative[length // 2] = -0.0
+    return [
+        (last_positive, 0.0, -0.0),
+        (first_positive, 0.0, -0.0),
+        (middle_negative, 0.0, -0.0),
+        (negative, -0.0, -0.0),
+        (positive, 0.0, 0.0),
+    ]
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_segment_reduce_orders_signed_zeros_as_ieee_maximum_and_minimum(
+    kind, dtype
+):
+    """Return +0.0 as the maximum and -0.0 as the minimum of both zeros.
+
+    IEEE-754 maximum and minimum order -0.0 below +0.0, whatever the
+    position of either zero, and so does every schedule: the lengths reach
+    warp, CTA, and split work. `torch.segment_reduce` is not the reference
+    here, because on PyTorch 2.12 it returns the sign of the first zero of
+    a segment, on the GPU and on the CPU.
+    """
+    cases = [
+        case
+        for length in SPECIAL_LENGTHS
+        for case in _signed_zero_segments(length, dtype)
+    ]
+    host_values = torch.cat([segment for segment, _, _ in cases])
+    host_offsets = torch.tensor(
+        _offsets([segment.numel() for segment, _, _ in cases]),
+        dtype=torch.int32,
+    )
+    expected = torch.tensor(
+        [extremes[kind == "min"] for _, *extremes in cases], dtype=dtype
+    )
+
+    actual = _reduce(kind, host_values, host_offsets)
+
+    assert _bits(actual) == _bits(expected)
+
+
 def _softmax(host_values, host_offsets):
     """Run the public softmax on fresh device tensors."""
     return swage.segment_softmax(host_values.cuda(), host_offsets.cuda()).cpu()
@@ -1762,6 +1799,72 @@ def test_segmented_calls_take_tensors_made_under_inference_mode(function):
         assert allocated.is_inference()
         assert _bits(allocated.cpu()) == _bits(expected)
         assert _bits(out.cpu()) == _bits(expected)
+
+
+def _compile_case(rank, offsets_dtype):
+    """Return values of one rank and offsets of one dtype, on the device."""
+    generator = torch.Generator().manual_seed(rank)
+    shape = (1000,) if rank == 1 else (1000, 8)
+    values = torch.randn(shape, generator=generator).cuda()
+    offsets = torch.tensor([0, 3, 3, 500, 1000], dtype=offsets_dtype).cuda()
+    return values, offsets
+
+
+@_needs_cuda
+@pytest.mark.parametrize(
+    "offsets_dtype", [torch.int32, torch.int64], ids=["int32", "int64"]
+)
+@pytest.mark.parametrize("rank", [1, 2])
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_run_eagerly_inside_torch_compile(
+    function, backend, rank, offsets_dtype, monkeypatch
+):
+    """Leave a call out of the compiled graph and run it as an eager call.
+
+    Dynamo does not trace into either call: the call is a graph break,
+    runs eagerly between the compiled graphs around it, and returns the
+    bits of the same call outside `torch.compile`. A second call with
+    other offsets of the same shape follows the new offsets. The wrapper
+    that keeps Dynamo out is made at the first call of a process, which
+    here is inside the trace.
+    """
+    torch._dynamo.reset()
+    monkeypatch.setattr(_segments, "_UNTRACED", {})
+    values, offsets = _compile_case(rank, offsets_dtype)
+
+    def model(values, offsets):
+        return _call(function, values * 2, offsets) + 1
+
+    compiled = torch.compile(model, backend=backend)
+    actual = compiled(values, offsets)
+    other = torch.tensor([0, 10, 990, 990, 1000], dtype=offsets_dtype).cuda()
+    again = compiled(values, other)
+
+    assert _bits(actual.cpu()) == _bits(model(values, offsets).cpu())
+    assert _bits(again.cpu()) == _bits(model(values, other).cpu())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("rank", [1, 2])
+@pytest.mark.parametrize("function", FUNCTIONS)
+def test_segmented_calls_refuse_a_full_graph(function, rank):
+    """Refuse `fullgraph=True`, which forbids the graph break of a call.
+
+    A call copies its offsets to the host and launches through the driver,
+    which no graph can hold, so a function that makes the call cannot be
+    compiled into one graph.
+    """
+    torch._dynamo.reset()
+    values, offsets = _compile_case(rank, torch.int32)
+    compiled = torch.compile(
+        lambda values, offsets: _call(function, values, offsets) + 1,
+        backend="eager",
+        fullgraph=True,
+    )
+
+    with pytest.raises(torch._dynamo.exc.Unsupported):
+        compiled(values, offsets)
 
 
 @_needs_cuda

@@ -95,8 +95,8 @@ _PROGRAM_NAMES = (
     "ragged_softmax",
     "ragged_softmax_r2",
 )
-# The reductions over rank-one values, which the planned path runs.
-_PLANNED = _PROGRAM_NAMES[:8]
+# The reductions, which the planned path runs.
+_PLANNED = _PROGRAM_NAMES[:16]
 
 
 def _run(*arguments):
@@ -165,7 +165,7 @@ def test_the_command_writes_the_kernels_the_library_and_a_manifest(
             *[f"{program}.{role}.ptx" for program, role in _kernel_ids()],
         ]
     )
-    assert len(_kernel_ids()) == 42
+    assert len(_kernel_ids()) == 58
     assert [key for key in manifest] == [
         "format_version",
         "swage_version",
@@ -229,7 +229,6 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
         "mixed": description["cta_block_threads"],
         "partial": description["split_block_threads"],
         "merge": description["split_block_threads"],
-        "column": description["cta_block_threads"],
     }
 
     for kernels in _artifact._PROGRAMS.values():
@@ -240,8 +239,8 @@ def test_the_kernel_table_uses_the_widths_of_the_native_description():
 def test_the_manifest_identifies_each_program(manifest):
     """Record the text digest and the planning admission of each program."""
     assert tuple(_PROGRAMS) == _PROGRAM_NAMES
-    # A program over rank-two values and the softmax have one kernel and
-    # are not planned, so the manifest records no admission for them.
+    # The softmax programs are not planned, so the manifest records no
+    # admission for them.
     assert manifest["programs"] == [
         {
             "name": name,
@@ -389,7 +388,7 @@ def test_the_command_reports_what_it_wrote(tmp_path):
         "format_version: 2",
         "target: sm_86",
         "programs: " + ", ".join(_PROGRAM_NAMES),
-        "kernels: 42",
+        "kernels: 58",
         f"runtime: libSwageRuntime.so ({platform.machine()})",
         "manifest_sha256: "
         + hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(),
@@ -521,6 +520,49 @@ def test_the_command_refuses_an_existing_directory(tmp_path):
         "directory\n"
     )
     assert list(output.iterdir()) == []
+
+
+def test_the_shipped_runtime_library_states_its_glibc_requirement(written):
+    """Read the glibc the runtime library needs from the library itself.
+
+    The library calls `dlopen` and `dlsym`, which a library built on glibc
+    2.34 or newer takes from the C library at version 2.34. The loader
+    reads the requirement and compares it with the glibc of the host, which
+    meets it here.
+    """
+    contents = (written / "libSwageRuntime.so").read_bytes()
+
+    needed = _artifact._glibc_requirement(contents)
+
+    assert needed is not None and needed[0] == 2
+    major, minor = os.confstr("CS_GNU_LIBC_VERSION").split()[1].split(".")[:2]
+    assert (int(major), int(minor)) >= needed
+
+
+def test_the_command_refuses_bindings_built_beside_another_frontend(
+    tmp_path, monkeypatch
+):
+    """Name no revision in a manifest that did not produce its kernels.
+
+    The bindings record the digest of the frontend they were built beside.
+    With another digest the frontend that would supply the program texts
+    is not that of the revision the manifest would name, and nothing is
+    written.
+    """
+    native = _runtime._native_bindings()
+    monkeypatch.setattr(native, "__frontend_digest__", "0" * 64)
+
+    errors = _refused(
+        tmp_path, "--target", "sm_86", "--output", tmp_path / "artifact"
+    )
+
+    assert errors.startswith(
+        f"error: the swage frontend at {_runtime._package_dir()} is not the "
+        "one the mlir_swage bindings were built beside, at revision "
+        f"{native.__source_revision__}, so the manifest would name a "
+        "revision that did not produce the kernels"
+    )
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("target", ["sm_72", "sm_85", "cpu"])
@@ -880,15 +922,16 @@ def _cases():
     for kind in _KINDS:
         cases[f"{kind}/float64"] = (kind, values, offsets)
         cases[f"{kind}/float64-direct-cta"] = (kind, wide, wide_offsets)
-    # Rank-two values, which run the column kernel of each kind: more
-    # columns than a block has threads, and a segment of many rows.
+    # Rank-two values, which run the row-stripe kernels of each kind: five
+    # groups of columns, and a segment of 700 rows, which both widths
+    # split.
     lengths = [0, 3, 40, 0, 700, 1]
     rows, row_offsets = _rows(lengths, 130, 3, torch.float32)
     wide_rows, _ = _rows(lengths, 5, 4, torch.float64)
     for kind in _KINDS:
         cases[f"{kind}/rank-two"] = (kind, rows, row_offsets)
         cases[f"{kind}/rank-two-float64"] = (kind, wide_rows, row_offsets)
-    # Rank-two logits, which run the column kernel of the softmax.
+    # Rank-two logits, which run the row-stripe kernel of the softmax.
     cases["softmax/rank-two"] = ("softmax", *_logits(lengths, 130, 5))
     return cases
 
@@ -961,6 +1004,117 @@ def child(device_artifact, tmp_path_factory):
     return cases, report
 
 
+# The derivatives that a process run from an artifact records, by name: the
+# kind, the column count (None for rank one), and the dtype.
+_GRADIENT_CASES = {
+    "sum/rank-one/float32": ("sum", None, torch.float32),
+    "sum/rank-two/float64": ("sum", 3, torch.float64),
+    "mean/rank-one/float64": ("mean", None, torch.float64),
+    "mean/rank-two/float32": ("mean", 5, torch.float32),
+    "max/rank-one/float64": ("max", None, torch.float64),
+    "min/rank-two/float32": ("min", 3, torch.float32),
+    "softmax/rank-one/float32": ("softmax", None, torch.float32),
+    "softmax/rank-two/float32": ("softmax", 4, torch.float32),
+}
+
+
+def _gradient_cases():
+    """Return the gradient cases the child process runs, by name.
+
+    Each batch has an empty segment and a split segment for rank one, and a
+    reduction has a row past the final offset. The second derivatives, and
+    the first derivative of a softmax, run the sum kernels of the artifact
+    on every schedule a batch reaches.
+    """
+    cases = {}
+    lengths = [3, 0, 40, 4100, 1]
+    offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
+    for index, (name, (kind, columns, dtype)) in enumerate(
+        _GRADIENT_CASES.items()
+    ):
+        generator = torch.Generator().manual_seed(index)
+        # A softmax covers every row; a reduction has one past the end.
+        rows = sum(lengths) + (kind != "softmax")
+        shape = (rows,) if columns is None else (rows, columns)
+        values = torch.randn(shape, generator=generator).to(dtype)
+        upstream_shape = shape if kind == "softmax" else (
+            len(lengths),
+            *shape[1:],
+        )
+        upstream = torch.randn(upstream_shape, generator=generator).to(dtype)
+        cases[name] = (kind, values, offsets, upstream)
+    return cases
+
+
+@pytest.fixture(scope="module")
+def gradient_child(device_artifact, tmp_path_factory):
+    """Record derivatives in a process that cannot import `mlir_swage`.
+
+    Returns:
+        The cases and the report the process saved.
+    """
+    root = tmp_path_factory.mktemp("gradient-child")
+    shutil.copytree(
+        pathlib.Path(swage.__file__).parent,
+        root / "site" / "swage",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    cases = _gradient_cases()
+    torch.save(cases, root / "cases.pt")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("SWAGE_NO_COMPILE", "SWAGE_CACHE_DIR")
+    }
+    environment["PYTHONPATH"] = str(root / "site")
+    environment["SWAGE_ARTIFACT_DIR"] = str(device_artifact)
+    environment["SWAGE_CACHE_DIR"] = str(root / "cache")
+    completed = subprocess.run(
+        [sys.executable, str(_CHILD), "cases.pt", "report.pt"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return cases, torch.load(root / "report.pt")
+
+
+@_needs_cuda
+@pytest.mark.parametrize("name", list(_GRADIENT_CASES))
+def test_derivatives_from_an_artifact_equal_the_compiled_path(
+    name, gradient_child
+):
+    """Record first and second derivatives with no compiler in the process.
+
+    The child maps no LLVM or MLIR library. Its second derivatives run the
+    sum kernels of the artifact. The result and both derivatives equal
+    those of the compiled path bit for bit.
+    """
+    cases, report = gradient_child
+    kind, values, offsets, upstream = cases[name]
+    values = values.cuda().requires_grad_()
+    weight = upstream.cuda().requires_grad_()
+
+    if kind == "softmax":
+        result = swage.segment_softmax(values, offsets.cuda())
+    else:
+        result = swage.segment_reduce(values, offsets.cuda(), kind)
+    (first,) = torch.autograd.grad(result, values, weight, create_graph=True)
+    (second,) = torch.autograd.grad((first * first).sum(), weight)
+
+    assert report["modules"] == []
+    assert not [
+        path
+        for path in report["mapped"]
+        if COMPILER_LIBRARY.search(os.path.basename(path))
+    ]
+    theirs = report["results"][name]
+    for ours, recorded in zip((result, first, second), theirs, strict=True):
+        assert _bits(recorded) == _bits(ours.detach().cpu())
+
+
 @_needs_cuda
 def test_the_cases_are_the_ones_the_tests_name(child):
     """Keep the parametrized names equal to the cases the process ran."""
@@ -990,7 +1144,10 @@ def test_the_child_process_held_no_compiler(child, device_artifact):
     names = [os.path.basename(path) for path in mapped]
     assert any(name.startswith("libcuda.so") for name in names)
     assert any("libtorch" in name for name in names)
-    assert str(device_artifact / "libSwageRuntime.so") in mapped
+    # The library was loaded from its verified bytes, in an anonymous
+    # memory file, and not from the file of the artifact.
+    assert "/memfd:libSwageRuntime.so (deleted)" in mapped
+    assert str(device_artifact / "libSwageRuntime.so") not in mapped
     assert report["launches_with_the_runtime_library"] is True
     assert not report["cache"].exists()
 
@@ -1073,7 +1230,7 @@ def test_an_artifact_keeps_llvm_out_of_a_process_that_could_import_it(
         for path in report["mapped"]
         if COMPILER_LIBRARY.search(os.path.basename(path))
     ]
-    assert str(device_artifact / "libSwageRuntime.so") in report["mapped"]
+    assert "/memfd:libSwageRuntime.so (deleted)" in report["mapped"]
     assert report["launches_with_the_runtime_library"] is True
     for name, (kind, values, offsets) in cases.items():
         if kind == "softmax":
@@ -1207,10 +1364,11 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     """Launch every kernel with the pointers and counts of its manifest.
 
     The batches reach the fused, partial, and merge kernels, the task-ID
-    CTA kernel through the direct-CTA selection, and the softmax kernel.
-    A public call never requests the pure warp kernel. The driver launches
-    through the runtime library of the artifact, as in a process without
-    the bindings.
+    CTA kernel through the direct-CTA selection, the softmax kernel, and
+    the task-id, partial, and merge kernels of rank-two values. A public
+    call never requests the pure warp kernel. The driver launches through
+    the runtime library of the artifact, as in a process without the
+    bindings.
     """
     _select(monkeypatch, device_artifact)
     artifact = _artifact.selected()
@@ -1233,8 +1391,10 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
     selected = torch.tensor(_offsets(lengths), dtype=torch.int32).cuda()
     swage.segment_reduce(torch.ones(sum(lengths)).cuda(), selected, "max")
     swage.segment_reduce(values, offsets, "mean")
-    rows = torch.ones(6, 5, device="cuda")
-    row_offsets = torch.tensor([0, 2, 6], dtype=torch.int32, device="cuda")
+    # Five columns are one group of eight, so the segment of 598 rows is
+    # split into chunks of 512 rows.
+    rows = torch.ones(600, 5, device="cuda")
+    row_offsets = torch.tensor([0, 2, 600], dtype=torch.int32, device="cuda")
     swage.segment_reduce(rows, row_offsets, "min")
     swage.segment_softmax(rows, row_offsets)
     torch.cuda.synchronize()
@@ -1263,12 +1423,16 @@ def test_a_call_passes_each_kernel_the_arguments_its_manifest_states(
         stated("segmented_mean", "mixed"),
         stated("segmented_mean", "partial"),
         stated("segmented_mean", "merge"),
-        stated("segmented_min_r2", "column"),
-        stated("ragged_softmax_r2", "column"),
+        stated("segmented_min_r2", "cta"),
+        stated("segmented_min_r2", "partial"),
+        stated("segmented_min_r2", "merge"),
+        stated("ragged_softmax_r2", "cta"),
     ]
-    # A column kernel takes the feature count as its third count.
-    assert stated("segmented_min_r2", "column") == (128, 3, 3)
-    assert stated("ragged_softmax_r2", "column") == (128, 3, 3)
+    # A kernel of rank-two values takes the feature count after its counts.
+    assert stated("segmented_min_r2", "cta") == (128, 4, 4)
+    assert stated("segmented_min_r2", "partial") == (512, 3, 3)
+    assert stated("segmented_min_r2", "merge") == (512, 3, 4)
+    assert stated("ragged_softmax_r2", "cta") == (128, 4, 4)
     # The merge of a mean takes one pointer more than the merge of a sum.
     assert stated("segmented_mean", "merge")[1:] == (4, 3)
     assert stated("segmented_sum", "merge")[1:] == (3, 3)

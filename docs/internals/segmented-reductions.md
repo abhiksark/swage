@@ -146,8 +146,12 @@ result is stored at `output[segment, column]`, as
 segment is a column of the rows of a segment, a run of scalars, so every
 reduction kind, both element types, and the mean epilogue apply as they are.
 
-The kernel takes the parameters of the direct kernel and the number of
-columns:
+A rank-two function has two tiles. `swage.segment_reduce` runs the
+row-stripe tile of the task-ids and split schedules, described below,
+which [ADR-0023](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md)
+records. The direct schedule gives the column tile, which no public call
+launches and the private `launch_gpu` runs. It takes the parameters of the
+direct kernel and the number of columns:
 
 ```text
 values*, offsets*, output*, value_count:i32, segment_count:i32,
@@ -158,7 +162,7 @@ feature_count:i32
 `feature_count` elements in row order, and `output` holds `segment_count`
 rows of the same width.
 
-The kernel is the column tile:
+The column tile is:
 
 - **One block per segment.** The block index is the segment, compared with
   `segment_count`. The rows of the segment are loaded from the offsets and
@@ -186,11 +190,10 @@ over the columns, and a loop over the rows of the column. Both add a column
 in row order, so the kernel and the oracle agree bit for bit, also on
 values that are not exactly summable, and the tests compare them that way.
 
-What follows from the tile:
+What follows from the column tile:
 
 - A column sum lies within `(n - 1) * eps * sum(|x|)` of the exact sum of
-  its `n` rows, the bound of a sequential sum. It is weaker than the bound
-  of the rank-one trees for a long segment. The bits of a column do not
+  its `n` rows, the bound of a sequential sum. The bits of a column do not
   depend on the batch, the block width, or the GPU model.
 - There is no split. A segment occupies one block for its whole length, so
   a batch with a heavy tail of long segments keeps few blocks busy for a
@@ -198,13 +201,94 @@ What follows from the tile:
 - With few columns few threads of a block work: a segment of 10,000 rows
   and three columns is 10,000 additions, one after the other, in each of
   three threads.
-- A launch classifies nothing, uploads no task record, and allocates no
-  scratch. Its host work is the validation of the offsets.
 
-`swage.segment_reduce` runs this kernel for `[N, D]` values with more than
-one column. `[N, 1]` values take the rank-one schedules through a view, and
-`[N, 0]` values launch nothing. Planning admission refuses a rank-two
-function on every schedule that reads a task buffer.
+[ADR-0023](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md)
+records why the public call left this tile for the row-stripe tile.
+
+### The row-stripe tile
+
+The task-ids schedule plans a second kernel of a rank-two function, the
+row-stripe tile of
+[ADR-0023](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md). Its
+task operation is `policy<cta>` with `feature_count`, and its kernel takes
+the parameters of the task-id kernel and the number of columns:
+
+```text
+values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
+segment_count:i32, feature_count:i32
+```
+
+- **Column groups.** For `D` columns the group width `W` is the smallest
+  power of two that is at least `D`, capped at 32, and there are
+  `ceil(D / W)` groups. The kernel computes `W` from the feature count.
+- **Items.** A block loops over items from its block index to
+  `task_count * groups` by the grid size. An item is a task, whose segment
+  the task buffer names, and a column group. A launch of one block per
+  item runs one item per block, and a smaller grid runs the same items
+  with the same bits.
+- **Stripes.** Thread `t` of a block of `T` threads owns column
+  `(t mod 32) mod W` of the group and is row stripe
+  `(t / 32) * (32 / W) + (t mod 32) / W`, one of `R = T / W`. It folds the
+  rows `s`, `s + R`, and so on of its column, which are the elements
+  `(start + s) * D + c` and every `R * D`-th one after it below `end * D`.
+  A column at or beyond `D` binds no element. `T` is a multiple of 32.
+- **Combination.** The stripes of a column combine by an XOR butterfly of
+  five shuffles in every lane, each kept by a select only where the offset
+  is at least `W`, then through a workgroup buffer of `T` elements between
+  two barriers, from which every thread combines the results of its column
+  from each subgroup as a pairwise tree in subgroup order. A thread holds
+  one scalar per reduction stage.
+- **Store.** The thread of stripe zero stores the result of its column at
+  `output[segment * D + c]`, when the column is below `D` and the segment
+  ID is below the segment count. A mean divides by the number of rows of
+  its segment.
+
+A column sum then has `ceil(n / R) - 1 + log2(R)` additions on its longest
+path. Its bits depend on `n` and on `D` through `W`, and not on the batch,
+the grid, or the device model. `python/tests/mlir/row_tile_model.py` adds
+in exactly that order, and the driver-level tests of
+`python/tests/mlir/test_segmented_bounds.py` require the bits of the kernel
+to equal it.
+
+The split schedules give the same tile at 512 threads for a single
+reduction. The partial kernel takes the layout of the rank-one partial
+kernel and the number of columns, reduces the rows of each range record,
+and stores the result of column `c` of partial task `p` at
+`scratch[p * D + c]`. The merge kernel reduces the scratch rows of each
+merge record into `output[segment * D + c]`; the merge of a mean reads the
+row count of its segment from the range records, as over rank-one values.
+The fused-mixed and persistent schedules refuse a rank-two function by
+name.
+
+`swage.segment_reduce` runs the tile for `[N, D]` values with more than
+one column. It classifies the rows of each segment as the rank-one call
+classifies elements, in one walk over the offsets that also validates
+them, with the default chunk limit divided by `W` as both of its limits:
+
+- A segment of at most `floor(4096 / W)` rows is one task of the task-id
+  kernel at 128 threads, at most eight rows per stripe. There is no warp
+  tile of rank two, so there is one direct class: a warp class would run
+  on the same kernel and only slow the classifier down. A batch without a
+  longer segment uploads no record and reads the identity task list,
+  which gives every segment the same task and the same bits.
+- A longer segment is cut into chunks of `floor(4096 / W)` rows. The
+  partial kernel reduces each chunk into a row of a `[P, D]` scratch, and
+  the merge kernel reduces the partials of the segment.
+- Each launch runs one block per task and column group, up to the largest
+  grid of a launch.
+
+The program is admitted under the default limits, the ones an artifact
+records, and its rows are classified under the chunk limit, which
+follows from the feature count. So the kernels of a segment, and the bits of its
+result, depend on its row count and the feature count alone, and not on
+the rest of the batch. A column sum of a segment cut into `P` chunks has
+`6 + 2 log2(R) + ceil(P / R)` additions on its longest path, for the
+`R = 512 / W` stripes of a split block: eight rows per stripe and the
+combination in the partial kernel, then the merge. At `W = 32` that is
+`14 + ceil(n / 2048)` for `n` rows, and no path has more than `n - 1`
+additions of nonzero terms. A maximum and a minimum are order-free and
+have the bits of the column tile. `[N, 1]` values take the rank-one
+schedules through a view, and `[N, 0]` values launch nothing.
 
 The alternative, a column loop inside the row tiles of rank one, keeps the
 split and the rank-one bound. It was not built: it doubles four schedules,

@@ -8,7 +8,7 @@ public argument contract and nothing else. The kernels are compiled in the
 process, or taken from the artifact that `SWAGE_ARTIFACT_DIR` selects.
 """
 
-from . import _artifact, _runtime
+from . import _artifact, _autograd, _runtime
 from . import _segmented_programs as _programs
 from . import _segmented_qualification as _qualification
 from . import _segmented_runtime as _execution
@@ -17,6 +17,14 @@ from ._errors import BackendUnavailableError
 from ._frontend import _INSTALLATION
 
 _KINDS = ("sum", "max", "min", "mean")
+# The body of each public call, wrapped once so that Dynamo does not trace
+# into it. See `_untraced`.
+_UNTRACED = {}
+_OUT_WHILE_RECORDING = (
+    "out must be None while values require grad: a call that records a "
+    "gradient allocates its result; call without out, or under "
+    "torch.no_grad()"
+)
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
@@ -25,16 +33,17 @@ def segment_reduce(values, offsets, kind, *, out=None):
     Segment `i` is `values[offsets[i]:offsets[i + 1]]`. The call validates
     the tensors, copies the offsets to the host to validate and classify
     them, and enqueues the kernels on the current PyTorch CUDA stream. It
-    returns without waiting for the result.
+    returns without waiting for the result. Inside a function compiled by
+    `torch.compile` the call is a graph break and runs eagerly.
 
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is reduced on its own, as
-    `torch.segment_reduce` does along axis 0. Such a call runs one kernel
-    with one block per segment, in which a thread reduces a column in row
-    order. It classifies nothing and splits no segment, so a long segment
-    occupies one block for its whole length, and with few columns few
-    threads reduce it. `[N, 1]` values are reduced by the schedules of
-    rank-one values.
+    `torch.segment_reduce` does along axis 0. A block reduces a group of
+    `W` adjacent columns of one segment, `W` the smallest power of two that
+    is at least `D`, capped at 32, with its threads split into stripes of
+    rows. A segment of more than `4096 / W` rows is cut into chunks of that
+    many rows, reduced by one block each and merged. `[N, 1]` values are
+    reduced by the schedules of rank-one values.
 
     Every call repeats the host work, also when the offsets are the ones of
     the call before, so a call costs more than its kernels. A call keeps no
@@ -47,8 +56,9 @@ def segment_reduce(values, offsets, kind, *, out=None):
     Args:
         values: Contiguous `torch.float32` or `torch.float64` CUDA tensor
             on the current device, of rank one or of rank two, `[N, D]`.
-            It must not require grad: the call records no gradient.
-            Nothing is cast: float64 values are reduced in float64.
+            When it requires grad and gradient recording is on, the call
+            records a gradient; see the user guide. Nothing is cast:
+            float64 values are reduced in float64.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at or
@@ -68,7 +78,8 @@ def segment_reduce(values, offsets, kind, *, out=None):
             on the device of `values`, with exactly one element per
             segment, or of shape `[S, D]` for `S` segments of `[N, D]`
             values, sharing no memory with `values` or `offsets`, and not
-            requiring grad. It is never resized.
+            requiring grad. It is never resized. None when the call records
+            a gradient.
 
     Returns:
         `out`, or a new tensor of the dtype and on the device of `values`
@@ -82,9 +93,10 @@ def segment_reduce(values, offsets, kind, *, out=None):
         TypeError: An argument is not a tensor, or a tensor has the wrong
             dtype, rank, or device type.
         ValueError: `kind` is not a supported kind; a tensor is not
-            contiguous, is a lazy view, requires grad, or is on another
-            device; `out` has the wrong size or overlaps an input; or the
-            offsets break their contract.
+            contiguous, is a lazy view, or is on another device; `out`
+            requires grad, has the wrong size, or overlaps an input; `out`
+            is given while the call records a gradient; or the offsets
+            break their contract.
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
@@ -93,6 +105,11 @@ def segment_reduce(values, offsets, kind, *, out=None):
             a CUDA graph; or a kernel would have to be compiled while
             `SWAGE_NO_COMPILE=1` is set.
     """
+    return _untraced(_segment_reduce)(values, offsets, kind, out=out)
+
+
+def _segment_reduce(values, offsets, kind, *, out=None):
+    """Run `segment_reduce` outside any trace; see its docstring."""
     torch = _runtime._import_torch()
     if type(kind) is not str or kind not in _KINDS:
         raise ValueError(
@@ -108,25 +125,47 @@ def segment_reduce(values, offsets, kind, *, out=None):
     # The element type of the program, or None for values no program takes.
     element = _programs._element_of(torch, values)
     _require_out(torch, out, shape, "segment", values, offsets, element)
+    recording = _records_gradient(torch, values, out)
     _require_bindings("segment_reduce")
     _require_numpy("segment_reduce")
     _refuse_capture(torch, "segment_reduce", values, offsets)
     if element is None:
         raise TypeError("values must have dtype torch.float32 or torch.float64")
+    if recording:
+        return _autograd.functions(torch).SegmentReduce.apply(
+            values, offsets, kind
+        )
     output = _result(torch, out, shape, values, values.dtype)
-    if rank == 2 and values.shape[1] != 1:
-        _qualification._launch_columns(
+    _launch_reduction(values.detach(), offsets, kind, output, element)
+    return output
+
+
+def _launch_reduction(values, offsets, kind, output, element):
+    """Validate and enqueue one reduction of `values` into `output`.
+
+    `[N, D]` values with more than one column run the row-stripe tile of
+    the program (ADR-0023). `[N, 1]` values are viewed as rank one and run
+    the planned path, as rank-one values do. Neither the values nor the
+    output may require grad: the shared validation refuses them.
+
+    Args:
+        values: The values, of rank one or two.
+        offsets: The int32 or int64 offsets of the call.
+        output: The result, of the shape the call returns.
+        kind: One of `_KINDS`.
+        element: The element type of the values, `"f32"` or `"f64"`.
+    """
+    if values.dim() == 2 and values.shape[1] != 1:
+        _qualification._launch_planned_rows(
             values,
             offsets,
             output,
             module_text=_programs._semantic_module(kind, element, 2),
             kernel_name=_programs._reduction_kernel(kind, element, 2),
-            validate_offsets=_validation._validate_offsets,
-            int64_offsets=True,
         )
-        return output
+        return
     kernel_values, kernel_output = values, output
-    if rank == 2:
+    if values.dim() == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
     _qualification._launch_planned_reduction(
         kernel_values,
@@ -135,7 +174,6 @@ def segment_reduce(values, offsets, kind, *, out=None):
         module_text=_programs._semantic_module(kind, element),
         kernel_name=_programs._reduction_kernel(kind, element),
     )
-    return output
 
 
 def segment_softmax(values, offsets, *, out=None):
@@ -145,21 +183,23 @@ def segment_softmax(values, offsets, *, out=None):
     the softmax of each segment at the positions of its values. The call
     validates the tensors, copies the offsets to the host to validate them,
     and enqueues one kernel on the current PyTorch CUDA stream. It returns
-    without waiting for the result.
+    without waiting for the result. Inside a function compiled by
+    `torch.compile` the call is a graph break and runs eagerly.
 
     Rank-two values are `[N, D]`: `N` rows of `D` features. The offsets
     delimit rows, and every column of a segment is normalized on its own
     over the rows of that segment, as `torch.softmax(values[a:b], dim=0)`
-    does. Such a call runs one kernel with one block per segment, in which
-    a thread normalizes a column in row order. `[N, 1]` values are
-    normalized by the kernel of rank-one values.
+    does. A block normalizes a group of `W` adjacent columns of one
+    segment, `W` the smallest power of two that is at least `D`, capped at
+    32, with its threads split into stripes of rows; no segment is split.
+    `[N, 1]` values are normalized by the kernel of rank-one values.
 
     Args:
         values: Contiguous `torch.float32` CUDA tensor on the current
-            device, of rank one or of rank two, `[N, D]`. It must not
-            require grad: the call records no gradient. float64 values are
-            refused: the device has no 64-bit exp2, so there is no float64
-            softmax kernel.
+            device, of rank one or of rank two, `[N, D]`. When it requires
+            grad and gradient recording is on, the call records a gradient;
+            see the user guide. float64 values are refused: the device has
+            no 64-bit exp2, so there is no float64 softmax kernel.
         offsets: Contiguous rank-one `torch.int32` or `torch.int64` tensor
             on the same device, with one entry more than there are
             segments. It starts at zero, never decreases, and ends at the
@@ -171,7 +211,7 @@ def segment_softmax(values, offsets, *, out=None):
         out: Optional result tensor: contiguous, `torch.float32`, on the
             device of `values`, with the shape of `values`, sharing no
             memory with `values` or `offsets`, and not requiring grad. It
-            is never resized.
+            is never resized. None when the call records a gradient.
 
     Returns:
         `out`, or a new tensor on the device of `values` when `out` is
@@ -182,9 +222,10 @@ def segment_softmax(values, offsets, *, out=None):
     Raises:
         TypeError: An argument is not a tensor, or a tensor has the wrong
             dtype, rank, or device type.
-        ValueError: A tensor is not contiguous, is a lazy view, requires
-            grad, or is on another device; `out` has the wrong size or
-            overlaps an input; or the offsets break their contract.
+        ValueError: A tensor is not contiguous, is a lazy view, or is on
+            another device; `out` requires grad, has the wrong size, or
+            overlaps an input; `out` is given while the call records a
+            gradient; or the offsets break their contract.
         RuntimeError: PyTorch is missing or older than the supported
             release; the native bindings are missing and no artifact is
             selected; the artifact that `SWAGE_ARTIFACT_DIR` selects cannot
@@ -193,6 +234,11 @@ def segment_softmax(values, offsets, *, out=None):
             the kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
             is set.
     """
+    return _untraced(_segment_softmax)(values, offsets, out=out)
+
+
+def _segment_softmax(values, offsets, *, out=None):
+    """Run `segment_softmax` outside any trace; see its docstring."""
     torch = _runtime._import_torch()
     _require_inputs(torch, values, offsets)
     rank = values.dim()
@@ -202,6 +248,7 @@ def segment_softmax(values, offsets, *, out=None):
     shape = tuple(values.shape)
     element = "f32" if values.dtype == torch.float32 else None
     _require_out(torch, out, shape, "value", values, offsets, element)
+    recording = _records_gradient(torch, values, out)
     _require_bindings("segment_softmax")
     _require_numpy("segment_softmax")
     _refuse_capture(torch, "segment_softmax", values, offsets)
@@ -210,8 +257,29 @@ def segment_softmax(values, offsets, *, out=None):
             "values must have dtype torch.float32; segment_softmax has no "
             "float64 kernel because the device has no 64-bit exp2"
         )
+    if recording:
+        return _autograd.functions(torch).SegmentSoftmax.apply(values, offsets)
     output = _result(torch, out, shape, values, torch.float32)
-    if rank == 2 and values.shape[1] != 1:
+    _launch_softmax(torch, values.detach(), offsets, output)
+    return output
+
+
+def _launch_softmax(torch, values, offsets, output):
+    """Validate and enqueue one softmax of `values` into `output`.
+
+    `[N, D]` values with more than one column run the row-stripe tile
+    (ADR-0023). `[N, 1]` values are viewed as rank one and run the kernel
+    of rank-one values. Neither the values nor the output may require
+    grad: the shared validation refuses them.
+
+    Args:
+        torch: The PyTorch module.
+        values: The float32 values, of rank one or two.
+        offsets: The int32 or int64 offsets of the call, which cover every
+            value.
+        output: The result, of the shape of the values.
+    """
+    if values.dim() == 2 and values.shape[1] != 1:
         _qualification._launch_columns(
             values,
             offsets,
@@ -221,10 +289,11 @@ def segment_softmax(values, offsets, *, out=None):
             validate_offsets=_validate_covering_offsets,
             int64_offsets=True,
             clamp_rows_to_output=True,
+            row_stripes=True,
         )
-        return output
+        return
     kernel_values, kernel_output = values, output
-    if rank == 2:
+    if values.dim() == 2:
         kernel_values, kernel_output = _one_column_as_scalars(values, output)
     value_count, segment_count, host_offsets = _validation._validate_shapes(
         kernel_values,
@@ -248,7 +317,24 @@ def segment_softmax(values, offsets, *, out=None):
         segment_count,
         _execution._target_description().cta_block_threads,
     )
-    return output
+
+
+def _untraced(function):
+    """Return the body of a public call wrapped against `torch.compile`.
+
+    A call copies its offsets to the host and launches through the driver,
+    which Dynamo cannot trace. Wrapped by `torch.compiler.disable`, the call
+    is a graph break inside a compiled function: it runs eagerly between the
+    graphs around it, as it does outside `torch.compile`. The wrapper needs
+    PyTorch, which `import swage` does not load, so it is made at the first
+    call, after `_runtime._import_torch` has refused a missing or an
+    unsupported PyTorch.
+    """
+    wrapped = _UNTRACED.get(function)
+    if wrapped is None:
+        torch = _runtime._import_torch()
+        wrapped = _UNTRACED[function] = torch.compiler.disable(function)
+    return wrapped
 
 
 def _one_column_as_scalars(values, output):
@@ -271,17 +357,30 @@ def _require_inputs(torch, values, offsets):
 
     The private runner validates dtype, rank, contiguity, lazy views, the
     device, and the offsets themselves. This check comes first because the
-    size of the result is read from the tensors, and because a caller of a
-    public function is told how to proceed without gradients.
+    size of the result is read from the tensors.
     """
     for name, tensor in (("values", values), ("offsets", offsets)):
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
-    if values.requires_grad:
-        raise ValueError(
-            "values must not require grad; a segmented call records no "
-            "gradient, so pass values.detach()"
-        )
+
+
+def _records_gradient(torch, values, out):
+    """Return whether a call records a gradient, and refuse its `out`.
+
+    A call records one when `values` require grad and gradient recording is
+    on, as a PyTorch operation does: not under `torch.no_grad()` and not
+    inside `torch.inference_mode()`. `requires_grad` is read first, so the
+    grad mode is read only for values that need a gradient.
+
+    Raises:
+        ValueError: The call records a gradient and `out` is given. The
+            result of such a call is the output of an autograd node, which
+            the call allocates.
+    """
+    recording = values.requires_grad and torch.is_grad_enabled()
+    if recording and out is not None:
+        raise ValueError(_OUT_WHILE_RECORDING)
+    return recording
 
 
 def _require_out(torch, out, shape, unit, values, offsets, element):
@@ -332,7 +431,8 @@ def _require_out(torch, out, shape, unit, values, offsets, element):
     _validation._validate_storage("out", out)
     if out.requires_grad:
         raise ValueError(
-            "out must not require grad; a segmented call records no gradient"
+            "out must not require grad; a call writes it in place, which "
+            "autograd cannot record"
         )
     if out.device != values.device:
         raise ValueError(

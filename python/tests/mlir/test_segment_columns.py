@@ -4,34 +4,41 @@
 `[N, D]` values are `N` rows of `D` features. The offsets delimit rows, and
 every column of a segment is reduced on its own, as `torch.segment_reduce`
 does along axis 0, or normalized on its own, as `torch.softmax` does along
-dimension 0 of the rows of a segment. One kernel serves a call: one block
-per segment, in which a thread takes a column in row order. The tests here
-pin, for the reduction:
+dimension 0 of the rows of a segment. A call runs the row-stripe tile of
+ADR-0023: a block takes a group of `W` adjacent columns of one segment, `W`
+the smallest power of two that is at least `D`, capped at 32, and its
+threads are stripes of rows. A reduction cuts a segment of more than
+`4096 / W` rows into chunks and merges them. The tests here pin, for the
+reduction:
 
 - Agreement with `torch.segment_reduce(axis=0)` at 1, 3, 64, 129, 200, and
   1024 columns, for every kind and both dtypes, with a maximum and a
-  minimum exact and a sum inside the `(n - 1)` bound of a sequential sum.
-- Bit equality with the CPU oracle, which adds a column in the same order.
+  minimum exact and a sum inside the bound of the depth of the tile.
+- Bit equality with `row_tile_model.py`, which adds in the order of the
+  tile, through the split as well.
+- Bit equality of the private column tile with the CPU oracle, which adds
+  a column in the same row order.
 - That a result reads its own rows and its own column, on values that
-  depend on both.
+  depend on both, and that its bits do not depend on the batch.
 - `[N, 1]` values through the schedules of rank one, and `[N, 0]` values
   without a launch.
 - The refusals of the shape rules.
 
 For the softmax, which takes float32 values only, they pin agreement with
 float64 `torch.softmax` inside the bound of docs/internals/ragged-softmax.md
-at `k = n - 1`, agreement with the CPU oracle, the special values, the two
-degenerate widths, and the refusals.
+at the depth of the tile, agreement with the CPU oracle, the special
+values, the two degenerate widths, and the refusals.
 
-The device-side bounds of the column kernels are in
-`test_segmented_bounds.py`.
+The device-side bounds of the kernels are in `test_segmented_bounds.py`.
 """
 
 import fractions
 import math
 from itertools import pairwise
 
+import numpy
 import pytest
+import row_tile_model
 import swage
 import torch
 from swage import _cuda_backend, _runtime
@@ -61,6 +68,58 @@ FEATURES = [1, 3, 64, 129, 200, 1024]
 # Rows per segment: empty segments, one row, both sides of the widths that
 # matter to the rank-one schedules, and one segment of many rows.
 LENGTHS = [0, 1, 31, 32, 33, 129, 0, 1500, 5]
+
+
+def _depth(rows, features):
+    """Return the rounding additions on the longest path of a column sum.
+
+    A segment of `n` rows of at most `4096 / W` rows is one block of
+    `R = 128 / W` stripes, `ceil(n / R) - 1 + log2(R)` additions, and a
+    longer one is cut into `P` chunks of that many rows and merged by
+    blocks of `R = 512 / W` stripes, `6 + 2 log2(R) + ceil(P / R)`. No path
+    has more than the `n - 1` additions of nonzero terms. One column takes
+    the schedules of rank one, whose bound is not tighter than `n - 1`
+    for every length, so it keeps `n - 1`.
+    """
+    sequential = max(rows - 1, 0)
+    if features == 1:
+        return sequential
+    width = row_tile_model.group_width(features)
+    chunk = 4096 // width
+    if rows <= chunk:
+        return min(sequential, _block_depth(rows, features))
+    stripes = row_tile_model.SPLIT_BLOCK_THREADS // width
+    partials = -(-rows // chunk)
+    tile = 6 + 2 * (stripes.bit_length() - 1) + -(-partials // stripes)
+    return min(sequential, tile)
+
+
+def _block_depth(rows, features):
+    """Return `ceil(n / R) - 1 + log2(R)` for the stripes of one CTA block.
+
+    It is the depth of a column sum of `n` rows in one block of the tile,
+    the reduction of a segment that is not split and the normalizer of
+    the softmax, which no segment splits.
+    """
+    width = row_tile_model.group_width(features)
+    stripes = row_tile_model.CTA_BLOCK_THREADS // width
+    return -(-rows // stripes) - 1 + stripes.bit_length() - 1
+
+
+def _tile_model(kind, host_values, host_offsets):
+    """Return the result of the row-stripe tile, as the call classifies it."""
+    rows = host_values.numpy()
+    chunk = 4096 // row_tile_model.group_width(rows.shape[1])
+    results = []
+    for begin, end in pairwise(host_offsets.tolist()):
+        segment = rows[begin:end]
+        if end - begin > chunk:
+            results.append(row_tile_model.reduce_split(segment, chunk, kind))
+        elif kind == "mean":
+            results.append(row_tile_model.mean_rows(segment))
+        else:
+            results.append(row_tile_model.reduce_rows(segment, kind))
+    return torch.from_numpy(numpy.stack(results))
 
 
 def _rows(lengths, columns, seed, dtype):
@@ -107,12 +166,13 @@ def _assert_same_results(actual, expected):
 def _assert_columns_match(kind, host_values, host_offsets, actual):
     """Compare one rank-two result with PyTorch and with a bound.
 
-    A maximum and a minimum are exact. A column sum is added in row order,
-    one addition per row, so it lies within `(n - 1) * eps * sum(|x|)` of
-    the exact sum of its `n` rows. A mean is the sum of the same call
-    divided by the number of rows, bit for bit, and NaN for no rows.
+    A maximum and a minimum are exact. A column sum of `n` rows lies within
+    `k * eps * sum(|x|)` of the exact sum, for the `k` of `_depth`. A mean
+    is the sum of the same call divided by the number of rows, bit for bit,
+    and NaN for no rows.
     """
     lengths = (host_offsets[1:] - host_offsets[:-1]).long()
+    features = host_values.shape[1]
     covered = host_values[: int(host_offsets[-1])]
     theirs = torch.segment_reduce(
         covered.cuda(), kind, lengths=lengths.cuda(), axis=0
@@ -123,7 +183,10 @@ def _assert_columns_match(kind, host_values, host_offsets, actual):
         assert _bits(actual) == _bits(theirs)
         return
     eps = _EPS64 if host_values.dtype == torch.float64 else _EPS32
-    depth = (lengths - 1).clamp(min=0).double()[:, None]
+    depth = torch.tensor(
+        [_depth(length, features) for length in lengths.tolist()],
+        dtype=torch.float64,
+    )[:, None]
     magnitude = _exact_column_sums(covered.abs(), host_offsets)
     if kind == "mean":
         total = _reduce("sum", host_values, host_offsets)
@@ -139,7 +202,7 @@ def _assert_columns_match(kind, host_values, host_offsets, actual):
     error = (actual.double() - _exact_column_sums(covered, host_offsets)).abs()
     assert (error <= depth * eps * magnitude).all(), (
         f"largest error {(error / (eps * magnitude)).nan_to_num().max()} "
-        "eps * sum(|x|) exceeds the sequential bound"
+        "eps * sum(|x|) exceeds the bound of the tile"
     )
     difference = (actual.double() - theirs.double()).abs()
     assert (difference <= 2 * depth * eps * magnitude).all()
@@ -154,7 +217,8 @@ def test_columns_match_pytorch_along_axis_zero(features, kind, dtype):
 
     At one column the call takes the schedules of rank one, whose sums are
     added by other trees and keep the rank-one bound, which is tighter
-    than the sequential one for every length here.
+    than the sequential one for every length here. The segment of 1,500
+    rows is split from 129 columns on.
     """
     host_values, host_offsets = _rows(LENGTHS, features, features, dtype)
 
@@ -166,19 +230,43 @@ def test_columns_match_pytorch_along_axis_zero(features, kind, dtype):
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("kind", KINDS)
-def test_columns_equal_the_cpu_oracle_bit_for_bit(kind, dtype):
-    """A thread adds its column in row order, the order of the oracle.
+@pytest.mark.parametrize("features", [2, 3, 33, 129])
+def test_column_bits_equal_the_row_tile_model(features, kind, dtype):
+    """Add in the order of the row-stripe tile, through the split as well.
 
-    The values are not exactly summable, so two orders would differ. The
-    oracle lowers the same program through the sequential schedule and runs
-    it on the host.
+    The values span many binades, so two orders of addition give other
+    bits. The segments of 1,500 and 5,000 rows are split at every width
+    here but two columns, at which 5,000 rows are.
     """
-    lengths = [0, 1, 2, 33, 150, 0, 7]
-    host_values, host_offsets = _rows(lengths, 5, 11, dtype)
+    lengths = [0, 1, 31, 129, 1500, 0, 5000]
+    host_values, host_offsets = _rows(lengths, features, features, dtype)
 
     actual = _reduce(kind, host_values, host_offsets)
 
-    _assert_same_results(actual, cpu_oracle(host_values, host_offsets, kind))
+    _assert_same_results(actual, _tile_model(kind, host_values, host_offsets))
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_column_tile_equals_the_cpu_oracle_bit_for_bit(kind, dtype):
+    """The private column tile adds a column in row order, as the oracle.
+
+    The values are not exactly summable, so two orders would differ. The
+    oracle lowers the same program through the sequential schedule and runs
+    it on the host. No public call launches the column tile.
+    """
+    lengths = [0, 1, 2, 33, 150, 0, 7]
+    host_values, host_offsets = _rows(lengths, 5, 11, dtype)
+    output = torch.full(
+        (len(lengths), 5), float("nan"), dtype=dtype, device="cuda"
+    )
+
+    launch_gpu(host_values.cuda(), host_offsets.cuda(), output, kind)
+
+    _assert_same_results(
+        output.cpu(), cpu_oracle(host_values, host_offsets, kind)
+    )
 
 
 @_needs_cuda
@@ -216,12 +304,13 @@ def test_columns_read_their_own_rows_and_their_own_column(
 
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
-def test_a_long_segment_of_few_columns_keeps_the_sequential_bound(dtype):
-    """Reduce 100,003 rows of three columns in three threads.
+def test_a_long_segment_of_few_columns_keeps_the_bound_of_the_split(dtype):
+    """Reduce 100,003 rows of three columns through the split.
 
-    No segment of rank-two values is split, so each of the three threads
-    adds 100,003 rows one after the other. The sum keeps the bound of a
-    sequential sum, and the mean divides it once.
+    Three columns are one group of four, so the segment is cut into 98
+    chunks of 1,024 rows, each reduced by 128 stripes of eight rows, and
+    the merge adds the 98 partials of each column: 21 additions on the
+    longest path. The mean divides the merged sum once.
     """
     host_values, host_offsets = _rows([100_003, 2], 3, 3, dtype)
 
@@ -237,8 +326,9 @@ def test_a_column_mean_is_within_its_bound_of_the_exact_mean(dtype):
 
     The reference is formed in rational arithmetic and rounded once. A
     mean of `n` rows lies within `eps * sum(|x|)` of it, which is
-    `(k + 1) * eps * sum(|x|) / n` for the `k = n - 1` additions of a
-    column and one unit for the division and the conversion of `n`.
+    `(k + 1) * eps * sum(|x|) / n` for the at most `k = n - 1` additions
+    of nonzero terms on a path of the tile and one unit for the division
+    and the conversion of `n`.
     """
     lengths = [1, 2, 33, 400]
     host_values, host_offsets = _rows(lengths, 4, 5, dtype)
@@ -274,9 +364,9 @@ def test_a_column_mean_is_within_its_bound_of_the_exact_mean(dtype):
 def test_column_bits_do_not_depend_on_the_block_size(kind, block_size):
     """A column is added by one thread, whatever the width of its block.
 
-    The private launch takes the block size. With 32 threads a thread
-    reduces five of the 129 columns, and with 1024 threads at most one.
-    Every width returns the bits of the default width.
+    The private launch of the column tile takes the block size. With 32
+    threads a thread reduces five of the 129 columns, and with 1024
+    threads at most one. Every width returns the bits of the default width.
     """
     host_values, host_offsets = _rows([0, 5, 300, 33], 129, 7, torch.float32)
     values, offsets = host_values.cuda(), host_offsets.cuda()
@@ -294,9 +384,11 @@ def test_column_bits_do_not_depend_on_the_block_size(kind, block_size):
 def test_column_bits_do_not_depend_on_the_batch(kind):
     """A segment alone has the bits it has among other segments.
 
-    A rank-two call has one schedule, so nothing about the other segments
-    of a batch, their number, or the device changes the order in which a
-    column is added.
+    The kernels of a segment follow from its row count and the feature
+    count: six columns are one group of eight, the segment of 4,500 rows
+    is split into chunks of 512 rows, and the others are tasks of the
+    task-id kernel. Nothing about the other segments of a batch, their
+    number, or the device changes the order in which a column is added.
     """
     lengths = [7, 4500, 0, 33]
     host_values, host_offsets = _rows(lengths, 6, 13, torch.float32)
@@ -333,19 +425,54 @@ def test_empty_segments_give_every_column_the_value_of_the_kind(dtype):
 
 
 @_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+def test_column_extremes_order_signed_zeros_as_ieee(dtype):
+    """Return +0.0 as the maximum and -0.0 as the minimum of both zeros.
+
+    Each column of a segment holds zeros of both signs at other rows, or
+    zeros of one sign, so a result that took the first zero of a column,
+    as `torch.segment_reduce` does on PyTorch 2.12, or a neighboring
+    column, shows in its sign.
+    """
+    rows = 5
+    host_values = torch.full((2 * rows, 4), -0.0, dtype=dtype)
+    host_values[rows - 1, 0] = 0.0
+    host_values[0, 1] = 0.0
+    host_values[:, 3] = 0.0
+    host_values[rows + 2, 2] = 0.0
+    host_offsets = torch.tensor([0, rows, 2 * rows], dtype=torch.int32)
+
+    maximum = _reduce("max", host_values, host_offsets)
+    minimum = _reduce("min", host_values, host_offsets)
+
+    zero, negative = 0.0, -0.0
+    assert _bits(maximum) == _bits(
+        torch.tensor(
+            [[zero, zero, negative, zero], [negative, negative, zero, zero]],
+            dtype=dtype,
+        )
+    )
+    assert _bits(minimum) == _bits(
+        torch.tensor(
+            [[negative, negative, negative, zero]] * 2, dtype=dtype
+        )
+    )
+
+
+@_needs_cuda
 @pytest.mark.parametrize("kind", KINDS)
 def test_one_column_takes_the_schedules_of_rank_one(kind, monkeypatch):
     """Reduce `[N, 1]` values as the rank-one values they are.
 
     The result has the bits of the rank-one call on the same elements,
-    with the shape `[S, 1]`, and the column kernel is never requested: the
-    long segment is split, which no rank-two kernel does.
+    with the shape `[S, 1]`, and no kernel of rank-two values is requested.
     """
-    monkeypatch.setattr(
-        qualification,
-        "_launch_columns",
-        lambda *arguments, **keywords: pytest.fail("the column kernel ran"),
-    )
+    for name in ("_launch_columns", "_launch_planned_rows"):
+        monkeypatch.setattr(
+            qualification,
+            name,
+            lambda *arguments, **keywords: pytest.fail("a rank-two kernel ran"),
+        )
     lengths = [0, 3, 40, 9000]
     host_values, host_offsets = _rows(lengths, 1, 17, torch.float32)
     values, offsets = host_values.cuda(), host_offsets.cuda()
@@ -400,22 +527,83 @@ def test_a_batch_of_rows_without_a_segment_returns_no_row(columns):
     assert result.shape == (0, columns)
 
 
+def _spy_on_classification(monkeypatch):
+    """Record the limits of every classification a call makes."""
+    native = _execution._native_swage()
+    classify = native._classify_segments
+    limits = []
+
+    def spy(*arguments, **keywords):
+        limits.append(
+            (keywords["warp_max_elements"], keywords["cta_chunk_elements"])
+        )
+        return classify(*arguments, **keywords)
+
+    monkeypatch.setattr(native, "_classify_segments", spy)
+    return limits
+
+
 @_needs_cuda
-def test_a_rank_two_call_classifies_nothing_and_compiles_one_kernel(
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_batch_without_a_split_launches_the_identity_list_with_its_bits(
+    kind, dtype, monkeypatch
+):
+    """Launch the identity task list when no segment needs a split.
+
+    Four columns are one group of four, so the chunk limit is 1,024 rows. A
+    batch whose longest segment has exactly 1,024 rows is classified and
+    split nowhere, so it reads the identity task list and uploads no
+    record. One more segment of 1,025 rows makes the call split that
+    segment and run the others from the classified task list. The
+    segments both batches share have the same bits in both, and the bits
+    of the tile model.
+    """
+    limits = _spy_on_classification(monkeypatch)
+    identity = []
+    identity_ids = _plan._identity_ids
+
+    def spy(*arguments):
+        identity.append(arguments[2])
+        return identity_ids(*arguments)
+
+    monkeypatch.setattr(_plan, "_identity_ids", spy)
+    lengths = [0, 3, 1024, 7, 33]
+    host_values, host_offsets = _rows([*lengths, 1025], 4, 41, dtype)
+    shared = int(host_offsets[len(lengths)])
+
+    unsplit = _reduce(
+        kind, host_values[:shared], host_offsets[: len(lengths) + 1]
+    )
+    assert (limits, identity) == ([(1024, 1024)], [len(lengths)])
+    split = _reduce(kind, host_values, host_offsets)
+    assert (limits, identity) == ([(1024, 1024)] * 2, [len(lengths)])
+
+    _assert_same_results(unsplit, split[: len(lengths)])
+    _assert_same_results(split, _tile_model(kind, host_values, host_offsets))
+
+
+@_needs_cuda
+def test_a_rank_two_call_classifies_its_rows_with_one_direct_class(
     monkeypatch,
 ):
-    """Validate the offsets, compile the column kernel, and launch it.
+    """Classify rows with one direct class and the chunk limit of the width.
 
-    The host work of a rank-two call is the validation of its offsets: no
-    program is admitted for planning and no segment is classified, also
-    for a segment that a rank-one call would split.
+    Four columns are one group of four: a segment of at most 1,024 rows is
+    a task of the task-id kernel, and the segment of 9,000 rows is cut into
+    chunks of 1,024 rows. Both limits of the classification are 1,024 rows,
+    so there is no warp class. The program is admitted under the default
+    limits, and the call compiles the three kernels its batch launches.
     """
-    for name in ("_admit_program", "_classifying_validator"):
-        monkeypatch.setattr(
-            _plan,
-            name,
-            lambda *arguments, **keywords: pytest.fail("the call planned"),
-        )
+    limits = _spy_on_classification(monkeypatch)
+    admitted = []
+    admit = _plan._admit_program
+
+    def admit_once(*arguments):
+        admitted.append(arguments[2:])
+        return admit(*arguments)
+
+    monkeypatch.setattr(_plan, "_admit_program", admit_once)
     monkeypatch.setattr(
         _execution,
         "_ptx_memo",
@@ -426,17 +614,52 @@ def test_a_rank_two_call_classifies_nothing_and_compiles_one_kernel(
     actual = _reduce("sum", host_values, host_offsets)
 
     _assert_columns_match("sum", host_values, host_offsets, actual)
+    _assert_same_results(actual, _tile_model("sum", host_values, host_offsets))
+    assert limits == [(1024, 1024)]
+    assert admitted == [(32, 4096)]
     assert [
-        (compile_ptx.__name__, dict(options)["kernel_name"])
+        (compile_ptx.__name__, dict(options))
         for compile_ptx, _, options in _execution._ptx_memo
-    ] == [("_compile_segmented_reduction_ptx", "segmented_sum_r2")]
+    ] == [
+        (
+            "_compile_segmented_reduction_ptx",
+            {
+                "kernel_name": "segmented_sum_r2",
+                "block_size": 128,
+                "target": _execution._target(torch, 0),
+                "use_task_ids": True,
+            },
+        ),
+        *(
+            (
+                name,
+                {
+                    "kernel_name": "segmented_sum_r2",
+                    "target": _execution._target(torch, 0),
+                },
+            )
+            for name in (
+                "_compile_split_partial_reduction_ptx",
+                "_compile_split_merge_reduction_ptx",
+            )
+        ),
+    ]
 
 
 @_needs_cuda
+@pytest.mark.parametrize(
+    "lengths", [LENGTHS, [0, 1, 31, 32, 33, 5]], ids=["split", "unsplit"]
+)
 @pytest.mark.parametrize("kind", KINDS)
-def test_columns_take_int64_offsets_and_give_the_bits_of_int32(kind):
-    """Narrow int64 offsets on the host, as the rank-one calls do."""
-    host_values, host_offsets = _rows(LENGTHS, 7, 29, torch.float64)
+def test_columns_take_int64_offsets_and_give_the_bits_of_int32(kind, lengths):
+    """Narrow int64 offsets on the host, as the rank-one calls do.
+
+    Seven columns are one group of eight, so the segment of 1,500 rows is
+    split and the call uploads its records with the narrowed offsets
+    behind them. Without a split it uploads the narrowed offsets alone and
+    reads the identity task list.
+    """
+    host_values, host_offsets = _rows(lengths, 7, 29, torch.float64)
     values, offsets = host_values.cuda(), host_offsets.cuda()
 
     narrow = swage.segment_reduce(values, offsets, kind).cpu()
@@ -588,11 +811,13 @@ def _assert_softmax_columns_match(host_values, host_offsets, actual):
     """Compare a rank-two softmax with float64 `torch.softmax` along rows.
 
     Every output lies within the relative bound of
-    docs/internals/ragged-softmax.md. A column of `n` rows is added by one
-    thread in row order, `k = n - 1` rounding additions. One column runs
+    docs/internals/ragged-softmax.md. The normalizer of a column of `n`
+    rows is added by the stripes of one block, the `k` of `_block_depth`,
+    and never more than `n - 1` additions of nonzero terms. One column runs
     the rank-one kernel and keeps the `k` of its tree. The outputs are
     normal f32 numbers, which the bound requires.
     """
+    features = host_values.shape[1]
     assert actual.dtype == torch.float32
     assert actual.shape == host_values.shape
     for begin, end in pairwise(host_offsets.tolist()):
@@ -602,7 +827,9 @@ def _assert_softmax_columns_match(host_values, host_offsets, actual):
         reference = torch.softmax(logits, 0)
         assert (reference >= torch.finfo(torch.float32).tiny).all()
         relative = (actual[begin:end].double() - reference).abs() / reference
-        depth = None if host_values.shape[1] == 1 else end - begin - 1
+        depth = None
+        if features > 1:
+            depth = min(end - begin - 1, _block_depth(end - begin, features))
         bound = _softmax_bound(logits, reference, depth)
         assert (relative <= bound).all(), (
             f"rows [{begin}, {end}): relative error "
@@ -623,14 +850,15 @@ def test_softmax_columns_match_pytorch_along_the_rows_of_a_segment(features):
 
 @_needs_cuda
 def test_softmax_columns_agree_with_the_cpu_oracle():
-    """Compare with the sequential lowering, which adds in the same order.
+    """Compare with the sequential lowering under the derived tolerance.
 
-    The oracle and the kernel add the exponentials of a column in row
-    order. They differ in the exponential: `ex2.approx.f32` on the device
-    and `exp2f` on the host, which is why the comparison has the tolerance
-    that `test_segmented_runtime.py` derives and is not bitwise. The logits
-    are quarter multiples with a spread of four, as that derivation needs,
-    and depend on the row and on the column.
+    The oracle adds the exponentials of a column in row order and the tile
+    in the order of its stripes. They also differ in the exponential:
+    `ex2.approx.f32` on the device and `exp2f` on the host. The tolerance
+    that `test_segmented_runtime.py` derives covers any order of at most
+    `n - 1` additions, so the comparison is not bitwise. The logits are
+    quarter multiples with a spread of four, as that derivation needs, and
+    depend on the row and on the column.
     """
     lengths = [0, 1, 2, 33, 150, 0, 7]
     host_offsets = torch.tensor(_offsets(lengths), dtype=torch.int32)
@@ -731,11 +959,11 @@ def test_softmax_columns_follow_pytorch_on_special_values(length):
 
 @_needs_cuda
 def test_a_long_segment_of_few_logit_columns_keeps_the_softmax_bound():
-    """Normalize 100,003 rows of three columns in three threads.
+    """Normalize 100,003 rows of three columns in one block.
 
-    No segment of rank-two values is split, so each of the three threads
-    walks 100,003 rows three times: for the maximum, for the sum, and for
-    the store.
+    No segment of the softmax is split. Three columns are one group of
+    four, so each column has 32 stripes, which walk about 3,126 rows each
+    three times: for the maximum, for the sum, and for the store.
     """
     host_values, host_offsets = _logits([100_003, 2], 3, 3)
 
@@ -747,7 +975,11 @@ def test_a_long_segment_of_few_logit_columns_keeps_the_softmax_bound():
 @_needs_cuda
 @pytest.mark.parametrize("block_size", [32, 64, 512, 1024])
 def test_softmax_column_bits_do_not_depend_on_the_block_size(block_size):
-    """A column is normalized by one thread, whatever the width of its block."""
+    """A column is normalized by one thread, whatever the width of its block.
+
+    The private launch of the column tile takes the block size; the public
+    call launches the row-stripe tile at the CTA width.
+    """
     host_values, host_offsets = _logits([0, 5, 300, 33], 129, 7)
     values, offsets = host_values.cuda(), host_offsets.cuda()
 
@@ -761,7 +993,11 @@ def test_softmax_column_bits_do_not_depend_on_the_block_size(block_size):
 
 @_needs_cuda
 def test_softmax_column_bits_do_not_depend_on_the_batch():
-    """A segment alone has the bits it has among other segments."""
+    """A segment alone has the bits it has among other segments.
+
+    The call launches one task per segment, in segment order, whatever the
+    batch.
+    """
     lengths = [7, 4500, 0, 33]
     host_values, host_offsets = _logits(lengths, 6, 13)
     together = _softmax(host_values, host_offsets)
@@ -841,7 +1077,11 @@ def test_logit_rows_without_a_segment_return_no_row():
 
 @_needs_cuda
 def test_a_rank_two_softmax_compiles_one_kernel(monkeypatch):
-    """Validate the offsets, compile the column kernel, and launch it."""
+    """Compile the row-stripe kernel and launch one task per segment.
+
+    The task list is the identity: the softmax classifies nothing, and its
+    task-id kernel takes any segment length.
+    """
     monkeypatch.setattr(
         _execution,
         "_ptx_memo",
@@ -853,9 +1093,19 @@ def test_a_rank_two_softmax_compiles_one_kernel(monkeypatch):
 
     _assert_softmax_columns_match(host_values, host_offsets, actual)
     assert [
-        (compile_ptx.__name__, dict(options)["kernel_name"])
+        (compile_ptx.__name__, dict(options))
         for compile_ptx, _, options in _execution._ptx_memo
-    ] == [("_compile_segmented_reduction_ptx", "ragged_softmax_r2")]
+    ] == [
+        (
+            "_compile_segmented_reduction_ptx",
+            {
+                "kernel_name": "ragged_softmax_r2",
+                "block_size": 128,
+                "target": _execution._target(torch, 0),
+                "use_task_ids": True,
+            },
+        )
+    ]
 
 
 @_needs_cuda

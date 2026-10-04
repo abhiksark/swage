@@ -201,13 +201,11 @@ LogicalResult TasksOp::verify() {
   }
   if (failed(requireWord("feature_count", getFeatureCount().getType())))
     return failure();
-  if (!column && getPolicy() != TaskPolicy::Sequential)
-    return emitOpError()
-           << "rank-two values take policy<column> or policy<sequential>, "
-              "got policy<"
-           << stringifyTaskPolicy(getPolicy()) << ">";
-  if (getIds())
-    return emitOpError("a task of rank-two values is one segment, in order, "
+  if (getPolicy() == TaskPolicy::Warp)
+    return emitOpError("rank-two values take policy<column>, policy<cta>, or "
+                       "policy<sequential>, got policy<warp>");
+  if (column && getIds())
+    return emitOpError("policy<column> runs one task per segment, in order, "
                        "and takes no ids");
   if (getOutput() && cast<MemRefType>(getOutput().getType()).getRank() != 2)
     return emitOpError() << "into must have rank two for rank-two values, got "
@@ -322,6 +320,26 @@ LogicalResult TasksOp::verifyRegions() {
   return success();
 }
 
+/// Require the buffers of a split task operation to be rows of
+/// `featureCount` columns exactly when it is given, and of rank one
+/// otherwise, and the count to be a word of the records.
+static LogicalResult
+verifyRowBuffers(Operation *task, Type word, Value featureCount,
+                 ArrayRef<std::pair<StringRef, Value>> buffers) {
+  int64_t rank = featureCount ? 2 : 1;
+  for (auto [name, buffer] : buffers)
+    if (cast<MemRefType>(buffer.getType()).getRank() != rank)
+      return task->emitOpError()
+             << name << " must have rank " << rank << " "
+             << (featureCount ? "with" : "without") << " a feature_count, got "
+             << buffer.getType();
+  if (featureCount && featureCount.getType() != word)
+    return task->emitOpError()
+           << "feature_count must have the element type of the records, "
+           << word << ", got " << featureCount.getType();
+  return success();
+}
+
 LogicalResult MergeTasksOp::verify() {
   Type word = cast<MemRefType>(getMerges().getType()).getElementType();
   const std::pair<const char *, Type> words[] = {
@@ -338,7 +356,8 @@ LogicalResult MergeTasksOp::verify() {
            << "an element of ranges must have the element type of the merges, "
            << word << ", got "
            << cast<MemRefType>(getRanges().getType()).getElementType();
-  return success();
+  return verifyRowBuffers(*this, word, getFeatureCount(),
+                          {{"scratch", getScratch()}, {"into", getOutput()}});
 }
 
 LogicalResult MergeTasksOp::verifyRegions() {
@@ -389,7 +408,8 @@ LogicalResult PartialTasksOp::verify() {
     if (type != word)
       return emitOpError() << name << " must have the element type of the "
                            << "ranges, " << word << ", got " << type;
-  return success();
+  return verifyRowBuffers(*this, word, getFeatureCount(),
+                          {{"values", getValues()}, {"into", getScratch()}});
 }
 
 LogicalResult PartialTasksOp::verifyRegions() {

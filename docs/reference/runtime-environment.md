@@ -367,18 +367,21 @@ Preparation and launch follow these rules:
 - `segment_reduce` runs the program of the dtype of `values`: float64
   values have kernels of their own, compiled and loaded like the float32
   ones, and nothing is cast. The schedule does not depend on the dtype.
-- `segment_reduce` on `[N, D]` values with more than one column takes
-  another path. It validates the offsets and enqueues one kernel, the
-  column kernel of the kind and dtype, with one 128-thread block per
-  segment. It admits no program for planning, classifies no segment,
-  uploads no task record, and allocates no scratch. With int64 offsets it
-  uploads the narrowed copy, as `segment_softmax` does. `[N, 1]` values
-  take the rank-one path through a view, and `[N, 0]` values enqueue
-  nothing.
+- `segment_reduce` on `[N, D]` values with more than one column runs the
+  row-stripe tile of the kind and dtype. It classifies the rows of each
+  segment with the default chunk limit divided by the column-group width
+  `W` of the feature count, and one direct class. A segment of at most
+  `4096 / W` rows is a task of the task-id kernel, with 128-thread blocks,
+  and a longer one is cut into chunks for the partial and merge kernels,
+  with 512-thread blocks. A batch without a split uploads no record. Each launch has one block per task and group of `W`
+  columns. `[N, 1]` values take the rank-one path through a view, and
+  `[N, 0]` values enqueue nothing.
 - `segment_softmax` on `[N, D]` values with more than one column enqueues
-  the column kernel of the softmax in the same way: one 128-thread block
-  per segment, and a thread per column. `[N, 1]` values run the rank-one
-  kernel through a view, and `[N, 0]` values enqueue nothing.
+  the task-id kernel of the softmax with one task per segment and one
+  128-thread block per segment and group of `W` columns. It classifies
+  nothing and uploads no task record. With int64 offsets it uploads the
+  narrowed copy. `[N, 1]` values run the rank-one kernel through a view,
+  and `[N, 0]` values enqueue nothing.
 - `segment_reduce` prepares nothing it does not launch. A batch compiles
   and loads the fused kernel when it has segments of up to 4096 elements
   and the partial and merge kernels when it has longer ones. A batch that
@@ -432,8 +435,8 @@ Three conditions are refused with an error instead of being handled:
   before the host copy, so the capture stays valid. A prepared private
   launch can be captured; a public call cannot, because a replay would not
   repeat its preparation.
-- `values` that require grad, with a `ValueError`. A call records no
-  gradient.
+- An `out` while the call records a gradient, with a `ValueError`;
+  [Gradients](../user-guide/segmented-calls.md#gradients) states the rule.
 - `SWAGE_NO_COMPILE=1` with a kernel the process does not hold and no
   artifact selected; [Cache variables](#cache-variables) states the rule.
 
@@ -946,8 +949,10 @@ the repository pins.
 
 The `swage` package and the `mlir_swage` bindings are built from one source
 tree and must match. The bindings record the `swage` version they were
-built for, and `swage` checks it once per process, when the bindings are
-first imported or first used:
+built for, the source revision of the build, and a digest of the `swage`
+sources beside the build: the SHA-256 of one line per Python source of
+`python/swage` that gives its SHA-256 and its name. `swage` checks them
+once per process, when the bindings are first imported or first used:
 
 - Bindings built for another `swage` version are refused with a
   `RuntimeError` that names both versions and both locations. Emission and
@@ -955,15 +960,25 @@ first imported or first used:
   cause.
 - Bindings that record no version are refused in the same way. They come
   from a build that predates this check.
-- Outside a checkout the source revision is not compared. The native wheel
-  installs both packages from one build, and the report shows
+- Outside a git checkout, as for an installed wheel, `swage` compares the
+  digest of its own sources with the frontend digest the bindings recorded,
+  the one `_build_info.json` records as well, and refuses bindings that
+  were built beside other `swage` sources. The report shows
   `source.revision` and `native.bindings.revision` side by side.
-- In a git checkout a different revision is expected: the frontend is
-  edited and committed without a native rebuild. There `swage` compares the
-  native sources of the checkout with the revision the bindings were built
-  from, and warns once with a `RuntimeWarning` when they differ or when the
-  checkout does not have that revision. It does not refuse. Bindings built
-  from a modified tree, whose revision ends in `-dirty`, are not compared.
+- In a git checkout, with bindings built from a commit, `swage` compares
+  the checkout with that commit. Native sources that differ from it refuse
+  the bindings, and so does a commit the checkout does not have. A
+  frontend that differs while the native sources do not is expected, since
+  the frontend is edited and committed without a native rebuild: `swage`
+  warns once with a `RuntimeWarning` and uses the bindings. A change to
+  anything else, such as the documentation, is not reported.
+- In a git checkout, with bindings built from a modified tree, whose
+  revision ends in `-dirty`, or from sources without a revision, there is
+  no commit to compare with. A `swage` source that changed since the build
+  warns once.
+- Bindings that record no digest of the `swage` sources come from a build
+  that predates it. They are compared by revision only, and outside a
+  checkout not at all.
 - A `swage` package from before this check cannot refuse anything. When
   such a package uses bindings that carry the check, the bindings warn once
   that nothing verified the pair.

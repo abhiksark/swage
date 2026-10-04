@@ -9,8 +9,11 @@ loaded:
     python artifact_child.py CASES RESULTS [importable]
 
 CASES is a `torch.save` file of `{name: (kind, values, offsets)}` with host
-tensors, where kind is a kind of `segment_reduce` or `"softmax"`. RESULTS
-receives
+tensors, where kind is a kind of `segment_reduce` or `"softmax"`. A case
+of four entries, `(kind, values, offsets, upstream)`, also records a
+gradient: its result is `(result, first, second)`, the first derivative
+for the upstream gradient and the derivative of the summed squares of the
+first derivative with respect to that upstream gradient. RESULTS receives
 the host result of every case, the files mapped into the process, and what
 the driver launches with.
 
@@ -115,13 +118,29 @@ def main(cases_path, results_path, bindings="blocked"):
     from swage import _artifact, _cuda_backend
 
     results = {}
-    for name, (kind, values, offsets) in torch.load(cases_path).items():
+    for name, (kind, values, offsets, *upstream) in torch.load(
+        cases_path
+    ).items():
         values, offsets = values.cuda(), offsets.cuda()
+        if upstream:
+            values.requires_grad_()
         if kind == "softmax":
             result = swage.segment_softmax(values, offsets)
         else:
             result = swage.segment_reduce(values, offsets, kind)
-        results[name] = result.cpu()
+        if not upstream:
+            results[name] = result.cpu()
+            continue
+        weight = upstream[0].cuda().requires_grad_()
+        (first,) = torch.autograd.grad(
+            result, values, weight, create_graph=True
+        )
+        (second,) = torch.autograd.grad((first * first).sum(), weight)
+        results[name] = (
+            result.detach().cpu(),
+            first.detach().cpu(),
+            second.cpu(),
+        )
 
     mapped = [path.strip() for path in mapped_files()]
     compiler = [

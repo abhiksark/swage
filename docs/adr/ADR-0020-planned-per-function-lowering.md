@@ -628,8 +628,9 @@ Failure behavior:
   admission rule.
 - With rollback on, `applyFullConversion` restores the module when a pattern
   fails. A failed pattern can only report "failed to legalize", so the
-  conversion checks every plan function before it starts and reports each
-  rule with the function it applies to: the launch width against the
+  conversion checks every plan function before it starts, at any depth of
+  the module, since it converts plan functions in nested modules too, and
+  reports each rule with the function it applies to: the launch width against the
   target, the element and word types against the admitted ones,
   `policy<warp>` against the subgroup width, the element programs against
   the admitted operations and kinds, and the kernel symbols. These checks

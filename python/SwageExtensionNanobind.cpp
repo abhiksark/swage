@@ -1286,12 +1286,15 @@ void verifyLoadedFrontend(nb::handle bindings) {
 NB_MODULE(_swageDialectsNanobind, m) {
   auto swageM = m.def_submodule("swage");
 
-  // What this extension was built from: the `swage` version and the source
-  // revision of its checkout, and the LLVM release it was compiled and
-  // linked against. `swage` refuses bindings built for another version, and
-  // its environment report prints all three.
+  // What this extension was built from: the `swage` version, the source
+  // revision of its checkout and the digest of the frontend sources beside
+  // it, and the LLVM release it was compiled and linked against. `swage`
+  // refuses bindings built for another version or beside a frontend that
+  // does not fit, and its environment report prints the version, the
+  // revision, and the LLVM release.
   swageM.attr("__version__") = SWAGE_BUILD_VERSION;
   swageM.attr("__source_revision__") = SWAGE_BUILD_REVISION;
+  swageM.attr("__frontend_digest__") = SWAGE_BUILD_FRONTEND;
   swageM.attr("__llvm_version__") = LLVM_VERSION_STRING;
 
   // Before anything is registered, so a refused import leaves nothing

@@ -78,11 +78,12 @@ add_mlir_python_modules(SwagePythonModules
     SwagePythonCAPI
 )
 
-# The extension records the swage version and the source revision it was
-# built from, and the package records them with the frontend digest in
-# _build_info.json. Both are regenerated on every build and rewritten only
-# when they change, so a new commit recompiles one file. A wheel build has
-# no git checkout and passes the revision it was configured with.
+# The extension records the swage version, the source revision, and the
+# digest of the frontend sources it was built from, and the package records
+# the same facts in _build_info.json. Both are regenerated on every build
+# and rewritten only when they change, so a new commit or a frontend edit
+# recompiles one file. A wheel build has no git checkout and passes the
+# revision it was configured with.
 set(SWAGE_IDENTITY_HEADER
   "${SWAGE_BINARY_DIR}/include/swage/Python/BuildIdentity.h")
 set(SWAGE_IDENTITY_SOURCE_ARGUMENTS)
