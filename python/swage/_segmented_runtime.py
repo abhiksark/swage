@@ -192,15 +192,13 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
 
     def build():
         compiler = getattr(compile_ptx, "__name__", "")
-        # Selecting an artifact may take the cold-path lock, which a compile
-        # place must not.
+        # An artifact compiles nothing, so it takes no compile place; it may
+        # take the cold-path lock, which a compile place must not.
         artifact = _artifact.selected()
-        with _memo_lock.compiling():
-            if artifact is not None:
-                ptx, contract_json = artifact.kernel(
-                    compiler, module_text, options
-                )
-            else:
+        if artifact is not None:
+            ptx, contract_json = artifact.kernel(compiler, module_text, options)
+        else:
+            with _memo_lock.compiling():
                 if _runtime._switch_on("SWAGE_NO_COMPILE"):
                     raise _compile_refusal(options)
                 if module is None:
@@ -214,7 +212,7 @@ def _compile_once(compile_ptx, module_text, *, module=None, **options):
                         )
                 else:
                     _, ptx, contract_json = compile_ptx(module, **options)
-            kernel = _checked_kernel(compiler, ptx, contract_json, options)
+        kernel = _checked_kernel(compiler, ptx, contract_json, options)
         with _memo_lock:
             _ptx_memo[key] = kernel
         return kernel
