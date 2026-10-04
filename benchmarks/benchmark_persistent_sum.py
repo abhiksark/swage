@@ -271,8 +271,8 @@ def main():
         resident_blocks=resident_blocks,
     )
     launches = {
-        "static_mixed": static.launch_mixed,
-        "persistent": persistent.launch_persistent,
+        "static_mixed": static.mixed,
+        "persistent": persistent.launch,
     }
     torch.cuda.synchronize()
     expected = torch.tensor(lengths, dtype=torch.float32)

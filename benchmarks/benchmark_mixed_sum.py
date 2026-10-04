@@ -313,11 +313,7 @@ def main():
         output,
         warp_max_elements=_WARP_MAX_ELEMENTS,
     )
-    launches = {
-        "warp": prepared.launch_warp,
-        "cta": prepared.launch_cta,
-        "mixed": prepared.launch_mixed,
-    }
+    launches = prepared._asdict()
     torch.cuda.synchronize()
     _check_results(launches, output, torch.tensor(lengths, dtype=torch.float32))
     samples = _measure(launches)

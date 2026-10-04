@@ -259,10 +259,11 @@ def test_harnesses_import_without_torch_or_triton():
     """Keep Triton and PyTorch lazy so the harnesses import anywhere."""
     script = (
         "import sys\n"
+        "import benchmark_campaign\n"
         "import benchmark_fresh_offsets\n"
-        "import benchmark_processes\n"
         "import benchmark_provenance\n"
         "import benchmark_triton_comparison\n"
+        "import run_triton_comparison_campaign\n"
         "loaded = {'triton', 'torch'} & set(sys.modules)\n"
         "assert not loaded, loaded\n"
     )

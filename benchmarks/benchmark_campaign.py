@@ -15,7 +15,11 @@ import statistics
 from datetime import datetime
 from functools import lru_cache
 
-_DISTRIBUTIONS = (
+# The record version that validate_child accepts. Version 2 added the
+# options, timer resolution, provenance, and candidate filter of the merged
+# harness; no version 1 record was committed.
+SCHEMA_VERSION = 2
+_SYNTHETIC_DISTRIBUTIONS = (
     "many-tiny",
     "uniform",
     "log-normal",
@@ -23,10 +27,39 @@ _DISTRIBUTIONS = (
     "zipf-like",
     "few-huge",
     "one-outlier",
-    "soc-epinions1-outdegree-v1",
 )
+_REAL_TRACE = "soc-epinions1-outdegree-v1"
+_REAL_TRACE_SEGMENTS = 32_768
+_DISTRIBUTIONS = (
+    *_SYNTHETIC_DISTRIBUTIONS,
+    _REAL_TRACE,
+    "alternating-empty",
+    "power-law",
+)
+_VALUES = ("ones", "quarters", "normal")
 _VADD_SIZES = tuple(1 << exponent for exponent in (10, 12, 14, 16, 18, 20, 22))
-_ORCHESTRATION = ("swage_mixed", "triton_matched_task_partition")
+_VADD_CANDIDATES = (
+    "swage",
+    "torch",
+    *(f"triton_b{block}" for block in (128, 256, 512, 1024)),
+)
+_MATCHED = "triton_matched_task_partition"
+_ORCHESTRATION = ("swage_mixed", _MATCHED)
+_FIXED_BLOCKS = (32, 64, 128, 256, 512, 1024, 2048, 4096)
+_LOOPED_BLOCKS = (128, 256, 512, 1024)
+_PLANNED_WARPS = (1, 2, 4, 8)
+_CTA_BLOCK = 4096
+_BATCHED_LAUNCHES = 32
+_MAX_BATCHED_LAUNCHES = 1 << 20
+_TICK_FRACTION = 0.01
+_I32_MAX = (1 << 31) - 1
+_FAMILIES = (
+    ("triton_planned_looped_b", "triton_planned_looped"),
+    (_MATCHED, _MATCHED),
+    ("triton_looped_b", "triton_looped"),
+    ("triton_b", "triton_fixed"),
+)
+_SWAGE_KERNELS = ("warp", "cta", "mixed", "partial", "merge")
 _AGGREGATE_KEYS = {
     "source",
     "environment",
@@ -38,6 +71,51 @@ _AGGREGATE_KEYS = {
 _OBSERVATION_SCOPE = (
     "pre/post child-process boundary samples; empty samples "
     "do not prove exclusive allocation"
+)
+_METHOD_FLAGS = (
+    "graph_capture_before_interleaved_replay",
+    "kernel_timing_compilation_excluded",
+    "end_to_end_compilation_excluded_after_explicit_warmup",
+    "planning_output_preallocated",
+    "planning_kernel_launch_excluded",
+    "planning_compilation_excluded",
+    "end_to_end_not_combined_with_graph_samples",
+    "correctness_checked_before_timing",
+)
+_METHOD_TEXTS = (
+    "launch_batching",
+    "timer_ticks",
+    "effective_gb_per_s",
+    "correctness",
+    "position_dependent_check",
+    "skipped",
+    "excluded",
+    "triton_dependency",
+    "triton_fixed",
+    "triton_matched_task_partition",
+    "triton_fused",
+    "triton_looped",
+    "triton_planned_looped",
+    "torch_padded",
+)
+_PROVENANCE_KEYS = (
+    "gpu",
+    "gpu_uuid",
+    "cpu_model",
+    "pytorch",
+    "triton",
+    "swage",
+    "llvm_pin",
+    "llvm_linked",
+    "cuda_driver",
+    "native_sha256",
+    "loaded_ptx",
+    "gpu_state_before",
+    "cpu_frequency_before",
+    "gpu_state_after",
+    "other_compute_process_seen",
+    "cpu_frequency_after",
+    "cpu_governor_unchanged",
 )
 
 
@@ -156,18 +234,14 @@ def load_unique_json(path):
     return _parse_unique_json(data, path)
 
 
-def _measurement(value, count, path, *, graph=False):
-    if graph:
-        if type(value) is not dict or type(value.get("available")) is not bool:
-            raise ValueError(f"{path} requires boolean graph availability")
-        if not value["available"]:
-            _object(value, {"available", "error"}, path)
-            _string(value["error"], f"{path}.error")
-            return
-    keys = {"samples_us", "summary_us"}
-    if graph:
-        keys.add("available")
-    _object(value, keys, path)
+def _optional_tick(value, path):
+    if value is not None:
+        _number(value, path, positive=True)
+
+
+def _measurement(value, count, path):
+    """Validate one raw measurement whose summary is recomputed here."""
+    _object(value, {"samples_us", "summary_us"}, path)
     _list(value["samples_us"], f"{path}.samples_us")
     if len(value["samples_us"]) != count:
         raise ValueError(f"{path} sample count does not match methodology")
@@ -178,6 +252,65 @@ def _measurement(value, count, path, *, graph=False):
         _number(actual, f"{path}.summary_us.{key}", positive=True)
     if summary != expected:
         raise ValueError(f"{path} summary_us does not match raw samples")
+
+
+def _kernel_measurement(value, count, path, *, metric, tick, useful_bytes):
+    """Validate one kernel timing entry, its batch, tick, and rate.
+
+    The call method times one launch per sample. The event and graph
+    methods start at 32 launches and double, so a batch is a power-of-two
+    multiple of 32, and with a measured tick the kept samples hold the tick
+    below one percent of the median sample.
+    """
+    graph = metric == "graph"
+    if graph:
+        if type(value) is not dict or type(value.get("available")) is not bool:
+            raise ValueError(f"{path} requires boolean graph availability")
+        if not value["available"]:
+            _object(value, {"available", "error"}, path)
+            _string(value["error"], f"{path}.error")
+            return
+    keys = {
+        "samples_us",
+        "summary_us",
+        "launches_per_sample",
+        "timer_tick_us",
+        "tick_fraction_of_sample",
+        "effective_gb_per_s",
+    }
+    if graph:
+        keys.add("available")
+    _object(value, keys, path)
+    _measurement(
+        {key: value[key] for key in ("samples_us", "summary_us")}, count, path
+    )
+    launches = value["launches_per_sample"]
+    _integer(launches, f"{path}.launches_per_sample", minimum=1)
+    if metric == "call":
+        _equal(launches, 1, f"{path}.launches_per_sample")
+    elif (
+        launches < _BATCHED_LAUNCHES
+        or launches > _MAX_BATCHED_LAUNCHES
+        or launches & (launches - 1)
+    ):
+        raise ValueError(f"{path} batch is not a doubling of 32 launches")
+    if value["timer_tick_us"] != tick or type(value["timer_tick_us"]) is not (
+        type(tick)
+    ):
+        raise ValueError(f"{path} timer tick differs from methodology")
+    sample = value["summary_us"]["median"] * launches
+    fraction = value["tick_fraction_of_sample"]
+    if tick is None:
+        _equal(fraction, None, f"{path}.tick_fraction_of_sample")
+    else:
+        _number(fraction, f"{path}.tick_fraction_of_sample", positive=True)
+        if fraction != tick / sample:
+            raise ValueError(f"{path} tick fraction does not match samples")
+        if metric != "call" and not fraction < _TICK_FRACTION:
+            raise ValueError(f"{path} batch does not outgrow the timer tick")
+    rate = useful_bytes / (value["summary_us"]["median"] * 1_000.0)
+    if value["effective_gb_per_s"] != rate:
+        raise ValueError(f"{path} effective_gb_per_s does not match samples")
 
 
 def _timing_method(value, candidates, count, path, *, kernel=False):
@@ -199,7 +332,7 @@ def _timing_method(value, candidates, count, path, *, kernel=False):
     _equal(value["timed_rounds"], count, path)
     order = value["base_candidate_order"]
     _strings(order, f"{path}.base_candidate_order")
-    if set(order) != set(candidates):
+    if order != list(candidates):
         raise ValueError(f"{path} candidate order does not match timings")
     counts = value["order_position_counts"]
     _object(counts, candidates, f"{path}.order_position_counts")
@@ -223,16 +356,21 @@ def _timing_method(value, candidates, count, path, *, kernel=False):
         _string(value["unit"], path)
 
 
-def _kernel_timings(row, candidates, count, path):
+def _kernel_timings(row, candidates, method, path):
+    count = method["samples_per_candidate_per_measurement"]
+    ticks = method["timer_ticks_us"]
     _object(row["timings"], candidates, f"{path}.timings")
-    for name, metrics in row["timings"].items():
+    for name in candidates:
+        metrics = row["timings"][name]
         _object(metrics, {"call", "batched_event", "graph"}, f"{path}.{name}")
         for metric, measurement in metrics.items():
-            _measurement(
+            _kernel_measurement(
                 measurement,
                 count,
                 f"{path}/{name}/{metric}",
-                graph=metric == "graph",
+                metric=metric,
+                tick=ticks["clock" if metric == "call" else "event"],
+                useful_bytes=row["useful_bytes"],
             )
     _timing_method(
         row["timing_method"],
@@ -243,7 +381,7 @@ def _kernel_timings(row, candidates, count, path):
     )
 
 
-def _phase(value, count, path, *, planning=False):
+def _phase(value, candidates, count, path, *, planning=False):
     keys = {"geometry", "included", "timing_method", "timings"}
     if planning:
         keys.add("excluded")
@@ -254,24 +392,108 @@ def _phase(value, count, path, *, planning=False):
         _strings(value["excluded"], f"{path}.excluded")
         if set(value["included"]) & set(value["excluded"]):
             raise ValueError(f"{path} included/excluded scopes overlap")
-    _object(value["timings"], _ORCHESTRATION, f"{path}.timings")
+    _object(value["timings"], candidates, f"{path}.timings")
     for name, measurement in value["timings"].items():
         _measurement(measurement, count, f"{path}/{name}")
-    _timing_method(value["timing_method"], _ORCHESTRATION, count, path)
+    _timing_method(value["timing_method"], candidates, count, path)
 
 
-def _configs(maximum):
+def _not_run(value, path):
+    _object(value, {"status", "reason"}, path)
+    _equal(value["status"], "not-run", f"{path}.status")
+    _string(value["reason"], f"{path}.reason")
+
+
+def _family(name):
+    for prefix, family in _FAMILIES:
+        if name.startswith(prefix):
+            return family
+    return name
+
+
+def _fixed_configs(maximum):
     return [
-        {"block": block, "num_warps": warps}
-        for block in (32, 64, 128, 256, 512, 1024, 2048, 4096)
+        (block, warps)
+        for block in _FIXED_BLOCKS
         if block >= maximum
         for warps in (1, 2, 4, 8)
         if warps <= block // 32
     ]
 
 
+def _looped_configs():
+    return [
+        (block, warps)
+        for block in _LOOPED_BLOCKS
+        for warps in (1, 2, 4, 8)
+        if warps <= block // 32
+    ]
+
+
+def _configs(maximum):
+    return [
+        {"block": block, "num_warps": warps}
+        for block, warps in _fixed_configs(maximum)
+    ]
+
+
+def _matched_name(warps):
+    return _MATCHED if warps == 1 else f"{_MATCHED}_w{warps}"
+
+
+def _row_candidates(maximum):
+    looped = _looped_configs()
+    return [
+        "swage_warp",
+        "swage_cta",
+        "swage_mixed",
+        "torch_segment_reduce",
+        "torch_padded",
+        "triton_fused",
+        *(f"triton_b{b}_w{w}" for b, w in _fixed_configs(maximum)),
+        *(_matched_name(warps) for warps in _PLANNED_WARPS),
+        *(f"triton_looped_b{b}_w{w}" for b, w in looped),
+        *(f"triton_planned_looped_b{b}_w{w}" for b, w in looped),
+    ]
+
+
+def _select(names, only, exclude):
+    def named(selectors, name):
+        return name in selectors or _family(name) in selectors
+
+    return [
+        name
+        for name in names
+        if (only is None or named(only, name)) and not named(exclude, name)
+    ]
+
+
+def _length_unable(maximum):
+    unable = set()
+    if not _fixed_configs(maximum):
+        unable.add("triton_fixed")
+    if maximum > _CTA_BLOCK:
+        unable |= {_MATCHED, "triton_fused"}
+    return unable
+
+
+def _case_candidates(maximum, method):
+    """Return what a row times by its filter and longest segment alone."""
+    selection = method["candidate_filter"]
+    unable = _length_unable(maximum)
+    return [
+        name
+        for name in _select(
+            _row_candidates(maximum),
+            selection["candidates"],
+            selection["exclude_candidates"],
+        )
+        if _family(name) not in unable
+    ]
+
+
 def _config_list(value, expected, path):
-    _list(value, path)
+    _list(value, path, nonempty=False)
     for config in value:
         _object(config, {"block", "num_warps"}, path)
         _integer(config["block"], path, minimum=1)
@@ -286,7 +508,7 @@ def _trace_reference():
     spec = importlib.util.spec_from_file_location("_campaign_real_traces", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    _, provenance = module.load_real_trace(_DISTRIBUTIONS[-1])
+    _, provenance = module.load_real_trace(_REAL_TRACE)
     return module, provenance
 
 
@@ -306,14 +528,55 @@ def _trace_provenance(row):
         raise ValueError("trace provenance statistics do not match result")
 
 
-def _segmented_row(row, count):
-    path = f"segmented-sum/{row.get('distribution')}"
+def _segment_selection(row, stats, method, path):
+    """Validate which candidates a row timed, excluded, and skipped.
+
+    Returns:
+        The timed candidates, in base order.
+    """
+    selection = method["candidate_filter"]
+    only = selection["candidates"]
+    exclude = selection["exclude_candidates"]
+    every = _row_candidates(0)
+    full = _row_candidates(stats["max"])
+    wanted = _select(full, only, exclude)
+    _strings(row["excluded"], f"{path}.excluded", nonempty=False)
+    if row["excluded"] != [name for name in full if name not in wanted]:
+        raise ValueError(f"{path} excluded candidates do not match filter")
+    skipped = row["skipped"]
+    if type(skipped) is not dict:
+        raise ValueError(f"{path}.skipped must be an object")
+    for family, reason in skipped.items():
+        _string(reason, f"{path}.skipped.{family}")
+    families = {_family(name) for name in _select(every, only, exclude)}
+    unable = _length_unable(stats["max"])
+    if "torch_padded" in skipped:
+        unable.add("torch_padded")
+    if set(skipped) != unable & families:
+        raise ValueError(f"{path} skipped families do not match the row")
+    timed = [name for name in wanted if _family(name) not in unable]
+    _strings(row["candidate_order"], f"{path}.candidate_order")
+    if row["candidate_order"] != timed:
+        raise ValueError(f"{path} candidate order does not match the filter")
+    return timed
+
+
+def _segmented_row(row, method):
+    path = f"segmented-sum/{row.get('distribution')}/{row.get('seed')}"
     keys = {
         "case",
         "distribution",
+        "seed",
+        "values",
         "segment_count",
         "statistics",
+        "useful_bytes",
+        "check",
+        "skipped",
+        "excluded",
+        "candidate_order",
         "triton_sweep_configs",
+        "triton_looped_sweep_configs",
         "matched_task_partition_triton",
         "triton_fused_contract",
         "timing_method",
@@ -322,12 +585,21 @@ def _segmented_row(row, count):
         "end_to_end",
         "padded_layout",
     }
-    if row.get("distribution") == _DISTRIBUTIONS[-1]:
+    if row.get("distribution") == _REAL_TRACE:
         keys.add("trace_provenance")
     _object(row, keys, path)
-    if row["distribution"] not in _DISTRIBUTIONS:
-        raise ValueError(f"{path} unknown distribution")
-    _equal(row["segment_count"], 32_768, path)
+    if row["distribution"] not in method["distributions"]:
+        raise ValueError(f"{path} undeclared distribution")
+    _integer(row["seed"], path)
+    if row["seed"] not in method["seeds"]:
+        raise ValueError(f"{path} undeclared seed")
+    _equal(row["values"], method["values"], f"{path}.values")
+    expected_count = (
+        _REAL_TRACE_SEGMENTS
+        if row["distribution"] == _REAL_TRACE
+        else method["segment_count"]
+    )
+    _equal(row["segment_count"], expected_count, f"{path}.segment_count")
     stats = row["statistics"]
     _object(stats, {"count", "total", "min", "median", "p95", "max"}, path)
     for key in ("count", "total", "min", "p95", "max"):
@@ -335,19 +607,36 @@ def _segmented_row(row, count):
     _number(stats["median"], path)
     if not (
         stats["count"] == row["segment_count"]
-        and 0
-        <= stats["min"]
-        <= stats["median"]
-        <= stats["p95"]
-        <= stats["max"]
-        <= 4096
+        and 0 <= stats["min"] <= stats["median"] <= stats["p95"] <= stats["max"]
         and stats["min"] * stats["count"]
         <= stats["total"]
-        <= stats["max"] * stats["count"]
+        <= min(stats["max"] * stats["count"], _I32_MAX)
     ):
         raise ValueError(f"{path} inconsistent length statistics")
-    configs = _configs(stats["max"])
-    _config_list(row["triton_sweep_configs"], configs, path)
+    _equal(
+        row["useful_bytes"],
+        4 * (stats["total"] + 2 * stats["count"] + 1),
+        f"{path}.useful_bytes",
+    )
+    check = row["check"]
+    _object(
+        check,
+        {"exact_segments", "bounded_segments", "unchecked_segments"},
+        f"{path}.check",
+    )
+    for key, value in check.items():
+        _integer(value, f"{path}.check.{key}")
+    if sum(check.values()) != stats["count"]:
+        raise ValueError(f"{path} check modes do not cover every segment")
+    _config_list(row["triton_sweep_configs"], _configs(stats["max"]), path)
+    _config_list(
+        row["triton_looped_sweep_configs"],
+        [
+            {"block": block, "num_warps": warps}
+            for block, warps in _looped_configs()
+        ],
+        path,
+    )
     partition = row["matched_task_partition_triton"]
     _object(
         partition,
@@ -369,7 +658,7 @@ def _segmented_row(row, count):
     for key, expected in {
         "warp_threshold_elements": 32,
         "short_tasks_per_program": 4,
-        "cta_block_elements": 4096,
+        "cta_block_elements": _CTA_BLOCK,
         "primary_cta_num_warps": 1,
     }.items():
         _equal(partition[key], expected, path)
@@ -410,7 +699,7 @@ def _segmented_row(row, count):
         "logical_lanes_per_program": 128,
         "short_task_slots": 4,
         "lanes_per_short_task": 32,
-        "maximum_segment_length": 4096,
+        "maximum_segment_length": _CTA_BLOCK,
         "physical_num_warps": 4,
         "warp_programs": warp_programs,
         "cta_programs": partition["cta_tasks"],
@@ -453,55 +742,59 @@ def _segmented_row(row, count):
     _number(padded["padding_fraction"], path)
     if padded["padding_fraction"] != fraction:
         raise ValueError(f"{path} padding_fraction mismatch")
-    candidates = {
-        "swage_warp",
-        "swage_cta",
-        "swage_mixed",
-        "torch_segment_reduce",
-        "torch_padded",
-        "triton_fused",
-        "triton_matched_task_partition",
-        *(f"triton_matched_task_partition_w{n}" for n in (2, 4, 8)),
-        *(f"triton_b{c['block']}_w{c['num_warps']}" for c in configs),
-    }
-    _kernel_timings(row, candidates, count, path)
-    _phase(row["planning"], count, f"{path}.planning", planning=True)
-    end = row["end_to_end"]
-    _object(
-        end,
-        {
-            "artifact_jit_warmup",
-            "compilation_excluded",
-            "graph_samples_combined",
-            "warm_preparation",
-            "changing_geometry",
-        },
-        path,
-    )
-    _string(end["artifact_jit_warmup"], path)
-    _equal(end["compilation_excluded"], True, path)
-    _equal(end["graph_samples_combined"], False, path)
-    for mode in ("warm_preparation", "changing_geometry"):
-        _phase(end[mode], count, f"{path}.{mode}")
+    timed = _segment_selection(row, stats, method, path)
+    _kernel_timings(row, timed, method, path)
+    count = method["samples_per_candidate_per_measurement"]
+    orchestrated = [name for name in _ORCHESTRATION if name in timed]
+    if not orchestrated:
+        _not_run(row["planning"], f"{path}.planning")
+        _not_run(row["end_to_end"], f"{path}.end_to_end")
+    else:
+        _phase(
+            row["planning"],
+            orchestrated,
+            count,
+            f"{path}.planning",
+            planning=True,
+        )
+        end = row["end_to_end"]
+        _object(
+            end,
+            {
+                "artifact_jit_warmup",
+                "compilation_excluded",
+                "graph_samples_combined",
+                "warm_preparation",
+                "changing_geometry",
+            },
+            path,
+        )
+        _string(end["artifact_jit_warmup"], path)
+        _equal(end["compilation_excluded"], True, path)
+        _equal(end["graph_samples_combined"], False, path)
+        for mode in ("warm_preparation", "changing_geometry"):
+            _phase(end[mode], orchestrated, count, f"{path}.{mode}")
     if "trace_provenance" in row:
         _trace_provenance(row)
 
 
 def _integer_list(value, expected, path):
-    _list(value, path)
+    _list(value, path, nonempty=False)
     for item in value:
         _integer(item, path)
     if value != expected:
         raise ValueError(f"{path} must equal {expected!r}")
 
 
-def _vadd_row(row, count):
+def _vadd_row(row, method):
     path = f"vadd/{row.get('n')}"
     _object(
         row,
         {
             "case",
             "n",
+            "seed",
+            "useful_bytes",
             "swage_block",
             "swage_grid",
             "triton_sweep_blocks",
@@ -514,24 +807,147 @@ def _vadd_row(row, count):
     _integer(row["n"], path, minimum=1)
     if row["n"] not in _VADD_SIZES:
         raise ValueError(f"{path} undeclared vector size")
+    _equal(row["seed"], method["seeds"][0], f"{path}.seed")
+    _equal(row["useful_bytes"], 12 * row["n"], f"{path}.useful_bytes")
     _equal(row["swage_block"], 256, path)
     _equal(row["swage_grid"], (row["n"] + 255) // 256, path)
     _integer_list(row["triton_sweep_blocks"], [128, 256, 512, 1024], path)
     _object(row["launch_contract"], {"swage", "triton"}, path)
     for value in row["launch_contract"].values():
         _string(value, path)
-    candidates = {
-        "swage",
-        "torch",
-        *(f"triton_b{n}" for n in (128, 256, 512, 1024)),
+    _kernel_timings(row, _VADD_CANDIDATES, method, path)
+
+
+def _signatures(rows, method):
+    """Recompute the compiled case signatures from the result rows."""
+    return [
+        {
+            "distribution": row["distribution"],
+            "seed": row["seed"],
+            "value_count": row["statistics"]["total"],
+            "segment_count": row["segment_count"],
+            "warp_task_count": row["matched_task_partition_triton"][
+                "warp_tasks"
+            ],
+            "cta_task_count": row["matched_task_partition_triton"]["cta_tasks"],
+            "warp_programs": row["triton_fused_contract"]["warp_programs"],
+            "candidates": _case_candidates(row["statistics"]["max"], method),
+        }
+        for row in rows
+    ]
+
+
+def _expected_triton_components(signatures):
+    """Return the Triton compile components and configurations, in order."""
+
+    def timed(signature, name):
+        return any(
+            candidate == name or _family(candidate) == name
+            for candidate in signature["candidates"]
+        )
+
+    fixed = sorted(
+        {
+            (block, warps)
+            for signature in signatures
+            for block, warps in _fixed_configs(0)
+            if timed(signature, f"triton_b{block}_w{warps}")
+        }
+    )
+    components = [f"triton_b{block}_w{warps}" for block, warps in fixed]
+    if any(
+        signature["warp_task_count"]
+        and (
+            timed(signature, _MATCHED)
+            or timed(signature, "triton_planned_looped")
+        )
+        for signature in signatures
+    ):
+        components.append("triton_matched_packed")
+    matched_warps = [
+        warps
+        for warps in _PLANNED_WARPS
+        if any(
+            signature["cta_task_count"]
+            and timed(signature, _matched_name(warps))
+            for signature in signatures
+        )
+    ]
+    components.extend(f"triton_matched_cta_w{warps}" for warps in matched_warps)
+    fused = sorted(
+        {
+            signature["warp_programs"]
+            for signature in signatures
+            if timed(signature, "triton_fused")
+        }
+    )
+    if fused:
+        components.append("triton_fused")
+    looped = [
+        config
+        for config in _looped_configs()
+        if any(
+            timed(signature, f"triton_looped_b{config[0]}_w{config[1]}")
+            for signature in signatures
+        )
+    ]
+    components.extend(f"triton_looped_b{b}_w{w}" for b, w in looped)
+    planned_looped = [
+        config
+        for config in _looped_configs()
+        if any(
+            signature["cta_task_count"]
+            and timed(
+                signature, f"triton_planned_looped_b{config[0]}_w{config[1]}"
+            )
+            for signature in signatures
+        )
+    ]
+    components.extend(
+        f"triton_planned_looped_cta_b{b}_w{w}" for b, w in planned_looped
+    )
+    configurations = {
+        "triton_fixed": [
+            {"block": block, "num_warps": warps} for block, warps in fixed
+        ],
+        "triton_matched_cta_num_warps": matched_warps,
+        "triton_fused_warp_programs": fused,
+        "triton_looped": [
+            {"block": block, "num_warps": warps} for block, warps in looped
+        ],
+        "triton_planned_looped_cta": [
+            {"block": block, "num_warps": warps}
+            for block, warps in planned_looped
+        ],
     }
-    _kernel_timings(row, candidates, count, path)
+    return components, configurations
 
 
-def _compilation(value, rows):
+def _swage_components(kernels, signatures, path):
+    """Validate the compiled Swage kernels; return their components."""
+    _strings(kernels, f"{path}.swage_kernels", nonempty=False)
+    uses_swage = any(
+        candidate.startswith("swage_")
+        for signature in signatures
+        for candidate in signature["candidates"]
+    )
+    if not uses_swage:
+        _equal(kernels, [], f"{path}.swage_kernels")
+        return []
+    allowed = [
+        ["warp", "cta"],
+        ["warp", "cta", "mixed"],
+        ["warp", "cta", "partial", "merge"],
+        ["warp", "cta", "mixed", "partial", "merge"],
+    ]
+    if kernels not in allowed:
+        raise ValueError(f"{path}.swage_kernels is not a prepared-sum set")
+    return [f"swage_{kernel}" for kernel in kernels]
+
+
+def _compilation(value, rows, method):
     if not rows:
-        _object(value, {"status", "reason"}, "compilation")
-        _equal(value["status"], "not-run", "compilation.status")
+        _not_run(value, "compilation")
         _equal(
             value["reason"],
             "segmented-sum suite not selected",
@@ -580,72 +996,57 @@ def _compilation(value, rows):
     _object(
         configs,
         {
-            "swage_artifacts",
+            "swage_kernels",
             "triton_fixed",
             "triton_matched_cta_num_warps",
             "triton_fused_warp_programs",
+            "triton_looped",
+            "triton_planned_looped_cta",
             "triton_case_signatures",
         },
         "compilation.configurations",
     )
-    _equal(
-        configs["swage_artifacts"], ["warp", "cta", "mixed"], "swage_artifacts"
-    )
-    fixed = sorted(
-        {
-            (config["block"], config["num_warps"])
-            for row in rows
-            for config in row["triton_sweep_configs"]
-        }
-    )
-    _config_list(
-        configs["triton_fixed"],
-        [{"block": block, "num_warps": warps} for block, warps in fixed],
-        "compilation.triton_fixed",
-    )
-    _integer_list(
-        configs["triton_matched_cta_num_warps"], [1, 2, 4, 8], "matched warps"
-    )
-    signatures = [
-        {
-            "distribution": row["distribution"],
-            "value_count": row["statistics"]["total"],
-            "segment_count": row["segment_count"],
-            "warp_task_count": row["matched_task_partition_triton"][
-                "warp_tasks"
-            ],
-            "cta_task_count": row["matched_task_partition_triton"]["cta_tasks"],
-            "warp_programs": row["triton_fused_contract"]["warp_programs"],
-        }
-        for row in rows
-    ]
+    signatures = _signatures(rows, method)
     actual = configs["triton_case_signatures"]
     _list(actual, "triton_case_signatures")
     for signature in actual:
         _object(signature, signatures[0], "triton_case_signatures")
         _string(signature["distribution"], "triton_case_signatures")
-        for key in set(signature) - {"distribution"}:
+        _strings(
+            signature["candidates"],
+            "triton_case_signatures.candidates",
+            nonempty=False,
+        )
+        for key in set(signature) - {"distribution", "candidates"}:
             _integer(signature[key], f"triton_case_signatures.{key}")
     if actual != signatures:
         raise ValueError(
             "compilation case signatures do not match result geometry"
         )
-    _integer_list(
-        configs["triton_fused_warp_programs"],
-        sorted({row["warp_programs"] for row in signatures}),
-        "fused warp programs",
+    swage = _swage_components(
+        configs["swage_kernels"], signatures, "compilation.configurations"
     )
-    swage = ["swage_warp", "swage_cta", "swage_mixed"]
-    triton = [f"triton_b{block}_w{warps}" for block, warps in fixed]
-    if any(row["warp_task_count"] for row in signatures):
-        triton.append("triton_matched_packed")
-    if any(row["cta_task_count"] for row in signatures):
-        triton.extend(f"triton_matched_cta_w{warps}" for warps in (1, 2, 4, 8))
-    triton.append("triton_fused")
+    triton, expected = _expected_triton_components(signatures)
+    _config_list(
+        configs["triton_fixed"],
+        expected["triton_fixed"],
+        "compilation.triton_fixed",
+    )
+    for key in ("triton_matched_cta_num_warps", "triton_fused_warp_programs"):
+        _integer_list(configs[key], expected[key], f"compilation.{key}")
+    for key in ("triton_looped", "triton_planned_looped_cta"):
+        _config_list(configs[key], expected[key], f"compilation.{key}")
     _equal(
         value["component_order"], swage + triton, "compilation.component_order"
     )
-    totals = {"swage_total": swage, "triton_total": triton}
+    totals = {
+        name: components
+        for name, components in (
+            ("swage_total", swage),
+            ("triton_total", triton),
+        )
+        if components
+    }
     _object(value["derived_totals"], totals, "compilation.derived_totals")
     if value["derived_totals"] != totals:
         raise ValueError("compilation derived_totals component mismatch")
@@ -654,8 +1055,10 @@ def _compilation(value, rows):
     for name, measurement in timings.items():
         _measurement(measurement, 1, f"compilation/{name}")
     for name, components in totals.items():
-        expected = sum(timings[part]["samples_us"][0] for part in components)
-        if timings[name]["samples_us"] != [expected]:
+        expected_total = sum(
+            timings[part]["samples_us"][0] for part in components
+        )
+        if timings[name]["samples_us"] != [expected_total]:
             raise ValueError(
                 f"compilation {name} is not the exact component sum"
             )
@@ -677,8 +1080,142 @@ def _compilation(value, rows):
         _string(reason, "not_applicable")
 
 
+def _provenance(value):
+    """Validate the provenance block of benchmark_provenance."""
+    _object(value, _PROVENANCE_KEYS, "provenance")
+    for key in ("gpu", "pytorch"):
+        _string(value[key], f"provenance.{key}")
+    for key in (
+        "gpu_uuid",
+        "cpu_model",
+        "triton",
+        "swage",
+        "llvm_pin",
+        "llvm_linked",
+        "cuda_driver",
+    ):
+        if value[key] is not None:
+            _string(value[key], f"provenance.{key}")
+    hashes = value["native_sha256"]
+    if type(hashes) is not dict or not hashes:
+        raise ValueError("provenance.native_sha256 must be a nonempty object")
+    for library, digest in hashes.items():
+        _string(library, "provenance.native_sha256")
+        if type(digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("provenance.native_sha256 holds an invalid hash")
+    _list(value["loaded_ptx"], "provenance.loaded_ptx", nonempty=False)
+    for entry in value["loaded_ptx"]:
+        if type(entry) is not dict:
+            raise ValueError("provenance.loaded_ptx entries must be objects")
+    for key in (
+        "gpu_state_before",
+        "gpu_state_after",
+        "cpu_frequency_before",
+        "cpu_frequency_after",
+    ):
+        if type(value[key]) is not dict:
+            raise ValueError(f"provenance.{key} must be an object")
+    for key in ("other_compute_process_seen", "cpu_governor_unchanged"):
+        if value[key] is not None and type(value[key]) is not bool:
+            raise ValueError(f"provenance.{key} must be boolean or null")
+
+
+def _methodology(method):
+    """Validate the methodology of a child and return it."""
+    _object(
+        method,
+        {
+            "suite",
+            "warmups_per_candidate_per_measurement",
+            "samples_per_candidate_per_measurement",
+            "distributions",
+            "segment_count",
+            "seeds",
+            "values",
+            "candidate_filter",
+            "candidate_sampling",
+            "batched_launches",
+            "graph_replay_launches",
+            "timer_ticks_us",
+            *_METHOD_FLAGS,
+            *_METHOD_TEXTS,
+        },
+        "methodology",
+    )
+    if method["suite"] not in ("all", "vadd", "segmented-sum"):
+        raise ValueError("methodology.suite is invalid")
+    for flag in _METHOD_FLAGS:
+        _equal(method[flag], True, f"methodology.{flag}")
+    for text in _METHOD_TEXTS:
+        _string(method[text], f"methodology.{text}")
+    _integer(method["warmups_per_candidate_per_measurement"], "warmups")
+    _integer(
+        method["samples_per_candidate_per_measurement"], "samples", minimum=1
+    )
+    _strings(method["distributions"], "methodology.distributions")
+    if set(method["distributions"]) - set(_DISTRIBUTIONS):
+        raise ValueError("methodology.distributions names an unknown one")
+    _integer(method["segment_count"], "methodology.segment_count", minimum=1)
+    if (
+        _REAL_TRACE in method["distributions"]
+        and method["segment_count"] != _REAL_TRACE_SEGMENTS
+    ):
+        raise ValueError("methodology.segment_count differs from the trace")
+    _list(method["seeds"], "methodology.seeds")
+    for seed in method["seeds"]:
+        _integer(seed, "methodology.seeds")
+    if len(method["seeds"]) != len(set(method["seeds"])):
+        raise ValueError("methodology.seeds contains duplicates")
+    if method["values"] not in _VALUES:
+        raise ValueError("methodology.values is invalid")
+    selection = method["candidate_filter"]
+    _object(
+        selection,
+        {"candidates", "exclude_candidates"},
+        "methodology.candidate_filter",
+    )
+    if selection["candidates"] is not None:
+        _strings(selection["candidates"], "candidate_filter.candidates")
+    _strings(
+        selection["exclude_candidates"],
+        "candidate_filter.exclude_candidates",
+        nonempty=False,
+    )
+    filtered = (
+        selection["candidates"] is not None or selection["exclude_candidates"]
+    )
+    if filtered and method["suite"] != "segmented-sum":
+        raise ValueError("a candidate filter requires the segmented-sum suite")
+    known = {
+        *_row_candidates(0),
+        *map(_family, _row_candidates(0)),
+    }
+    for selector in [
+        *(selection["candidates"] or ()),
+        *selection["exclude_candidates"],
+    ]:
+        if selector not in known:
+            raise ValueError(f"candidate_filter names unknown {selector!r}")
+    _equal(
+        method["candidate_sampling"],
+        "deterministic rotating/interleaved order",
+        "candidate_sampling",
+    )
+    for key in ("batched_launches", "graph_replay_launches"):
+        _equal(method[key], _BATCHED_LAUNCHES, f"methodology.{key}")
+    ticks = method["timer_ticks_us"]
+    _object(ticks, {"clock", "event"}, "methodology.timer_ticks_us")
+    for key, tick in ticks.items():
+        _optional_tick(tick, f"methodology.timer_ticks_us.{key}")
+    return method
+
+
 def validate_child(record):
-    """Reject malformed schema-v1 comparison children; return no value."""
+    """Reject malformed comparison children; return no value.
+
+    A child is one process record of benchmark_triton_comparison.py with
+    ``schema_version`` 2.
+    """
     _object(
         record,
         {
@@ -687,13 +1224,14 @@ def validate_child(record):
             "recorded_at",
             "source",
             "environment",
+            "provenance",
             "methodology",
             "compilation",
             "results",
         },
         "child",
     )
-    _equal(record["schema_version"], 1, "child.schema_version")
+    _equal(record["schema_version"], SCHEMA_VERSION, "child.schema_version")
     _equal(record["benchmark"], "swage-triton-comparison", "child.benchmark")
     _timestamp(record["recorded_at"], "child.recorded_at")
     source = record["source"]
@@ -763,71 +1301,63 @@ def validate_child(record):
     _equal(
         compiler["llvm_version"], compiler["llvm_pin"], "compiler.llvm_version"
     )
-    method = record["methodology"]
-    flags = {
-        "graph_capture_before_interleaved_replay",
-        "kernel_timing_compilation_excluded",
-        "end_to_end_compilation_excluded_after_explicit_warmup",
-        "planning_output_preallocated",
-        "planning_kernel_launch_excluded",
-        "planning_compilation_excluded",
-        "end_to_end_not_combined_with_graph_samples",
-        "correctness_checked_before_timing",
-    }
-    _object(
-        method,
-        {
-            "warmups_per_candidate_per_measurement",
-            "samples_per_candidate_per_measurement",
-            "candidate_sampling",
-            "batched_launches",
-            "graph_replay_launches",
-            "triton_dependency",
-            *flags,
-        },
-        "methodology",
-    )
-    for flag in flags:
-        _equal(method[flag], True, f"methodology.{flag}")
-    _integer(method["warmups_per_candidate_per_measurement"], "warmups")
-    count = method["samples_per_candidate_per_measurement"]
-    _integer(count, "samples", minimum=1)
-    for key in ("batched_launches", "graph_replay_launches"):
-        _equal(method[key], 32, f"methodology.{key}")
-    _equal(
-        method["candidate_sampling"],
-        "deterministic rotating/interleaved order",
-        "candidate_sampling",
-    )
-    _string(method["triton_dependency"], "triton_dependency")
+    _provenance(record["provenance"])
+    method = _methodology(record["methodology"])
     _list(record["results"], "results")
     vadd, segmented = [], []
     for row in record["results"]:
         if type(row) is not dict:
             raise ValueError("result must be an object")
         if row.get("case") == "vadd":
-            _vadd_row(row, count)
+            _vadd_row(row, method)
             vadd.append(row)
         elif row.get("case") == "segmented-sum":
-            _segmented_row(row, count)
+            _segmented_row(row, method)
             segmented.append(row)
         else:
             raise ValueError("unrecognized result case")
+    suite = method["suite"]
+    if (suite in ("all", "vadd")) != bool(vadd) or (
+        suite in ("all", "segmented-sum")
+    ) != bool(segmented):
+        raise ValueError("result cases do not match methodology.suite")
     if vadd and [row["n"] for row in vadd] != list(_VADD_SIZES):
         raise ValueError("vadd cases must be the unique declared size sequence")
-    if segmented and [row["distribution"] for row in segmented] != list(
-        _DISTRIBUTIONS
+    declared = [
+        (name, seed)
+        for name in method["distributions"]
+        for seed in method["seeds"]
+    ]
+    if (
+        segmented
+        and [(row["distribution"], row["seed"]) for row in segmented]
+        != declared
     ):
         raise ValueError(
             "segmented cases must be the unique declared distribution sequence"
         )
     if record["results"] != vadd + segmented:
         raise ValueError("result suite order must be vadd then segmented-sum")
-    _compilation(record["compilation"], segmented)
+    _compilation(record["compilation"], segmented, method)
+
+
+def _case_key(row, seeds):
+    """Return the aggregate key prefix of a result row.
+
+    A run with one seed keeps the key of a distribution alone; a run with
+    several seeds adds the seed, so every row has its own key.
+    """
+    if row["case"] == "vadd":
+        return f"vadd/n={row['n']}"
+    key = f"segmented-sum/distribution={row['distribution']}"
+    if len(seeds) > 1:
+        key += f"/seed={row['seed']}"
+    return key
 
 
 def _raw_process_medians(child):
     medians = {}
+    seeds = child["methodology"]["seeds"]
     compilation = child["compilation"]
     if compilation["status"] == "measured":
         for name, measurement in compilation["timings"].items():
@@ -835,11 +1365,7 @@ def _raw_process_medians(child):
                 measurement["samples_us"]
             )
     for row in child["results"]:
-        case = (
-            f"vadd/n={row['n']}"
-            if row["case"] == "vadd"
-            else f"segmented-sum/distribution={row['distribution']}"
-        )
+        case = _case_key(row, seeds)
         for name, metrics in row["timings"].items():
             for metric, measurement in metrics.items():
                 if measurement.get("available") is False:
@@ -847,11 +1373,14 @@ def _raw_process_medians(child):
                 medians[f"{case}/{name}/{metric}_us"] = statistics.median(
                     measurement["samples_us"]
                 )
-        if row["case"] == "segmented-sum":
+        if row["case"] != "segmented-sum":
+            continue
+        if row["planning"].get("status") != "not-run":
             for name, measurement in row["planning"]["timings"].items():
                 medians[f"{case}/{name}/planning_us"] = statistics.median(
                     measurement["samples_us"]
                 )
+        if row["end_to_end"].get("status") != "not-run":
             for mode in ("warm_preparation", "changing_geometry"):
                 for name, measurement in row["end_to_end"][mode][
                     "timings"
@@ -868,20 +1397,49 @@ def process_medians(child):
     return _raw_process_medians(child)
 
 
+# What differs among the children of one campaign: the samples, their
+# summaries, the batch that grew to outgrow the timer tick of the process,
+# the tick, its fraction of a sample, and the effective rate.
+_TIMING_PAYLOAD = {
+    "samples_us",
+    "summary_us",
+    "launches_per_sample",
+    "timer_tick_us",
+    "tick_fraction_of_sample",
+    "effective_gb_per_s",
+}
+
+
 def _metadata(value):
     if type(value) is dict:
         return {
-            key: _metadata(item)
+            # A skip reason of the padded baseline names the free device
+            # memory of its process; the skipped families must agree.
+            key: sorted(item) if key == "skipped" else _metadata(item)
             for key, item in value.items()
-            if key not in {"samples_us", "summary_us"}
+            if key not in _TIMING_PAYLOAD
         }
     if type(value) is list:
         return [_metadata(item) for item in value]
     return value
 
 
+def _untimed(method):
+    """Return a methodology without the timer ticks of its process."""
+    return {
+        key: item for key, item in method.items() if key != "timer_ticks_us"
+    }
+
+
 def aggregate_children(children):
-    """Require exact-source agreement and aggregate independent raw medians."""
+    """Require exact-source agreement and aggregate independent raw medians.
+
+    Only timing payloads may differ among children: the samples, their
+    summaries, the timer ticks each process measures, and what follows from
+    them, which is a batch that grew to outgrow the tick, its fraction of a
+    sample, and the effective rate. The aggregate methodology lists the
+    ticks of every process under ``timer_ticks_us_per_process``.
+    """
     _list(children, "children")
     for child in children:
         validate_child(child)
@@ -892,9 +1450,11 @@ def aggregate_children(children):
     reference = children[0]
     flattened = []
     for index, child in enumerate(children):
-        for key in ("source", "environment", "methodology"):
+        for key in ("source", "environment"):
             if child[key] != reference[key]:
                 raise ValueError(f"child {index} {key} metadata differs")
+        if _untimed(child["methodology"]) != _untimed(reference["methodology"]):
+            raise ValueError(f"child {index} methodology metadata differs")
         for key in ("results", "compilation"):
             if _metadata(child[key]) != _metadata(reference[key]):
                 raise ValueError(f"child {index} {key} metadata differs")
@@ -913,7 +1473,12 @@ def aggregate_children(children):
     return {
         "source": reference["source"],
         "environment": reference["environment"],
-        "methodology": reference["methodology"],
+        "methodology": {
+            **_untimed(reference["methodology"]),
+            "timer_ticks_us_per_process": [
+                child["methodology"]["timer_ticks_us"] for child in children
+            ],
+        },
         "agreement": {
             "source": True,
             "environment": True,
@@ -1076,7 +1641,9 @@ def load_campaign(manifest_path, *, require_archival=True):
         },
         "manifest",
     )
-    _equal(manifest["schema_version"], 1, "manifest.schema_version")
+    _equal(
+        manifest["schema_version"], SCHEMA_VERSION, "manifest.schema_version"
+    )
     _equal(
         manifest["benchmark"],
         "swage-triton-comparison-process-campaign",
@@ -1097,6 +1664,7 @@ def load_campaign(manifest_path, *, require_archival=True):
             "repetitions",
             "samples_per_process",
             "warmups_per_process",
+            "harness_options",
             "gpu_execution_mode",
             "exclusive_gpu_allocated",
             "allow_shared_gpu_engineering",
@@ -1114,6 +1682,11 @@ def load_campaign(manifest_path, *, require_archival=True):
     for key in ("repetitions", "samples_per_process"):
         _integer(controls[key], f"controls.{key}", minimum=1)
     _integer(controls["warmups_per_process"], "controls.warmups_per_process")
+    _list(
+        controls["harness_options"], "controls.harness_options", nonempty=False
+    )
+    for option in controls["harness_options"]:
+        _string(option, "controls.harness_options")
     for key in (
         "exclusive_gpu_allocated",
         "allow_shared_gpu_engineering",
@@ -1184,6 +1757,7 @@ def load_campaign(manifest_path, *, require_archival=True):
         _equal(entry["recorded_at"], child["recorded_at"], "child recorded_at")
         method = child["methodology"]
         for control, field in (
+            ("suite", "suite"),
             ("samples_per_process", "samples_per_candidate_per_measurement"),
             ("warmups_per_process", "warmups_per_candidate_per_measurement"),
         ):

@@ -10,8 +10,10 @@ import statistics
 
 import pytest
 from benchmark_campaign_fixtures import (
+    TICKS,
     make_child,
     make_telemetry,
+    restamp,
     write_campaign,
 )
 
@@ -39,17 +41,9 @@ def _measurement(child):
 
 
 def _replace_samples(measurement, samples):
-    q1, _, q3 = statistics.quantiles(samples, n=4, method="inclusive")
-    measurement.update(
-        {
-            "samples_us": samples,
-            "summary_us": {
-                "median": statistics.median(samples),
-                "q1": q1,
-                "q3": q3,
-            },
-        }
-    )
+    """Replace the call samples of vadd n=1024 and what derives from them."""
+    measurement["samples_us"] = samples
+    restamp(measurement, useful_bytes=12 * 1024, tick=TICKS["clock"])
 
 
 def test_inclusive_quartiles_and_single_sample(campaign):
@@ -299,6 +293,15 @@ def test_zero_column_padding_has_zero_storage_and_fraction(campaign):
     child = make_child(suite="segmented-sum")
     row = child["results"][0]
     row["statistics"].update(total=0, min=0, median=0.0, p95=0, max=0)
+    # Without values only the offsets and the sums move.
+    row["useful_bytes"] = 4 * (2 * row["segment_count"] + 1)
+    for metrics in row["timings"].values():
+        for metric, measurement in metrics.items():
+            restamp(
+                measurement,
+                useful_bytes=row["useful_bytes"],
+                tick=TICKS["clock" if metric == "call" else "event"],
+            )
     row["padded_layout"].update(
         columns=0,
         packed_elements=0,
@@ -543,3 +546,114 @@ def test_shared_and_nonrelease_campaigns_are_not_archival(campaign, tmp_path):
     ]
     with pytest.raises(ValueError, match="not archival eligible"):
         campaign.load_campaign(debug)
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        ("unresolved", "outgrow the timer tick"),
+        ("odd-batch", "doubling of 32"),
+        ("call-batch", "launches_per_sample"),
+        ("tick", "timer tick differs"),
+        ("fraction", "tick fraction"),
+        ("rate", "effective_gb_per_s"),
+    ],
+)
+def test_kernel_entries_carry_a_consistent_batch_tick_and_rate(
+    campaign, mutation, message
+):
+    """Every entry states its batch, tick, and rate as its samples imply."""
+    child = make_child()
+    metrics = child["results"][0]["timings"]["swage"]
+    event = metrics["batched_event"]
+    if mutation == "unresolved":
+        # 32 launches of 0.05 us are 1.6 us, which one tick of 0.032 us
+        # does not stay under one percent of.
+        event["samples_us"] = [0.05, 0.05]
+        restamp(event, useful_bytes=12 * 1024, tick=TICKS["event"])
+    elif mutation == "odd-batch":
+        event["launches_per_sample"] = 48
+        restamp(event, useful_bytes=12 * 1024, tick=TICKS["event"])
+    elif mutation == "call-batch":
+        metrics["call"]["launches_per_sample"] = 32
+        restamp(metrics["call"], useful_bytes=12 * 1024, tick=TICKS["clock"])
+    elif mutation == "tick":
+        restamp(event, useful_bytes=12 * 1024, tick=0.064)
+    elif mutation == "fraction":
+        event["tick_fraction_of_sample"] *= 2
+    else:
+        event["effective_gb_per_s"] *= 2
+    with pytest.raises(ValueError, match=message):
+        campaign.validate_child(child)
+
+
+def test_a_filtered_child_lists_what_it_excluded(campaign):
+    """Validate the timed, excluded, and skipped candidates by the filter."""
+    child = make_child(
+        suite="segmented-sum",
+        only=["torch_segment_reduce", "triton_looped"],
+        exclude=["triton_looped_b128_w1"],
+    )
+    campaign.validate_child(child)
+    row = child["results"][0]
+    assert row["candidate_order"][0] == "torch_segment_reduce"
+    assert len(row["candidate_order"]) == 1 + 14
+    assert row["planning"]["status"] == "not-run"
+    medians = campaign.process_medians(child)
+    assert not any(name.endswith("planning_us") for name in medians)
+    assert "segmented-sum/swage_total/compilation_us" not in medians
+
+    changed = copy.deepcopy(child)
+    changed["results"][0]["excluded"].remove("swage_mixed")
+    with pytest.raises(ValueError, match="excluded candidates"):
+        campaign.validate_child(changed)
+    changed = copy.deepcopy(child)
+    changed["results"][0]["skipped"]["triton_fused"] = "invented"
+    with pytest.raises(ValueError, match="skipped families"):
+        campaign.validate_child(changed)
+
+
+def test_seeds_name_the_rows_of_a_multi_seed_run(campaign):
+    """Add the seed to the aggregate keys only when a run has several."""
+    child = make_child(suite="segmented-sum")
+    row = child["results"][0]
+    assert campaign._case_key(row, [7]) == (
+        "segmented-sum/distribution=many-tiny"
+    )
+    assert campaign._case_key(row, [7, 11]) == (
+        "segmented-sum/distribution=many-tiny/seed=7"
+    )
+    child["methodology"]["seeds"] = [7, 11]
+    with pytest.raises(ValueError, match="declared distribution sequence"):
+        campaign.validate_child(child)
+
+
+def test_padded_skip_reasons_may_differ_among_processes(campaign):
+    """The free memory in a skip reason is not campaign metadata."""
+    children = [make_child(suite="segmented-sum") for _ in range(2)]
+    for index, child in enumerate(children):
+        row = child["results"][0]
+        row["skipped"]["torch_padded"] = f"needs 1 bytes and {index} are free"
+        row["candidate_order"].remove("torch_padded")
+        del row["timings"]["torch_padded"]
+        method = row["timing_method"]
+        candidates = row["candidate_order"]
+        width = len(candidates)
+        method["base_candidate_order"] = list(candidates)
+        method["order_position_counts"] = {
+            name: [
+                sum(
+                    candidates[(position + rounds) % width] == name
+                    for rounds in range(2)
+                )
+                for position in range(width)
+            ]
+            for name in candidates
+        }
+
+    aggregate = campaign.aggregate_children(children)
+
+    assert aggregate["process_count"] == 2
+    del children[1]["results"][0]["skipped"]["torch_padded"]
+    with pytest.raises(ValueError):
+        campaign.aggregate_children(children)
