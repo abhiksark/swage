@@ -32,10 +32,11 @@ _CAPI = f"{_LIBDIR}/libSwagePythonCAPI.so.22.1"
 _SUPPORT = f"{_LIBDIR}/libMLIRPythonSupport-mlir_swage.so"
 _NANOBIND = f"{_LIBDIR}/libnanobind-mlir_swage.so"
 _INFO = {
-    "schema_version": 1,
+    "schema_version": 2,
     "package_version": "0.5.2",
     "source_revision": _REVISION,
     "source_clean": True,
+    "frontend_digest": "c" * 64,
     "llvm_version": "llvmorg-22.1.8",
     "build_type": "Release",
 }
@@ -280,7 +281,7 @@ def test_internal_tag_and_purelib_must_agree(checker, tmp_path):
     [
         b"{not-json}",
         b"null",
-        b'{"schema_version": 1}',
+        b'{"schema_version": 2}',
         json.dumps({**_INFO, "unexpected": "value"}).encode(),
         (json.dumps(_INFO)[:-1] + ', "source_clean": true}').encode(),
     ],
@@ -323,7 +324,8 @@ def test_distribution_metadata_matches_release(
         ("source_revision", "b" * 40, "expected revision"),
         ("source_revision", "A" * 40, "lowercase hex"),
         ("source_clean", 1, "must be a boolean"),
-        ("schema_version", True, "integer 1"),
+        ("schema_version", True, "integer 2"),
+        ("frontend_digest", "C" * 64, "frontend_digest"),
         ("llvm_version", "llvmorg-22.1.7", "llvm_version"),
         ("build_type", "Debug", "build_type"),
         ("package_version", "0.5.1", "package_version"),

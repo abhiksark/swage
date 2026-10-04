@@ -1,32 +1,10 @@
 include(AddMLIRPython)
 
-# Build-tree packages retain checkout identity too. Wheel builds must supply
-# this information explicitly, including when building from an sdist.
-if(NOT SWAGE_WHEEL_BUILD)
-  find_package(Git REQUIRED)
-  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
-    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    OUTPUT_VARIABLE SWAGE_SOURCE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
-    COMMAND_ERROR_IS_FATAL ANY)
-  execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain
-    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    OUTPUT_VARIABLE SWAGE_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE
-    COMMAND_ERROR_IS_FATAL ANY)
-  if(SWAGE_GIT_STATUS STREQUAL "")
-    set(SWAGE_SOURCE_CLEAN true)
-  else()
-    set(SWAGE_SOURCE_CLEAN false)
-  endif()
-endif()
-file(STRINGS "${PROJECT_SOURCE_DIR}/python/swage/__init__.py"
-     SWAGE_VERSION_LINE REGEX "^__version__ = ")
-string(REGEX REPLACE "^__version__ = \"([^\"]+)\"$" "\\1"
-       SWAGE_PACKAGE_VERSION "${SWAGE_VERSION_LINE}")
+# The packaged build record, written with the compiled-in identity below.
 set(SWAGE_PYTHON_ROOT
     "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
-configure_file(mlir_swage/_build_info.json.in
-               "${SWAGE_PYTHON_ROOT}/_build_info.json" @ONLY)
-install(FILES "${SWAGE_PYTHON_ROOT}/_build_info.json"
+set(SWAGE_BUILD_INFO "${SWAGE_PYTHON_ROOT}/_build_info.json")
+install(FILES "${SWAGE_BUILD_INFO}"
         DESTINATION "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}"
         COMPONENT SwagePythonModules)
 
@@ -101,21 +79,34 @@ add_mlir_python_modules(SwagePythonModules
 )
 
 # The extension records the swage version and the source revision it was
-# built from. The header is regenerated on every build, and rewritten only
-# when one of the two changed, so a new commit recompiles one file.
+# built from, and the package records them with the frontend digest in
+# _build_info.json. Both are regenerated on every build and rewritten only
+# when they change, so a new commit recompiles one file. A wheel build has
+# no git checkout and passes the revision it was configured with.
 set(SWAGE_IDENTITY_HEADER
   "${SWAGE_BINARY_DIR}/include/swage/Python/BuildIdentity.h")
+set(SWAGE_IDENTITY_SOURCE_ARGUMENTS)
+if(SWAGE_WHEEL_BUILD)
+  list(APPEND SWAGE_IDENTITY_SOURCE_ARGUMENTS
+    "-DSWAGE_SOURCE_REVISION=${SWAGE_SOURCE_REVISION}"
+    "-DSWAGE_SOURCE_CLEAN=${SWAGE_SOURCE_CLEAN}")
+endif()
 add_custom_target(SwageBuildIdentity
   COMMAND ${CMAKE_COMMAND}
     "-DSWAGE_SOURCE_DIR=${SWAGE_SOURCE_DIR}"
     "-DSWAGE_IDENTITY_HEADER=${SWAGE_IDENTITY_HEADER}"
+    "-DSWAGE_BUILD_INFO=${SWAGE_BUILD_INFO}"
+    "-DSWAGE_LLVM_TAG=${SWAGE_LLVM_TAG}"
+    "-DSWAGE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+    ${SWAGE_IDENTITY_SOURCE_ARGUMENTS}
     -P "${SWAGE_SOURCE_DIR}/cmake/SwageBuildIdentity.cmake"
-  BYPRODUCTS "${SWAGE_IDENTITY_HEADER}"
+  BYPRODUCTS "${SWAGE_IDENTITY_HEADER}" "${SWAGE_BUILD_INFO}"
   COMMENT "Recording the Swage build identity"
   VERBATIM
 )
 add_dependencies(SwagePythonModules.extension._swageDialectsNanobind.dso
   SwageBuildIdentity)
+add_dependencies(SwagePythonModules SwageBuildIdentity)
 
 # The runtime library travels with the bindings. `python -m swage.compile`
 # copies it from this package into every artifact it writes, so a native

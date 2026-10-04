@@ -52,22 +52,32 @@ def load_extension(backend="native"):
 
 
 def validate_build_info(info):
-    """Validate metadata without reflecting its potentially sensitive values."""
+    """Validate metadata without reflecting its potentially sensitive values.
+
+    Schema 2 records the build of the native package: the `swage` version,
+    the source revision (40 hex digits, or null for a build from sources
+    without git), whether the sources were clean, the digest of the Python
+    frontend the build packaged, the LLVM release, and the build type. The
+    compiled-in identity of the extension spells an unknown revision
+    `unknown` and a dirty one with a `-dirty` suffix; this record keeps the
+    plain revision and `source_clean` apart instead.
+    """
     fields = {
         "schema_version",
         "package_version",
         "source_revision",
         "source_clean",
+        "frontend_digest",
         "llvm_version",
         "build_type",
     }
     if not isinstance(info, dict) or set(info) != fields:
         raise ValueError("invalid native build metadata: schema fields")
-    if type(info["schema_version"]) is not int or info["schema_version"] != 1:
+    if type(info["schema_version"]) is not int or info["schema_version"] != 2:
         raise ValueError("invalid native build metadata: schema_version")
     for name, pattern in (
         ("package_version", r"[0-9]+\.[0-9]+\.[0-9]+"),
-        ("source_revision", r"[0-9a-f]{40}"),
+        ("frontend_digest", r"[0-9a-f]{64}"),
         ("llvm_version", r"llvmorg-[0-9]+\.[0-9]+\.[0-9]+"),
         ("build_type", r"Release|RelWithDebInfo|Debug|MinSizeRel"),
     ):
@@ -75,6 +85,12 @@ def validate_build_info(info):
             pattern, info[name]
         ):
             raise ValueError(f"invalid native build metadata: {name}")
+    revision = info["source_revision"]
+    if revision is not None and (
+        not isinstance(revision, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", revision)
+    ):
+        raise ValueError("invalid native build metadata: source_revision")
     if type(info["source_clean"]) is not bool:
         raise ValueError("invalid native build metadata: source_clean")
     return info

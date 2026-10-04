@@ -31,6 +31,7 @@ _BUILD_FIELDS = {
     "package_version",
     "source_revision",
     "source_clean",
+    "frontend_digest",
     "llvm_version",
     "build_type",
 }
@@ -59,10 +60,10 @@ def _build_info(payload, expected_revision, expected_version, allow_dirty):
         raise ValueError(f"malformed build info JSON: {error}") from error
     if not isinstance(info, dict) or set(info) != _BUILD_FIELDS:
         raise ValueError(
-            "build info must have the exact schema_version 1 fields"
+            "build info must have the exact schema_version 2 fields"
         )
-    if type(info["schema_version"]) is not int or info["schema_version"] != 1:
-        raise ValueError("build info schema_version must be integer 1")
+    if type(info["schema_version"]) is not int or info["schema_version"] != 2:
+        raise ValueError("build info schema_version must be integer 2")
     if info["package_version"] != expected_version:
         raise ValueError("build info package_version does not match release")
     revision = info["source_revision"]
@@ -78,6 +79,9 @@ def _build_info(payload, expected_revision, expected_version, allow_dirty):
         raise ValueError("build info source_clean must be a boolean")
     if not info["source_clean"] and not allow_dirty:
         raise ValueError("official wheel requires source_clean=true")
+    digest = info["frontend_digest"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("build info frontend_digest must be 64 lowercase hex")
     if info["llvm_version"] != "llvmorg-22.1.8":
         raise ValueError("build info llvm_version must be llvmorg-22.1.8")
     if info["build_type"] != "Release":
