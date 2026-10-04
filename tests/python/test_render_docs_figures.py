@@ -19,7 +19,9 @@ REQUIRED_LABELS = {
         "gid = program_id(0) * BLOCK + arange(0, BLOCK)",
         "mask = gid < n",
         "masked",
-        "public launch contract",
+        # The geometry is the launch contract of the CUDA backend; the
+        # Native CPU backend calls the kernel on the host without a grid.
+        "public CUDA launch contract",
     ),
     "warp-vs-cta-tiles": (
         "32-thread warp tile",
@@ -71,7 +73,7 @@ REQUIRED_LABELS = {
         "GPU lowering infrastructure",
         "NVPTX emission",
         "current stream",
-        "one launch crosses the domains",
+        "one CUDA launch crosses the domains",
     ),
     "ragged-softmax-phases": (
         "one CTA per segment",
@@ -98,7 +100,7 @@ REQUIRED_LABELS = {
         "miss",
     ),
     "dispatch-path": (
-        "_launch_kernel",
+        "_launch_cuda_kernel",
         "nanobind",
         "dlopen libcuda.so.1",
         "GIL held across the enqueue",
