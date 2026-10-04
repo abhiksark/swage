@@ -327,12 +327,14 @@ does not qualify a release.
 |---|---|---|
 | Cold compile/load/first synchronized CUDA launch | Five fresh child processes, unique empty cache per process, `n=129`, `BLOCK=128` | Median <=250 ms and maximum <=400 ms |
 | Warm host dispatch | `n=129`, `BLOCK=128`; 200 warmups, then 20 batches of 500 launches, synchronize before and after each batch | Median <=15 microseconds/call and p95 <=20 microseconds/call |
-| Large-vector throughput | `n=2^18` and `2^20`, `BLOCK=256`; rotating interleaved CUDA-event batches of 32 launches, 25 warmups, 100 samples against `torch.add(out=...)` | Swage/PyTorch median ratio <=1.85 at `2^18` and <=1.50 at `2^20` |
+| Large-vector throughput | `n=2^18` and `2^20`, `BLOCK=256`; rotating interleaved CUDA-event batches of 32 launches, 25 warmups, 100 samples against `torch.add(out=...)` | Swage/PyTorch median ratio <=1.80 at `2^18` and <=1.50 at `2^20` |
 | Native compiler memory | Linux `/proc/self/status` after PyTorch/tensor setup versus after first compile/launch | RSS increase <=512 MiB |
 
 The `2^18` ceiling was 1.50. The
-[gate calibration record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/fixed-runtime-gate-a6000-sm86.md)
-gives the alternating runs it was set from and the rule;
+[current gate calibration record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/fixed-runtime-gate-a6000-sm86-0ea2a78.md)
+gives the alternating runs it was set from and the rule, and supersedes
+the 1.85 of the
+[first calibration record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/fixed-runtime-gate-a6000-sm86.md);
 [Benchmarking](../reference/benchmarking.md#frozen-evidence-contract)
 summarizes why it moved.
 

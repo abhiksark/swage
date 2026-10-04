@@ -36,13 +36,15 @@ _CONFIG = {
 # Inclusive ceilings of the Swage/PyTorch median ratio, per vector size. At
 # 2**18 elements PyTorch's add takes about 2.9 us on the A6000, less than
 # one Swage launch, so that ratio measures the host cost of a launch. Its
-# ceiling was set from benchmarks/results/fixed-runtime-gate-a6000-sm86.json:
-# the smallest multiple of 0.05 that is at least 5% above the largest ratio
-# of the merged wheel. The earlier ceiling, 1.50, failed there for three
-# reasons: every launch now advances the version counter of its output for
+# ceiling was set from
+# benchmarks/results/fixed-runtime-gate-a6000-sm86-0ea2a78.json: the
+# smallest multiple of 0.05 that is at least 5% above the largest ratio of
+# the wheel of the final launch path. It supersedes the 1.85 of
+# fixed-runtime-gate-a6000-sm86.json, which records why the original 1.50
+# failed: every launch now advances the version counter of its output for
 # autograd correctness, main's launch path grew slower, and the commit that
 # set 1.50 measures at it on that host today.
-_THROUGHPUT_MAXIMUM_RATIO = {1 << 18: 1.85, 1 << 20: 1.50}
+_THROUGHPUT_MAXIMUM_RATIO = {1 << 18: 1.80, 1 << 20: 1.50}
 
 
 def _fixed_vector_add_kernel():
