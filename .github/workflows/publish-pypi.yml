@@ -394,6 +394,25 @@ jobs:
           "$py" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
             --backend cuda --expected-revision "$EXPECTED_REVISION" --require-persistent-hit \
             > "$RELEASE_WORK/evidence/cuda-cache-reuse.json"
+      # The private CPU oracle of the segmented tests runs swage-opt, which
+      # the wheel does not hold; a bindings-off build provides it.
+      - name: Build swage-opt for the CPU oracle
+        run: |
+          pin="$(cat cmake/llvm-version.txt)"
+          llvm="$HOME/.swage/llvm/install-$pin"
+          cmake -G Ninja -S "$GITHUB_WORKSPACE" -B "$RELEASE_WORK/oracle-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLIR_DIR="$llvm/lib/cmake/mlir" \
+            -DLLVM_DIR="$llvm/lib/cmake/llvm" \
+            -DSWAGE_PYTHON_BINDINGS=OFF
+          ninja -C "$RELEASE_WORK/oracle-build" swage-opt
+      - name: Qualify the installed public segmented calls on A6000
+        run: |
+          "$GITHUB_WORKSPACE/scripts/qualify_installed_segments.sh" \
+            "$RELEASE_WORK/venv/bin/python" "$RELEASE_WORK/oracle-build" \
+            "$RELEASE_WORK/segmented-qualification"
+          cp "$RELEASE_WORK/segmented-qualification/segmented-calls.xml" \
+            "$RELEASE_WORK/evidence/"
       - name: Enforce qualified A6000 runtime SLOs
         working-directory: ${{ runner.temp }}
         run: |

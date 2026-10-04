@@ -120,6 +120,23 @@ jobs:
           env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" \
             "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
             --backend cuda --expected-revision "$GITHUB_SHA"
+      # The private CPU oracle of the segmented tests runs swage-opt, which
+      # the wheel does not hold; a bindings-off build provides it.
+      - name: Qualify the installed public segmented calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(cat cmake/llvm-version.txt)"
+          llvm="$HOME/.swage/llvm/install-$pin"
+          cmake -G Ninja -S "$GITHUB_WORKSPACE" -B "$FIXED_WORK/oracle-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLIR_DIR="$llvm/lib/cmake/mlir" \
+            -DLLVM_DIR="$llvm/lib/cmake/llvm" \
+            -DSWAGE_PYTHON_BINDINGS=OFF
+          ninja -C "$FIXED_WORK/oracle-build" swage-opt
+          "$GITHUB_WORKSPACE/scripts/qualify_installed_segments.sh" \
+            "$FIXED_WORK/venv/bin/python" "$FIXED_WORK/oracle-build" \
+            "$FIXED_WORK/segmented-qualification"
       - name: Enforce fixed-runtime A6000 SLOs
         shell: bash
         run: |
