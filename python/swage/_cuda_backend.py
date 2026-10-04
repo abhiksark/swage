@@ -140,18 +140,23 @@ def _memory_cache_limit():
         return _memory_cache_entries
 
 
+def cuda_unavailable():
+    """Return the error for a PyTorch that has no usable CUDA device."""
+    return BackendUnavailableError(
+        "CUDA is unavailable in PyTorch",
+        code="cuda-unavailable",
+        backend="cuda",
+        remediation=(
+            "Install a CUDA-enabled PyTorch build and verify that an "
+            "NVIDIA GPU is accessible to this process."
+        ),
+    )
+
+
 def validate_device(tensors, runtime_names, torch):
     """Require CUDA availability and tensors on the active device."""
     if not torch.cuda.is_available():
-        raise BackendUnavailableError(
-            "CUDA is unavailable in PyTorch",
-            code="cuda-unavailable",
-            backend="cuda",
-            remediation=(
-                "Install a CUDA-enabled PyTorch build and verify that an "
-                "NVIDIA GPU is accessible to this process."
-            ),
-        )
+        raise cuda_unavailable()
     current_device = torch.cuda.current_device()
     for name, tensor in zip(runtime_names, tensors):
         if tensor.device.index != current_device:
@@ -275,7 +280,7 @@ def _compile_native(
     """
     from . import _runtime
 
-    native_swage = _runtime._native_compiler(kernel_name)
+    native_swage = _runtime._native_compiler(kernel_name, "cuda")
     compilers = {
         "fixed": "_compile_ptx",
         "segmented": "_compile_segmented_reduction_ptx",
@@ -311,7 +316,12 @@ def _queue_unload_locked(entry):
         and not entry.unload_queued
     ):
         entry.unload_queued = True
-        _retired_loaded[entry.key] = entry
+        # An older module of the same key may still wait for its last
+        # launch; both stay queued, so neither is forgotten loaded.
+        slot = entry.key
+        if _retired_loaded.get(slot, entry) is not entry:
+            slot = (entry.key, id(entry))
+        _retired_loaded[slot] = entry
 
 
 def _evict_loaded_locked(limit):
@@ -411,8 +421,9 @@ def _poll_deferred(driver, context, *, capturing=False):
                     entry.events.clear()
                     entry.unloaded = True
                     entry.unload_queued = False
-                    if _retired_loaded.get(entry.key) is entry:
-                        _retired_loaded.pop(entry.key)
+                    for slot, queued in tuple(_retired_loaded.items()):
+                        if queued is entry:
+                            del _retired_loaded[slot]
         except RuntimeError as error:
             with _cuda_lock:
                 entry.unload_blocked = True

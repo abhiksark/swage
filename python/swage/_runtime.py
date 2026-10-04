@@ -459,14 +459,15 @@ def _import_torch(backend="cuda"):
     """Return PyTorch, or raise when it is missing or unsupported.
 
     Raises:
-        BackendUnavailableError: PyTorch cannot be imported.
-        RuntimeError: The PyTorch release or one of the methods a launch
-            needs is missing.
+        BackendUnavailableError: PyTorch cannot be imported, or its
+            release or one of the methods a launch needs is missing. An
+            error raised while PyTorch initializes is not unavailability
+            and propagates unchanged.
     """
     global _supported_torch
     try:
         import torch
-    except Exception as error:
+    except (ImportError, OSError) as error:
         raise BackendUnavailableError(
             "Swage launch requires PyTorch",
             code="pytorch-unavailable",
@@ -474,12 +475,12 @@ def _import_torch(backend="cuda"):
             remediation="install 'swage-compiler[pytorch]'",
         ) from error
     if torch is not _supported_torch:
-        _require_supported_torch(torch)
+        _require_supported_torch(torch, backend)
         _supported_torch = torch
     return torch
 
 
-def _require_supported_torch(torch):
+def _require_supported_torch(torch, backend):
     """Reject a PyTorch that a launch cannot use, before any work starts.
 
     A launch enqueues the kernel and then retains each tensor on the stream
@@ -493,21 +494,30 @@ def _require_supported_torch(torch):
     release = re.match(r"(\d+)\.(\d+)", str(found))
     required = ".".join(str(part) for part in _MIN_TORCH)
     if release is None or (int(release[1]), int(release[2])) < _MIN_TORCH:
-        raise RuntimeError(
+        raise BackendUnavailableError(
             f"Swage launch requires PyTorch {required} or newer; "
-            f"found PyTorch {found}"
+            f"found PyTorch {found}",
+            code="pytorch-unsupported",
+            backend=backend,
+            remediation=f"install PyTorch {required} or newer",
         )
     if not callable(getattr(torch.Tensor, "record_stream", None)):
-        raise RuntimeError(
+        raise BackendUnavailableError(
             "Swage launch requires torch.Tensor.record_stream to retain "
-            f"submitted tensors; found PyTorch {found} without it"
+            f"submitted tensors; found PyTorch {found} without it",
+            code="pytorch-unsupported",
+            backend=backend,
+            remediation=f"install PyTorch {required} or newer",
         )
     graph = getattr(getattr(torch, "autograd", None), "graph", None)
     if not callable(getattr(graph, "increment_version", None)):
-        raise RuntimeError(
+        raise BackendUnavailableError(
             "Swage launch requires torch.autograd.graph.increment_version "
             "to mark the output as written; found PyTorch "
-            f"{found} without it"
+            f"{found} without it",
+            code="pytorch-unsupported",
+            backend=backend,
+            remediation=f"install PyTorch {required} or newer",
         )
 
 
@@ -524,6 +534,9 @@ def _validate_launch_call(kernel, arguments, constexprs, grid):
     ):
         raise TypeError("grid must be a one-element tuple of integers")
 
+    # The frontend names a parameter form outside the language precisely,
+    # with its source location, so it is asked before the shape check.
+    kernel._require_plain_parameters()
     parameter_names = [argument.arg for argument in kernel.function.args.args]
     if len(parameter_names) != 5:
         raise ValueError(
@@ -1525,7 +1538,7 @@ def _compile_refusal(kernel_name, reason):
     The public launch and the private segmented runner both raise it, so
     the two refusals read alike and differ only in `reason`.
     """
-    return RuntimeError(
+    return SwageError(
         f"SWAGE_NO_COMPILE=1 refuses to compile kernel '{kernel_name}': "
         f"{reason}"
     )
@@ -1806,7 +1819,7 @@ def _compile_cached(
         return artifact
 
 
-def _native_compiler(kernel_name):
+def _native_compiler(kernel_name, backend):
     """Return the native `swage` bindings for a compile of `kernel_name`.
 
     Raises:
@@ -1825,7 +1838,7 @@ def _native_compiler(kernel_name):
             "which the swage-compiler wheel does not include; kernel "
             f"'{kernel_name}' was not compiled",
             code="native-unavailable",
-            backend="native",
+            backend=backend,
             remediation=f"see {_INSTALLATION} for the native build",
         ) from error
 

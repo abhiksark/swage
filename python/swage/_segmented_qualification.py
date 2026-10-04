@@ -238,6 +238,8 @@ def launch_gpu(values, offsets, output, kind, block_size=None):
             validate_offsets=_validation._validate_offsets,
             block_size=block_size,
         )
+    # An unknown kind is refused also for a batch without segments.
+    module_text = _programs._semantic_module(kind, element)
     value_count, segment_count, _ = _validation._validate_shapes(
         values, offsets, output, _validation._validate_offsets, element=element
     )
@@ -245,7 +247,6 @@ def launch_gpu(values, offsets, output, kind, block_size=None):
     if segment_count == 0:
         return None
 
-    module_text = _programs._semantic_module(kind, element)
     kernel = _execution._compile_once(
         _native_bindings()._compile_segmented_reduction_ptx,
         module_text,

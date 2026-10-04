@@ -13,6 +13,7 @@ from . import _segmented_programs as _programs
 from . import _segmented_qualification as _qualification
 from . import _segmented_runtime as _execution
 from . import _segmented_validation as _validation
+from ._errors import BackendUnavailableError
 from ._frontend import _INSTALLATION
 
 _KINDS = ("sum", "max", "min", "mean")
@@ -375,10 +376,13 @@ def _require_bindings(call):
             swage,
         )
     except Exception as error:
-        raise RuntimeError(
+        raise BackendUnavailableError(
             f"Swage {call}() requires the build-tree mlir_swage bindings, "
             "which the swage-compiler wheel does not include; nothing was "
-            f"launched. See {_INSTALLATION} for the native build"
+            "launched",
+            code="native-unavailable",
+            backend="native",
+            remediation=f"see {_INSTALLATION} for the native build",
         ) from error
 
 
@@ -393,10 +397,15 @@ def _require_numpy(call):
     try:
         import numpy  # noqa: F401
     except ImportError as error:
-        raise RuntimeError(
+        raise BackendUnavailableError(
             f"Swage {call}() requires numpy, which cannot be imported; "
-            "nothing was launched. Install 'swage-compiler[pytorch]', which "
-            f"declares it. See {_INSTALLATION} for the requirements"
+            "nothing was launched",
+            code="numpy-unavailable",
+            backend="cuda",
+            remediation=(
+                "install 'swage-compiler[pytorch]', which declares it; see "
+                f"{_INSTALLATION} for the requirements"
+            ),
         ) from error
 
 

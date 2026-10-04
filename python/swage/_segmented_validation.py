@@ -7,7 +7,7 @@ and the offsets version it was prepared with and compares both before each
 enqueue.
 """
 
-from . import _runtime
+from . import _cuda_backend, _runtime
 from . import _segmented_programs as _programs
 from . import _segmented_runtime as _execution
 
@@ -255,7 +255,7 @@ def _validate_shapes(
     if not require_cuda:
         return value_count, segment_count, host_offsets
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable in PyTorch")
+        raise _cuda_backend.cuda_unavailable()
     current_device = torch.cuda.current_device()
     for name, tensor in (
         ("values", values),
