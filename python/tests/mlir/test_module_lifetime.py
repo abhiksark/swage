@@ -15,7 +15,9 @@ import gc
 import itertools
 import threading
 import warnings
+import weakref
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -239,6 +241,57 @@ def _retired_modules():
     return sorted(
         entry.module for entry in _cuda_backend._retired_loaded.values()
     )
+
+
+def test_native_fixed_launcher_collects_a_stream_reference_cycle(fake_cuda):
+    """Collect the native launcher and every retained stream reference."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    class Stream:
+        cuda_stream = 0
+        device = torch.device("cuda", 0)
+
+    def query_cuda(*_arguments):
+        pytest.fail("stream lifetime construction queried CUDA")
+
+    torch_context = SimpleNamespace(
+        Tensor=torch.Tensor,
+        cuda=torch.cuda,
+        autograd=torch.autograd,
+        _C=SimpleNamespace(
+            _cuda_getDevice=query_cuda,
+            _cuda_getCurrentRawStream=query_cuda,
+            _cuda_isCurrentStreamCapturing=query_cuda,
+            _is_torch_function_mode_enabled=(
+                torch._C._is_torch_function_mode_enabled
+            ),
+        ),
+    )
+    lease = _load(fake_cuda, "stream-cycle")
+    artifact = SimpleNamespace(
+        key="stream-cycle",
+        contract=_abi.parse_kernel_contract(_contract_json()),
+    )
+    stream = Stream()
+    launcher = native_swage._FixedCUDALaunch(
+        weakref.ref(lease.entry),
+        artifact,
+        add_kernel,
+        torch_context,
+        stream,
+        _runtime,
+        _cuda_backend,
+        torch.float32,
+    )
+    stream.launcher = launcher
+    references = (weakref.ref(launcher), weakref.ref(stream))
+    del launcher, stream
+    gc.collect()
+
+    assert all(reference() is None for reference in references)
+    assert fake_cuda.calls("cuLaunchKernel") == []
 
 
 class _ForbiddenLock:

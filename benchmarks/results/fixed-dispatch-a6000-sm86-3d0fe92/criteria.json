@@ -1,0 +1,38 @@
+{
+  "status": "predeclared before candidate timing",
+  "baseline_revision": "3d0fe92c1046c7e58a0bd074f3cfa220077eb9dc",
+  "sequence": [
+    "characterize current dispatch and ownership",
+    "evaluate prepared callable binding",
+    "evaluate direct method calls independently",
+    "evaluate raw slot reads independently",
+    "qualify retained combination with frozen SLO"
+  ],
+  "comparison": {
+    "pairs_per_candidate": 20,
+    "independent_processes": true,
+    "order": "alternate baseline/candidate order within pairs",
+    "hardware": "NVIDIA RTX A6000 / sm_86",
+    "input": "existing host-submitted fixed vector-add benchmark, unchanged thresholds and sample collection",
+    "retain_criterion": "A paired median warm-launch improvement of at least 5 percent, with a 95 percent paired-bootstrap confidence interval wholly above zero, and no material p95, cold-start, throughput-ratio or RSS regression. Evaluate each candidate alone; reject candidates that change characterized behavior or fail qualification.",
+    "p95_material_regression_percent": 5,
+    "graph_timing_role": "supplemental only",
+    "statistic": "median of paired relative warm gains, deterministic 20000 paired bootstrap resamples",
+    "other_material_regression_percent": 5,
+    "all_records_required": "all 40 records correct, identity-valid, qualified, and within unchanged frozen gates; failed records retained"
+  },
+  "frozen_slo": {
+    "cold_median_ms": 250,
+    "cold_max_ms": 400,
+    "warm_median_us": 15,
+    "warm_p95_us": 20,
+    "ratio_262144": 1.8,
+    "ratio_1048576": 1.5,
+    "rss_mib": 512
+  },
+  "ordinary_lookup": "characterize separately from native captured record_stream descriptors",
+  "old_capture_query_hunk": "reject as redundant and less conservative than PR74",
+  "artifacts": "clean wheels built out of tree, installed and measured outside checkout; no historical record overwrite",
+  "cpython": "actual CUDA evidence required on every enabled fast-path minor; otherwise preserve existing path",
+  "settings_changes": false
+}

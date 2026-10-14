@@ -10,6 +10,11 @@ semantic versioning (`0.x`; anything may change).
 
 ### Added
 
+- Fixed CUDA dispatch characterization for captured allocator descriptors,
+  mutable lookup, deleted residency slots, pre-enqueue reentrancy and stream
+  reference cycles. Retained A6000 paired evidence rejects the method and
+  slot shortcuts below the predeclared gain threshold; dispatch is unchanged.
+
 - Installed-wheel `python -m swage.bench vector-add --output PATH [--enforce]`
   entry point, with dependency-free help and the unchanged frozen float32
   vector-add schema, correctness checks, and inclusive A6000 gates.

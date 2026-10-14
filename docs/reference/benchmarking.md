@@ -122,6 +122,21 @@ gates. Historical addition results do not qualify multiplication or
 low-precision performance. See [Verification](../internals/verification.md)
 for the complete release boundary and retained evidence.
 
+## Dispatch proposal qualification
+
+The frozen workload also measures independent dispatch proposals against a
+clean installed baseline. The
+[2026-10-14 qualification record](https://github.com/abhiksark/swage/blob/main/benchmarks/results/fixed-dispatch-a6000-sm86-3d0fe92.md)
+retains 20 alternating process pairs for each of the method and entry-slot
+shortcuts, including failed cold-start gates. Their paired warm gains were
+1.80% and 0.90%, below the predeclared 5% threshold, so both were rejected.
+The production dispatch path and benchmark thresholds remain unchanged.
+
+The record preserves the candidate patches and all raw distributions. Its
+characterization cases distinguish native captured allocator descriptors
+from ordinary Python lookup. These local A6000 results do not qualify a
+release or other Python ABIs and devices.
+
 ## Source-tree comparison harness
 
 The source tree also holds a research comparison of the private Swage paths

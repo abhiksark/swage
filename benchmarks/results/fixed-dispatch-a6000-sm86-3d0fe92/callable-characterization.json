@@ -1,0 +1,1 @@
+{"launcher_type": "<class 'mlir_swage._mlir_libs._swageDialectsNanobind.swage._FixedCUDALaunch'>", "source": "installed baseline qualification", "ordinary_lookup_refuses": true, "ordinary_output_unchanged": true, "ordinary_version_unchanged": true, "bound_launch_accepted": true, "bound_output_correct": true, "bound_version_step": 1, "override_calls": 1, "class_mutable": true}

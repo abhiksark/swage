@@ -1,0 +1,232 @@
+diff --git a/python/SwageExtensionNanobind.cpp b/python/SwageExtensionNanobind.cpp
+index 15ff829..1fb9e65 100644
+--- a/python/SwageExtensionNanobind.cpp
++++ b/python/SwageExtensionNanobind.cpp
+@@ -27,6 +27,8 @@
+ #include "llvm/Support/Error.h"
+ #include "llvm/Support/JSON.h"
+ 
++#include <structmember.h>
++
+ #include <array>
+ #include <condition_variable>
+ #include <cstdint>
+@@ -620,6 +622,34 @@ public:
+     // shortcut rather than silently accepting different lookup semantics.
+     entryType = nb::borrow<nb::object>(
+         reinterpret_cast<PyObject *>(Py_TYPE(entry.ptr())));
++#if PY_VERSION_HEX >= 0x030D0000 && PY_VERSION_HEX < 0x030E0000 &&             \
++    !defined(Py_GIL_DISABLED)
++    // Only the qualified regular-GIL layout may bypass generic lookup.
++    // Descriptors own member definitions; unsupported layouts keep lookup.
++    ordinaryEntrySlots = true;
++    for (Attribute name : {EntryDriver, CacheResident, Unloading, Unloaded,
++                           UnloadBlocked, Context, Function, PendingStreams}) {
++      size_t index = name - EntryDriver;
++      nb::object &descriptor = entryDescriptors[index];
++      descriptor = attribute(entryType, name);
++      if (Py_TYPE(descriptor.ptr()) != &PyMemberDescr_Type ||
++          PyDescr_TYPE(descriptor.ptr()) != Py_TYPE(entry.ptr())) {
++        ordinaryEntrySlots = false;
++        continue;
++      }
++      PyMemberDef *definition =
++          reinterpret_cast<PyMemberDescrObject *>(descriptor.ptr())->d_member;
++      if (definition->type != T_OBJECT_EX || definition->flags != 0 ||
++          definition->offset < 0 ||
++          definition->offset % alignof(PyObject *) != 0 ||
++          definition->offset > Py_TYPE(entry.ptr())->tp_basicsize -
++                                   Py_ssize_t(sizeof(PyObject *))) {
++        ordinaryEntrySlots = false;
++        continue;
++      }
++      entryMembers[index] = definition;
++    }
++#endif
+     if (Py_TYPE(entry.ptr())->tp_getattro == PyObject_GenericGetAttr &&
+         Py_TYPE(entryType.ptr()) == &PyType_Type)
+       entryTypeVersion = Py_TYPE(entry.ptr())->tp_version_tag;
+@@ -755,13 +785,13 @@ public:
+               tensorTypeVersion ||
+           !moduleState(runtime, cudaBackend, artifactCache, loadedCache,
+                        driver) ||
+-          !attribute(entry, EntryDriver).is(driver) ||
+-          !attribute(entry, Context).is(contextValue) ||
+-          !attribute(entry, Function).is(functionValue) ||
+-          !attribute(entry, CacheResident).is(nb::handle(Py_True)) ||
+-          !attribute(entry, Unloading).is(nb::handle(Py_False)) ||
+-          !attribute(entry, Unloaded).is(nb::handle(Py_False)) ||
+-          !attribute(entry, UnloadBlocked).is(nb::handle(Py_False)) ||
++          !entryAttribute(entry, EntryDriver).is(driver) ||
++          !entryAttribute(entry, Context).is(contextValue) ||
++          !entryAttribute(entry, Function).is(functionValue) ||
++          !entryAttribute(entry, CacheResident).is(nb::handle(Py_True)) ||
++          !entryAttribute(entry, Unloading).is(nb::handle(Py_False)) ||
++          !entryAttribute(entry, Unloaded).is(nb::handle(Py_False)) ||
++          !entryAttribute(entry, UnloadBlocked).is(nb::handle(Py_False)) ||
+           dictItem(artifactCache, artifactKey) != artifact.ptr() ||
+           dictItem(loadedCache, loadedKey) != entry.ptr())
+         return false;
+@@ -777,7 +807,7 @@ public:
+       // Only the context-owned legacy stream is safe to fence later.
+       // Externally owned streams may be destroyed immediately after use.
+       if (!rawStream) {
+-        nb::object pendingStreams = attribute(entry, PendingStreams);
++        nb::object pendingStreams = entryAttribute(entry, PendingStreams);
+         if (!PySet_CheckExact(pendingStreams.ptr()))
+           return false;
+         if (PySet_Add(pendingStreams.ptr(), rawStreamValue.ptr()) < 0)
+@@ -881,6 +911,8 @@ public:
+       Py_VISIT(parameter.ptr());
+     for (const nb::object &descriptor : value.tensorDescriptors)
+       Py_VISIT(descriptor.ptr());
++    for (const nb::object &descriptor : value.entryDescriptors)
++      Py_VISIT(descriptor.ptr());
+     for (const CachedPythonLock *lock :
+          {&value.artifactLock, &value.cudaLock}) {
+       int result = lock->traverse(visit, arg);
+@@ -943,6 +975,17 @@ private:
+   nb::object attribute(nb::handle object, Attribute name) const {
+     return checkedObject(PyObject_GetAttr(object.ptr(), names[name].ptr()));
+   }
++  nb::object entryAttribute(nb::handle entry, Attribute name) const {
++    if (!ordinaryEntrySlots)
++      return attribute(entry, name);
++    // Call only after the live type/version check, with the GIL held.
++    char *address = reinterpret_cast<char *>(entry.ptr()) +
++                    entryMembers[name - EntryDriver]->offset;
++    PyObject *value = *reinterpret_cast<PyObject **>(address);
++    // Preserve generic lookup's deleted-slot exception and own every value
++    // through a possible reentrant set insertion or reference decrement.
++    return value ? nb::borrow<nb::object>(value) : attribute(entry, name);
++  }
+   nb::object tensorProperty(nb::handle tensor, Attribute name) const {
+     PyGetSetDef *definition = tensorGetters[name - IsCUDA];
+     return checkedObject(definition->get(tensor.ptr(), definition->closure));
+@@ -997,6 +1040,9 @@ private:
+   std::array<nb::object, AttributeCount> names;
+   std::array<nb::object, 5> parameters;
+   nb::object entryType;
++  std::array<nb::object, PendingStreams - EntryDriver + 1> entryDescriptors;
++  std::array<PyMemberDef *, PendingStreams - EntryDriver + 1> entryMembers{};
++  bool ordinaryEntrySlots = false;
+   uint32_t entryTypeVersion = 0, tensorTypeVersion = 0;
+   nb::object entryRef, artifact, runtimeRef, cudaBackendRef;
+   nb::object artifactCacheRef, loadedCacheRef, driverRef, identity, stream;
+diff --git a/python/tests/mlir/test_runtime.py b/python/tests/mlir/test_runtime.py
+index 4bd21fe..4890b0e 100644
+--- a/python/tests/mlir/test_runtime.py
++++ b/python/tests/mlir/test_runtime.py
+@@ -253,6 +253,112 @@ def _count_python_launches(monkeypatch):
+     return calls
+ 
+ 
++@pytest.mark.parametrize(
++    "name",
++    [
++        "driver",
++        "context",
++        "function",
++        "cache_resident",
++        "unloading",
++        "unloaded",
++        "unload_blocked",
++        "pending_streams",
++    ],
++)
++def test_native_launch_preserves_deleted_entry_slot_error(monkeypatch, name):
++    """Deleted object slots raise before enqueue and leave output untouched."""
++    from swage import _cuda_backend
++
++    kernel = sw.jit(add_kernel.__wrapped__)
++    x = torch.ones(129, device="cuda")
++    y = torch.ones_like(x)
++    output = torch.zeros_like(x)
++    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
++        kernel, x, y, output
++    )
++    assert fast_launch is not None
++    entry = next(reversed(_cuda_backend._loaded_functions.values()))
++    output.fill_(-777.0)
++    version = output._version
++    with monkeypatch.context() as patch:
++        patch.delattr(entry, name)
++        with pytest.raises(AttributeError, match=name):
++            fast_launch(arguments, constexprs, grid)
++    torch.cuda.synchronize()
++    assert torch.all(output == -777.0)
++    assert output._version == version
++
++
++def test_native_launch_declines_replaced_entry_descriptor(monkeypatch):
++    """A replaced descriptor retains ordinary lookup's exception identity."""
++    from swage import _cuda_backend
++
++    kernel = sw.jit(add_kernel.__wrapped__)
++    x = torch.ones(129, device="cuda")
++    y = torch.ones_like(x)
++    output = torch.zeros_like(x)
++    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
++        kernel, x, y, output
++    )
++    primary = RuntimeError("caller rejects entry function")
++
++    def reject_function(entry):
++        raise primary
++
++    output.fill_(-777.0)
++    version = output._version
++    with monkeypatch.context() as patch:
++        patch.setattr(
++            _cuda_backend._LoadedModule, "function", property(reject_function)
++        )
++        assert fast_launch(arguments, constexprs, grid) is False
++        assert output._version == version
++        with pytest.raises(RuntimeError) as caught:
++            kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
++        assert caught.value is primary
++    torch.cuda.synchronize()
++    assert torch.all(output == -777.0)
++    assert output._version == version + 1
++
++
++def test_native_launch_rechecks_entry_after_stream_query(monkeypatch):
++    """Pre-enqueue reentrancy retains the deleted-slot exception."""
++    from swage import _cuda_backend
++
++    original = torch._C._cuda_getCurrentRawStream
++    active = False
++    entry = None
++
++    def query_stream(device):
++        if active:
++            del entry.function
++        return original(device)
++
++    monkeypatch.setattr(torch._C, "_cuda_getCurrentRawStream", query_stream)
++    kernel = sw.jit(add_kernel.__wrapped__)
++    x = torch.ones(129, device="cuda")
++    y = torch.ones_like(x)
++    output = torch.zeros_like(x)
++    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
++        kernel, x, y, output
++    )
++    entry = next(reversed(_cuda_backend._loaded_functions.values()))
++    function = entry.function
++    output.fill_(-777.0)
++    version = output._version
++    active = True
++    try:
++        with pytest.raises(AttributeError, match="function"):
++            fast_launch(arguments, constexprs, grid)
++    finally:
++        active = False
++        entry.function = function
++    torch.cuda.synchronize()
++    assert torch.all(output == -777.0)
++    assert output._version == version
++
++
+ @pytest.mark.parametrize("failure", ["allocator", "version", "both"])
+ def test_native_launch_marks_output_after_allocator_recording_error(
+     monkeypatch, failure,
