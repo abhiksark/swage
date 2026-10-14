@@ -46,8 +46,13 @@ surface this record anticipated:
 - No record has added `packed_warp`, queues, or dependencies to the
   dialect.
 
-The `--swage-to-plan` conversion adds a private companion function that
-holds the classification operation. No lowering consumes `swage_plan` IR:
-every GPU kernel is still lowered directly from `swage`. Host
-materialization reads the limits recorded on the classification operation,
-and the host classifier and the private runtime apply the schedule.
+Until [ADR-0020](ADR-0020-planned-per-function-lowering.md), the
+`--swage-to-plan` conversion added a private companion function that held
+the classification operation, and no lowering consumed `swage_plan` IR.
+ADR-0020 made `swage_plan` a pipeline stage and removed the companion and
+the classification operation. `--swage-to-plan` now replaces each segment
+function by plan functions, one per schedule, with five task operations;
+`--swage-plan-to-gpu` lowers every segmented GPU kernel from them, and
+`--swage-plan-to-scf` lowers the sequential CPU oracle. The decision of
+this record stands: the plan dialect carries the schedule, and the
+semantic dialect stays free of it.

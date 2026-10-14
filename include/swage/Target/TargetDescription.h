@@ -88,6 +88,20 @@ struct TargetDescription {
   constexpr int32_t slotsPerBlock(int32_t threads) const {
     return threads / subgroupWidth;
   }
+
+  /// The columns one group of the row-stripe tile covers for rank-two
+  /// values of `features` columns: the smallest power of two that is at
+  /// least `features`, capped at the subgroup width, and 1 for `features`
+  /// of 1 or less. A power of two that divides the subgroup width is what
+  /// lets an XOR shuffle pair the lanes of one column only. The kernels
+  /// compute it from the feature count with the same rule, and so does the
+  /// host that sizes their launch.
+  constexpr int32_t columnGroupWidth(int64_t features) const {
+    int32_t width = 1;
+    while (width < subgroupWidth && width < features)
+      width <<= 1;
+    return width;
+  }
 };
 
 /// The description of the one target Swage compiles for.

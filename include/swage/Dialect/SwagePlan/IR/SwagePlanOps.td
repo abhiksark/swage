@@ -96,8 +96,13 @@ def SwagePlan_TasksOp
     `i + block_threads`, and so on, one after the other. Each thread reduces
     its columns alone and stores its own results, so no thread combines
     with another and a thread holds one scalar per reduction, whatever the
-    number of columns. The policy takes no `ids`. `policy<sequential>`
-    visits the columns of each segment in order.
+    number of columns. The policy takes no `ids`. `policy<cta>` over
+    rank-two values is the row-stripe tile, with or without `ids`: a block
+    runs one task and one group of adjacent columns at a time, its threads
+    split into row stripes of each column of the group, and the stripes of
+    one column combine across the block, so a thread still holds one scalar
+    per reduction. `policy<sequential>` visits the columns of each segment
+    in order. `policy<warp>` takes rank-one values only.
 
     Example:
 
@@ -163,6 +168,14 @@ def SwagePlan_PartialTasksOp
     Every bound the kernel needs is an operand: a loaded range is clamped to
     `value_count`, and a task index is compared with `partial_count`.
 
+    With `feature_count`, the values are rank-two rows of `feature_count`
+    columns, a range record names rows, and `scratch` holds one row of
+    `feature_count` partial results per task: the region runs once per
+    task and column, and its scalar is stored at `scratch[t, c]`. The
+    kernel is the row-stripe tile: a block runs one task and one group of
+    adjacent columns at a time, and the row stripes of one column combine
+    across the block.
+
     Example:
 
     ```mlir
@@ -179,17 +192,19 @@ def SwagePlan_PartialTasksOp
     ```
   }];
   let arguments = (ins
-    Arg<SwagePlan_Buffer, "chunk values", [MemRead]>:$values,
+    Arg<SwagePlan_RowBuffer, "chunk values", [MemRead]>:$values,
     AnySignlessInteger:$value_count,
     Arg<SwagePlan_WordBuffer, "one range record per task", [MemRead]>:$ranges,
     AnySignlessInteger:$partial_count,
-    Arg<SwagePlan_Buffer, "one scalar per task", [MemWrite]>:$scratch);
+    Arg<SwagePlan_RowBuffer, "one scalar per task", [MemWrite]>:$scratch,
+    Optional<AnySignlessInteger>:$feature_count);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     `values` `(` $values `:` type($values) `)`
     `value_count` `(` $value_count `:` type($value_count) `)`
     `ranges` `(` $ranges `:` type($ranges) `)`
     `partial_count` `(` $partial_count `:` type($partial_count) `)`
+    (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
     `into` `(` $scratch `:` type($scratch) `)`
     attr-dict-with-keyword $body
   }];
@@ -198,7 +213,8 @@ def SwagePlan_PartialTasksOp
 }
 
 def SwagePlan_MergeTasksOp
-    : SwagePlan_Op<"merge_tasks", [SingleBlock, RecursiveMemoryEffects]> {
+    : SwagePlan_Op<"merge_tasks", [AttrSizedOperandSegments, SingleBlock,
+                                   RecursiveMemoryEffects]> {
   let summary = "Reduce the partial results of one split segment per task";
   let description = [{
     The body of the second stage of a split reduction. Task `t` is the block
@@ -231,6 +247,13 @@ def SwagePlan_MergeTasksOp
     comparison stores nothing. The two range records of an extent are
     addressed through the clamped range of partials.
 
+    With `feature_count`, `scratch` holds one row of `feature_count`
+    partial results per partial task and `output` one row per segment: the
+    region runs once per task and column over the rows of scratch the
+    record names, and its scalar is stored at `output[segment, c]`. A range
+    record names rows, so an extent is a number of rows. The kernel is the
+    row-stripe tile, as for `swage_plan.partial_tasks`.
+
     Example:
 
     ```mlir
@@ -248,14 +271,16 @@ def SwagePlan_MergeTasksOp
     ```
   }];
   let arguments = (ins
-    Arg<SwagePlan_Buffer, "partial results", [MemRead]>:$scratch,
+    Arg<SwagePlan_RowBuffer, "partial results", [MemRead]>:$scratch,
     AnySignlessInteger:$partial_count,
     Arg<SwagePlan_WordBuffer, "one merge record per task", [MemRead]>:$merges,
     AnySignlessInteger:$merge_count,
     AnySignlessInteger:$segment_count,
-    Arg<SwagePlan_Buffer, "one scalar per split segment", [MemWrite]>:$output,
+    Arg<SwagePlan_RowBuffer, "one scalar per split segment",
+        [MemWrite]>:$output,
     Arg<Optional<SwagePlan_WordBuffer>, "one range record per partial task",
-        [MemRead]>:$ranges);
+        [MemRead]>:$ranges,
+    Optional<AnySignlessInteger>:$feature_count);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     `scratch` `(` $scratch `:` type($scratch) `)`
@@ -263,6 +288,7 @@ def SwagePlan_MergeTasksOp
     `merges` `(` $merges `:` type($merges) `)`
     `merge_count` `(` $merge_count `:` type($merge_count) `)`
     `segment_count` `(` $segment_count `:` type($segment_count) `)`
+    (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
     (`ranges` `(` $ranges^ `:` type($ranges) `)`)?
     `into` `(` $output `:` type($output) `)`
     attr-dict-with-keyword $body

@@ -68,14 +68,20 @@ reduced or normalized per column (a reduction of `[N, D]` values returns
 than `2**31` rows and fewer than `2**31` segments. They share these limits:
 
 - They run on the current CUDA device only.
-- They record no gradient: a tensor that requires grad is refused.
+- They record a gradient for values that require grad, including second
+  derivatives; `out=` is refused while a gradient is recorded.
 - They are refused under CUDA graph capture.
-- They validate and classify the offsets on the host at every call, so with
-  offsets that change on every call a reduction is slower than
-  `torch.segment_reduce`. The `pytorch` extra declares `numpy` for this.
+- They validate and classify the offsets on the host at every call. The
+  `pytorch` extra declares `numpy` for this.
 - An empty segment gives the identity of its kind: a sum of `0`, a maximum
   of negative infinity, a minimum of positive infinity, and a mean of NaN.
 
+With offsets that change on every call, the committed record at `2cf88ae`
+on one RTX A6000 finds a reduction slower than `torch.segment_reduce` on
+rank-one values and on `[N, D]` values whose segments have at most 32 rows,
+and faster on most `[N, D]` rows with longer segments;
+[Benchmarks](docs/internals/benchmarks.md#public-segment_reduce-calls-at-2cf88ae)
+reports it beside the older record at `c6099ec`.
 [Segmented Calls](docs/user-guide/segmented-calls.md) states the contract
 and the cost, and
 [Running Without the Compiler](docs/user-guide/deployment.md) states what an

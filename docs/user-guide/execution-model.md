@@ -51,9 +51,12 @@ defaults, derive:
 - one direct CTA task for a segment from 33 through 4096 elements;
 - ordered partial CTA tasks plus one merge CTA task for a longer segment.
 
-These three tasks derive from segments of scalars. Rows of features have
-one more shape and no derivation: one block per segment, in which each
-thread reduces one column in row order, whatever the length of the segment.
+These three tasks derive from segments of scalars. Rows of features
+derive the same three from their row counts, with limits divided by the
+column-group width `W`, the smallest power of two that is at least the
+feature count, capped at 32. Both direct tasks then run on one kernel, in
+which a block takes a group of `W` columns of one segment with its threads
+split into stripes of rows.
 [Segmented Calls](segmented-calls.md#rows-of-features) states its costs.
 
 The thresholds are planning limits that the private helpers can change

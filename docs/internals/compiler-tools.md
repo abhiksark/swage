@@ -93,7 +93,9 @@ A kernel schedule replaces a segment function by a `gpu.module` named
 function, the planner requires that nothing in the module refers to the
 function, that `<kernel>_module` is not defined, and, for a split stage,
 that `<kernel>` is not defined. The conversion applies the same rules to
-every plan function, including one written by hand. The sequential schedule plans and lowers a function in
+every plan function, including one written by hand and one in a nested
+module, whose kernel module is created beside it in that module. The
+sequential schedule plans and lowers a function in
 place, so a function it lowers may have callers. `--swage-fixed-block-to-gpu`
 applies the two rules to its one kernel function.
 

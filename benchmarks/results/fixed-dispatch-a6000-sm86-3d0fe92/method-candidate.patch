@@ -1,0 +1,248 @@
+diff --git a/python/SwageExtensionNanobind.cpp b/python/SwageExtensionNanobind.cpp
+index 15ff829..7619805 100644
+--- a/python/SwageExtensionNanobind.cpp
++++ b/python/SwageExtensionNanobind.cpp
+@@ -411,6 +411,23 @@ PyCFunction noArgsTensorMethod(nb::handle method, PyTypeObject *tensorType) {
+   return definition->ml_flags == METH_NOARGS ? definition->ml_meth : nullptr;
+ }
+ 
++#if PY_VERSION_HEX >= 0x030D0000 && PY_VERSION_HEX < 0x030E0000 &&             \
++    !defined(Py_GIL_DISABLED)
++PyCFunctionWithKeywords keywordTensorMethod(nb::handle method,
++                                            PyTypeObject *tensorType) {
++  if (Py_TYPE(method.ptr()) != &PyMethodDescr_Type ||
++      PyDescr_TYPE(method.ptr()) != tensorType->tp_base)
++    return nullptr;
++  PyMethodDef *definition =
++      reinterpret_cast<PyMethodDescrObject *>(method.ptr())->d_method;
++  if (definition->ml_flags != (METH_VARARGS | METH_KEYWORDS))
++    return nullptr;
++  // CPython stores all method signatures through the generic ml_meth type.
++  return reinterpret_cast<PyCFunctionWithKeywords>(
++      reinterpret_cast<void (*)()>(definition->ml_meth));
++}
++#endif
++
+ bool hasTensorInstanceState(PyObject *tensor) {
+ #if PY_VERSION_HEX >= 0x030D0000
+   if (Py_TYPE(tensor)->tp_flags & Py_TPFLAGS_MANAGED_DICT) {
+@@ -587,6 +604,18 @@ public:
+     conjugateMethod = noArgsTensorMethod(isConj, tensorClass);
+     deviceMethod = noArgsTensorMethod(getDevice, tensorClass);
+     pointerMethod = noArgsTensorMethod(dataPtr, tensorClass);
++#if PY_VERSION_HEX >= 0x030D0000 && PY_VERSION_HEX < 0x030E0000 &&             \
++    !defined(Py_GIL_DISABLED)
++    // Limit this keyword ABI to regular-GIL CPython 3.13.
++    // Retained descriptors own the method definitions; tuples contain no
++    // tensor metadata or pointers. Other signatures keep the native calls.
++    contiguousMethod = keywordTensorMethod(isContiguous, tensorClass);
++    recordStreamMethod = keywordTensorMethod(recordStream, tensorClass);
++    if (contiguousMethod)
++      emptyArguments = checkedObject(PyTuple_New(0));
++    if (recordStreamMethod)
++      streamArguments = nb::make_tuple(this->stream);
++#endif
+     ordinaryMethods &= numelMethod && negativeMethod && conjugateMethod &&
+                        deviceMethod && pointerMethod;
+     for (Attribute name : {IsCUDA, Dtype, NDim, RequiresGrad}) {
+@@ -678,7 +707,10 @@ public:
+           !tensorProperty(tensor, RequiresGrad).is(nb::handle(Py_False)) ||
+           !tensorProperty(tensor, Dtype).is(elementDtype) ||
+           nb::cast<int32_t>(tensorProperty(tensor, NDim)) != 1 ||
+-          !callOne(isContiguous, tensor).is(nb::handle(Py_True)) ||
++          !(contiguousMethod ? checkedObject(contiguousMethod(
++                                   tensor.ptr(), emptyArguments.ptr(), nullptr))
++                             : callOne(isContiguous, tensor))
++               .is(nb::handle(Py_True)) ||
+           !checkedObject(negativeMethod(tensor.ptr(), nullptr))
+                .is(nb::handle(Py_False)) ||
+           !checkedObject(conjugateMethod(tensor.ptr(), nullptr))
+@@ -813,7 +845,11 @@ public:
+     // attempt all three allocator records if any one record itself fails.
+     for (const nb::object &tensor : tensors) {
+       try {
+-        callTwo(recordStream, tensor, stream);
++        if (recordStreamMethod)
++          checkedObject(
++              recordStreamMethod(tensor.ptr(), streamArguments.ptr(), nullptr));
++        else
++          callTwo(recordStream, tensor, stream);
+       } catch (...) {
+         if (!failure)
+           failure = std::current_exception();
+@@ -875,6 +911,8 @@ public:
+           value.deviceValue.ptr(),     value.torchFunctionMode.ptr(),
+           value.incrementVersion.ptr()})
+       Py_VISIT(reference);
++    Py_VISIT(value.emptyArguments.ptr());
++    Py_VISIT(value.streamArguments.ptr());
+     for (const nb::object &name : value.names)
+       Py_VISIT(name.ptr());
+     for (const nb::object &parameter : value.parameters)
+@@ -1002,11 +1040,14 @@ private:
+   nb::object artifactCacheRef, loadedCacheRef, driverRef, identity, stream;
+   nb::object tensorType, elementDtype, numel, isContiguous, isNeg, isConj;
+   nb::object getDevice, dataPtr, recordStream;
++  nb::object emptyArguments, streamArguments;
+   std::array<nb::object, 4> tensorDescriptors;
+   std::array<PyGetSetDef *, 4> tensorGetters{};
+   PyCFunction numelMethod = nullptr, deviceMethod = nullptr;
+   PyCFunction negativeMethod = nullptr, conjugateMethod = nullptr;
+   PyCFunction pointerMethod = nullptr;
++  PyCFunctionWithKeywords contiguousMethod = nullptr,
++                          recordStreamMethod = nullptr;
+   nb::object isInBadFork, currentDevice, currentRawStream, isCapturing;
+   nb::object torchFunctionMode, incrementVersion;
+   nb::object logger, loggingEnabled, debugLevel, moveToEnd;
+diff --git a/python/tests/mlir/test_module_lifetime.py b/python/tests/mlir/test_module_lifetime.py
+index 7e8be89..9050ce0 100644
+--- a/python/tests/mlir/test_module_lifetime.py
++++ b/python/tests/mlir/test_module_lifetime.py
+@@ -15,7 +15,9 @@ import gc
+ import itertools
+ import threading
+ import warnings
++import weakref
+ from contextlib import contextmanager
++from types import SimpleNamespace
+ from unittest import mock
+ 
+ import pytest
+@@ -241,6 +243,40 @@ def _retired_modules():
+     )
+ 
+ 
++def test_native_fixed_launcher_collects_a_stream_reference_cycle(fake_cuda):
++    """Collect the native launcher and every retained stream reference."""
++    from mlir_swage._mlir_libs._swageDialectsNanobind import (
++        swage as native_swage,
++    )
++
++    class Stream:
++        cuda_stream = 0
++        device = torch.device("cuda", 0)
++
++    lease = _load(fake_cuda, "stream-cycle")
++    artifact = SimpleNamespace(
++        key="stream-cycle",
++        contract=_abi.parse_kernel_contract(_contract_json()),
++    )
++    stream = Stream()
++    launcher = native_swage._FixedCUDALaunch(
++        weakref.ref(lease.entry),
++        artifact,
++        add_kernel,
++        torch,
++        stream,
++        _runtime,
++        _cuda_backend,
++        torch.float32,
++    )
++    stream.launcher = launcher
++    references = (weakref.ref(launcher), weakref.ref(stream))
++    del launcher, stream
++    gc.collect()
++
++    assert all(reference() is None for reference in references)
++
++
+ class _ForbiddenLock:
+     """A lock that fails the test when anything tries to take it."""
+ 
+diff --git a/python/tests/mlir/test_runtime.py b/python/tests/mlir/test_runtime.py
+index 4bd21fe..88921c0 100644
+--- a/python/tests/mlir/test_runtime.py
++++ b/python/tests/mlir/test_runtime.py
+@@ -309,6 +309,92 @@ def test_native_launch_marks_output_after_allocator_recording_error(
+     assert output._version == version + 1
+ 
+ 
++@pytest.mark.parametrize("fail", [False, True], ids=["success", "error"])
++def test_native_launch_keeps_captured_allocator_after_class_mutation(
++    monkeypatch, fail
++):
++    """Keep all allocator records on the callable captured before enqueue."""
++    kernel = sw.jit(add_kernel.__wrapped__)
++    x = torch.arange(129, device="cuda", dtype=torch.float32)
++    y = torch.ones_like(x)
++    output = torch.zeros_like(x)
++    original_record = torch.Tensor.record_stream
++    recorded = []
++    replacements = []
++    active = False
++    primary = RuntimeError("captured allocator failed")
++
++    def replacement(tensor, stream):
++        replacements.append(id(tensor))
++        raise RuntimeError("replacement allocator must not run")
++
++    def captured_record(tensor, stream):
++        original_record(tensor, stream)
++        if active:
++            recorded.append(id(tensor))
++            if tensor is x:
++                monkeypatch.setattr(torch.Tensor, "record_stream", replacement)
++                if fail:
++                    raise primary
++
++    monkeypatch.setattr(torch.Tensor, "record_stream", captured_record)
++    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
++        kernel, x, y, output
++    )
++    assert fast_launch is not None
++    python_launches = _count_python_launches(monkeypatch)
++    output.fill_(-777.0)
++    version = output._version
++    active = True
++
++    if fail:
++        with pytest.raises(RuntimeError) as caught:
++            kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
++        assert caught.value is primary
++    else:
++        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
++    torch.cuda.synchronize()
++
++    assert python_launches == []
++    assert recorded == [id(x), id(y), id(output)]
++    assert replacements == []
++    assert torch.equal(output, x + y)
++    assert output._version == version + 1
++
++
++@pytest.mark.parametrize("override", ["class", "instance"])
++def test_warm_launch_preserves_contiguity_method_overrides(
++    monkeypatch, override
++):
++    """Refuse changed contiguity lookup before writing any output."""
++    kernel = sw.jit(add_kernel.__wrapped__)
++    x = torch.arange(129, device="cuda", dtype=torch.float32)
++    y = torch.ones_like(x)
++    output = torch.zeros_like(x)
++    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
++        kernel, x, y, output
++    )
++    python_launches = _count_python_launches(monkeypatch)
++    output.fill_(-777.0)
++    version = output._version
++    primary = RuntimeError("caller rejects contiguity lookup")
++
++    def reject_contiguity(*args, **kwargs):
++        raise primary
++
++    target = torch.Tensor if override == "class" else x
++    monkeypatch.setattr(target, "is_contiguous", reject_contiguity)
++    assert fast_launch(arguments, constexprs, grid) is False
++    with pytest.raises(RuntimeError) as caught:
++        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
++    torch.cuda.synchronize()
++
++    assert caught.value is primary
++    assert python_launches == [1]
++    assert torch.all(output == -777.0)
++    assert output._version == version
++
++
+ def test_native_launch_declines_while_its_stream_captures():
+     """Hand a launch to the Python path while the launch stream captures.
+ 

@@ -17,12 +17,16 @@ namespace {
 
 using swage_plan::TaskPolicy;
 
-/// The four values of the bound segment a consumer reads, from the operand
-/// the task pattern replaced.
+/// The values of the bound segment a consumer reads, from the operand the
+/// task pattern replaced: the four of every binding, and for the row-stripe
+/// tile of rank-two values the group width and the exchange buffer too.
 std::optional<SegmentBinding> boundSegmentOf(ValueRange segment) {
-  if (segment.size() != 4)
-    return std::nullopt;
-  return SegmentBinding{segment[0], segment[1], segment[2], segment[3]};
+  if (segment.size() == 4)
+    return SegmentBinding{segment[0], segment[1], segment[2], segment[3]};
+  if (segment.size() == 6)
+    return SegmentBinding{segment[0], segment[1], segment[2],
+                          segment[3], segment[4], segment[5]};
+  return std::nullopt;
 }
 
 /// The capture operands of a consumer, one value each.
@@ -70,9 +74,16 @@ public:
         capturesOf(adaptor.getCaptures());
     if (!policy || !segment || !captures)
       return rewriter.notifyMatchFailure(reduce, "not in a task region");
+    // A block task of the row-stripe tile combines per column.
     ThreadCombination combination = combinationOf(*policy);
-    if (combination == ThreadCombination::Subgroup && !target)
-      return rewriter.notifyMatchFailure(reduce, "a warp task needs a target");
+    if (combination == ThreadCombination::Block && segment->exchange)
+      combination = ThreadCombination::ColumnGroup;
+    if ((combination == ThreadCombination::Subgroup ||
+         combination == ThreadCombination::ColumnGroup) &&
+        !target)
+      return rewriter.notifyMatchFailure(reduce,
+                                         "a warp task or a column group needs "
+                                         "a target");
     Type element =
         cast<SegmentType>(reduce.getSegment().getType()).getElementType();
     Value total = emitReductionStage(

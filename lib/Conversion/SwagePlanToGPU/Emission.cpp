@@ -211,6 +211,76 @@ static Value loadElement(OpBuilder &builder, Location loc, Type elementType,
   return LLVM::LoadOp::create(builder, loc, elementType, address);
 }
 
+Value emitColumnGroupWidth(OpBuilder &builder, Location loc, Value features,
+                           int32_t subgroupWidth) {
+  Value width = builder.createOrFold<arith::ConstantIndexOp>(loc, 1);
+  for (int64_t candidate = 2; candidate <= subgroupWidth; candidate <<= 1) {
+    Value half =
+        builder.createOrFold<arith::ConstantIndexOp>(loc, candidate / 2);
+    Value wider = builder.createOrFold<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::sgt, features, half);
+    width = builder.createOrFold<arith::SelectOp>(
+        loc, wider,
+        builder.createOrFold<arith::ConstantIndexOp>(loc, candidate), width);
+  }
+  return width;
+}
+
+/// Combine the per-thread results of one column of a row-stripe tile, as
+/// `ThreadCombination::ColumnGroup` describes, and return the result of the
+/// column, which every thread of the column holds.
+static Value combineColumnGroup(OpBuilder &builder, Location loc,
+                                const TargetDescription &target,
+                                ReductionKind kind, Value total,
+                                const SegmentBinding &segment) {
+  auto exchangeType = cast<MemRefType>(segment.exchange.getType());
+  int64_t threads = exchangeType.getDimSize(0);
+  int64_t subgroups = threads / target.subgroupWidth;
+  Value threadId = gpu::ThreadIdOp::create(builder, loc, gpu::Dimension::x);
+  Value subgroupWidth =
+      arith::ConstantIndexOp::create(builder, loc, target.subgroupWidth);
+  Value lane = arith::RemUIOp::create(builder, loc, threadId, subgroupWidth);
+  Value column = arith::RemUIOp::create(builder, loc, lane, segment.groupWidth);
+  // Lanes `l` and `l xor offset` share a column exactly when the offset is
+  // at least the group width.
+  for (int32_t offset = 1; offset < target.subgroupWidth; offset <<= 1) {
+    auto shuffled =
+        gpu::ShuffleOp::create(builder, loc, total, offset,
+                               target.subgroupWidth, gpu::ShuffleMode::XOR);
+    Value combined =
+        combine(builder, loc, kind, total, shuffled.getShuffleResult());
+    Value pairsColumn = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::uge,
+        arith::ConstantIndexOp::create(builder, loc, offset),
+        segment.groupWidth);
+    total = arith::SelectOp::create(builder, loc, pairsColumn, combined, total);
+  }
+  memref::StoreOp::create(builder, loc, total, segment.exchange,
+                          ValueRange{threadId});
+  gpu::BarrierOp::create(builder, loc);
+  SmallVector<Value> partials;
+  for (int64_t subgroup = 0; subgroup < subgroups; ++subgroup) {
+    Value slot = arith::AddIOp::create(
+        builder, loc,
+        arith::ConstantIndexOp::create(builder, loc,
+                                       subgroup * target.subgroupWidth),
+        column);
+    partials.push_back(
+        memref::LoadOp::create(builder, loc, segment.exchange, slot));
+  }
+  // A pairwise tree in subgroup order. The subgroup count is a power of
+  // two, so every level pairs all of its values.
+  while (partials.size() > 1) {
+    SmallVector<Value> level;
+    for (size_t index = 0; index + 1 < partials.size(); index += 2)
+      level.push_back(
+          combine(builder, loc, kind, partials[index], partials[index + 1]));
+    partials = std::move(level);
+  }
+  gpu::BarrierOp::create(builder, loc);
+  return partials.front();
+}
+
 Value emitReductionStage(OpBuilder &builder, Location loc,
                          const TargetDescription *target, ReductionKind kind,
                          Type elementType, const SegmentBinding &segment,
@@ -233,6 +303,8 @@ Value emitReductionStage(OpBuilder &builder, Location loc,
   Value total = local.getResult(0);
   if (combination == ThreadCombination::None)
     return total;
+  if (combination == ThreadCombination::ColumnGroup)
+    return combineColumnGroup(builder, loc, *target, kind, total, segment);
   if (combination == ThreadCombination::Subgroup) {
     for (int32_t offset = 1; offset < target->subgroupWidth; offset <<= 1) {
       auto shuffled =

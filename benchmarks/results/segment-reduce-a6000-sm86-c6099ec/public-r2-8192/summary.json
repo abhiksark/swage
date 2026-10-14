@@ -1,0 +1,4037 @@
+{
+  "benchmark": "fresh-offsets-segmented-sum",
+  "code": {
+    "benchmark": "fresh-offsets-segmented-sum",
+    "cpu_model": "AMD Ryzen 9 7900X 12-Core Processor",
+    "gpu": "NVIDIA RTX A6000",
+    "gpu_uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b",
+    "loaded_ptx": [
+      {
+        "bytes": 2275,
+        "kernel": "segmented_sum_r2",
+        "sha256": "ff8379311c4215bb5d34b195219a9cc69ef7fbe7f0b5aa57f6f466b22eca1131"
+      }
+    ],
+    "native_sha256": {
+      "/home/abhik/Projects/personal/swage-review-integration/build/python_packages/mlir_swage/_mlir_libs/_swageDialectsNanobind.cpython-313-x86_64-linux-gnu.so": "163ebc9fe3ce33cad70bf3842df08ed186eed79300ff4b1d17c83dfc539e3f76",
+      "/home/abhik/Projects/personal/swage-review-integration/build/python_packages/mlir_swage/_mlir_libs/libSwagePythonCAPI.so.22.1": "4741f3c50331b9654b711e8d82f2d4e1c78dac000f71f6ee7f0f92ab17773d0f"
+    },
+    "pytorch": "2.12.0+cu130",
+    "revision": "c6099ec56608faa636f44fb32d29ab475855e95f",
+    "triton": "3.7.0"
+  },
+  "command": [
+    "benchmarks/benchmark_fresh_offsets.py",
+    "--segment-count",
+    "8192",
+    "--features",
+    "3",
+    "64",
+    "--distributions",
+    "bimodal",
+    "few-huge",
+    "many-tiny",
+    "one-outlier",
+    "alternating-empty",
+    "power-law"
+  ],
+  "incomplete": {},
+  "process_records": [
+    {
+      "cpu_frequency_after": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_frequency_before": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_governor_unchanged": true,
+      "gpu_state_after": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "120.92 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "97 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:13:06.257014+00:00"
+      },
+      "gpu_state_before": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "8001 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "102.82 W",
+          "power.limit": "300.00 W",
+          "pstate": "P0",
+          "temperature.gpu": "70",
+          "utilization.gpu": "2 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:10:53.904126+00:00"
+      },
+      "other_compute_process_seen": false,
+      "record": "process-1.json",
+      "recorded_at": "2026-10-03T12:13:06.294335+00:00",
+      "sha256": "1c0b44799b79c5345a1c07ce76b92008b76c58dc9af3d091ad29e2cbea72a3ce",
+      "worktree_clean": true
+    },
+    {
+      "cpu_frequency_after": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_frequency_before": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_governor_unchanged": true,
+      "gpu_state_after": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "120.71 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "97 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:15:19.036167+00:00"
+      },
+      "gpu_state_before": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "8001 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "102.25 W",
+          "power.limit": "300.00 W",
+          "pstate": "P0",
+          "temperature.gpu": "70",
+          "utilization.gpu": "0 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:13:07.861337+00:00"
+      },
+      "other_compute_process_seen": false,
+      "record": "process-2.json",
+      "recorded_at": "2026-10-03T12:15:19.072081+00:00",
+      "sha256": "807d17695fbb92f4e02126e09bf3c5a11e5c14cb7c5d802a4c6f5b9f1428cf90",
+      "worktree_clean": true
+    },
+    {
+      "cpu_frequency_after": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_frequency_before": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_governor_unchanged": true,
+      "gpu_state_after": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "120.24 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "96 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:17:32.428020+00:00"
+      },
+      "gpu_state_before": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "8001 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "102.49 W",
+          "power.limit": "300.00 W",
+          "pstate": "P0",
+          "temperature.gpu": "70",
+          "utilization.gpu": "0 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:15:20.637240+00:00"
+      },
+      "other_compute_process_seen": false,
+      "record": "process-3.json",
+      "recorded_at": "2026-10-03T12:17:32.464013+00:00",
+      "sha256": "ad81c0c08b9f52f6661315bbde4cc8a8245e0d929beeaa09cb5bd25e4706db95",
+      "worktree_clean": true
+    },
+    {
+      "cpu_frequency_after": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_frequency_before": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_governor_unchanged": true,
+      "gpu_state_after": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "119.72 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "96 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:19:45.615361+00:00"
+      },
+      "gpu_state_before": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "8001 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "102.63 W",
+          "power.limit": "300.00 W",
+          "pstate": "P0",
+          "temperature.gpu": "70",
+          "utilization.gpu": "0 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:17:34.052559+00:00"
+      },
+      "other_compute_process_seen": false,
+      "record": "process-4.json",
+      "recorded_at": "2026-10-03T12:19:45.652713+00:00",
+      "sha256": "02a40efb9d9e2c2e84aa00f2d7800c607c4fa76f51c7f68e1f4c5f1984a43da2",
+      "worktree_clean": true
+    },
+    {
+      "cpu_frequency_after": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_frequency_before": {
+        "energy_performance_preference": "performance",
+        "governors": {
+          "powersave": 24
+        },
+        "scaling_driver": "amd-pstate-epp"
+      },
+      "cpu_governor_unchanged": true,
+      "gpu_state_after": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "119.44 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "96 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:22:02.133262+00:00"
+      },
+      "gpu_state_before": {
+        "error": null,
+        "gpu": {
+          "clocks.current.graphics": "1890 MHz",
+          "clocks.current.memory": "7601 MHz",
+          "compute_mode": "Default",
+          "driver_version": "580.178.04",
+          "name": "NVIDIA RTX A6000",
+          "power.draw": "102.37 W",
+          "power.limit": "300.00 W",
+          "pstate": "P2",
+          "temperature.gpu": "71",
+          "utilization.gpu": "1 %",
+          "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b"
+        },
+        "other_compute_processes": [],
+        "sampled_at": "2026-10-03T12:19:47.201978+00:00"
+      },
+      "other_compute_process_seen": false,
+      "record": "process-5.json",
+      "recorded_at": "2026-10-03T12:22:02.171946+00:00",
+      "sha256": "098bc88cb4430aefa14f9a3042997fa3a08c583bba25da1229905485b5a91396",
+      "worktree_clean": true
+    }
+  ],
+  "processes": 5,
+  "recorded_at": "2026-10-03T12:22:02.804480+00:00",
+  "reference_missing": {},
+  "references": [
+    "torch"
+  ],
+  "rows": {
+    "alternating-empty D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 13.690126046214925,
+            "median": 13.428101286392916,
+            "min": 13.32731695267801,
+            "process_values": [
+              13.32731695267801,
+              13.428101286392916,
+              13.690126046214925,
+              13.552465819159776,
+              13.371162959472791
+            ]
+          },
+          "median_us": {
+            "max": 70.8575,
+            "median": 69.9905,
+            "min": 68.7435,
+            "process_values": [
+              70.8575,
+              69.9905,
+              68.7435,
+              69.475,
+              70.532
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 5.402989057912998,
+            "median": 5.369840417369955,
+            "min": 5.245993589743589,
+            "process_values": [
+              5.402989057912998,
+              5.369840417369955,
+              5.245993589743589,
+              5.390255256420203,
+              5.349412210845657
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 9.072907227360908,
+            "median": 8.942130107853709,
+            "min": 8.930669541427706,
+            "process_values": [
+              8.936268203178244,
+              8.930669541427706,
+              9.072907227360908,
+              9.060107899542745,
+              8.942130107853709
+            ]
+          },
+          "median_us": {
+            "max": 105.7125,
+            "median": 105.572,
+            "min": 103.9345,
+            "process_values": [
+              105.572,
+              105.7125,
+              103.9445,
+              103.9345,
+              105.6125
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 8.110518643547644,
+            "median": 8.050020969156279,
+            "min": 7.932272588522589,
+            "process_values": [
+              8.050020969156279,
+              8.110518643547644,
+              7.932272588522589,
+              8.063814105050819,
+              8.010049298445203
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 73.19059375826876,
+            "median": 71.88661573805624,
+            "min": 71.26198848278962,
+            "process_values": [
+              71.65001252158879,
+              72.43058691898224,
+              71.88661573805624,
+              73.19059375826876,
+              71.26198848278962
+            ]
+          },
+          "median_us": {
+            "max": 13.185,
+            "median": 13.104,
+            "min": 12.889,
+            "process_values": [
+              13.1145,
+              13.034,
+              13.104,
+              12.889,
+              13.185
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 60.94961169829405,
+            "median": 60.63241532065881,
+            "min": 59.29749455485873,
+            "process_values": [
+              59.74141021696569,
+              60.63241532065881,
+              60.849689811707485,
+              60.94961169829405,
+              59.29749455485873
+            ]
+          },
+          "median_us": {
+            "max": 15.9245,
+            "median": 15.549,
+            "min": 15.4635,
+            "process_values": [
+              15.7745,
+              15.549,
+              15.484,
+              15.4635,
+              15.9245
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2077739855896852,
+            "median": 1.1997439677244162,
+            "min": 1.1816239316239316,
+            "process_values": [
+              1.202828929810515,
+              1.1929568820009206,
+              1.1816239316239316,
+              1.1997439677244162,
+              1.2077739855896852
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 59.18572588908506,
+            "median": 58.46066162891194,
+            "min": 57.1240505645886,
+            "process_values": [
+              57.835733188645364,
+              58.46066162891194,
+              58.688663245807554,
+              59.18572588908506,
+              57.1240505645886
+            ]
+          },
+          "median_us": {
+            "max": 16.521,
+            "median": 16.09,
+            "min": 15.995000000000001,
+            "process_values": [
+              16.366,
+              16.09,
+              16.075,
+              15.995000000000001,
+              16.521
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2530147895335608,
+            "median": 1.2409806812010242,
+            "min": 1.2267246642246643,
+            "process_values": [
+              1.2479316786762744,
+              1.2344637102961484,
+              1.2267246642246643,
+              1.2409806812010242,
+              1.2530147895335608
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 59.963376088323564,
+            "median": 59.716239732020036,
+            "min": 58.09013064843694,
+            "process_values": [
+              58.928203857478834,
+              59.75095927585796,
+              59.963376088323564,
+              59.716239732020036,
+              58.09013064843694
+            ]
+          },
+          "median_us": {
+            "max": 16.1905,
+            "median": 15.779,
+            "min": 15.749500000000001,
+            "process_values": [
+              16.0,
+              15.779,
+              15.749500000000001,
+              15.774000000000001,
+              16.1905
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2279484262419416,
+            "median": 1.2200236379579854,
+            "min": 1.2018849206349207,
+            "process_values": [
+              1.2200236379579854,
+              1.2106030382077642,
+              1.2018849206349207,
+              1.2238342772907131,
+              1.2279484262419416
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 59.407630498719115,
+            "median": 58.644035857333584,
+            "min": 57.46853385380031,
+            "process_values": [
+              58.182702289545915,
+              58.644035857333584,
+              59.407630498719115,
+              59.29009593394375,
+              57.46853385380031
+            ]
+          },
+          "median_us": {
+            "max": 16.4455,
+            "median": 16.035,
+            "min": 15.835,
+            "process_values": [
+              16.130499999999998,
+              16.035,
+              15.835,
+              15.8845,
+              16.4455
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2472885855138414,
+            "median": 1.230243977290164,
+            "min": 1.208409645909646,
+            "process_values": [
+              1.22997445575508,
+              1.230243977290164,
+              1.208409645909646,
+              1.2324074792458686,
+              1.2472885855138414
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 56.6502915945356,
+            "median": 56.18259090571007,
+            "min": 55.0919601516474,
+            "process_values": [
+              55.597148103571,
+              56.18259090571007,
+              56.64149810935719,
+              56.6502915945356,
+              55.0919601516474
+            ]
+          },
+          "median_us": {
+            "max": 17.127000000000002,
+            "median": 16.741,
+            "min": 16.616,
+            "process_values": [
+              16.932000000000002,
+              16.741,
+              16.616,
+              16.656,
+              17.127000000000002
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2989761092150172,
+            "median": 1.2910900148690383,
+            "min": 1.2680097680097682,
+            "process_values": [
+              1.2910900148690383,
+              1.284410004603345,
+              1.2680097680097682,
+              1.292264721855846,
+              1.2989761092150172
+            ]
+          }
+        }
+      }
+    },
+    "alternating-empty D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 186.82409417204892,
+            "median": 184.1595016786018,
+            "min": 181.20439526911247,
+            "process_values": [
+              184.1595016786018,
+              185.39315864270455,
+              186.82409417204892,
+              182.5429228308692,
+              181.20439526911247
+            ]
+          },
+          "median_us": {
+            "max": 107.3105,
+            "median": 105.848,
+            "min": 104.26,
+            "process_values": [
+              105.848,
+              104.7055,
+              104.26,
+              107.06,
+              107.3105
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.533125118303994,
+            "median": 2.4887843874911826,
+            "min": 2.473899012908124,
+            "process_values": [
+              2.4887843874911826,
+              2.4841751880234404,
+              2.473899012908124,
+              2.533125118303994,
+              2.523794964663272
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 142.6124605066493,
+            "median": 140.78134528025214,
+            "min": 138.0452395944974,
+            "process_values": [
+              139.74693116846282,
+              140.78134528025214,
+              142.6124605066493,
+              141.31535060554967,
+              138.0452395944974
+            ]
+          },
+          "median_us": {
+            "max": 141.2645,
+            "median": 138.24849999999998,
+            "min": 136.15449999999998,
+            "process_values": [
+              138.78449999999998,
+              138.24849999999998,
+              136.15449999999998,
+              137.78199999999998,
+              141.2645
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 3.322346217617799,
+            "median": 3.263214201739948,
+            "min": 3.230697133637053,
+            "process_values": [
+              3.263214201739948,
+              3.2799947804218363,
+              3.230697133637053,
+              3.2600321786863518,
+              3.322346217617799
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 461.5298817652491,
+            "median": 460.91396616255776,
+            "min": 457.1190366618468,
+            "process_values": [
+              457.1190366618468,
+              461.5298817652491,
+              460.9770748404518,
+              460.91396616255776,
+              457.3948854170624
+            ]
+          },
+          "median_us": {
+            "max": 42.53,
+            "median": 42.264,
+            "min": 42.144000000000005,
+            "process_values": [
+              42.53,
+              42.149,
+              42.144000000000005,
+              42.264,
+              42.5195
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 485.6005367527795,
+            "median": 481.95131472707635,
+            "min": 477.8652124739889,
+            "process_values": [
+              477.8873434398645,
+              481.95131472707635,
+              485.6005367527795,
+              481.97992487009265,
+              477.8652124739889
+            ]
+          },
+          "median_us": {
+            "max": 40.806,
+            "median": 40.370000000000005,
+            "min": 40.1,
+            "process_values": [
+              40.806,
+              40.3305,
+              40.1,
+              40.370000000000005,
+              40.656
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9594639078297671,
+            "median": 0.9561730500123472,
+            "min": 0.9514996203492786,
+            "process_values": [
+              0.9594639078297671,
+              0.9568554414102352,
+              0.9514996203492786,
+              0.955186447094454,
+              0.9561730500123472
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 479.35359780451324,
+            "median": 473.26160328642936,
+            "min": 468.82612825013166,
+            "process_values": [
+              468.8982438340979,
+              475.09024994244095,
+              479.35359780451324,
+              473.26160328642936,
+              468.82612825013166
+            ]
+          },
+          "median_us": {
+            "max": 41.588,
+            "median": 41.177,
+            "min": 40.541,
+            "process_values": [
+              41.3575,
+              40.9715,
+              40.541,
+              41.177,
+              41.588
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9780924046613907,
+            "median": 0.9724312250176346,
+            "min": 0.9619637433561121,
+            "process_values": [
+              0.9724312250176346,
+              0.9720633941493273,
+              0.9619637433561121,
+              0.9742807117168275,
+              0.9780924046613907
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 481.7183699810909,
+            "median": 475.7085913677082,
+            "min": 469.66303314787723,
+            "process_values": [
+              469.66303314787723,
+              478.4660400592503,
+              481.7183699810909,
+              475.7085913677082,
+              472.0316802684631
+            ]
+          },
+          "median_us": {
+            "max": 41.361999999999995,
+            "median": 40.8665,
+            "min": 40.3405,
+            "process_values": [
+              41.361999999999995,
+              40.5805,
+              40.3405,
+              40.8665,
+              41.141999999999996
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.972537032682812,
+            "median": 0.9669340336929775,
+            "min": 0.9572062452543658,
+            "process_values": [
+              0.972537032682812,
+              0.962786780232034,
+              0.9572062452543658,
+              0.9669340336929775,
+              0.9676030997542303
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 481.97508872976533,
+            "median": 474.1504267074242,
+            "min": 469.66011510777025,
+            "process_values": [
+              469.66011510777025,
+              476.68654604530985,
+              481.97508872976533,
+              473.9996067692301,
+              474.1504267074242
+            ]
+          },
+          "median_us": {
+            "max": 41.302499999999995,
+            "median": 40.9865,
+            "min": 40.379999999999995,
+            "process_values": [
+              41.302499999999995,
+              40.861000000000004,
+              40.379999999999995,
+              40.9865,
+              41.047
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9711380202210204,
+            "median": 0.9694417423900924,
+            "min": 0.9581435079726649,
+            "process_values": [
+              0.9711380202210204,
+              0.9694417423900924,
+              0.9581435079726649,
+              0.9697733295476054,
+              0.9653688307717635
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 477.36448892392616,
+            "median": 471.4902382778164,
+            "min": 468.7903843812665,
+            "process_values": [
+              468.7903843812665,
+              473.7057704893175,
+              477.36448892392616,
+              471.4902382778164,
+              469.4938521506251
+            ]
+          },
+          "median_us": {
+            "max": 41.613,
+            "median": 41.207,
+            "min": 40.716,
+            "process_values": [
+              41.533,
+              41.197,
+              40.716,
+              41.207,
+              41.613
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9786803701830924,
+            "median": 0.976557723959558,
+            "min": 0.9661161731207288,
+            "process_values": [
+              0.976557723959558,
+              0.97741346176659,
+              0.9661161731207288,
+              0.9749905356804845,
+              0.9786803701830924
+            ]
+          }
+        }
+      }
+    },
+    "bimodal D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 41.857917155656295,
+            "median": 41.71383669494529,
+            "min": 41.6312732162827,
+            "process_values": [
+              41.68224442154211,
+              41.6312732162827,
+              41.73020012583938,
+              41.857917155656295,
+              41.71383669494529
+            ]
+          },
+          "median_us": {
+            "max": 641.474,
+            "median": 638.699,
+            "min": 638.5385,
+            "process_values": [
+              638.699,
+              641.4185,
+              641.474,
+              638.5385,
+              638.5835
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.5867837693764295,
+            "median": 1.5845783736436068,
+            "min": 1.5762872909632963,
+            "process_values": [
+              1.5762872909632963,
+              1.5855855299099453,
+              1.5867837693764295,
+              1.5844293606710527,
+              1.5845783736436068
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 39.61011178405708,
+            "median": 39.528954672308515,
+            "min": 39.50209847227484,
+            "process_values": [
+              39.50209847227484,
+              39.52432080603127,
+              39.528954672308515,
+              39.61011178405708,
+              39.56486682043027
+            ]
+          },
+          "median_us": {
+            "max": 676.249,
+            "median": 674.9114999999999,
+            "min": 674.0699999999999,
+            "process_values": [
+              676.249,
+              674.5405000000001,
+              675.5229999999999,
+              674.0699999999999,
+              674.9114999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.6747225179218805,
+            "median": 1.6710091636457185,
+            "min": 1.667463062163345,
+            "process_values": [
+              1.6689594068984581,
+              1.667463062163345,
+              1.6710091636457185,
+              1.6725949948946484,
+              1.6747225179218805
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 66.20475530113015,
+            "median": 65.99620037886905,
+            "min": 65.87507588353202,
+            "process_values": [
+              65.87507588353202,
+              65.90032650452476,
+              65.99620037886905,
+              66.16519469539887,
+              66.20475530113015
+            ]
+          },
+          "median_us": {
+            "max": 405.192,
+            "median": 404.2605,
+            "min": 402.999,
+            "process_values": [
+              405.192,
+              404.53099999999995,
+              404.2605,
+              403.0085,
+              402.999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 456.1619034287856,
+            "median": 455.18715085836453,
+            "min": 454.32027038891,
+            "process_values": [
+              455.18715085836453,
+              454.5291760255698,
+              456.1619034287856,
+              455.228969113184,
+              454.32027038891
+            ]
+          },
+          "median_us": {
+            "max": 58.679500000000004,
+            "median": 58.61,
+            "min": 58.549499999999995,
+            "process_values": [
+              58.679500000000004,
+              58.549499999999995,
+              58.5795,
+              58.61,
+              58.6245
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.14547058429425383,
+            "median": 0.14490532713436016,
+            "min": 0.14473427252793977,
+            "process_values": [
+              0.14481899938794449,
+              0.14473427252793977,
+              0.14490532713436016,
+              0.14543117576924555,
+              0.14547058429425383
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 434.41600140821356,
+            "median": 431.9011889691622,
+            "min": 431.43944652319647,
+            "process_values": [
+              431.9011889691622,
+              431.8561929747882,
+              433.5659750679147,
+              431.43944652319647,
+              434.41600140821356
+            ]
+          },
+          "median_us": {
+            "max": 61.9155,
+            "median": 61.67,
+            "min": 61.455,
+            "process_values": [
+              61.786,
+              61.9155,
+              61.455,
+              61.67,
+              61.6155
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.15305501926922785,
+            "median": 0.15289243893905444,
+            "min": 0.15201831492317455,
+            "process_values": [
+              0.15248573515765365,
+              0.15305501926922785,
+              0.15201831492317455,
+              0.15302406773058136,
+              0.15289243893905444
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 240.68258427504435,
+            "median": 240.1722214805468,
+            "min": 239.80072464217926,
+            "process_values": [
+              239.80072464217926,
+              240.1722214805468,
+              240.62244258465986,
+              240.68258427504435,
+              239.93040164563195
+            ]
+          },
+          "median_us": {
+            "max": 111.363,
+            "median": 111.1425,
+            "min": 110.732,
+            "process_values": [
+              111.1425,
+              111.363,
+              110.977,
+              110.732,
+              111.16749999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.2758505604232268,
+            "median": 0.2747634355106654,
+            "min": 0.27429588935615706,
+            "process_values": [
+              0.27429588935615706,
+              0.2752891620172496,
+              0.2745185344598347,
+              0.2747634355106654,
+              0.2758505604232268
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 200.3798870611571,
+            "median": 199.92067317760933,
+            "min": 198.86926795770944,
+            "process_values": [
+              198.86926795770944,
+              199.80037096325057,
+              199.97645612874587,
+              199.92067317760933,
+              200.3798870611571
+            ]
+          },
+          "median_us": {
+            "max": 133.695,
+            "median": 133.5395,
+            "min": 133.25900000000001,
+            "process_values": [
+              133.5395,
+              133.695,
+              133.25900000000001,
+              133.6295,
+              133.289
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.33157985501546494,
+            "median": 0.33049383112789876,
+            "min": 0.3295709194653399,
+            "process_values": [
+              0.3295709194653399,
+              0.33049383112789876,
+              0.3296364596590565,
+              0.33157985501546494,
+              0.33074275618549914
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 511.4552607365624,
+            "median": 510.05367335032946,
+            "min": 507.9648225371171,
+            "process_values": [
+              508.44393242909734,
+              507.9648225371171,
+              511.4552607365624,
+              510.69816494357246,
+              510.05367335032946
+            ]
+          },
+          "median_us": {
+            "max": 52.7385,
+            "median": 52.4685,
+            "min": 52.298,
+            "process_values": [
+              52.488,
+              52.7385,
+              52.348,
+              52.298,
+              52.4685
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.1303694896064826,
+            "median": 0.12976897509605875,
+            "min": 0.12949076152629307,
+            "process_values": [
+              0.12953858911330923,
+              0.1303694896064826,
+              0.12949076152629307,
+              0.12976897509605875,
+              0.13019511214668025
+            ]
+          }
+        }
+      }
+    },
+    "bimodal D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 385.9759432750948,
+            "median": 385.24759272230745,
+            "min": 384.68952431414294,
+            "process_values": [
+              384.68952431414294,
+              385.84381141056065,
+              385.9759432750948,
+              385.24759272230745,
+              384.999404125513
+            ]
+          },
+          "median_us": {
+            "max": 1477.9075,
+            "median": 1476.1545,
+            "min": 1473.635,
+            "process_values": [
+              1477.9075,
+              1473.635,
+              1476.1545,
+              1477.402,
+              1473.9005
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.538044261606691,
+            "median": 1.5356813482620062,
+            "min": 1.5304983281759466,
+            "process_values": [
+              1.538044261606691,
+              1.5342206045639273,
+              1.5356813482620062,
+              1.5372286325353262,
+              1.5304983281759466
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 377.4447818409363,
+            "median": 376.33668360744565,
+            "min": 375.7382544493066,
+            "process_values": [
+              376.7109756498256,
+              375.7382544493066,
+              376.33668360744565,
+              375.99506996085563,
+              377.4447818409363
+            ]
+          },
+          "median_us": {
+            "max": 1515.0525,
+            "median": 1511.365,
+            "min": 1508.3595,
+            "process_values": [
+              1509.752,
+              1512.4074999999998,
+              1511.365,
+              1515.0525,
+              1508.3595
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.5764037701277156,
+            "median": 1.5723117335726082,
+            "min": 1.5662805549209777,
+            "process_values": [
+              1.5711845295116404,
+              1.5745871596406285,
+              1.5723117335726082,
+              1.5764037701277156,
+              1.5662805549209777
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 593.0557619695704,
+            "median": 592.4449136383016,
+            "min": 590.8562358581235,
+            "process_values": [
+              590.8562358581235,
+              593.0141593108478,
+              592.4449136383016,
+              593.0557619695704,
+              592.0831165550989
+            ]
+          },
+          "median_us": {
+            "max": 963.02,
+            "median": 961.0815,
+            "min": 960.5105,
+            "process_values": [
+              960.9005,
+              960.5105,
+              961.2375,
+              961.0815,
+              963.02
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 689.299470339476,
+            "median": 688.9608136748755,
+            "min": 688.1832089160107,
+            "process_values": [
+              688.9762710045194,
+              688.1832089160107,
+              688.5593166986927,
+              688.9608136748755,
+              689.299470339476
+            ]
+          },
+          "median_us": {
+            "max": 829.13,
+            "median": 827.3164999999999,
+            "min": 826.53,
+            "process_values": [
+              827.3164999999999,
+              828.053,
+              829.13,
+              826.735,
+              826.53
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8625651829022485,
+            "median": 0.8609804032779668,
+            "min": 0.8582687794646009,
+            "process_values": [
+              0.8609804032779668,
+              0.8620967704153156,
+              0.8625651829022485,
+              0.8602132077248391,
+              0.8582687794646009
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 689.5447442681085,
+            "median": 689.1582651889042,
+            "min": 688.5691581176634,
+            "process_values": [
+              688.5691581176634,
+              689.1582651889042,
+              689.1070702660966,
+              689.5447442681085,
+              689.3598361329127
+            ]
+          },
+          "median_us": {
+            "max": 828.0125,
+            "median": 827.312,
+            "min": 825.9845,
+            "process_values": [
+              828.0125,
+              827.5715,
+              827.312,
+              825.9845,
+              826.2239999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8617047238501802,
+            "median": 0.8606738709215985,
+            "min": 0.8579510290544329,
+            "process_values": [
+              0.8617047238501802,
+              0.8615954744898676,
+              0.8606738709215985,
+              0.8594323166141478,
+              0.8579510290544329
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 689.0228835540688,
+            "median": 688.967757224055,
+            "min": 688.3356128789851,
+            "process_values": [
+              688.7118304497469,
+              688.967757224055,
+              688.3356128789851,
+              689.0228835540688,
+              688.9681626764816
+            ]
+          },
+          "median_us": {
+            "max": 829.08,
+            "median": 828.2635,
+            "min": 826.826,
+            "process_values": [
+              828.3385,
+              826.826,
+              828.2635,
+              829.08,
+              828.163
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8626531672912235,
+            "median": 0.8616637407508551,
+            "min": 0.8599644867188636,
+            "process_values": [
+              0.8620439889457857,
+              0.8608193247236756,
+              0.8616637407508551,
+              0.8626531672912235,
+              0.8599644867188636
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 687.6777814068423,
+            "median": 686.7873846813623,
+            "min": 686.1276814399423,
+            "process_values": [
+              687.6777814068423,
+              686.6850377628004,
+              686.1276814399423,
+              686.7873846813623,
+              687.2579187703554
+            ]
+          },
+          "median_us": {
+            "max": 830.6775,
+            "median": 829.9014999999999,
+            "min": 829.175,
+            "process_values": [
+              829.9014999999999,
+              829.8965000000001,
+              830.332,
+              830.6775,
+              829.175
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8643153572303701,
+            "median": 0.8638156542997959,
+            "min": 0.8610153475524911,
+            "process_values": [
+              0.8636705881618336,
+              0.8640160622918751,
+              0.8638156542997959,
+              0.8643153572303701,
+              0.8610153475524911
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 676.0753722561769,
+            "median": 675.719581046654,
+            "min": 675.4287643485559,
+            "process_values": [
+              675.4287643485559,
+              675.5960885245227,
+              675.719581046654,
+              676.0370095303359,
+              676.0753722561769
+            ]
+          },
+          "median_us": {
+            "max": 844.8040000000001,
+            "median": 843.2065,
+            "min": 842.74,
+            "process_values": [
+              844.8040000000001,
+              843.7574999999999,
+              843.2065,
+              843.0360000000001,
+              842.74
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8791794780000636,
+            "median": 0.8772093265192006,
+            "min": 0.8751012440032399,
+            "process_values": [
+              0.8791794780000636,
+              0.8784469300439713,
+              0.8772093265192006,
+              0.8771743083182852,
+              0.8751012440032399
+            ]
+          }
+        }
+      }
+    },
+    "few-huge D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 20.95006144290189,
+            "median": 20.857152064816347,
+            "min": 20.804956790277174,
+            "process_values": [
+              20.804956790277174,
+              20.95006144290189,
+              20.857152064816347,
+              20.807866034549782,
+              20.866127737980133
+            ]
+          },
+          "median_us": {
+            "max": 618.972,
+            "median": 617.8395,
+            "min": 616.452,
+            "process_values": [
+              617.8395,
+              616.452,
+              618.516,
+              618.972,
+              617.2735
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.6288331562335818,
+            "median": 1.626342805248819,
+            "min": 1.6250474503353154,
+            "process_values": [
+              1.626342805248819,
+              1.6250474503353154,
+              1.6288331562335818,
+              1.628805102943034,
+              1.625582494677062
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 19.7911025027501,
+            "median": 19.75706504335301,
+            "min": 19.693531555126228,
+            "process_values": [
+              19.730934829703656,
+              19.75706504335301,
+              19.765894518099106,
+              19.693531555126228,
+              19.7911025027501
+            ]
+          },
+          "median_us": {
+            "max": 653.662,
+            "median": 653.456,
+            "min": 651.8885,
+            "process_values": [
+              653.296,
+              653.4960000000001,
+              653.456,
+              653.662,
+              651.8885
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.7227002404150322,
+            "median": 1.7200907330217674,
+            "min": 1.716740689631562,
+            "process_values": [
+              1.7196751734031774,
+              1.7227002404150322,
+              1.7208460232876297,
+              1.7200907330217674,
+              1.716740689631562
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 33.99832482581069,
+            "median": 33.94973958580562,
+            "min": 33.87252817840822,
+            "process_values": [
+              33.87252817840822,
+              33.94973958580562,
+              33.92687470325559,
+              33.95059753070518,
+              33.99832482581069
+            ]
+          },
+          "median_us": {
+            "max": 380.016,
+            "median": 379.72950000000003,
+            "min": 379.34400000000005,
+            "process_values": [
+              379.895,
+              379.34400000000005,
+              379.72950000000003,
+              380.016,
+              379.7245
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 298.2853630822484,
+            "median": 297.9653873378873,
+            "min": 296.0871781576168,
+            "process_values": [
+              297.23835995373395,
+              297.9653873378873,
+              298.0134260449646,
+              296.0871781576168,
+              298.2853630822484
+            ]
+          },
+          "median_us": {
+            "max": 43.5965,
+            "median": 43.3715,
+            "min": 43.301,
+            "process_values": [
+              43.3965,
+              43.3715,
+              43.316,
+              43.5965,
+              43.301
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.11472280114521492,
+            "median": 0.11423288013793287,
+            "min": 0.11403267368842412,
+            "process_values": [
+              0.11423288013793287,
+              0.11433290100805599,
+              0.11407067399293444,
+              0.11472280114521492,
+              0.11403267368842412
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 284.8517209144553,
+            "median": 283.7195044952665,
+            "min": 282.97747932431366,
+            "process_values": [
+              283.7195044952665,
+              284.8517209144553,
+              282.97747932431366,
+              282.9870392573607,
+              284.14327474485265
+            ]
+          },
+          "median_us": {
+            "max": 45.56,
+            "median": 45.42,
+            "min": 45.295,
+            "process_values": [
+              45.42,
+              45.295,
+              45.42,
+              45.56,
+              45.36
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.1198896888552061,
+            "median": 0.11955935192619015,
+            "min": 0.1194034965624868,
+            "process_values": [
+              0.11955935192619015,
+              0.1194034965624868,
+              0.11961146026316101,
+              0.1198896888552061,
+              0.11945502594644275
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 125.9238245038266,
+            "median": 125.76065754625664,
+            "min": 125.56967177452641,
+            "process_values": [
+              125.9238245038266,
+              125.67798611619445,
+              125.56967177452641,
+              125.76065754625664,
+              125.88606635331622
+            ]
+          },
+          "median_us": {
+            "max": 102.77250000000001,
+            "median": 102.49199999999999,
+            "min": 102.3215,
+            "process_values": [
+              102.49199999999999,
+              102.3215,
+              102.622,
+              102.77250000000001,
+              102.487
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.27044256031325,
+            "median": 0.2698983078521402,
+            "min": 0.269732749166983,
+            "process_values": [
+              0.26979033680359044,
+              0.269732749166983,
+              0.2702502702581706,
+              0.27044256031325,
+              0.2698983078521402
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 114.484645090242,
+            "median": 114.46766987058638,
+            "min": 114.20488406748669,
+            "process_values": [
+              114.47893221227375,
+              114.484645090242,
+              114.46766987058638,
+              114.23036053659831,
+              114.20488406748669
+            ]
+          },
+          "median_us": {
+            "max": 112.94649999999999,
+            "median": 112.72049999999999,
+            "min": 112.45,
+            "process_values": [
+              112.63499999999999,
+              112.45,
+              112.926,
+              112.94649999999999,
+              112.72049999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.29738537564239803,
+            "median": 0.2968481096163139,
+            "min": 0.296432789236155,
+            "process_values": [
+              0.29648981955540343,
+              0.296432789236155,
+              0.29738537564239803,
+              0.29721511725822064,
+              0.2968481096163139
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 386.62074096746903,
+            "median": 385.42012493105085,
+            "min": 383.8187515813592,
+            "process_values": [
+              385.42012493105085,
+              386.62074096746903,
+              383.8187515813592,
+              384.03687315430136,
+              385.5388262333765
+            ]
+          },
+          "median_us": {
+            "max": 33.523,
+            "median": 33.4525,
+            "min": 33.3425,
+            "process_values": [
+              33.4925,
+              33.3425,
+              33.4525,
+              33.4375,
+              33.523
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.08828242581134482,
+            "median": 0.08809560489769691,
+            "min": 0.08789515584799021,
+            "process_values": [
+              0.08816251859066321,
+              0.08789515584799021,
+              0.08809560489769691,
+              0.08798971622247484,
+              0.08828242581134482
+            ]
+          }
+        }
+      }
+    },
+    "few-huge D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 199.89126435675934,
+            "median": 199.3873131142483,
+            "min": 199.004232519399,
+            "process_values": [
+              199.5230102412253,
+              199.004232519399,
+              199.09742395686055,
+              199.89126435675934,
+              199.3873131142483
+            ]
+          },
+          "median_us": {
+            "max": 1378.8325,
+            "median": 1377.0135,
+            "min": 1376.1174999999998,
+            "process_values": [
+              1377.0135,
+              1377.084,
+              1378.8325,
+              1376.4075,
+              1376.1174999999998
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.6979217278184415,
+            "median": 2.693741254293347,
+            "min": 2.691627011003897,
+            "process_values": [
+              2.691627011003897,
+              2.6979217278184415,
+              2.693416248801099,
+              2.693741254293347,
+              2.694837652832324
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 194.93322191437994,
+            "median": 194.6468788549509,
+            "min": 193.29662094533947,
+            "process_values": [
+              194.6468788549509,
+              193.87253704652875,
+              193.29662094533947,
+              194.85633159348322,
+              194.93322191437994
+            ]
+          },
+          "median_us": {
+            "max": 1414.5585,
+            "median": 1409.69,
+            "min": 1409.0545,
+            "process_values": [
+              1409.69,
+              1414.5585,
+              1411.9745,
+              1409.0545,
+              1409.5905
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.7713401015626227,
+            "median": 2.758155948016026,
+            "min": 2.75549926064057,
+            "process_values": [
+              2.75549926064057,
+              2.7713401015626227,
+              2.758155948016026,
+              2.757634084526337,
+              2.760387506499076
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 537.606515519069,
+            "median": 536.9983332154022,
+            "min": 536.9442807663008,
+            "process_values": [
+              536.9983332154022,
+              537.606515519069,
+              536.9484537011301,
+              536.9442807663008,
+              537.6037566106645
+            ]
+          },
+          "median_us": {
+            "max": 511.92699999999996,
+            "median": 510.96500000000003,
+            "min": 510.424,
+            "process_values": [
+              511.5915,
+              510.424,
+              511.92699999999996,
+              510.96500000000003,
+              510.6495
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 668.2519161454973,
+            "median": 667.4086234491874,
+            "min": 666.6095718689414,
+            "process_values": [
+              666.6095718689414,
+              667.2420890756525,
+              668.2519161454973,
+              667.4184380931924,
+              667.4086234491874
+            ]
+          },
+          "median_us": {
+            "max": 412.656,
+            "median": 411.67949999999996,
+            "min": 411.0285,
+            "process_values": [
+              412.421,
+              412.656,
+              411.67949999999996,
+              411.12350000000004,
+              411.0285
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8084572825729198,
+            "median": 0.8049131547176684,
+            "min": 0.8041761813696093,
+            "process_values": [
+              0.806152956020575,
+              0.8084572825729198,
+              0.8041761813696093,
+              0.8046020764631628,
+              0.8049131547176684
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 674.0098841314348,
+            "median": 672.968384785406,
+            "min": 672.5898041982434,
+            "process_values": [
+              672.968384785406,
+              674.0098841314348,
+              672.5898041982434,
+              673.2112639186897,
+              672.6357957590747
+            ]
+          },
+          "median_us": {
+            "max": 409.10450000000003,
+            "median": 408.21349999999995,
+            "min": 408.078,
+            "process_values": [
+              409.10450000000003,
+              408.078,
+              408.7895,
+              408.21349999999995,
+              408.08799999999997
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.7996702447167321,
+            "median": 0.7991548018748672,
+            "min": 0.7985308452181659,
+            "process_values": [
+              0.7996702447167321,
+              0.7994882685767126,
+              0.7985308452181659,
+              0.798906970144726,
+              0.7991548018748672
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 668.1108194689747,
+            "median": 667.2607499809021,
+            "min": 666.9462379617796,
+            "process_values": [
+              666.9462379617796,
+              667.0099394492654,
+              667.3336942643205,
+              667.2607499809021,
+              668.1108194689747
+            ]
+          },
+          "median_us": {
+            "max": 411.7745,
+            "median": 411.1885,
+            "min": 410.8885,
+            "process_values": [
+              411.7,
+              411.1885,
+              411.7745,
+              410.9135,
+              410.8885
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8055822218390984,
+            "median": 0.8046389940654011,
+            "min": 0.804191089409255,
+            "process_values": [
+              0.8047436284613798,
+              0.8055822218390984,
+              0.8043617547033074,
+              0.804191089409255,
+              0.8046389940654011
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 669.1883246619785,
+            "median": 668.5109082915487,
+            "min": 666.9457159434935,
+            "process_values": [
+              668.3775619098735,
+              666.9457159434935,
+              668.5109082915487,
+              669.1883246619785,
+              668.9819865810989
+            ]
+          },
+          "median_us": {
+            "max": 412.5615,
+            "median": 411.55449999999996,
+            "min": 410.853,
+            "process_values": [
+              411.62,
+              412.5615,
+              410.853,
+              410.8985,
+              411.55449999999996
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8082721423757504,
+            "median": 0.8045872536975301,
+            "min": 0.8025616933664371,
+            "process_values": [
+              0.8045872536975301,
+              0.8082721423757504,
+              0.8025616933664371,
+              0.8041617331911187,
+              0.8059432154540442
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 665.6023456605251,
+            "median": 664.2009100800998,
+            "min": 663.1936766275232,
+            "process_values": [
+              664.2009100800998,
+              663.1936766275232,
+              665.1462634920906,
+              664.070607541513,
+              665.6023456605251
+            ]
+          },
+          "median_us": {
+            "max": 414.62,
+            "median": 414.38,
+            "min": 412.9515,
+            "process_values": [
+              414.62,
+              414.43949999999995,
+              412.9515,
+              413.8535,
+              414.38
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.8119514364528313,
+            "median": 0.8104513073418929,
+            "min": 0.8066609106376496,
+            "process_values": [
+              0.8104513073418929,
+              0.8119514364528313,
+              0.8066609106376496,
+              0.8099449081639643,
+              0.8114763649039116
+            ]
+          }
+        }
+      }
+    },
+    "many-tiny D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 23.46200977029726,
+            "median": 23.375111029817916,
+            "min": 23.023989621739645,
+            "process_values": [
+              23.375111029817916,
+              23.023989621739645,
+              23.46200977029726,
+              23.112237294914536,
+              23.3934203916789
+            ]
+          },
+          "median_us": {
+            "max": 73.868,
+            "median": 73.107,
+            "min": 72.586,
+            "process_values": [
+              73.107,
+              73.868,
+              72.586,
+              73.858,
+              72.79599999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 5.636079209431875,
+            "median": 5.481626506024095,
+            "min": 5.410808796123742,
+            "process_values": [
+              5.46390134529148,
+              5.610938093429548,
+              5.410808796123742,
+              5.636079209431875,
+              5.481626506024095
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 15.67936173660014,
+            "median": 15.517120758796246,
+            "min": 15.42564451504775,
+            "process_values": [
+              15.513063752503435,
+              15.42564451504775,
+              15.517120758796246,
+              15.554567580333321,
+              15.67936173660014
+            ]
+          },
+          "median_us": {
+            "max": 110.396,
+            "median": 109.62950000000001,
+            "min": 108.753,
+            "process_values": [
+              109.5145,
+              110.396,
+              110.065,
+              109.62950000000001,
+              108.753
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 8.38556779339157,
+            "median": 8.20462169213567,
+            "min": 8.184940209267564,
+            "process_values": [
+              8.184940209267564,
+              8.38556779339157,
+              8.20462169213567,
+              8.365790377351292,
+              8.189231927710843
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 129.92702667073902,
+            "median": 128.1184697599187,
+            "min": 127.06094953299092,
+            "process_values": [
+              127.52668456881904,
+              129.40424528881545,
+              127.06094953299092,
+              129.92702667073902,
+              128.1184697599187
+            ]
+          },
+          "median_us": {
+            "max": 13.415,
+            "median": 13.280000000000001,
+            "min": 13.1045,
+            "process_values": [
+              13.379999999999999,
+              13.165,
+              13.415,
+              13.1045,
+              13.280000000000001
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 108.19709107258146,
+            "median": 107.69700635275643,
+            "min": 106.26236373267906,
+            "process_values": [
+              107.86328345567476,
+              106.91130072739082,
+              108.19709107258146,
+              106.26236373267906,
+              107.69700635275643
+            ]
+          },
+          "median_us": {
+            "max": 16.009999999999998,
+            "median": 15.869499999999999,
+            "min": 15.739,
+            "process_values": [
+              15.835,
+              15.975000000000001,
+              15.739,
+              16.009999999999998,
+              15.869499999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2217177305505742,
+            "median": 1.1949924698795178,
+            "min": 1.1732389116660455,
+            "process_values": [
+              1.1834828101644246,
+              1.2134447398404864,
+              1.1732389116660455,
+              1.2217177305505742,
+              1.1949924698795178
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 98.84733687081679,
+            "median": 98.38826439404096,
+            "min": 97.6550396974529,
+            "process_values": [
+              98.84733687081679,
+              97.77934853024749,
+              98.83860329286307,
+              97.6550396974529,
+              98.38826439404096
+            ]
+          },
+          "median_us": {
+            "max": 17.493000000000002,
+            "median": 17.328,
+            "min": 17.2175,
+            "process_values": [
+              17.2175,
+              17.4575,
+              17.2425,
+              17.493000000000002,
+              17.328
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.334884963180587,
+            "median": 1.3048192771084335,
+            "min": 1.2853149459560194,
+            "process_values": [
+              1.2868086696562036,
+              1.3260539308773263,
+              1.2853149459560194,
+              1.334884963180587,
+              1.3048192771084335
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 107.23564848570756,
+            "median": 105.80815178320995,
+            "min": 105.36910301165369,
+            "process_values": [
+              106.82055784684161,
+              105.4116714300222,
+              107.23564848570756,
+              105.36910301165369,
+              105.80815178320995
+            ]
+          },
+          "median_us": {
+            "max": 16.16,
+            "median": 16.085,
+            "min": 15.8945,
+            "process_values": [
+              15.95,
+              16.15,
+              15.8945,
+              16.16,
+              16.085
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.2331641802434279,
+            "median": 1.2112198795180722,
+            "min": 1.1848304137159897,
+            "process_values": [
+              1.1920777279521675,
+              1.226737561716673,
+              1.1848304137159897,
+              1.2331641802434279,
+              1.2112198795180722
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 94.38305635742034,
+            "median": 93.33126569081807,
+            "min": 93.25316481760262,
+            "process_values": [
+              94.20648071667726,
+              93.33126569081807,
+              94.38305635742034,
+              93.25316481760262,
+              93.32733404520556
+            ]
+          },
+          "median_us": {
+            "max": 18.259,
+            "median": 18.194000000000003,
+            "min": 18.0435,
+            "process_values": [
+              18.0735,
+              18.259,
+              18.0435,
+              18.259,
+              18.194000000000003
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.3933381662787592,
+            "median": 1.3700301204819278,
+            "min": 1.3450242266120016,
+            "process_values": [
+              1.3507847533632287,
+              1.3869350550702622,
+              1.3450242266120016,
+              1.3933381662787592,
+              1.3700301204819278
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 95.64592384123722,
+            "median": 94.81757192882444,
+            "min": 94.21242882578838,
+            "process_values": [
+              95.34020660801286,
+              94.48581365297319,
+              95.64592384123722,
+              94.21242882578838,
+              94.81757192882444
+            ]
+          },
+          "median_us": {
+            "max": 18.084000000000003,
+            "median": 18.0085,
+            "min": 17.833,
+            "process_values": [
+              17.8735,
+              18.0435,
+              17.833,
+              18.084000000000003,
+              18.0085
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.3799839749704303,
+            "median": 1.356061746987952,
+            "min": 1.3293328363771897,
+            "process_values": [
+              1.3358370702541107,
+              1.370565894417015,
+              1.3293328363771897,
+              1.3799839749704303,
+              1.356061746987952
+            ]
+          }
+        }
+      }
+    },
+    "many-tiny D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 279.9364373611064,
+            "median": 274.5508263988373,
+            "min": 270.17525065113045,
+            "process_values": [
+              279.9364373611064,
+              275.5259694765454,
+              270.8570772781976,
+              270.17525065113045,
+              274.5508263988373
+            ]
+          },
+          "median_us": {
+            "max": 132.06650000000002,
+            "median": 130.023,
+            "min": 127.90899999999999,
+            "process_values": [
+              127.90899999999999,
+              129.6725,
+              131.61599999999999,
+              132.06650000000002,
+              130.023
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.0157592685867796,
+            "median": 1.983479016978628,
+            "min": 1.9495945616388244,
+            "process_values": [
+              1.9495945616388244,
+              1.983290635873514,
+              2.003806159889164,
+              2.0157592685867796,
+              1.983479016978628
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 222.23837282574127,
+            "median": 220.78440596069987,
+            "min": 219.3534611854797,
+            "process_values": [
+              220.78440596069987,
+              222.23837282574127,
+              219.3534611854797,
+              219.41344717767726,
+              221.51287989351448
+            ]
+          },
+          "median_us": {
+            "max": 162.92950000000002,
+            "median": 161.637,
+            "min": 160.6255,
+            "process_values": [
+              161.637,
+              160.6255,
+              162.92950000000002,
+              162.8995,
+              161.2065
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.4863699497840255,
+            "median": 2.4636782099743932,
+            "min": 2.4567047757427445,
+            "process_values": [
+              2.4636782099743932,
+              2.4567047757427445,
+              2.4805429106465904,
+              2.4863699497840255,
+              2.459178069653563
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 546.5555858377817,
+            "median": 544.6496807302649,
+            "min": 543.3144304195303,
+            "process_values": [
+              544.598954474464,
+              546.5555858377817,
+              543.3144304195303,
+              545.2225504500307,
+              544.6496807302649
+            ]
+          },
+          "median_us": {
+            "max": 65.683,
+            "median": 65.553,
+            "min": 65.3825,
+            "process_values": [
+              65.608,
+              65.3825,
+              65.683,
+              65.517,
+              65.553
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 560.5427066460536,
+            "median": 559.0485465897516,
+            "min": 555.9590931651387,
+            "process_values": [
+              555.9590931651387,
+              559.6307844039394,
+              560.5427066460536,
+              559.02403300888,
+              559.0485465897516
+            ]
+          },
+          "median_us": {
+            "max": 64.155,
+            "median": 63.7845,
+            "min": 63.644000000000005,
+            "process_values": [
+              64.155,
+              63.774,
+              63.644000000000005,
+              63.7845,
+              63.8795
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9778533105718814,
+            "median": 0.9744710387015088,
+            "min": 0.9689569599439734,
+            "process_values": [
+              0.9778533105718814,
+              0.9753986158375714,
+              0.9689569599439734,
+              0.9735564815238794,
+              0.9744710387015088
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 554.7133234226117,
+            "median": 553.1859408379873,
+            "min": 552.6265406137197,
+            "process_values": [
+              552.6265406137197,
+              554.7133234226117,
+              554.6589559369255,
+              553.1859408379873,
+              552.9488195718025
+            ]
+          },
+          "median_us": {
+            "max": 64.7055,
+            "median": 64.641,
+            "min": 64.28550000000001,
+            "process_values": [
+              64.7055,
+              64.435,
+              64.28550000000001,
+              64.6805,
+              64.641
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9872323213822367,
+            "median": 0.9860875932451605,
+            "min": 0.9787235662195698,
+            "process_values": [
+              0.9862440556029752,
+              0.9855083546820633,
+              0.9787235662195698,
+              0.9872323213822367,
+              0.9860875932451605
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 557.6795990710038,
+            "median": 556.6316916846046,
+            "min": 553.8100365513737,
+            "process_values": [
+              553.8100365513737,
+              556.4887405562934,
+              556.8509929506852,
+              557.6795990710038,
+              556.6316916846046
+            ]
+          },
+          "median_us": {
+            "max": 64.431,
+            "median": 64.16499999999999,
+            "min": 63.9995,
+            "process_values": [
+              64.431,
+              64.13499999999999,
+              64.185,
+              63.9995,
+              64.16499999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9820601146201682,
+            "median": 0.97882629322838,
+            "min": 0.9768380725613199,
+            "process_values": [
+              0.9820601146201682,
+              0.9809199709402363,
+              0.9771934899441255,
+              0.9768380725613199,
+              0.97882629322838
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 558.5047730287077,
+            "median": 557.0461920892446,
+            "min": 553.5927426305371,
+            "process_values": [
+              553.5927426305371,
+              557.0461920892446,
+              558.5047730287077,
+              557.7871382197236,
+              556.4545937350465
+            ]
+          },
+          "median_us": {
+            "max": 64.566,
+            "median": 64.13,
+            "min": 64.0095,
+            "process_values": [
+              64.566,
+              64.13,
+              64.0095,
+              64.09450000000001,
+              64.18
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.984117790513352,
+            "median": 0.9790551157079006,
+            "min": 0.9745215657019319,
+            "process_values": [
+              0.984117790513352,
+              0.9808434978778725,
+              0.9745215657019319,
+              0.9782880779034452,
+              0.9790551157079006
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 553.12266555058,
+            "median": 552.0681836629934,
+            "min": 549.1209651976451,
+            "process_values": [
+              549.1209651976451,
+              552.0681836629934,
+              552.5377527031449,
+              553.12266555058,
+              551.9793916156946
+            ]
+          },
+          "median_us": {
+            "max": 64.9665,
+            "median": 64.606,
+            "min": 64.55600000000001,
+            "process_values": [
+              64.9665,
+              64.65100000000001,
+              64.606,
+              64.55600000000001,
+              64.601
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.9902222289964637,
+            "median": 0.9854773999664393,
+            "min": 0.9836030631974786,
+            "process_values": [
+              0.9902222289964637,
+              0.9888119909761789,
+              0.9836030631974786,
+              0.9853320512233469,
+              0.9854773999664393
+            ]
+          }
+        }
+      }
+    },
+    "one-outlier D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 4.973021185124557,
+            "median": 4.967532946166477,
+            "min": 4.922833516558143,
+            "process_values": [
+              4.922833516558143,
+              4.967532946166477,
+              4.968160907478941,
+              4.973021185124557,
+              4.966478362173391
+            ]
+          },
+          "median_us": {
+            "max": 366.43449999999996,
+            "median": 362.352,
+            "min": 362.052,
+            "process_values": [
+              366.43449999999996,
+              362.052,
+              362.352,
+              362.3125,
+              362.4975
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.00779426429816,
+            "median": 1.9928687133706808,
+            "min": 1.987047627410733,
+            "process_values": [
+              2.00779426429816,
+              1.987047627410733,
+              1.9875487491155224,
+              1.9928687133706808,
+              1.9959722378995066
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 4.552208222656104,
+            "median": 4.525117609450392,
+            "min": 4.487775403148412,
+            "process_values": [
+              4.487775403148412,
+              4.552208222656104,
+              4.516740791091373,
+              4.535394627676288,
+              4.525117609450392
+            ]
+          },
+          "median_us": {
+            "max": 401.16499999999996,
+            "median": 398.645,
+            "min": 396.646,
+            "process_values": [
+              401.16499999999996,
+              396.646,
+              398.645,
+              397.57349999999997,
+              399.677
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 2.200688821652456,
+            "median": 2.1868188081153104,
+            "min": 2.1769096517128963,
+            "process_values": [
+              2.198092117519424,
+              2.1769096517128963,
+              2.186620664688362,
+              2.1868188081153104,
+              2.200688821652456
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 9.939914197550076,
+            "median": 9.901122274806577,
+            "min": 9.86636527567891,
+            "process_values": [
+              9.86636527567891,
+              9.901122274806577,
+              9.88079113354063,
+              9.902587395692718,
+              9.939914197550076
+            ]
+          },
+          "median_us": {
+            "max": 182.506,
+            "median": 182.20600000000002,
+            "min": 181.61450000000002,
+            "process_values": [
+              182.506,
+              182.20600000000002,
+              182.31099999999998,
+              181.80450000000002,
+              181.61450000000002
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 69.42366319495075,
+            "median": 69.20344304741137,
+            "min": 68.14956076626709,
+            "process_values": [
+              68.14956076626709,
+              69.2974228104733,
+              69.20344304741137,
+              69.42366319495075,
+              68.25673303349771
+            ]
+          },
+          "median_us": {
+            "max": 26.464,
+            "median": 26.1335,
+            "min": 25.944,
+            "process_values": [
+              26.464,
+              26.084,
+              26.1335,
+              25.944,
+              26.454500000000003
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.14566292889609586,
+            "median": 0.1433457114491172,
+            "min": 0.14270273838106315,
+            "process_values": [
+              0.14500345194130604,
+              0.14315664687222154,
+              0.1433457114491172,
+              0.14270273838106315,
+              0.14566292889609586
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 72.40678218995959,
+            "median": 72.08259732232092,
+            "min": 70.90758775578367,
+            "process_values": [
+              71.84398735010282,
+              72.19634913663917,
+              72.08259732232092,
+              72.40678218995959,
+              70.90758775578367
+            ]
+          },
+          "median_us": {
+            "max": 25.447,
+            "median": 25.052,
+            "min": 24.912,
+            "process_values": [
+              25.207,
+              25.022,
+              25.052,
+              24.912,
+              25.447
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.14011546434893687,
+            "median": 0.13741354059820857,
+            "min": 0.13702631122992004,
+            "process_values": [
+              0.13811600714497058,
+              0.13732807920705134,
+              0.13741354059820857,
+              0.13702631122992004,
+              0.14011546434893687
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 33.08250908025427,
+            "median": 32.87360639116153,
+            "min": 32.59761401137776,
+            "process_values": [
+              32.59761401137776,
+              32.78061686509861,
+              32.93450376648002,
+              32.87360639116153,
+              33.08250908025427
+            ]
+          },
+          "median_us": {
+            "max": 55.3485,
+            "median": 54.928,
+            "min": 54.3915,
+            "process_values": [
+              55.3485,
+              54.963,
+              54.682,
+              54.928,
+              54.3915
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.30326948155129146,
+            "median": 0.30165307399317254,
+            "min": 0.29948875227473576,
+            "process_values": [
+              0.30326948155129146,
+              0.30165307399317254,
+              0.2999380180022051,
+              0.3021267350368115,
+              0.29948875227473576
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 32.010034429094524,
+            "median": 31.77887153400124,
+            "min": 31.4731520071205,
+            "process_values": [
+              31.633644753743354,
+              31.4731520071205,
+              32.010034429094524,
+              31.77887153400124,
+              31.935257195327864
+            ]
+          },
+          "median_us": {
+            "max": 57.482,
+            "median": 56.8465,
+            "min": 56.3955,
+            "process_values": [
+              56.902,
+              57.482,
+              56.3955,
+              56.8465,
+              56.5305
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.31547808524417414,
+            "median": 0.3117815304702311,
+            "min": 0.30933679262359376,
+            "process_values": [
+              0.3117815304702311,
+              0.31547808524417414,
+              0.30933679262359376,
+              0.31267927911575344,
+              0.3112664462363963
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 96.33241044044628,
+            "median": 95.39120023345978,
+            "min": 93.38836813681289,
+            "process_values": [
+              94.21858086867438,
+              95.39120023345978,
+              96.33241044044628,
+              95.41902202716096,
+              93.38836813681289
+            ]
+          },
+          "median_us": {
+            "max": 19.250999999999998,
+            "median": 18.930500000000002,
+            "min": 18.775,
+            "process_values": [
+              19.136000000000003,
+              18.775,
+              18.785,
+              18.930500000000002,
+              19.250999999999998
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.10599924565494492,
+            "median": 0.10412558545030513,
+            "min": 0.10303821491846352,
+            "process_values": [
+              0.10485134735296375,
+              0.10304270989978374,
+              0.10303821491846352,
+              0.10412558545030513,
+              0.10599924565494492
+            ]
+          }
+        }
+      }
+    },
+    "one-outlier D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 28.238843733302964,
+            "median": 28.118487150155524,
+            "min": 28.0675971796704,
+            "process_values": [
+              28.238843733302964,
+              28.15976928599361,
+              28.118487150155524,
+              28.0675971796704,
+              28.106551147017456
+            ]
+          },
+          "median_us": {
+            "max": 1347.038,
+            "median": 1343.842,
+            "min": 1340.511,
+            "process_values": [
+              1341.207,
+              1340.511,
+              1343.842,
+              1344.9544999999998,
+              1347.038
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 3.272809455210878,
+            "median": 3.25174856479157,
+            "min": 3.247498165846241,
+            "process_values": [
+              3.247498165846241,
+              3.2489281412308744,
+              3.25174856479157,
+              3.272809455210878,
+              3.260270955484156
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 27.467289742449378,
+            "median": 27.387080468547552,
+            "min": 27.328432341512382,
+            "process_values": [
+              27.467289742449378,
+              27.453497892461893,
+              27.328432341512382,
+              27.387080468547552,
+              27.329919668556627
+            ]
+          },
+          "median_us": {
+            "max": 1381.618,
+            "median": 1380.536,
+            "min": 1373.6975,
+            "process_values": [
+              1376.7640000000001,
+              1373.6975,
+              1381.618,
+              1380.536,
+              1380.926
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 3.359393402571615,
+            "median": 3.3422909594776935,
+            "min": 3.3293605686850007,
+            "process_values": [
+              3.333593222226796,
+              3.3293605686850007,
+              3.3431566721312467,
+              3.359393402571615,
+              3.3422909594776935
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 92.00508607209862,
+            "median": 91.67136217104539,
+            "min": 91.4310508133361,
+            "process_values": [
+              91.4310508133361,
+              91.71106094367286,
+              91.62475753966756,
+              92.00508607209862,
+              91.67136217104539
+            ]
+          },
+          "median_us": {
+            "max": 413.2675,
+            "median": 412.997,
+            "min": 410.948,
+            "process_values": [
+              412.997,
+              412.601,
+              413.2675,
+              410.948,
+              413.1675
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 223.38417873695326,
+            "median": 223.05291872982957,
+            "min": 222.8183802076461,
+            "process_values": [
+              223.05291872982957,
+              223.37451649169446,
+              222.8183802076461,
+              223.38417873695326,
+              222.97589584387725
+            ]
+          },
+          "median_us": {
+            "max": 169.652,
+            "median": 169.517,
+            "min": 169.19650000000001,
+            "process_values": [
+              169.4315,
+              169.517,
+              169.6475,
+              169.19650000000001,
+              169.652
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.4117224077012177,
+            "median": 0.4106131290578276,
+            "min": 0.4102487427269447,
+            "process_values": [
+              0.4102487427269447,
+              0.4108497071020186,
+              0.410502882515562,
+              0.4117224077012177,
+              0.4106131290578276
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 304.5517647783896,
+            "median": 304.3654434408831,
+            "min": 302.25529463108944,
+            "process_values": [
+              304.3654434408831,
+              304.3939354993812,
+              302.25529463108944,
+              304.5517647783896,
+              302.8698283143891
+            ]
+          },
+          "median_us": {
+            "max": 125.41,
+            "median": 124.4525,
+            "min": 123.9165,
+            "process_values": [
+              123.9165,
+              124.39750000000001,
+              125.41,
+              124.4525,
+              124.999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.30345962360940554,
+            "median": 0.302538316784355,
+            "min": 0.30004213105664207,
+            "process_values": [
+              0.30004213105664207,
+              0.30149587616123086,
+              0.30345962360940554,
+              0.3028424520863954,
+              0.302538316784355
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 224.42034994466417,
+            "median": 223.56687982864406,
+            "min": 223.11863727619271,
+            "process_values": [
+              223.7650251705972,
+              223.56687982864406,
+              223.11863727619271,
+              224.42034994466417,
+              223.34098052976674
+            ]
+          },
+          "median_us": {
+            "max": 169.392,
+            "median": 168.94099999999997,
+            "min": 168.38,
+            "process_values": [
+              168.94099999999997,
+              168.936,
+              169.096,
+              168.38,
+              169.392
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.4099838443246383,
+            "median": 0.4094415670344958,
+            "min": 0.4090610827681556,
+            "process_values": [
+              0.4090610827681556,
+              0.4094415670344958,
+              0.4091683957727138,
+              0.40973553831628334,
+              0.4099838443246383
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 249.83425559783905,
+            "median": 249.14423054102122,
+            "min": 247.00776511839157,
+            "process_values": [
+              247.00776511839157,
+              249.14423054102122,
+              249.4155554998482,
+              249.83425559783905,
+              248.2558220593918
+            ]
+          },
+          "median_us": {
+            "max": 152.731,
+            "median": 151.824,
+            "min": 151.5385,
+            "process_values": [
+              152.731,
+              151.639,
+              151.824,
+              151.5385,
+              152.325
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.36981140298839943,
+            "median": 0.3686761422425529,
+            "min": 0.3673746423321457,
+            "process_values": [
+              0.36981140298839943,
+              0.36751971032547187,
+              0.3673746423321457,
+              0.3687534675920068,
+              0.3686761422425529
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 258.89301901058354,
+            "median": 258.3449449421395,
+            "min": 257.1736813015233,
+            "process_values": [
+              258.3449449421395,
+              258.89301901058354,
+              257.1736813015233,
+              258.66586958738424,
+              257.7690302743666
+            ]
+          },
+          "median_us": {
+            "max": 146.684,
+            "median": 146.539,
+            "min": 145.743,
+            "process_values": [
+              146.4485,
+              145.743,
+              146.539,
+              146.6795,
+              146.684
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.3569295871983803,
+            "median": 0.3545994280830127,
+            "min": 0.35322987583646187,
+            "process_values": [
+              0.3545994280830127,
+              0.35322987583646187,
+              0.35458631515906763,
+              0.3569295871983803,
+              0.3550230838582415
+            ]
+          }
+        }
+      }
+    },
+    "power-law D=3": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 0.9704397499534958,
+            "median": 0.9645859582599339,
+            "min": 0.9528446959178021,
+            "process_values": [
+              0.9592234775508347,
+              0.9528446959178021,
+              0.9671081189292259,
+              0.9704397499534958,
+              0.9645859582599339
+            ]
+          },
+          "median_us": {
+            "max": 3624.886,
+            "median": 3568.316,
+            "min": 3551.0135,
+            "process_values": [
+              3624.886,
+              3617.4315,
+              3556.2425000000003,
+              3568.316,
+              3551.0135
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.853440169836703,
+            "median": 1.829271024693228,
+            "min": 1.8153013319742055,
+            "process_values": [
+              1.853440169836703,
+              1.8532360393738785,
+              1.8207765830101796,
+              1.829271024693228,
+              1.8153013319742055
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 0.9720122094666317,
+            "median": 0.9680239231759525,
+            "min": 0.9589892360725276,
+            "process_values": [
+              0.9696538948006381,
+              0.9648360331355061,
+              0.9589892360725276,
+              0.9680239231759525,
+              0.9720122094666317
+            ]
+          },
+          "median_us": {
+            "max": 3615.6135,
+            "median": 3550.833,
+            "min": 3511.6545,
+            "process_values": [
+              3518.5175,
+              3553.0465000000004,
+              3615.6135,
+              3550.833,
+              3511.6545
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.8511742081749136,
+            "median": 1.8202511432134159,
+            "min": 1.7951807536871411,
+            "process_values": [
+              1.7990529006356093,
+              1.8202511432134159,
+              1.8511742081749136,
+              1.8203084929766673,
+              1.7951807536871411
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 1.7620835183493926,
+            "median": 1.7558843762954848,
+            "min": 1.7259810124700201,
+            "process_values": [
+              1.7268448705777593,
+              1.7558843762954848,
+              1.7614999131328983,
+              1.7620835183493926,
+              1.7259810124700201
+            ]
+          },
+          "median_us": {
+            "max": 1956.1565,
+            "median": 1953.146,
+            "min": 1950.6765,
+            "process_values": [
+              1955.761,
+              1951.9540000000002,
+              1953.146,
+              1950.6765,
+              1956.1565
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 21.23360123613493,
+            "median": 21.13379294807828,
+            "min": 21.042205320370876,
+            "process_values": [
+              21.09208429266782,
+              21.13379294807828,
+              21.23360123613493,
+              21.178756478356505,
+              21.042205320370876
+            ]
+          },
+          "median_us": {
+            "max": 164.222,
+            "median": 162.975,
+            "min": 162.49900000000002,
+            "process_values": [
+              162.619,
+              162.99,
+              162.975,
+              162.49900000000002,
+              164.222
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.0839513607423537,
+            "median": 0.08344230282835999,
+            "min": 0.08314870784313626,
+            "process_values": [
+              0.08314870784313626,
+              0.08350094315747195,
+              0.08344230282835999,
+              0.08330392046041464,
+              0.0839513607423537
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 25.020993446586374,
+            "median": 24.610998737843524,
+            "min": 24.432093992285502,
+            "process_values": [
+              25.020993446586374,
+              24.534300322596586,
+              24.610998737843524,
+              24.930059114351415,
+              24.432093992285502
+            ]
+          },
+          "median_us": {
+            "max": 139.2255,
+            "median": 138.203,
+            "min": 137.176,
+            "process_values": [
+              137.176,
+              139.2255,
+              137.472,
+              138.203,
+              138.92000000000002
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.07132621977772018,
+            "median": 0.07084875426550738,
+            "min": 0.07013944955441896,
+            "process_values": [
+              0.07013944955441896,
+              0.07132621977772018,
+              0.07038490722147756,
+              0.07084875426550738,
+              0.07101681281635698
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 6.9221735974519945,
+            "median": 6.887874802673398,
+            "min": 6.841412096918173,
+            "process_values": [
+              6.860079338554329,
+              6.9221735974519945,
+              6.895715931742783,
+              6.841412096918173,
+              6.887874802673398
+            ]
+          },
+          "median_us": {
+            "max": 503.697,
+            "median": 498.276,
+            "min": 494.3145,
+            "process_values": [
+              503.116,
+              494.3145,
+              496.062,
+              503.697,
+              498.276
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.2582165725582894,
+            "median": 0.2547219509277504,
+            "min": 0.2532408550611336,
+            "process_values": [
+              0.2572482015951847,
+              0.2532408550611336,
+              0.25398101319614613,
+              0.2582165725582894,
+              0.2547219509277504
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 6.950532112574746,
+            "median": 6.843740841949696,
+            "min": 6.727376036954842,
+            "process_values": [
+              6.950532112574746,
+              6.803308945794015,
+              6.916941064146302,
+              6.843740841949696,
+              6.727376036954842
+            ]
+          },
+          "median_us": {
+            "max": 508.9515,
+            "median": 503.66650000000004,
+            "min": 497.2195,
+            "process_values": [
+              498.2065,
+              503.7315,
+              497.2195,
+              503.66650000000004,
+              508.9515
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.26017933636700336,
+            "median": 0.2580652515376899,
+            "min": 0.25457364682414935,
+            "process_values": [
+              0.2547379255440721,
+              0.2580652515376899,
+              0.25457364682414935,
+              0.2582009369569993,
+              0.26017933636700336
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 66.47684193214548,
+            "median": 66.10289173109254,
+            "min": 64.67496008374182,
+            "process_values": [
+              66.47684193214548,
+              65.07183594570684,
+              66.2246851808938,
+              66.10289173109254,
+              64.67496008374182
+            ]
+          },
+          "median_us": {
+            "max": 53.0995,
+            "median": 51.361000000000004,
+            "min": 51.0655,
+            "process_values": [
+              51.361000000000004,
+              51.917,
+              51.286,
+              51.0655,
+              53.0995
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.02714481177758528,
+            "median": 0.026261388789325487,
+            "min": 0.026178354022309697,
+            "process_values": [
+              0.026261388789325487,
+              0.026597450554674953,
+              0.026258149672374723,
+              0.026178354022309697,
+              0.02714481177758528
+            ]
+          }
+        }
+      }
+    },
+    "power-law D=64": {
+      "end_to_end": {
+        "swage_public_call": {
+          "effective_gb_per_s": {
+            "max": 4.914327775329706,
+            "median": 4.885019722642839,
+            "min": 4.85825153662857,
+            "process_values": [
+              4.85825153662857,
+              4.87666149242677,
+              4.894296657217926,
+              4.914327775329706,
+              4.885019722642839
+            ]
+          },
+          "median_us": {
+            "max": 14855.640500000001,
+            "median": 14780.379,
+            "min": 14713.5955,
+            "process_values": [
+              14778.4695,
+              14780.379,
+              14855.640500000001,
+              14713.5955,
+              14823.190999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 3.509830322502202,
+            "median": 3.4682779870968106,
+            "min": 3.359231565498825,
+            "process_values": [
+              3.4682779870968106,
+              3.4878460648642506,
+              3.4634603781362148,
+              3.359231565498825,
+              3.509830322502202
+            ]
+          }
+        },
+        "swage_public_call_int64": {
+          "effective_gb_per_s": {
+            "max": 4.944840568114898,
+            "median": 4.85602256352997,
+            "min": 4.8405586218765455,
+            "process_values": [
+              4.944840568114898,
+              4.8405586218765455,
+              4.85602256352997,
+              4.852429936333908,
+              4.884590320444607
+            ]
+          },
+          "median_us": {
+            "max": 15088.655,
+            "median": 14913.098,
+            "min": 14643.873,
+            "process_values": [
+              14643.873,
+              15088.655,
+              14913.098,
+              14937.4185,
+              14772.696
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 3.56059245610984,
+            "median": 3.4768560829310875,
+            "min": 3.4103321470449632,
+            "process_values": [
+              3.4366902724088804,
+              3.56059245610984,
+              3.4768560829310875,
+              3.4103321470449632,
+              3.4978741328980374
+            ]
+          }
+        },
+        "torch": {
+          "effective_gb_per_s": {
+            "max": 17.046373204730124,
+            "median": 16.856497785749198,
+            "min": 16.42515306654455,
+            "process_values": [
+              17.046373204730124,
+              16.946583503664968,
+              16.856497785749198,
+              16.42515306654455,
+              16.848582530177815
+            ]
+          },
+          "median_us": {
+            "max": 4380.048000000001,
+            "median": 4261.0395,
+            "min": 4223.3355,
+            "process_values": [
+              4261.0395,
+              4237.681,
+              4289.248,
+              4380.048000000001,
+              4223.3355
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "process_values": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w1": {
+          "effective_gb_per_s": {
+            "max": 54.541320144717005,
+            "median": 54.13739327869517,
+            "min": 53.95511117950528,
+            "process_values": [
+              54.13739327869517,
+              53.95511117950528,
+              54.541320144717005,
+              54.208023973517584,
+              53.967444517764704
+            ]
+          },
+          "median_us": {
+            "max": 1349.9485,
+            "median": 1338.7275,
+            "min": 1323.449,
+            "process_values": [
+              1340.2095,
+              1338.7275,
+              1335.271,
+              1323.449,
+              1349.9485
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.31964036482538505,
+            "median": 0.31452642013762133,
+            "min": 0.3021539946594192,
+            "process_values": [
+              0.31452642013762133,
+              0.31591040005134885,
+              0.31130655070539176,
+              0.3021539946594192,
+              0.31964036482538505
+            ]
+          }
+        },
+        "triton_rows_looped_r16_w4": {
+          "effective_gb_per_s": {
+            "max": 91.13102212156923,
+            "median": 90.99063113901201,
+            "min": 89.65238441075623,
+            "process_values": [
+              89.65238441075623,
+              91.08827278458438,
+              91.13102212156923,
+              90.31961728966587,
+              90.99063113901201
+            ]
+          },
+          "median_us": {
+            "max": 808.6865,
+            "median": 799.394,
+            "min": 793.5385,
+            "process_values": [
+              800.0754999999999,
+              799.394,
+              793.5385,
+              808.6865,
+              796.414
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.188639494100665,
+            "median": 0.18776533284894448,
+            "min": 0.18462959766650958,
+            "process_values": [
+              0.18776533284894448,
+              0.188639494100665,
+              0.185006439357202,
+              0.18462959766650958,
+              0.18857464674544563
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w1": {
+          "effective_gb_per_s": {
+            "max": 54.58841329798372,
+            "median": 53.88213170684621,
+            "min": 53.01426753937566,
+            "process_values": [
+              54.58841329798372,
+              54.29918494595388,
+              53.01426753937566,
+              53.016824654296656,
+              53.88213170684621
+            ]
+          },
+          "median_us": {
+            "max": 1367.0255000000002,
+            "median": 1340.245,
+            "min": 1313.245,
+            "process_values": [
+              1313.245,
+              1328.7035,
+              1365.3725,
+              1367.0255000000002,
+              1340.245
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.31832444754884776,
+            "median": 0.31354495536591837,
+            "min": 0.30819826945983486,
+            "process_values": [
+              0.30819826945983486,
+              0.31354495536591837,
+              0.31832444754884776,
+              0.3121028582335171,
+              0.3173427732653491
+            ]
+          }
+        },
+        "triton_rows_looped_r4_w4": {
+          "effective_gb_per_s": {
+            "max": 63.99644146978359,
+            "median": 63.3803895951185,
+            "min": 63.009235379610175,
+            "process_values": [
+              63.3803895951185,
+              63.04173002251521,
+              63.99644146978359,
+              63.009235379610175,
+              63.57301592072628
+            ]
+          },
+          "median_us": {
+            "max": 1156.327,
+            "median": 1144.2939999999999,
+            "min": 1131.4605,
+            "process_values": [
+              1144.2939999999999,
+              1148.397,
+              1131.4605,
+              1156.327,
+              1134.6965
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.2709965662823606,
+            "median": 0.2685480855082427,
+            "min": 0.2637899463961981,
+            "process_values": [
+              0.2685480855082427,
+              0.2709965662823606,
+              0.2637899463961981,
+              0.2639987050370224,
+              0.2686730665844568
+            ]
+          }
+        },
+        "triton_rows_looped_r64_w4": {
+          "effective_gb_per_s": {
+            "max": 66.41450122769842,
+            "median": 65.80373609796536,
+            "min": 65.73225236755056,
+            "process_values": [
+              66.41450122769842,
+              65.74256941101777,
+              66.40854974970435,
+              65.73225236755056,
+              65.80373609796536
+            ]
+          },
+          "median_us": {
+            "max": 1109.1335,
+            "median": 1102.4859999999999,
+            "min": 1086.0245,
+            "process_values": [
+              1087.0525,
+              1103.6625,
+              1086.0245,
+              1109.1335,
+              1102.4859999999999
+            ]
+          },
+          "ratio_to_torch": {
+            "max": 0.26104627491706495,
+            "median": 0.255114391687756,
+            "min": 0.2531969473436836,
+            "process_values": [
+              0.255114391687756,
+              0.26044020302613624,
+              0.2531969473436836,
+              0.25322405142592036,
+              0.26104627491706495
+            ]
+          }
+        }
+      }
+    }
+  },
+  "smoke": false,
+  "statistics": "every process contributes the median of its own samples; the summary lists those per-process medians with their median, minimum, and maximum; a ratio is formed inside each process from its two medians, once against each reference; every candidate is reported and none is selected"
+}

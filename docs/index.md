@@ -39,7 +39,11 @@ device. The wider segment compiler is private research or planned work.
   explicitly selected CUDA or Native CPU backend.
 - `swage.segment_reduce` for `"sum"`, `"max"`, `"min"`, and `"mean"` over
   `float32` or `float64` values, and `swage.segment_softmax` over `float32`
-  values, with `int32` or `int64` offsets on the current CUDA device.
+  values, with `int32` or `int64` offsets on the current CUDA device. Both
+  take values of rank one or `[N, D]` rows, and both record a gradient,
+  with second derivatives, for values that require grad.
+  [Segmented Calls](user-guide/segmented-calls.md) states the contract and
+  the cost.
 - `python -m swage.compile`, which writes the kernels of the two segmented
   calls ahead of time without a GPU, and `SWAGE_ARTIFACT_DIR`, which makes a
   process run the calls from such a directory with no compiler loaded.
@@ -52,8 +56,9 @@ device. The wider segment compiler is private research or planned work.
   source builds.
 
 The two segmented calls take values of rank one or `[N, D]` rows that they
-reduce or normalize per column. They record no gradient, are refused under
-CUDA graph capture, and prepare their offsets on the host at every call.
+reduce or normalize per column. They record a gradient for values that
+require grad, are refused under CUDA graph capture, and prepare their
+offsets on the host at every call.
 [Segmented Calls](user-guide/segmented-calls.md) states the contract and
 the cost, and [Running Without the Compiler](user-guide/deployment.md)
 states what an artifact delivers and what it does not.

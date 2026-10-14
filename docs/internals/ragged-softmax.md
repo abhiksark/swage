@@ -6,7 +6,7 @@ Stable ragged softmax executes all phases in one CTA per segment
 with fused maps. This page records the exact internal contracts;
 none of them is a public API. The public `swage.segment_softmax` launches
 this path with the default 128-thread block and requires offsets that cover
-every value. For rank-two values it launches the column kernel that
+every value. For rank-two values it launches the row-stripe kernel that
 [Rank-two values](#rank-two-values) describes.
 
 *Qualified on NVIDIA RTX A6000 (`sm_86`); see
@@ -15,7 +15,7 @@ every value. For rank-two values it launches the column kernel that
 
 Over rank-one values the softmax path retains the five-argument ABI
 defined in [Segmented Reductions](segmented-reductions.md). Over rank-two
-values it takes the sixth argument of the column kernel. It admits ordered f32
+values it takes the feature count as well. It admits ordered f32
 reduction captures,
 single-consumer map chains, and exactly one scalar store or map-store
 terminal. The stable softmax module performs maximum, shifted exponential
@@ -49,12 +49,16 @@ second segment id of
 [Segmented Reductions](segmented-reductions.md#rank-two-values): it
 declares the `feature_count` role, `swage.make_segment` binds
 `swage.segment_id 1` as the column, and `swage.map_store` writes a
-rank-two output. Its kernel function is `ragged_softmax_r2`, and it takes
-the six parameters of the column kernel:
+rank-two output. Its kernel function is `ragged_softmax_r2`.
+
+`swage.segment_softmax` runs the task-ids schedule of the program, the
+row-stripe tile of
+[Segmented Reductions](segmented-reductions.md#the-row-stripe-tile), with
+the parameters of the task-id kernel and the number of columns:
 
 ```text
-values*, offsets*, output*, value_count:i32, segment_count:i32,
-feature_count:i32
+values*, offsets*, output*, task_ids*, value_count:i32, task_count:i32,
+segment_count:i32, feature_count:i32
 ```
 
 `value_count` is the number of rows. `values` and `output` hold rows of
@@ -62,42 +66,44 @@ feature_count:i32
 it read from: the row and the column of a value are the row and the column
 of its result.
 
-The kernel is the column tile of the reductions, with three stages in
-place of one:
+The kernel is the row-stripe tile with three stages in place of one:
 
-- **One block per segment.** The rows of the segment are loaded from the
-  offsets and clamped to `value_count`. The public call passes the number
-  of rows of the values, which is the number of rows of the output. The
-  private launch admits a shorter output and passes the smaller number.
-- **One column per thread at a time.** Thread `t` of a block of 128 takes
-  the columns `t`, `t + 128`, and so on. The loop over those columns is
-  bounded by `feature_count`.
-- **Three walks over a column.** A thread computes the maximum of its
-  column, then the sum of the shifted exponentials, then stores every
-  normalized element, each time in row order.
-- **One scalar per stage.** A thread holds the maximum and the sum of the
-  column it works on, never a value per column or per row.
-- **No combination across threads.** The kernel holds no shuffle, no
-  barrier, and no shared memory. The two all-reduce operations of the
-  rank-one kernel, which combine the threads of a block and separate its
-  phases, do not exist in it.
-- **No split and no warp schedule.** A segment occupies one block for its
-  whole length.
+- **One task per segment.** The call passes the identity task list, so
+  task `t` is segment `t`, and launches one block of 128 threads per
+  segment and group of `W` adjacent columns, `W` the smallest power of two
+  that is at least `feature_count`, capped at 32. The rows of the segment
+  are loaded from the offsets and clamped to `value_count`. The public
+  call passes the number of rows of the values, which is the number of
+  rows of the output.
+- **Stripes.** The threads of a block are `R = 128 / W` stripes of rows for
+  each column of the group. A stripe walks the rows `s`, `s + R`, and so
+  on of its column.
+- **Three stages.** The stripes compute the maximum of their column and
+  combine it across the block, then the sum of the shifted exponentials,
+  combined the same way, and then each stripe stores the normalized
+  elements of its rows.
+- **One exchange buffer.** Both reductions combine through the one
+  workgroup buffer of the kernel, between two barriers each. The trailing
+  barrier of the maximum keeps the stores of the sum from overwriting a
+  result that another thread has not read.
+- **One scalar per stage.** A thread holds the maximum and the sum of its
+  column, never a value per column or per row.
+- **No split and no warp schedule.** A segment occupies one block per
+  column group for its whole length.
 
-The limits are those of the column tile. With few columns few threads of a
-block work: a segment of 10,000 rows and three columns is three walks of
-10,000 rows, one row after the other, in each of three threads. A batch
-with a heavy tail of long segments keeps few blocks busy for a long time.
-The bits of a column do not depend on the batch, on the block width, or on
-the GPU model.
+The bits of a column depend on its row count and on `W`, and not on the
+batch or on the GPU model. `[N, 1]` values run the rank-one kernel through
+a view, and `[N, 0]` values launch nothing.
 
-`swage.segment_softmax` runs this kernel for `[N, D]` values with more
-than one column. `[N, 1]` values run the rank-one kernel through a view,
-and `[N, 0]` values launch nothing. The CPU oracle lowers the same program
-to a loop over the segments, a loop over the columns, and the three stages
-over the rows. The kernel and the oracle add in the same order and differ
-in the exponential, `ex2.approx.f32` on the device and `exp2f` on the
-host, so the tests compare them within a tolerance and not bit for bit.
+The direct schedule of the program gives the column tile of the
+reductions with three stages: a thread walks its column three times in
+row order, and no thread combines with another. The private
+`launch_softmax_gpu` runs it, and no public call does. The CPU oracle
+lowers the program to a loop over the segments, a loop over the columns,
+and the three stages over the rows. The oracle adds in row order, and both
+tiles differ from it in the exponential, `ex2.approx.f32` on the device
+and `exp2f` on the host, so the tests compare them within a tolerance and
+not bit for bit.
 
 The driver-level tests of `python/tests/mlir/test_segmented_bounds.py`
 launch the kernel below the Python validation: with row ranges that
@@ -139,8 +145,8 @@ where:
   values it is `ceil(n / 128) + 6`, the additions of the 128-lane sum over
   a segment of `n` elements (see
   [Segmented Reductions](segmented-reductions.md#sum-rounding)). For
-  rank-two values it is `n - 1`: a thread adds the `n` rows of its column
-  one after the other.
+  rank-two values it is `ceil(n / R) - 1 + log2(R)` for the `R = 128 / W`
+  stripes of a column, and never more than `n - 1`.
 - `1.5` covers the division and the higher-order terms.
 
 Both `d` and `dbar` are at most the spread of the segment, the difference
@@ -153,12 +159,13 @@ bound is therefore
 
 for any distribution of the logits, which is `2.4e-05` at spread 80 for a
 4096-element segment of rank-one values. For rank-two values the term
-`k / 2` is `(n - 1) / 2` and grows with the number of rows, so the bound
-of a long segment is weaker than the rank-one bound: at 4096 rows it is
-`2.7e-04` at the same spread. The other terms are the same, and a column
-is bounded on its own.
+`k / 2` grows with `n / R`, so the bound of a long segment is weaker than
+the rank-one bound when the columns are many: at 4096 rows and the same
+spread it is `8.3e-05` from 17 columns on, where `W` is 32 and `k` is
+1025, and `2.6e-05` at two columns, where `k` is 69. The other terms are
+the same, and a column is bounded on its own.
 
-The tests of rank-two values assert the first form with `k = n - 1` for
+The tests of rank-two values assert the first form with that `k` for
 every output of every column against `torch.softmax` in float64 along the
 rows of a segment, at 3, 64, 129, 200, and 1024 columns and for a segment
 of 100,003 rows.
