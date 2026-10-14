@@ -4,26 +4,29 @@
 
 !!! warning "Recorded evidence"
 
-    This page reports recorded measurements from three campaigns, each on
+    This page reports recorded measurements from five campaigns, each on
     one machine. None is a continuously enforced gate, and none is a public
     performance contract.
 
 The page reads in the order the records were made. Each section says which
-record it reports, and the last record is the only one that describes the
-kernels the compiler generates now.
+record it reports. Only the last three records time kernels that passed
+through the LLVM pass pipeline.
 
 | Record | Date | GPU | What it measures |
 |---|---|---|---|
 | [`perf-5090-sm120.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/perf-5090-sm120.json) | 2026-08-27 | RTX 5090 (`sm_120`) | One frozen layout per row against `torch.segment_reduce` and a Triton kernel that reads one block per segment; dispatch cost; vector add |
 | [`persistent-sum-a6000-sm86.json`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/persistent-sum-a6000-sm86.json) | 2026-09-02 | RTX A6000 (`sm_86`) | The predeclared persistent gate against static mixed execution |
 | [`segmented-sum-a6000-sm86-453c56e`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segmented-sum-a6000-sm86-453c56e.md) | 2026-10-02 | RTX A6000 (`sm_86`) | A new offsets layout on every call, and one frozen layout per row against looped and planned Triton, five processes each |
+| [`segment-reduce-a6000-sm86-c6099ec`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-c6099ec.md) | 2026-10-03 | RTX A6000 (`sm_86`) | The public `swage.segment_reduce` call with a new offsets layout on every call, on rank-one and `[N, D]` values, against torch and looped Triton, five processes each |
+| [`segment-reduce-a6000-sm86-2cf88ae`](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-2cf88ae.md) | 2026-10-03 | RTX A6000 (`sm_86`) | The same runs after the row-stripe schedule for `[N, D]` values, with a comparison against `c6099ec`, five processes each |
 
 The first two records were made before kernels passed through the LLVM pass
 pipeline and with earlier revisions of the harnesses. The third was made at
-revision `453c56e` with the harnesses that
-[Harness methods](#harness-methods) describes. One more record, the first
-Swage and Triton comparison on the A6000 at revision `80f222d`, is reported
-on the [A6000 comparison study](a6000-comparison.md) beside the third.
+revision `453c56e`, the fourth at `c6099ec`, and the fifth at `2cf88ae`,
+with the harnesses that [Harness methods](#harness-methods) describes. One more record, the
+first Swage and Triton comparison on the A6000 at revision `80f222d`, is
+reported on the [A6000 comparison study](a6000-comparison.md) beside the
+third.
 
 ## The RTX 5090 snapshot
 
@@ -44,7 +47,8 @@ Every timing describes the PTX that the source revision of its record
 generated. The revisions of this snapshot and of the persistent gate emitted
 PTX without the LLVM pass pipeline that kernels go through now (see
 [Compiler Pipeline](compiler-pipeline.md)), so their numbers do not measure
-currently generated code. The `453c56e` record does.
+currently generated code. The `453c56e`, `c6099ec`, and `2cf88ae` records
+do.
 
 ## Timing methods
 
@@ -149,7 +153,7 @@ qualification.
 
 ## Fresh offsets and the frozen comparison at `453c56e`
 
-The newest record was made on 2026-10-02 on one NVIDIA RTX A6000 (`sm_86`)
+This record was made on 2026-10-02 on one NVIDIA RTX A6000 (`sm_86`)
 at revision `453c56e`, from a clean tree, with five independent processes
 per run. It holds two measurements that the older records lack: a call that
 sees a new offsets layout every time, and a frozen-layout comparison with
@@ -171,7 +175,8 @@ out on a layout that no earlier call used, at 2,048, 8,192, and 32,768
 segments. The Swage candidate is the private preparation with schedule
 selection disabled, followed by the mixed launch. The public
 `swage.segment_reduce` call was not a candidate when these records were
-taken.
+taken; the [`c6099ec` record](#public-segment_reduce-calls-at-c6099ec)
+times it.
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-fresh-statement.inc"
 
@@ -238,6 +243,105 @@ The record does not support a statement about another GPU, another seed, or
 a quiet machine, and its Triton columns are optimistic for Triton because
 each is chosen after the run. The summary page lists every limit.
 
+## Public `segment_reduce` calls at `c6099ec`
+
+This record was made on 2026-10-03 on one NVIDIA RTX A6000 (`sm_86`)
+at revision `c6099ec`, from a clean tree, with five independent processes
+per run. It times the public `swage.segment_reduce` call, on int32 and on
+int64 offsets, with a new offsets layout on every call, against
+`torch.segment_reduce` and looped Triton kernels. One run uses rank-one
+values at 8,192 segments. Four runs use `[N, D]` values: D of 3 and 64 at
+2,048, 8,192, and 32,768 segments, and D of 768 at 2,048 segments. Its
+[summary page](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-c6099ec.md)
+holds every table, the machine conditions, the commands, and notes on the
+compiled column kernel. Every number in this section and in
+[Where Swage loses](#where-swage-loses) for this record is generated from
+the committed summaries by `benchmarks/public_call_tables.py`.
+
+The record is the baseline for a change to the schedule of rank-two
+values, which is not implemented at this revision; the
+[`2cf88ae` record](#public-segment_reduce-calls-at-2cf88ae) measures it.
+Every `[N, D]` row runs the column kernel of the call at `c6099ec`: one block of 128 threads
+per segment, in which each thread reduces whole columns and walks the rows
+of the segment one at a time. The rank-one run also times the private
+`swage_mixed` and `swage_cta_call` candidates, and the rank-one kernels its
+processes loaded have the SHA-256 digests of those of the `453c56e` record.
+
+The machine was not quiet. Builds and tests of another branch ran on the
+CPU during the campaign, GPU work was serialized with them by a file lock,
+and the CPU frequency governor was `powersave`. The summary page states
+these conditions from the records.
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-public-statement.inc"
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-looped-statement.inc"
+
+The range of each ratio over the rows of each run:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-ranges.inc"
+
+The record does not support a statement about the planned schedule, another
+GPU, another seed, another kind or type, or a quiet machine, and its Triton
+columns are optimistic for Triton because each is chosen after the run. The
+summary page lists every limit.
+
+## Public `segment_reduce` calls at `2cf88ae`
+
+The newest record was made on 2026-10-03 on one NVIDIA RTX A6000 (`sm_86`)
+at revision `2cf88ae`, from a clean tree, with five independent processes
+per run. It repeats the five runs of the `c6099ec` record with the same
+commands and the same harness, after two changes: `[N, D]` values run the
+row-stripe tile of
+[ADR-0023](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md) instead
+of the column kernel, and the segmented calls record gradients
+([ADR-0024](../adr/ADR-0024-gradients-of-the-segmented-calls.md)). No timed
+call records a gradient. Its
+[summary page](https://github.com/abhiksark/swage/blob/main/benchmarks/results/segment-reduce-a6000-sm86-2cf88ae.md)
+holds every table, the machine conditions, the commands, and notes on the
+compiled row-stripe kernels. Every number in this section and in
+[Where Swage loses](#where-swage-loses) for this record is generated from
+the committed summaries by `benchmarks/public_call_tables.py`.
+
+At this revision a segment of `[N, D]` values of at most `floor(4096 / W)`
+rows, for the column-group width W, runs on a block of 128 threads. Each
+warp splits its lanes into stripes of rows over W adjacent columns, and the
+stripes of one column are combined by warp shuffles and through shared
+memory. A longer segment is reduced in chunks of that many rows and then
+merged. The rank-one run times the same kernels as at `c6099ec`.
+
+The machine was not quiet. The load average rose during the campaign, the
+record does not identify its sources, and the CPU frequency governor was
+`powersave`. No build or test that the maintainer started ran during the
+campaign. The summary page states these conditions from the records.
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-public-statement.inc"
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-looped-statement.inc"
+
+The range of each ratio over the rows of each run:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-ranges.inc"
+
+### Against the `c6099ec` record
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-comparison-statement.inc"
+
+The rows of each change, per run. A cell gives the number of rows and, in
+parentheses, the range of the ratio of `2cf88ae` to `c6099ec`:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-comparison-counts.inc"
+
+Every row, in microseconds, with the ratio of the two revisions, its
+change, and the ratio of the public call to torch at each revision:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-comparison-tables.inc"
+
+The record does not support a statement about another GPU, another seed,
+another kind or type, gradients, or a quiet machine, or about a change
+smaller than the spread between two separate campaigns. Its Triton columns
+are optimistic for Triton because each is chosen after the run. The summary
+page lists every limit.
+
 ## Where Swage loses
 
 The losses are listed by record, in the order the records were made.
@@ -264,15 +368,29 @@ On the RTX A6000 at `453c56e`, from the record above:
 
 --8<-- "docs/internals/_generated/segmented-sum-a6000-sm86-453c56e-losses.inc"
 
+On the RTX A6000 at `c6099ec`, from the record above, with a new offsets
+layout on every call. The `[N, D]` rows of this record ran the column
+kernel that the row-stripe schedule replaced, so they describe the call
+before that change:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-c6099ec-losses.inc"
+
+On the RTX A6000 at `2cf88ae`, the newest record, with a new offsets layout
+on every call:
+
+--8<-- "docs/internals/_generated/segment-reduce-a6000-sm86-2cf88ae-losses.inc"
+
 ## Harness methods
 
 The scripts under `benchmarks/` are research harnesses, not CI gates. This
 section states what they measure and what they write into a record. It
 describes the harnesses as they are now, not as they were when a record was
 made. Since revision `453c56e`, the fresh-offsets harness has gained the two
-public-call candidates, and the comparison harness has renamed two
-candidates, added candidates and timed phases, and changed its padded
-baseline, as the candidate list below states. The older records come from
+public-call candidates and the kinds, `[N, D]`, float64, pipelined, and
+int64-offsets options of the public-call records, and the comparison
+harness has renamed two candidates, added candidates and timed phases, and
+changed its padded baseline, as the candidate list below states. The older
+records come from
 earlier revisions, so they carry one of the fields below only if the
 harness wrote it at the time.
 
@@ -297,11 +415,11 @@ Where the two harnesses name a candidate differently, both names are given.
 - In fresh offsets only, `swage_public_call`: one public
   `swage.segment_reduce` call into a caller's buffer. It enqueues the mixed
   policy alone, with automatic schedule selection, which `swage_mixed`
-  disables, so the two can run different kernels on one layout. No
-  committed record holds this candidate.
+  disables, so the two can run different kernels on one layout. The
+  `c6099ec` and `2cf88ae` records hold this candidate.
 - In fresh offsets only, `swage_public_call_int64`: the same call on the
   int64 form of the same offsets, which the call checks and narrows on the
-  host. No committed record holds this candidate.
+  host. The `c6099ec` and `2cf88ae` records hold this candidate.
 - In fresh offsets only, `swage_cta_call`: the one private call that
   validates the offsets and launches a single policy, the pure CTA kernel.
   It does not classify and uploads no task list.
@@ -355,6 +473,80 @@ the row then records the bytes it would need.
 Triton is imported only when a harness runs. It is not a dependency of the
 project. Fresh offsets leaves the Triton candidates out when Triton is not
 installed, and fails when a Triton candidate was asked for by name.
+
+Every fresh-offsets record holds a `candidate_descriptions` block that
+names the surface each candidate times: `public` for the call a user makes,
+`private` for the qualification runner that no user calls, and `baseline`
+for PyTorch and Triton, with the entry point it calls and the kinds, ranks,
+and types it covers. The two `swage_public_call` candidates are the only
+public ones; `swage_mixed` and `swage_cta_call` time private calls.
+
+### Kinds, `[N, D]` values, and float64 in fresh offsets
+
+Without further options a fresh-offsets row is a float32 sum of rank-one
+values, and the candidates are those above. Three options produce other
+rows; every row records its `kind`, `rank`, `features`, and `dtype`:
+
+- `--kinds` takes `sum`, `max`, `min`, and `mean`, one row each.
+- `--features` takes one or more widths `D` and times `[N, D]` values, one
+  row for each `D`, instead of rank-one values.
+- `--dtype float64` times float64 values and results.
+
+A row of another kind or of float64 values times `swage_public_call`,
+`swage_public_call_int64`, and `torch.segment_reduce`. The candidates that
+time a float32 sum of rank-one values only are listed under `skipped` with
+that reason. Pad-to-max also times a float64 sum, and its memory bound then
+counts 29 bytes per padded element instead of 17.
+
+An `[N, D]` row times these candidates:
+
+- `swage_public_call` and `swage_public_call_int64` on `[N, D]` values into
+  a caller's `[S, D]` buffer.
+- `torch.segment_reduce` along axis 0.
+- `triton_rows_looped`, a looped Triton reduction written for this harness:
+  one program per segment and block of columns walks the rows of its
+  segment in fixed blocks of rows, for every kind. The column block is the
+  power of two from 4 to 64 that covers `D`, and each row records it with
+  the number of blocks. Five configurations of rows per step and warps are
+  timed. Its mean divides once, rounded to nearest, and its maximum and
+  minimum do not propagate NaN; the timed values hold none.
+
+The values of an `[N, D]` row may be large, so a row is admitted only when
+the largest total its distribution can reach, times `D`, is at most 2^28
+values. With 64 features at 32,768 segments that admits `power-law`,
+`many-tiny`, `one-outlier`, and `alternating-empty`; at 8,192 segments it
+also admits `bimodal` and `few-huge`. `uniform`, `log-normal`, and
+`zipf-like` are refused at 64 features at every size the record uses. A
+command that names such a row is refused before anything runs.
+
+### Pipelined calls in fresh offsets
+
+A fresh-offsets sample starts from an idle device. That is the best case
+for a call that waits for the stream, and not what a serving loop sees,
+where the host enqueues work ahead of the device. `--pipeline-depth K`
+times K calls in flight instead:
+
+- A sample is K steps, each on its own fresh layout. A step launches two
+  `torch.cumsum` kernels that write the int32 and the int64 offsets of its
+  layout again on the device from its uploaded lengths, then calls the
+  candidate on that layout. The offsets equal the uploaded ones; they are
+  produced again so that every call depends on work in the stream, as
+  offsets that a previous step of a model produces on the device would.
+- No synchronize runs between the steps. A candidate whose call copies the
+  offsets to the host waits there for every earlier step.
+- The timer runs from a synchronize before the first step to a
+  synchronize after the last. The sample is that span divided by K: the
+  time per step at that depth.
+- `pipeline_enqueue_samples_us` is the host time from the first step until
+  the last call returned, divided by K. It approaches the time per step
+  when the calls wait for the device.
+- Every step writes its own outputs, and the result of every step is
+  checked after the closing synchronize. A pipelined row records no
+  preparation or partition samples. The warm calls are single calls on
+  the warm layout.
+
+A pipelined row needs K layouts per iteration, so its pool is K times the
+pool of a row without the option.
 
 ### Choosing candidates
 
@@ -418,6 +610,13 @@ device or a target: they run on the current CUDA device, which
 | `--samples`, `--warmups` | Timed and untimed fresh layouts per row. | Timed samples and warmup launches per candidate and method. |
 | `--candidates`, `--exclude-candidates` | Candidates or families to time or to leave out. | The same, for the segmented-sum suite. |
 | `--warm-calls` | Untimed calls of a candidate before each of its samples. The default is 2. | Not offered: each candidate is warmed up and timed to completion. |
+| `--kinds` | `sum` (default), `max`, `min`, `mean`, one row each. | Not offered. |
+| `--features` | Widths `D` of `[N, D]` rows, one row each. Without it, rank-one rows. | Not offered. |
+| `--dtype` | `float32` (default) or `float64`. | Not offered. |
+| `--pipeline-depth` | Calls in flight per sample; 0 (default) times one call from an idle device. | Not offered. |
+
+A fresh-offsets record keeps every option of its command under
+`configuration.options`, beside the revision in `source`.
 
 A segment count is accepted when the largest total the distribution can
 reach fits signed 32-bit offsets. One million segments fit `bimodal`,
@@ -453,6 +652,25 @@ With `normal` values the bound grows with the square of the segment length,
 so the check detects a misplaced element in short segments and loses that
 power in long ones. `quarters` keeps the exact check for every segment of up
 to 2.3 million elements.
+
+Fresh offsets checks the other kinds, `[N, D]` values, and float64 by the
+same reference along axis 0, with one rule per kind:
+
+- A maximum and a minimum must equal the reference.
+- A sum has the bound above, in the unit of the type: `2^-24` for float32
+  and `2^-53` for float64, where the bound is doubled because the float64
+  reference rounds as well.
+- A mean has the bound of its sum divided by the segment length, plus two
+  units of its own magnitude for the division.
+- An empty segment must give the reference value: infinite for a maximum or
+  a minimum, and NaN for a mean.
+
+Outputs start as NaN, except those of a mean, which start as `1e30`
+because an empty mean is NaN; an output that still holds its start value
+fails, also where the bound says nothing. For `[N, D]` values a result is
+one column of one segment, and `check` counts results. The reference of an
+`[N, D]` row stays on the host, and each result is copied there to be
+checked, outside the timer.
 
 ### Effective rate and timer resolution
 
@@ -613,6 +831,22 @@ reads the records of the fresh-offsets and comparison harnesses.
 
 Several seeds are several configurations: run the driver once per `--seed`
 for fresh offsets, or pass `--seeds` to the comparison.
+
+A fresh-offsets row is labeled by its distribution, followed by what is
+not the default: `D=<features>` for `[N, D]` values, the kind when it is
+not `sum`, and the dtype when it is not `float32`. A row with a pipeline
+depth is reported under the timing method `pipelined`, any other under
+`end_to_end`. A float32 sum of rank-one values keeps the bare
+distribution name, as the rows of the earlier records do.
+
+The committed records name the driver of their own revision. The
+segmented-sum record at `453c56e` and the public-call records at `c6099ec`
+and `2cf88ae` were written by `benchmarks/benchmark_processes.py`, the
+driver of those revisions, with `--processes 5`; their pages give its
+commands, and they stay reproducible by checking out the revision they
+name. That driver was retired when its options moved into
+`run_triton_comparison_campaign.py`, whose `--summarize` reads those
+records as they are.
 
 ### Gate scripts on another GPU
 

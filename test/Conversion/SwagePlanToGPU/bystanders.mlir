@@ -1,7 +1,8 @@
 // test/Conversion/SwagePlanToGPU/bystanders.mlir
 // The conversion changes plan functions and nothing else. A segment
 // function that was not planned keeps its Swage operations, and other
-// functions, globals, and kernel modules stay as they are.
+// functions, globals, and kernel modules stay as they are. A plan function
+// in a nested module is converted where it is.
 //
 // RUN: swage-opt --swage-plan-to-gpu %s | FileCheck %s
 
@@ -21,6 +22,11 @@
 // CHECK: gpu.return
 // CHECK: func.func @bystander(%[[X:.*]]: i32) -> i32 {
 // CHECK-NEXT: return %[[X]] : i32
+// A plan function in a nested module becomes a kernel module beside it.
+// CHECK: module @inner {
+// CHECK-NEXT: gpu.module @nested_module {
+// CHECK-NEXT: gpu.func @nested(
+// CHECK: gpu.return
 
 module {
   memref.global "private" @table : memref<4xi32>
@@ -61,5 +67,24 @@ module {
   }
   func.func @bystander(%x: i32) -> i32 {
     return %x : i32
+  }
+  module @inner {
+    func.func @nested(
+        %values: memref<?xf32>, %offsets: memref<?xi32>,
+        %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+        attributes {swage_plan.block_threads = 128 : i32} {
+      swage_plan.tasks policy<cta>
+          segments(%values, %offsets : memref<?xf32>, memref<?xi32>)
+          value_count(%value_count : i32) segment_count(%segment_count : i32)
+          into(%output : memref<?xf32>) {
+      ^bb0(%segment: !swage.segment<f32>):
+        %sum = swage.reduce %segment kind<sum> : !swage.segment<f32> -> f32 {
+        ^bb0(%value: f32):
+          swage.yield %value : f32
+        }
+        swage_plan.yield %sum : f32
+      }
+      return
+    }
   }
 }

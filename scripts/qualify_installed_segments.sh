@@ -16,12 +16,13 @@
 # The tests run from the copy with PYTHONPATH unset, so only the installed
 # packages can be imported. They cover `swage.segment_reduce` (sum, max,
 # min, and mean over float32 and float64) and `swage.segment_softmax`
-# (float32), over rank-one and [N, D] values, int32 and int64 offsets, empty
-# batches and segments, and `out=`, against PyTorch, float64 references,
-# and the CPU oracle, and the artifact path: `python -m swage.compile`
+# (float32), over rank-one values and [N, D] values on the row-stripe tile,
+# int32 and int64 offsets, empty batches and segments, and `out=`, against
+# PyTorch, float64 references, and the CPU oracle; the first and second
+# derivatives of both calls; and the artifact path: `python -m swage.compile`
 # writes the kernels, and a fresh process with no compiler runs both calls
-# from SWAGE_ARTIFACT_DIR. A skipped test fails the qualification, because
-# it shows nothing about the wheel.
+# and their derivatives from SWAGE_ARTIFACT_DIR. A skipped test fails the
+# qualification, because it shows nothing about the wheel.
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -79,6 +80,7 @@ PY
     --junitxml="$WORK/segmented-calls.xml" \
     python/tests/mlir/test_public_segments.py \
     python/tests/mlir/test_segment_columns.py \
+    python/tests/mlir/test_segment_gradients.py \
     python/tests/mlir/test_artifact.py
 
 "$PYTHON" - "$WORK/segmented-calls.xml" <<'PY'

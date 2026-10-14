@@ -12,6 +12,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Matchers.h"
+#include "swage/Target/TargetDescription.h"
 #include "gtest/gtest.h"
 
 #include <cmath>
@@ -92,6 +93,32 @@ TEST(EmissionTest, EveryReductionKindLowersToItsOwnIdentityAndCombine) {
                       .second)
           << "shares its lowering with another kind";
     }
+  }
+}
+
+// The kernels compute the column-group width of the row-stripe tile from
+// the feature count, and the host computes it to size their launch. Both
+// follow `TargetDescription::columnGroupWidth`; the emitted chain is held
+// to it here over the edges of every step and the extremes of an i32.
+TEST(EmissionTest, TheColumnGroupWidthChainFollowsTheTargetRule) {
+  MLIRContext context;
+  context.loadDialect<arith::ArithDialect>();
+  const TargetDescription &target = nvidiaTarget();
+  const int64_t features[] = {-1, 0, 1, 2, 3, 5, 17, 32, 33, 2147483647};
+  const int32_t expected[] = {1, 1, 1, 2, 4, 8, 32, 32, 32, 32};
+  for (auto [count, width] : llvm::zip_equal(features, expected)) {
+    SCOPED_TRACE(count);
+    Block block;
+    OpBuilder builder(&context);
+    builder.setInsertionPointToEnd(&block);
+    Location loc = builder.getUnknownLoc();
+    Value featureCount = arith::ConstantIndexOp::create(builder, loc, count);
+    Value emitted =
+        emitColumnGroupWidth(builder, loc, featureCount, target.subgroupWidth);
+    llvm::APInt folded;
+    ASSERT_TRUE(matchPattern(emitted, m_ConstantInt(&folded)));
+    EXPECT_EQ(folded.getSExtValue(), width);
+    EXPECT_EQ(target.columnGroupWidth(count), width);
   }
 }
 

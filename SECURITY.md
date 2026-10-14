@@ -47,6 +47,8 @@ Within that model, the project still commits to:
   and applies that rule to what they lead to. It accepts only plain file
   names from the manifest, and it verifies the SHA-256 digest of every
   kernel and of the library against the manifest before it loads anything.
+  It loads the bytes it verified: the library is loaded from a copy of them
+  in an anonymous memory file, not from its path a second time.
   These checks detect damage, a partial copy, and a file that an account
   other than its owner and root could change. They do not authenticate an
   artifact: the manifest is not signed, so whoever can write the directory

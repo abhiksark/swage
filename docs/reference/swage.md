@@ -213,20 +213,27 @@ values a segment is a run of rows, and each of its `D` columns is reduced
 to one result, as `torch.segment_reduce` does along axis 0. The call validates its tensors,
 copies the offsets to the host to validate and classify them, enqueues its
 kernels on the current PyTorch CUDA stream, and returns without waiting for
-them. Every call repeats the host work, so with offsets that change on every
-call it is slower than `torch.segment_reduce`.
+them. Every call repeats the host work. With offsets that change on every
+call, the committed record at `2cf88ae` finds it slower than
+`torch.segment_reduce` on rank-one values and on `[N, D]` values whose
+segments have at most 32 rows, and faster on most `[N, D]` rows with
+longer segments.
 [Segmented Calls](../user-guide/segmented-calls.md#what-a-call-costs) cites
-the committed record of the private preparation that the call repeats; no
-record times the call itself.
+the committed record of the private preparation that the call repeats, and
+the newest record that times the call itself.
 
 Parameters
 :   `values`: a contiguous `torch.float32` or `torch.float64` CUDA tensor on
     the current device, of rank one or of rank two, `[N, D]`. It must not
-    require grad and must not be a lazy negation or conjugate view. float64
-    values run a float64 program; nothing is cast. `[N, D]` values run one
-    kernel with one block per segment, in which a thread reduces a column
-    in row order: no segment is split, and nothing is classified. `[N, 1]`
-    values are reduced by the schedules of rank-one values.
+    be a lazy negation or conjugate view. When it requires grad and
+    gradient recording is on, the call records a gradient; see
+    [Gradients](../user-guide/segmented-calls.md#gradients). float64
+    values run a float64 program; nothing is cast. `[N, D]` values run the
+    row-stripe tile: a block reduces a group of up to 32 adjacent columns
+    of one segment with its threads split into stripes of rows, and a
+    segment of more than `4096 / W` rows, for the `W` columns of a group,
+    is split and merged. `[N, 1]` values are reduced by the schedules of
+    rank-one values.
 :   `offsets`: a contiguous rank-one `torch.int32` or `torch.int64` tensor
     on the same device with one entry more than there are segments. It
     starts at zero, never decreases, and ends at or below the number of
@@ -245,7 +252,8 @@ Parameters
     the dtype of `values`, on the device of `values`, with exactly one
     element per segment, or of shape `[S, D]` for `S` segments of `[N, D]`
     values, which shares no memory with `values` or `offsets`, does not
-    require grad, and is not a lazy view. It is never resized.
+    require grad, and is not a lazy view. It is never resized. It must be
+    `None` when the call records a gradient.
 
 Returns
 :   `out`, or a new tensor of the dtype of `values` on the device of
@@ -265,9 +273,10 @@ Raises
     the call. Values of another rank raise
     `values must have rank one or two`.
 :   `ValueError`: an unsupported `kind`; a tensor that is not contiguous,
-    is a lazy view, requires grad, or is on another device; offsets that
-    break the offsets contract; an `out` of the wrong size or one that
-    overlaps an input. For `[N, D]` values a wrong `out` raises
+    is a lazy view, or is on another device; an `out` that requires grad;
+    offsets that break the offsets contract; an `out` of the wrong size or
+    one that overlaps an input; an `out` while the call records a
+    gradient. For `[N, D]` values a wrong `out` raises
     `out must have shape (S, D), one row per segment and one column per
     feature; found (...)`, with the numbers of the call.
 :   `RuntimeError`: missing PyTorch, a PyTorch older than 2.6, missing
@@ -321,9 +330,9 @@ Parameters
 :   `values`: as for `segment_reduce`, with one difference. The values are
     `torch.float32`. float64 values raise a `TypeError`, because the
     device has no 64-bit `exp2` instruction for the exponential of the
-    kernel. `[N, D]` values run one kernel with one block per segment, in
-    which a thread normalizes a column in row order, and `[N, 1]` values
-    run the kernel of rank-one values.
+    kernel. `[N, D]` values run the row-stripe tile with one task per
+    segment, and no segment is split; `[N, 1]` values run the kernel of
+    rank-one values.
 :   `offsets`: as for `segment_reduce`, with one difference. The final
     offset must equal the number of values, or of rows for `[N, D]`
     values, so that every value belongs to a segment.

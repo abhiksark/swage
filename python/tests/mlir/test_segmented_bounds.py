@@ -21,12 +21,20 @@ values, and its column loop is bounded by the feature count, which is what
 keeps a load inside `[N, D]` and a store inside `[S, D]`. The column kernel
 of the softmax stores a row for every row it reads, so the same two bounds
 keep its stores inside the `[N, D]` output.
+
+The row-stripe tile of rank-two values, the task-ids and split kernels of a
+rank-two program, takes the same bounds: rows clamped to the row count, or
+for a merge rows of scratch clamped to the partial count, and a segment ID
+compared with the segment count. A lane whose column is at or beyond the
+feature count reads nothing and stores nothing.
 """
 
 import re
 from itertools import accumulate, pairwise
 
+import numpy
 import pytest
+import row_tile_model
 import torch
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
@@ -35,6 +43,7 @@ from swage import _cuda_backend, _segmented_runtime
 from swage._segmented_programs import (
     _SOFTMAX_MODULE,
     _parameter_roles,
+    _reduction_kernel,
     _semantic_module,
     _softmax_text,
 )
@@ -89,8 +98,9 @@ STRAY_IDS = [
 
 # Each kernel maps the parameter index of a count to the number of loaded
 # indices it compares with that count. The segment count is the last i32 of
-# every ABI that loads a segment ID or an output segment. The merge count is
-# the fifth i32 of the persistent ABI.
+# every ABI that loads a segment ID or an output segment, except for the
+# kernels of rank-two values, which take the feature count after it. The
+# merge count is the fifth i32 of the persistent ABI.
 BOUNDED_ID_KERNELS = [
     pytest.param(
         "_compile_segmented_reduction_ptx",
@@ -115,6 +125,30 @@ BOUNDED_ID_KERNELS = [
     ),
     pytest.param(
         "_compile_split_merge_reduction_ptx", {}, {5: 1}, id="split-merge"
+    ),
+    # The row-stripe tile loads the segment of each item from its task
+    # buffer; the segment count is its seventh parameter.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "use_task_ids": True,
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {6: 1},
+        id="rows",
+    ),
+    # The merge of the split of rank-two values compares the segment of
+    # each merge record with its sixth parameter.
+    pytest.param(
+        "_compile_split_merge_reduction_ptx",
+        {
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {5: 1},
+        id="rows-split-merge",
     ),
 ]
 
@@ -185,6 +219,51 @@ CLAMPED_KERNELS = [
         },
         {3: 1},
         id="softmax-columns",
+    ),
+    # The row-stripe tile clamps the rows of the segment of each item
+    # against the row count, its fifth parameter.
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "use_task_ids": True,
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {4: 1},
+        id="rows",
+    ),
+    pytest.param(
+        "_compile_segmented_reduction_ptx",
+        {
+            "block_size": 128,
+            "use_task_ids": True,
+            "module_text": _softmax_text(2),
+            "kernel_name": "ragged_softmax_r2",
+        },
+        {4: 1},
+        id="softmax-rows",
+    ),
+    # The split of rank-two values clamps partial ranges of rows against
+    # the row count and merge ranges of scratch rows against the partial
+    # count, each the first count of its kernel.
+    pytest.param(
+        "_compile_split_partial_reduction_ptx",
+        {
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {3: 1},
+        id="rows-split-partial",
+    ),
+    pytest.param(
+        "_compile_split_merge_reduction_ptx",
+        {
+            "module_text": _semantic_module("sum", "f32", 2),
+            "kernel_name": "segmented_sum_r2",
+        },
+        {3: 1},
+        id="rows-split-merge",
     ),
 ]
 
@@ -428,7 +507,8 @@ def test_loaded_ids_are_compared_with_the_abi_count(
         parameter.split(":")[0].strip()
         for parameter in signature.group(1).split(",")
     ]
-    assert len(parameters) == max(bounds) + 1
+    columns = "feature_count" in arguments.get("module_text", "")
+    assert len(parameters) == max(bounds) + 1 + columns
     # One unsigned comparison of the loaded i32 word bounds it on both
     # sides: a negative word is a large unsigned one.
     for count_index, sites in bounds.items():
@@ -1414,3 +1494,840 @@ def test_split_merge_kernel_skips_output_segments_outside_the_segment_count(
 
     sums = _clamped_sums(host_scratch, ranges)
     _assert_only_stored(output_buffer, {0: sums[0], 2: sums[3]})
+
+
+# The row-stripe tile of rank-two values, the task-ids kernel of a rank-two
+# program. A block runs items, each a task and a group of W adjacent
+# columns, in a loop from its block index to task_count * groups by the
+# grid size, and its stripes of one column combine across the block.
+
+
+def _row_tile(kind="sum", element="f32", block_size=128, softmax=False):
+    """Return the raw launch of the row-stripe kernel of one program."""
+    name = (
+        "ragged_softmax_r2" if softmax else _reduction_kernel(kind, element, 2)
+    )
+    text = _softmax_text(2) if softmax else _semantic_module(kind, element, 2)
+    return _launcher(
+        "_compile_segmented_reduction_ptx",
+        block_size=block_size,
+        use_task_ids=True,
+        module_text=text,
+        kernel_name=name,
+    )
+
+
+def _items(task_count, features):
+    """Return the items of a launch: one per task and column group."""
+    if features <= 0:
+        return 0
+    return task_count * -(-features // row_tile_model.group_width(features))
+
+
+def _launch_rows(
+    launch,
+    values,
+    offsets,
+    output,
+    task_ids,
+    *,
+    value_count,
+    segment_count,
+    features,
+    grid=None,
+):
+    """Launch a row-stripe kernel by its contract, below the validation.
+
+    The grid is one block per item unless `grid` names another size.
+    """
+    if grid is None:
+        grid = max(_items(task_ids.numel(), features), 1)
+    launch(
+        grid,
+        {"task_ids": task_ids, "task_count": task_ids.numel()},
+        values=values,
+        offsets=offsets,
+        output=output,
+        value_count=value_count,
+        segment_count=segment_count,
+        feature_count=features,
+    )
+
+
+def _guarded_of(host, dtype):
+    """Place `host` between two NaN guards of `dtype`, as `_guarded` does."""
+    count = host.numel()
+    guard = max(count, 32)
+    buffer = torch.full(
+        (count + 2 * guard,), float("nan"), dtype=dtype, device="cuda"
+    )
+    guarded = buffer[guard : guard + count]
+    guarded.copy_(host.reshape(-1))
+    return guarded
+
+
+def _identity_ids(count):
+    return torch.arange(count, dtype=torch.int32, device="cuda")
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [2, 3, 5, 8, 16, 17, 32, 33, 64, 129])
+def test_row_tile_reads_its_own_rows_and_columns(features):
+    """Reduce values that depend on the row and on the column, exactly.
+
+    The segments are adjacent and of lengths around the subgroup and the
+    stripe counts, and every value is a small integer, so every sum is
+    exact and a load from a neighboring row, column, or segment changes it.
+    The values sit between NaN guards and the output between canaries.
+    """
+    offsets = (0, 1, 5, 5, 40, 300, 1000)
+    segment_count = len(offsets) - 1
+    values, host_rows = _guarded_rows(offsets[-1], features)
+    output, output_buffer = _canaried_output(segment_count * features)
+
+    _launch_rows(
+        _row_tile(),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(segment_count),
+        value_count=offsets[-1],
+        segment_count=segment_count,
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(segment_count, features)
+    assert torch.equal(
+        stored, _clamped_column_sums(host_rows, pairwise(offsets))
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["f32", "f64"]
+)
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
+@pytest.mark.parametrize("features", [2, 3, 17, 33, 129])
+def test_row_tile_bits_equal_the_tile_model(features, kind, dtype):
+    """Add in exactly the order of the host tile model.
+
+    The values span many binades, so two orders of addition give other
+    bits. A stripe folds its rows in order, the stripes of one subgroup
+    combine by an XOR butterfly over the bits of their index, and the
+    subgroups as a pairwise tree; a mean divides that sum once.
+    """
+    lengths = [0, 1, 2, 31, 32, 33, 128, 129, 700]
+    offsets = list(accumulate(lengths, initial=0))
+    generator = torch.Generator().manual_seed(features)
+    host_rows = torch.randn(
+        (offsets[-1], features), generator=generator, dtype=dtype
+    ) * torch.exp2(
+        torch.randint(-8, 8, (offsets[-1], features), generator=generator)
+    ).to(dtype)
+    element = "f32" if dtype == torch.float32 else "f64"
+    output = torch.full(
+        (len(lengths), features), float("nan"), dtype=dtype, device="cuda"
+    )
+
+    _launch_rows(
+        _row_tile(kind, element),
+        _guarded_of(host_rows, dtype),
+        _device_i32(offsets),
+        output,
+        _identity_ids(len(lengths)),
+        value_count=offsets[-1],
+        segment_count=len(lengths),
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    expected = row_tile_model.reduce_segments(host_rows.numpy(), offsets, kind)
+    actual = output.cpu().numpy()
+    assert numpy.array_equal(numpy.isnan(actual), numpy.isnan(expected))
+    word = numpy.int32 if dtype == torch.float32 else numpy.int64
+    stored = ~numpy.isnan(expected)
+    assert numpy.array_equal(
+        actual[stored].view(word), expected[stored].view(word)
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [3, 129], ids=["one-group", "five-groups"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_row_tile_clamps_row_ranges_that_validation_rejects(offsets, features):
+    """Keep every load inside `[N, D]` and every store inside `[S, D]`.
+
+    A row range that was not clamped to the row count would read a NaN
+    guard, or leave the allocation, at a flat index of rows times columns.
+    """
+    segment_count = len(offsets) - 1
+    with pytest.raises(ValueError):
+        _validate_offsets(list(offsets), _VALUE_COUNT, segment_count)
+    values, host_rows = _guarded_rows(_VALUE_COUNT, features)
+    output, output_buffer = _canaried_output(segment_count * features)
+
+    _launch_rows(
+        _row_tile(),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(segment_count),
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(segment_count, features)
+    assert torch.isfinite(stored).all()
+    assert torch.equal(
+        stored, _clamped_column_sums(host_rows, pairwise(offsets))
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_row_tile_skips_ids_outside_the_segment_count(stray_ids):
+    """Store nothing for an item whose segment ID names no segment.
+
+    Segment 1 has no task, so a stray ID must not be redirected to it or to
+    any other segment, in any column group.
+    """
+    offsets = (0, 250, 600, 1000)
+    segment_count = len(offsets) - 1
+    features = 33
+    values, host_rows = _guarded_rows(_VALUE_COUNT, features)
+    output, output_buffer = _canaried_output(segment_count * features)
+    task_ids = _device_i32([0, *stray_ids(segment_count), 2])
+
+    _launch_rows(
+        _row_tile(),
+        values,
+        _device_i32(offsets),
+        output,
+        task_ids,
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        features=features,
+    )
+
+    sums = _clamped_column_sums(host_rows, pairwise(offsets))
+    _assert_only_stored(
+        output_buffer,
+        {
+            segment * features + column: sums[segment, column]
+            for segment in (0, 2)
+            for column in range(features)
+        },
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, -129, _INT32_MIN])
+def test_row_tile_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no item for a feature count that names no column.
+
+    A count of zero or below has no column group, so the item loop of
+    every block of the grid runs zero times: nothing is loaded and
+    nothing is stored.
+    """
+    offsets = (0, 7, 40)
+    values, _ = _guarded_rows(offsets[-1], 4)
+    output, output_buffer = _canaried_output(2 * 4)
+
+    _launch_rows(
+        _row_tile(),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(2),
+        value_count=offsets[-1],
+        segment_count=2,
+        features=feature_count,
+        grid=4,
+    )
+
+    _assert_only_stored(output_buffer, {})
+
+
+# Grids of fewer and of more blocks than a launch has items.
+_ROW_GRIDS = [
+    pytest.param(lambda items: 1, id="one-block"),
+    pytest.param(lambda items: 3, id="three-blocks"),
+    pytest.param(lambda items: items - 1, id="one-block-fewer"),
+    pytest.param(lambda items: items + 7, id="seven-blocks-more"),
+]
+
+
+@requires_cuda
+@pytest.mark.parametrize("grid", _ROW_GRIDS)
+def test_row_tile_bits_do_not_depend_on_the_grid(grid):
+    """Give every item the same bits with fewer or more blocks than items.
+
+    A block runs the items `b`, `b + G`, and so on, so a grid of one block
+    runs them all, and blocks beyond the item count run none.
+    """
+    offsets = (0, 3, 300, 301, 1000)
+    segment_count = len(offsets) - 1
+    features = 70
+    generator = torch.Generator().manual_seed(5)
+    values = _guarded_of(
+        torch.randn(offsets[-1] * features, generator=generator),
+        torch.float32,
+    )
+    items = _items(segment_count, features)
+
+    def run(blocks):
+        output = torch.full(
+            (segment_count, features), float("nan"), device="cuda"
+        )
+        _launch_rows(
+            _row_tile(),
+            values,
+            _device_i32(offsets),
+            output,
+            _identity_ids(segment_count),
+            value_count=offsets[-1],
+            segment_count=segment_count,
+            features=features,
+            grid=blocks,
+        )
+        return output.cpu()
+
+    actual = run(grid(items))
+    expected = run(items)
+    assert not expected.isnan().any()
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [*range(2, 71), 1023, 1024, 1025])
+def test_row_tile_covers_every_column_the_host_width_names(features):
+    """Store every `(segment, column)` the host model counts, and no more.
+
+    The kernel computes the column-group width from the feature count, and
+    the host sizes the grid from its own computation of the same width. A
+    disagreement leaves NaN in some column or writes past the canaries.
+    """
+    offsets = (0, 2, 9)
+    values, host_rows = _guarded_rows(offsets[-1], features)
+    output, output_buffer = _canaried_output(2 * features)
+    output.fill_(float("nan"))
+
+    _launch_rows(
+        _row_tile(),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(2),
+        value_count=offsets[-1],
+        segment_count=2,
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    assert torch.equal(
+        output.cpu().reshape(2, features),
+        _clamped_column_sums(host_rows, pairwise(offsets)),
+    )
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [3, 129], ids=["one-group", "five-groups"])
+@pytest.mark.parametrize("offsets", INVALID_OFFSETS)
+def test_softmax_row_tile_stores_only_rows_inside_the_clamped_ranges(
+    offsets, features
+):
+    """Keep every load and every store of the softmax inside `[N, D]`.
+
+    The softmax stores each element at the index it read, so the clamp of
+    the rows bounds the stores as well. A softmax output is positive, so
+    the canary of minus one shows a row that no thread stored. Where two
+    segments claim the same rows, either may win, and both are finite.
+    """
+    segment_count = len(offsets) - 1
+    values, host_rows = _guarded_logits(_VALUE_COUNT, features)
+    output, output_buffer = _canaried_output(_VALUE_COUNT * features)
+
+    _launch_rows(
+        _row_tile(softmax=True),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(segment_count),
+        value_count=_VALUE_COUNT,
+        segment_count=segment_count,
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(_VALUE_COUNT, features)
+    claims = torch.zeros(_VALUE_COUNT, dtype=torch.int64)
+    expected = torch.full_like(stored, _CANARY)
+    for start, end in pairwise(offsets):
+        start = min(max(start, 0), _VALUE_COUNT)
+        end = min(max(end, start), _VALUE_COUNT)
+        claims[start:end] += 1
+        expected[start:end] = _column_softmax(host_rows, start, end)
+    once = claims <= 1
+    torch.testing.assert_close(stored[once], expected[once], rtol=1e-5, atol=0)
+    contested = stored[~once]
+    assert ((contested > 0) & (contested <= 1)).all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("feature_count", [0, -1, _INT32_MIN])
+def test_softmax_row_tile_does_nothing_without_a_positive_feature_count(
+    feature_count,
+):
+    """Run no item of the softmax for a feature count that names none."""
+    offsets = (0, 7, 40)
+    values, _ = _guarded_logits(offsets[-1], 4)
+    output, output_buffer = _canaried_output(offsets[-1] * 4)
+
+    _launch_rows(
+        _row_tile(softmax=True),
+        values,
+        _device_i32(offsets),
+        output,
+        _identity_ids(2),
+        value_count=offsets[-1],
+        segment_count=2,
+        features=feature_count,
+        grid=4,
+    )
+
+    _assert_only_stored(output_buffer, {})
+
+
+# The split of rank-two values: the partial kernel runs the row-stripe tile
+# over the rows of each range record into one scratch row per task, and the
+# merge kernel runs it over the scratch rows of each merge record into the
+# row of its segment. Both are 512 threads wide, as their contracts state.
+
+
+def _row_split(kind="sum", element="f32"):
+    """Return the raw launches of the partial and merge kernels."""
+    name = _reduction_kernel(kind, element, 2)
+    text = _semantic_module(kind, element, 2)
+    return tuple(
+        _launcher(compiler, module_text=text, kernel_name=name)
+        for compiler in (
+            "_compile_split_partial_reduction_ptx",
+            "_compile_split_merge_reduction_ptx",
+        )
+    )
+
+
+def _launch_row_partials(
+    launch, values, ranges, scratch, *, value_count, features, grid=None
+):
+    """Launch the partial kernel of rank-two values below the validation."""
+    partial_count = ranges.numel() // 2
+    if grid is None:
+        grid = max(_items(partial_count, features), 1)
+    launch(
+        grid,
+        {
+            "partial_ranges": ranges,
+            "scratch": scratch,
+            "partial_count": partial_count,
+        },
+        values=values,
+        value_count=value_count,
+        feature_count=features,
+    )
+
+
+def _launch_row_merges(
+    launch,
+    scratch,
+    output,
+    records,
+    *,
+    partial_count,
+    segment_count,
+    features,
+    ranges=None,
+):
+    """Launch the merge kernel of rank-two values below the validation.
+
+    With `ranges`, the kernel is the merge of a mean, which also takes the
+    range records of the partial tasks.
+    """
+    merge_count = records.numel() // 3
+    named = {
+        "scratch": scratch,
+        "merge_records": records,
+        "partial_count": partial_count,
+        "merge_count": merge_count,
+    }
+    if ranges is not None:
+        named["partial_ranges"] = ranges
+    launch(
+        max(_items(merge_count, features), 1),
+        named,
+        output=output,
+        segment_count=segment_count,
+        feature_count=features,
+    )
+
+
+def _split_plan(offsets, chunk_rows):
+    """Cut every segment into chunks of `chunk_rows` rows.
+
+    Returns:
+        The range records of the partial tasks and the merge records, each
+        as a flat list of words.
+    """
+    ranges, records = [], []
+    for segment, (begin, end) in enumerate(pairwise(offsets)):
+        first = len(ranges) // 2
+        for start in range(begin, end, chunk_rows):
+            ranges += [start, min(start + chunk_rows, end)]
+        records += [segment, first, len(ranges) // 2]
+    return ranges, records
+
+
+def _run_row_split(kind, dtype, host_rows, offsets):
+    """Run the split of a rank-two program over every segment.
+
+    The chunks have `4096 / W` rows, the chunk size of the public split.
+
+    Returns:
+        The `[S, D]` output as a numpy array.
+    """
+    features = host_rows.shape[1]
+    chunk_rows = 4096 // row_tile_model.group_width(features)
+    host_ranges, host_records = _split_plan(offsets, chunk_rows)
+    partial_count = len(host_ranges) // 2
+    element = "f32" if dtype == torch.float32 else "f64"
+    partial, merge = _row_split(kind, element)
+    ranges = _device_i32(host_ranges)
+    scratch = torch.full(
+        (partial_count, features), float("nan"), dtype=dtype, device="cuda"
+    )
+    output = torch.full(
+        (len(offsets) - 1, features),
+        float("nan"),
+        dtype=dtype,
+        device="cuda",
+    )
+
+    _launch_row_partials(
+        partial,
+        _guarded_of(host_rows, dtype),
+        ranges,
+        scratch,
+        value_count=offsets[-1],
+        features=features,
+    )
+    _launch_row_merges(
+        merge,
+        scratch,
+        output,
+        _device_i32(host_records),
+        partial_count=partial_count,
+        segment_count=len(offsets) - 1,
+        features=features,
+        ranges=ranges if kind == "mean" else None,
+    )
+    torch.cuda.synchronize()
+    return output.cpu().numpy()
+
+
+def _spread_rows(row_count, features, dtype, seed):
+    """Return random rows whose values span many binades.
+
+    Two orders of addition of such values give other bits.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randn(
+        (row_count, features), generator=generator, dtype=dtype
+    ) * torch.exp2(
+        torch.randint(-8, 8, (row_count, features), generator=generator)
+    ).to(dtype)
+
+
+def _int_type(dtype):
+    return numpy.int32 if dtype == torch.float32 else numpy.int64
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["f32", "f64"]
+)
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
+@pytest.mark.parametrize("features", [3, 33, 129])
+def test_row_split_bits_equal_the_tile_model(features, kind, dtype):
+    """Add in the order of the tile model through the partials and merges.
+
+    The segments are cut into chunks of `4096 / W` rows: one segment fits
+    one chunk, and the others take two, several, and a partial last chunk.
+    """
+    lengths = [1, 129, 1500, 4100]
+    offsets = list(accumulate(lengths, initial=0))
+    host_rows = _spread_rows(offsets[-1], features, dtype, features)
+
+    actual = _run_row_split(kind, dtype, host_rows, offsets)
+
+    chunk_rows = 4096 // row_tile_model.group_width(features)
+    expected = numpy.stack(
+        [
+            row_tile_model.reduce_split(
+                host_rows.numpy()[begin:end], chunk_rows, kind
+            )
+            for begin, end in pairwise(offsets)
+        ]
+    )
+    word = _int_type(dtype)
+    assert numpy.array_equal(actual.view(word), expected.view(word))
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["f32", "f64"]
+)
+def test_row_split_mean_is_the_merged_sum_divided_by_the_row_count(dtype):
+    """Divide the merged sum of each column once, by the rows of its segment.
+
+    The merge of a mean reads the row count from the range records of its
+    partial tasks, so its bits are those of the split sum divided by the
+    number of rows of the segment, column by column.
+    """
+    features = 33
+    lengths = [7, 128, 129, 1000]
+    offsets = list(accumulate(lengths, initial=0))
+    host_rows = _spread_rows(offsets[-1], features, dtype, 3)
+
+    sums = _run_row_split("sum", dtype, host_rows, offsets)
+    means = _run_row_split("mean", dtype, host_rows, offsets)
+
+    rows = numpy.array(lengths, dtype=sums.dtype)[:, None]
+    word = _int_type(dtype)
+    assert numpy.array_equal(means.view(word), (sums / rows).view(word))
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [3, 129], ids=["one-group", "five-groups"])
+def test_row_partial_kernel_clamps_plan_ranges(features):
+    """Clamp the rows of each range record by the row count.
+
+    The values sit between NaN guards, and scratch between canaries: an
+    unclamped range would read a guard at a flat index of rows times
+    columns, and a column beyond the features would store past its row.
+    """
+    ranges = [(-200, 450), (450, 1800), (1200, 1300), (900, 200)]
+    values, host_rows = _guarded_rows(_VALUE_COUNT, features)
+    scratch, scratch_buffer = _canaried_output(len(ranges) * features)
+    partial, _ = _row_split()
+
+    _launch_row_partials(
+        partial,
+        values,
+        _device_ranges(ranges),
+        scratch,
+        value_count=_VALUE_COUNT,
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    stored = scratch.cpu().reshape(len(ranges), features)
+    assert torch.equal(stored, _clamped_column_sums(host_rows, ranges))
+    _assert_guards_hold(scratch_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("features", [3, 129], ids=["one-group", "five-groups"])
+def test_row_merge_kernel_clamps_ranges_beyond_the_partial_count(features):
+    """Clamp the scratch rows of each merge record by the partial count.
+
+    Scratch sits between NaN guards, so a row of scratch outside the
+    partial count would poison the column sums.
+    """
+    partial_count = 6
+    scratch, host_scratch = _guarded_rows(partial_count, features)
+    ranges = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+    ]
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in enumerate(ranges)
+            for field in (segment, begin, end)
+        ]
+    )
+    output, output_buffer = _canaried_output(len(ranges) * features)
+    _, merge = _row_split()
+
+    _launch_row_merges(
+        merge,
+        scratch,
+        output,
+        records,
+        partial_count=partial_count,
+        segment_count=len(ranges),
+        features=features,
+    )
+
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(len(ranges), features)
+    assert torch.equal(stored, _clamped_column_sums(host_scratch, ranges))
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_row_merge_kernel_skips_output_segments_outside_the_segment_count(
+    stray_ids,
+):
+    """Store no row for a merge record whose segment names no segment."""
+    features = 33
+    partial_count = 6
+    segment_count = 3
+    scratch, host_scratch = _guarded_rows(partial_count, features)
+    ranges = [(0, 3), (3, 5), (0, 6), (5, 6)]
+    stray = stray_ids(segment_count)
+    segments = [0, stray[0], stray[1], 2]
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, ranges, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    output, output_buffer = _canaried_output(segment_count * features)
+    _, merge = _row_split()
+
+    _launch_row_merges(
+        merge,
+        scratch,
+        output,
+        records,
+        partial_count=partial_count,
+        segment_count=segment_count,
+        features=features,
+    )
+
+    sums = _clamped_column_sums(host_scratch, ranges)
+    _assert_only_stored(
+        output_buffer,
+        {
+            segment * features + column: sums[record, column]
+            for segment, record in ((0, 0), (2, 3))
+            for column in range(features)
+        },
+    )
+
+
+@requires_cuda
+@pytest.mark.parametrize("stray_ids", STRAY_IDS)
+def test_row_mean_merge_reads_range_records_inside_the_partial_count(
+    stray_ids,
+):
+    """Read the row count of a split segment from the clamped partials.
+
+    As for rank-one values, the two range records of an extent are
+    addressed through the range of partials after its clamp, and the
+    records sit between guards that hold a large word, which would change
+    the divisor of every column.
+    """
+    features = 5
+    partial_count = 6
+    scratch, host_scratch = _guarded_rows(partial_count, features)
+    host_ranges = [(0, 5), (5, 9), (9, 20), (20, 21), (21, 40), (40, 47)]
+    partials = [
+        (-2, 3),
+        (3, partial_count + 5),
+        (partial_count + 2, partial_count + 9),
+        (4, 1),
+        (0, partial_count),
+        (2, 3),
+    ]
+    segment_count = 4
+    stray = stray_ids(segment_count)
+    segments = [0, 1, 2, 3, stray[0], stray[1]]
+    ranges, _ = _canaried(
+        torch.tensor(
+            [bound for bounds in host_ranges for bound in bounds],
+            dtype=torch.int32,
+        ),
+        1 << 20,
+    )
+    records = _device_i32(
+        [
+            field
+            for segment, (begin, end) in zip(segments, partials, strict=True)
+            for field in (segment, begin, end)
+        ]
+    )
+    output, output_buffer = _canaried_output(segment_count * features)
+    _, merge = _row_split("mean")
+
+    _launch_row_merges(
+        merge,
+        scratch,
+        output,
+        records,
+        partial_count=partial_count,
+        segment_count=segment_count,
+        features=features,
+        ranges=ranges,
+    )
+
+    # The first segment merges partials [0, 3) and the second [3, 6). The
+    # third and the fourth have no partial after the clamp: zero divided
+    # by zero in every column.
+    sums = _clamped_column_sums(host_scratch, partials)
+    first = sums[0] / (host_ranges[2][1] - host_ranges[0][0])
+    second = sums[1] / (host_ranges[5][1] - host_ranges[3][0])
+    torch.cuda.synchronize()
+    stored = output.cpu().reshape(segment_count, features)
+    assert torch.equal(stored[:2], torch.stack([first, second]))
+    assert stored[2:].isnan().all()
+    _assert_guards_hold(output_buffer, _CANARY)
+
+
+@requires_cuda
+@pytest.mark.parametrize("grid", _ROW_GRIDS)
+def test_row_partial_bits_do_not_depend_on_the_grid(grid):
+    """Give every partial task the same bits with any number of blocks."""
+    features = 70
+    ranges = [(0, 3), (3, 300), (300, 301), (301, 1000)]
+    generator = torch.Generator().manual_seed(9)
+    values = _guarded_of(
+        torch.randn(_VALUE_COUNT * features, generator=generator),
+        torch.float32,
+    )
+    items = _items(len(ranges), features)
+    partial, _ = _row_split()
+
+    def run(blocks):
+        scratch = torch.full(
+            (len(ranges), features), float("nan"), device="cuda"
+        )
+        _launch_row_partials(
+            partial,
+            values,
+            _device_ranges(ranges),
+            scratch,
+            value_count=_VALUE_COUNT,
+            features=features,
+            grid=blocks,
+        )
+        return scratch.cpu()
+
+    actual = run(grid(items))
+    expected = run(items)
+    assert not expected.isnan().any()
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))

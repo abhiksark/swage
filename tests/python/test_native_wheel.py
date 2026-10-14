@@ -168,6 +168,7 @@ def _wheel(
     members = {
         "swage/__init__.py": b'__version__ = "0.5.2"\n',
         "swage/_segments.py": b"",
+        "swage/_autograd.py": b"",
         "swage/_segmented_qualification.py": b"",
         "swage/compile.py": b"",
         "swage/bench.py": b"",
@@ -370,6 +371,7 @@ def test_dirty_artifacts_require_explicit_local_opt_in(checker, tmp_path):
     [
         "swage/__init__.py",
         "swage/_segments.py",
+        "swage/_autograd.py",
         "swage/_segmented_qualification.py",
         "swage/compile.py",
         "swage/bench.py",

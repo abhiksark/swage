@@ -162,8 +162,10 @@ FailureOr<SmallVector<func::FuncOp>> findSegmentFunctions(ModuleOp module,
 }
 
 /// A GPU lowering replaces a segment function by a `gpu.module` named after
-/// its kernel, so nothing may refer to the function, and the names it
-/// creates must be free. Checked before any function is changed.
+/// its kernel, so nothing in `module` may refer to the function, and the
+/// names it creates must be free in the symbol table that holds the
+/// function, where they are created. Checked before any function is
+/// changed.
 LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
                                   StringRef kernelSuffix) {
   std::optional<SymbolTable::UseRange> uses = SymbolTable::getSymbolUses(
@@ -188,9 +190,10 @@ LogicalResult verifyKernelSymbols(ModuleOp module, func::FuncOp function,
   SmallVector<std::string, 2> created = {kernel + "_module"};
   if (!kernelSuffix.empty())
     created.push_back(kernel);
+  Operation *table =
+      SymbolTable::getNearestSymbolTable(function->getParentOp());
   for (const std::string &name : created) {
-    Operation *existing =
-        SymbolTable::lookupSymbolIn(module.getOperation(), name);
+    Operation *existing = SymbolTable::lookupSymbolIn(table, name);
     if (!existing)
       continue;
     InFlightDiagnostic diagnostic = function.emitError()
@@ -670,10 +673,6 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 
 /// Admit a single reduction whose element program needs no other stage.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis) {
-  if (analysis.abi.featureCount)
-    return analysis.segments.front().emitError(
-        "planning requires rank-one values: a function over rank-two values "
-        "has one kernel, the direct schedule, and no task buffer");
   for (MapOp map : analysis.maps)
     if (!map.getCaptures().empty())
       return map.emitError("planning requires capture-free maps");

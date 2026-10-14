@@ -576,14 +576,32 @@ def _phases(row):
             yield f"end_to_end_{mode}", end[mode]
 
 
+def _fresh_label(row):
+    """Label a fresh-offsets row: its distribution, then what is not default.
+
+    A float32 sum of rank-one values keeps the bare distribution name, as
+    the rows of the recorded campaigns do.
+    """
+    parts = [row["distribution"]]
+    if row.get("features") is not None:
+        parts.append(f"D={row['features']}")
+    if row.get("kind", "sum") != "sum":
+        parts.append(row["kind"])
+    if row.get("dtype", "float32") != "float32":
+        parts.append(row["dtype"])
+    return " ".join(parts)
+
+
 def _series(record):
     """Return each candidate's median and rate from one process record.
 
     Returns:
         A mapping from row label to timing method to candidate to its
-        ``median_us`` and ``gb_per_s``. A comparison record contributes
-        its kernel timing methods, its planning and end-to-end phases, and
-        its compilation components under the row ``compilation``.
+        ``median_us`` and ``gb_per_s``. A fresh-offsets row is timed end to
+        end, or pipelined when it has a pipeline depth. A comparison record
+        contributes its kernel timing methods, its planning and end-to-end
+        phases, and its compilation components under the row
+        ``compilation``.
 
     Raises:
         ValueError: If the record is not one this driver can read.
@@ -591,8 +609,8 @@ def _series(record):
     benchmark = record.get("benchmark")
     if benchmark == "fresh-offsets-segmented-sum":
         return {
-            row["distribution"]: {
-                "end_to_end": {
+            _fresh_label(row): {
+                "pipelined" if row.get("pipeline_depth") else "end_to_end": {
                     candidate: {
                         "median_us": summary["median"],
                         "gb_per_s": row["effective_gb_per_s"][candidate][

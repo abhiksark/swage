@@ -207,6 +207,8 @@ def launch_state(monkeypatch):
         allocation_error=None,
         lease_error=None,
         direct_count=1,
+        partial_count=2,
+        merge_count=1,
         events=[],
         event_records=[],
         completion_record_error=None,
@@ -288,7 +290,10 @@ def launch_state(monkeypatch):
 
     def compile_kernel(compiler, *args, **kwargs):
         if compiler.phase == "task":
-            phase = "warp" if kwargs["block_size"] == 32 else "cta"
+            if getattr(state, "rows", False):
+                phase = "direct"
+            else:
+                phase = "warp" if kwargs["block_size"] == 32 else "cta"
         else:
             phase = compiler.phase
         return _kernel(phase)
@@ -327,7 +332,8 @@ def launch_state(monkeypatch):
         _plan,
         "_classification",
         lambda *a, **k: (
-            [0, 4, 128, 128, 260, 0, 2], state.direct_count, 0, 2, 1
+            [0, 4, 128, 128, 260, 0, 2], state.direct_count, 0,
+            state.partial_count, state.merge_count
         ),
     )
     return state
@@ -345,6 +351,18 @@ def _launch(state, helper):
             {"value_count": 260, "segment_count": 2},
             2,
             {},
+        )
+    if helper == "rows":
+        state.rows = True
+        state.torch.Tensor = _Tensor
+        state.values.dim = lambda: 2
+        state.values.shape = (260, 4)
+        return _qualification._launch_planned_rows(
+            state.values,
+            state.offsets,
+            state.output,
+            module_text=_programs._semantic_module("sum", rank=2),
+            kernel_name="segmented_sum",
         )
     return _qualification._launch_planned_reduction(
         state.values,
@@ -458,8 +476,9 @@ def test_release_failure_cannot_skip_retention_or_other_releases(
 @pytest.mark.parametrize(
     "point", ["validation", "records", "scratch", "binding", "lease"]
 )
-def test_mixed_preenqueue_error_only_releases_acquired_leases(
-    launch_state, monkeypatch, point
+@pytest.mark.parametrize("helper", ["mixed", "rows"])
+def test_planned_preenqueue_error_only_releases_acquired_leases(
+    launch_state, monkeypatch, point, helper
 ):
     """Rejected setup cannot imply output mutation or allocator retention."""
     state = launch_state
@@ -478,7 +497,7 @@ def test_mixed_preenqueue_error_only_releases_acquired_leases(
         state.lease_error = primary
 
     with pytest.raises(RuntimeError) as caught:
-        _launch(state, "mixed")
+        _launch(state, helper)
 
     assert caught.value is primary
     assert state.launched == []
@@ -525,7 +544,8 @@ def test_one_stream_error_leaves_no_lease_to_release(launch_state, monkeypatch):
     assert state.output.version == 0
 
 
-def test_scratch_only_failure_does_not_mark_user_output(launch_state):
+@pytest.mark.parametrize("helper", ["mixed", "rows"])
+def test_scratch_only_failure_does_not_mark_user_output(launch_state, helper):
     """A partial phase can write scratch before any output phase is tried."""
     state = launch_state
     state.direct_count = 0
@@ -533,7 +553,7 @@ def test_scratch_only_failure_does_not_mark_user_output(launch_state):
     state.driver_errors["launch", "partial"] = primary
 
     with pytest.raises(RuntimeError) as caught:
-        _launch(state, "mixed")
+        _launch(state, helper)
 
     assert caught.value is primary
     assert state.launched == ["partial"]
@@ -582,6 +602,98 @@ def test_opaque_enqueue_error_conservatively_marks_attempted_output(
     assert caught.value is primary
     assert state.launched == []
     assert state.retained == ["values", "offsets", "output", "records"]
+    assert state.output.version == 1
+    assert state.released == ["direct"]
+
+
+@pytest.mark.parametrize("narrowed", [False, True])
+@pytest.mark.parametrize(
+    "point,phase,expected_launches",
+    [
+        ("launch", "direct", ["direct"]),
+        ("record", "direct", ["direct"]),
+        ("launch", "partial", ["direct", "partial"]),
+        ("record", "merge", ["direct", "partial", "merge"]),
+    ],
+)
+def test_row_stripe_error_retains_storage_and_marks_attempted_output(
+    launch_state, narrowed, point, phase, expected_launches
+):
+    """Keep all split-launch storage live after any attempted output write."""
+    state = launch_state
+    if narrowed:
+        state.offsets.dtype = "int64"
+    primary = RuntimeError(f"row {phase} {point} failed")
+    state.driver_errors[point, phase] = primary
+
+    with pytest.raises(RuntimeError) as caught:
+        _launch(state, "rows")
+
+    assert caught.value is primary
+    assert state.launched == expected_launches
+    assert state.retained == (
+        ["values", "output", "records", "scratch"] if narrowed
+        else ["values", "offsets", "output", "records", "scratch"]
+    )
+    assert state.output.version == 1
+    assert state.released == ["direct", "partial", "merge"]
+
+
+@pytest.mark.parametrize("primary_failure", [False, True])
+@pytest.mark.parametrize("cleanup", ["retention", "release", "version"])
+def test_row_stripe_cleanup_error_attempts_remaining_actions(
+    launch_state, monkeypatch, primary_failure, cleanup
+):
+    """Preserve the first error while completing every cleanup action."""
+    state = launch_state
+    first_cleanup = RuntimeError(f"row {cleanup} failed")
+    if cleanup == "retention":
+        state.record_errors["values"] = first_cleanup
+    elif cleanup == "release":
+        state.release_errors["direct"] = first_cleanup
+    else:
+        def fail_version(tensor):
+            tensor.version += 1
+            raise first_cleanup
+
+        monkeypatch.setattr(
+            state.torch.autograd.graph, "increment_version", fail_version
+        )
+    primary = RuntimeError("row direct completion fence failed")
+    if primary_failure:
+        state.driver_errors["record", "direct"] = primary
+
+    with pytest.raises(RuntimeError) as caught:
+        _launch(state, "rows")
+
+    assert caught.value is (primary if primary_failure else first_cleanup)
+    assert state.retained == [
+        "values", "offsets", "output", "records", "scratch"
+    ]
+    assert state.output.version == 1
+    assert state.released == ["direct", "partial", "merge"]
+
+
+@pytest.mark.parametrize("narrowed", [False, True])
+def test_row_stripe_unsplit_error_retains_identity_tasks(
+    launch_state, narrowed
+):
+    """The upload-free identity path still retains every borrowed tensor."""
+    state = launch_state
+    state.partial_count = state.merge_count = 0
+    if narrowed:
+        state.offsets.dtype = "int64"
+    primary = RuntimeError("row identity fence failed")
+    state.driver_errors["record", "direct"] = primary
+
+    with pytest.raises(RuntimeError) as caught:
+        _launch(state, "rows")
+
+    assert caught.value is primary
+    assert state.launched == ["direct"]
+    assert state.retained == [
+        "values", "records" if narrowed else "offsets", "output", "tasks"
+    ]
     assert state.output.version == 1
     assert state.released == ["direct"]
 

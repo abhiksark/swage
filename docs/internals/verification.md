@@ -30,8 +30,12 @@ the paths the calls run through.
 | Launch validation, the PyTorch floor, and the cache bound, read-only mode, and no-compile mode | Public today | `tests/python/test_runtime.py`, `python/tests/mlir/test_runtime.py` | `python -m pytest tests/python/test_runtime.py -q`; trusted GPU workflow |
 | Public segmented calls: names and signatures, the checks that need no native build, the PyTorch floor, and the wheel-only error | Public today | `tests/python/test_segments.py` | `python -m pytest tests/python/test_segments.py -q` |
 | Public segmented calls: argument and offsets validation on host tensors | Public today | The tests of `python/tests/mlir/test_public_segments.py` that need no GPU | `ninja -C build check-swage-python` |
-| Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, and special values; the schedule of a public sum; `out`; graph capture, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
-| Installed-wheel segmented qualification: the public segmented calls and the artifact path, run from an installed wheel with `PYTHONPATH` unset, where a skipped test fails the qualification | Public today | `scripts/qualify_installed_segments.sh`, `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_segment_columns.py`, `python/tests/mlir/test_artifact.py` | `scripts/qualify_installed_segments.sh PYTHON ORACLE_BUILD WORK_DIR` on an RTX A6000, with `ORACLE_BUILD` a bindings-off build that holds `bin/swage-opt`; the release `gpu` job of `publish-pypi.yml` and the `fixed-runtime-slo` job of `ci-gpu.yml` run it |
+| Public segmented calls: results against `torch.segment_reduce`, `torch.softmax`, and float64 on the nine benchmark distributions, empty batches and segments, long segments, special values, and signed zeros; the schedule of a public sum; `out`; graph capture, `torch.compile`, streams, threads, inference mode, and no-compile mode; resource use over repeated calls; and the segmented example | Public today | The CUDA tests of `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_examples.py` | Trusted GPU workflow |
+| Public segmented calls on `[N, D]` rows: reductions and the softmax per column against `torch.segment_reduce` along axis 0 and `torch.softmax` along the rows, bit equality with the host model of the row-stripe tile, through the split, and of the column tile with the CPU oracle, agreement of the softmax with the oracle, values that depend on the row and the column, independence of the batch, `[N, 1]` and `[N, 0]`, the refusals of the shape rules; the row-stripe and column kernels below the Python validation; and their plan, oracle, and kernel lowerings | Public today | `python/tests/mlir/test_segment_columns.py`, the column and row cases of `python/tests/mlir/test_segmented_bounds.py`, `python/tests/mlir/row_tile_model.py`, the `segmented-columns` and `ragged-softmax-columns` files under `test/Conversion`, `test/Conversion/SwagePlanToGPU/column-groups.mlir`, `test/Dialect/Swage/columns.mlir`, `test/Dialect/SwagePlan/columns.mlir` | `ninja -C build check-swage`; trusted GPU workflow |
+| Gradients of the public segmented calls: when a call records one, the `out` refusal while recording, and an import of `swage` that loads no PyTorch | Public today | `tests/python/test_segments.py`, with a stand-in for PyTorch | `python -m pytest tests/python/test_segments.py -q` |
+| Gradients of the public segmented calls on the GPU: first and second derivatives of every kind and of the softmax, the tie rule, comparison with `torch.segment_reduce` and float64 `torch.softmax`, and the interactions with `out`, grad mode, in-place changes, streams, graph capture, no-compile mode, `torch.compile`, and resource use | Public today; recorded run on the development GPU | `python/tests/mlir/test_segment_gradients.py` | `python -m pytest python/tests/mlir/test_segment_gradients.py -q`; trusted GPU workflow after merge |
+| Derivatives of calls that run from an artifact, against the compiled path bit for bit | Public today; recorded run on the development GPU | The gradient cases of `python/tests/mlir/test_artifact.py` | `ninja -C build check-swage-python`; trusted GPU workflow after merge |
+| Installed-wheel segmented qualification: the public segmented calls, their first and second derivatives, `[N, D]` values on the row-stripe tile, and the artifact path including derivatives, run from an installed wheel with `PYTHONPATH` unset, where a skipped test fails the qualification | Public today | `scripts/qualify_installed_segments.sh`, `python/tests/mlir/test_public_segments.py`, `python/tests/mlir/test_segment_columns.py`, `python/tests/mlir/test_segment_gradients.py`, `python/tests/mlir/test_artifact.py` | `scripts/qualify_installed_segments.sh PYTHON ORACLE_BUILD WORK_DIR` on an RTX A6000, with `ORACLE_BUILD` a bindings-off build that holds `bin/swage-opt`; the release `gpu` job of `publish-pypi.yml` and the `fixed-runtime-slo` job of `ci-gpu.yml` run it |
 | Compile-only PTX emission for every admitted processor, public and private kernels | Public today, compile-only; private qualification | `python/tests/mlir/test_target_compile.py` | `ninja -C build check-swage-python` |
 | Loaded-module lifetime, in-process cache bounds, cold-path locking, and the context and overlap guards of prepared launches | Public today; private qualification | `python/tests/mlir/test_module_lifetime.py` | `ninja -C build check-swage-python`; trusted GPU workflow |
 | Module leases: a launch holds a lease on its loaded module, a retired module is unloaded only after no lease holds it, no graph captured it, and an event on every stream that launched it has completed; interpreter exit waits, bounded, and `os.fork()` waits for a compile in flight | Public today; private qualification | `tests/python/test_runtime.py`, `python/tests/mlir/test_module_lifetime.py`, `python/tests/mlir/test_segmented_cache.py` | `python -m pytest tests/python/test_runtime.py -k "lease or exit or fork"`; `python -m pytest python/tests/mlir/test_module_lifetime.py`; `python -m pytest python/tests/mlir/test_segmented_cache.py -k lease`; trusted GPU workflow |
@@ -58,6 +62,8 @@ the paths the calls run through.
 | Native AddressSanitizer and UndefinedBehaviorSanitizer over the lit suite and the C++ unit tests | Hosted gate | The `sanitizers` job of `ci-cpp.yml`, which instruments Swage against the uninstrumented Release LLVM on pull requests and pushes to `main`; the `sanitizers-instrumented-llvm` job of `sanitizers.yml`, which also instruments LLVM, on pushes to `main`, weekly, and by hand | `ninja -C <build> check-swage check-swage-unit` in a bindings-off build with the sanitizer flags of either job |
 | Recorded RTX 5090 performance snapshot | Recorded evidence | `benchmarks/results/perf-5090-sm120.json` | Not re-executable in CI |
 | Recorded fresh-offsets and frozen comparison runs on RTX A6000 at `453c56e`, their generated summary page, and the documentation fragments | Recorded evidence | `benchmarks/results/segmented-sum-a6000-sm86-453c56e/`, `tests/python/test_campaign_tables.py` | `python -m pytest tests/python/test_campaign_tables.py -q`; the measurements are not re-executable in CI |
+| Recorded public `segment_reduce` call runs on RTX A6000 at `c6099ec`, their generated summary page, the documentation fragments, and the PTX of the rank-two column kernel | Recorded evidence | `benchmarks/results/segment-reduce-a6000-sm86-c6099ec/`, `tests/python/test_public_call_tables.py` | `python -m pytest tests/python/test_public_call_tables.py -q`; the measurements are not re-executable in CI |
+| Recorded public `segment_reduce` call runs on RTX A6000 at `2cf88ae`, after the row-stripe schedule, their generated summary page, the documentation fragments with the comparison against `c6099ec`, and the PTX of the rank-two row-stripe kernels | Recorded evidence | `benchmarks/results/segment-reduce-a6000-sm86-2cf88ae/`, `tests/python/test_public_call_tables.py` | `python -m pytest tests/python/test_public_call_tables.py -q`; the measurements are not re-executable in CI |
 | Public segment syntax, and public launch of a segment program that the caller writes | Planned | No executable public contract | No passing gate yet |
 | Packed warps, queues, and persistent scheduling | Planned | No executable public contract | No passing gate yet |
 
@@ -171,6 +177,51 @@ these checks:
 
 These checks were executed from the branch that added artifacts. The
 trusted GPU workflow has not executed them yet.
+
+The gradients of the two calls, which
+[Gradients](../user-guide/segmented-calls.md#gradients) describes, have
+these checks in `python/tests/mlir/test_segment_gradients.py`:
+
+- Derivatives: `gradcheck` and `gradgradcheck` in float64 pass for every
+  kind at rank one and at 1, 3, and 64 columns, with int32 and int64
+  offsets, empty segments, and rows past the final offset, and on batches
+  that reach every schedule of rank one.
+- Reductions: the gradient of a sum is an exact copy, that of a mean one
+  correctly rounded division, and that of a maximum or a minimum without a
+  tie the whole gradient, in both dtypes. Each equals the gradient of
+  `torch.segment_reduce` on CUDA and on the CPU bit for bit, the mean to
+  within one rounding. Tied elements share a positive, negative, infinite,
+  or NaN gradient equally, per column, and every other element receives
+  `0.0`.
+- PyTorch on ties: the gradient of `torch.segment_reduce` on tied elements
+  has the same bits on CUDA as on the CPU, and differs from the Swage
+  gradient only for a negative gradient.
+- Softmax: the backward lies within its bound of `y * (g - s)` on the
+  returned `y` at logit spreads 8, 20, 50, and 80, at rank one and at 1, 3,
+  and 64 columns, and on one segment of 100,003 rows, and agrees with the
+  float64 gradient of `torch.softmax` within the error the forward carries.
+  A product of the second derivative with a vector lies within its bound
+  of its formula and of float64 `torch.softmax`. NaN and infinities give
+  the NaN of `torch.softmax`.
+- Interactions: grad mode, the `out` refusal, in-place changes after a
+  call, offsets made under inference mode, determinism, gradients that do
+  not depend on the batch, the stream of a backward, the refusal of a
+  backward under CUDA graph capture and in no-compile mode, `torch.compile`
+  with the `eager` and `inductor` backends, and no module, synchronization,
+  event, memory, or garbage left behind by 100 calls with backward passes.
+
+The recorded run of these checks was on one NVIDIA RTX A6000 (`sm_86`),
+with PyTorch 2.12.0+cu130, CUDA 13.0, and Python 3.13, at commit `22a2ff7`
+of the branch that added gradients, with bindings built from that commit.
+`ninja -C build check-swage-python` ran the whole `python/tests/mlir`
+directory ten times, one run after another. The directory holds the
+gradient file and the gradient cases of
+`python/tests/mlir/test_artifact.py`, in which a process that cannot
+import `mlir_swage` records the result, the first derivative, and a second
+derivative of each reduction kind and of the softmax from an artifact, and
+each equals the compiled path bit for bit. Every run passed 4416 tests,
+skipped the 2 opt-in racecheck tests, and had no failure and no error. The
+trusted GPU workflow has not run these checks; it runs on `main` only.
 
 The trusted GPU workflow, `ci-gpu.yml`, runs only on `main`, weekly and by
 hand, through the self-hosted `swage-gpu` runner. Its `runtime-qualification`

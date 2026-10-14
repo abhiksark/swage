@@ -39,6 +39,12 @@ struct SegmentBinding {
   Value first;  ///< Index of the first element this thread reads.
   Value end;    ///< Index one past the last element of the segment.
   Value stride; ///< Index distance between two elements of one thread.
+  /// The row-stripe tile of rank-two values binds two more values: the
+  /// columns one group covers, as an index, and the workgroup buffer of one
+  /// element per thread through which the threads of one column combine.
+  /// Both are null for every other tile.
+  Value groupWidth;
+  Value exchange;
 };
 
 /// A bound segment, the index of its output slot, and where it starts.
@@ -67,6 +73,11 @@ enum class ThreadCombination {
   Subgroup,
   /// A block-wide reduction.
   Block,
+  /// The row-stripe tile of rank-two values: the threads of one column of a
+  /// column group, one per row stripe, combine across the block through the
+  /// exchange buffer of the binding, and every thread of the column ends
+  /// with the same result.
+  ColumnGroup,
 };
 
 /// Applies an element program to one loaded element at the insertion point
@@ -162,11 +173,31 @@ BoundSegment emitSegmentBinding(OpBuilder &builder, Location loc, Value values,
                                 Value logicalThreadId, Value stride, Value zero,
                                 Value one);
 
+/// The column-group width of the row-stripe tile for `features` columns, an
+/// index, as `TargetDescription::columnGroupWidth` gives it: a chain of
+/// comparisons from 2 up to `subgroupWidth`. Constant inputs fold to a
+/// constant.
+Value emitColumnGroupWidth(OpBuilder &builder, Location loc, Value features,
+                           int32_t subgroupWidth);
+
 /// Reduce the bound segment with `kind`: every thread folds its elements,
 /// then the threads combine their accumulators as `combination` says.
 /// Returns the result, which every thread holds. `target` gives the width
-/// of a subgroup and is read for `ThreadCombination::Subgroup` only, so it
-/// may be null otherwise.
+/// of a subgroup and is read for `ThreadCombination::Subgroup` and
+/// `ThreadCombination::ColumnGroup` only, so it may be null otherwise.
+///
+/// `ThreadCombination::ColumnGroup` combines the threads of one column of a
+/// row-stripe tile, which the binding's group width and exchange buffer
+/// describe. Within a subgroup, an XOR butterfly over every offset that is
+/// at least the group width pairs the lanes of one column: each step runs
+/// in every lane, and a select keeps the combination only where the offset
+/// is at least the width, so no shuffle sits under thread-dependent
+/// control flow. Every thread then stores its result at its own index of
+/// the exchange buffer, a barrier follows, every thread loads the result of
+/// its column from each subgroup and combines them as a pairwise tree in
+/// subgroup order, and a second barrier frees the buffer for the next
+/// stage. The buffer holds one element per thread of the block, which is
+/// its static size, and the subgroup count it implies is a power of two.
 Value emitReductionStage(OpBuilder &builder, Location loc,
                          const TargetDescription *target, ReductionKind kind,
                          Type elementType, const SegmentBinding &segment,

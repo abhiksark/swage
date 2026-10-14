@@ -42,6 +42,12 @@ gates belong in the roadmap.
 
 - [ADR-0022: Wider data model for the segmented reductions](../adr/ADR-0022-wider-data-model-for-segmented-reductions.md)
   (accepted; implemented step by step, and the record says which steps
+  exist; its single column tile is superseded by ADR-0023)
+- [ADR-0023: Row-stripe tile for rank-two values](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md)
+  (accepted; steps 1 to 4 implemented, and the record says which steps
+  remain conditional)
+- [ADR-0024: Gradients of the segmented calls](../adr/ADR-0024-gradients-of-the-segmented-calls.md)
+  (accepted; implemented step by step, and the record says which steps
   exist)
 
 ## Deployment

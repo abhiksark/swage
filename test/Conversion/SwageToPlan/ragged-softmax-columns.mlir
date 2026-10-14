@@ -6,18 +6,27 @@
 // segment. The region is the one of the rank-one softmax, two reductions and
 // a map store, and the store writes the rank-two output itself.
 //
-// Every schedule that needs a task buffer refuses rank-two values before it
-// looks at the captures of the program.
+// The task-ids schedule plans the same region as the row-stripe kernel,
+// policy<cta> with a task buffer. Its ids only name segments, so the
+// schedule admits the captures and the map store of the softmax over
+// rank-two values, which a launch runs with one task per segment. Over
+// rank-one values the same schedule refuses them, because host
+// classification describes one capture-free reduction. The split schedules
+// plan rank-two values but refuse the softmax as they do over rank-one
+// values, and the other kernel schedules refuse rank-two values by name
+// before they look at the program.
 //
 // RUN: swage-opt --swage-to-plan='schedule=direct' %s \
 // RUN:   | FileCheck %s --implicit-check-not='swage.map ' \
 // RUN:       --implicit-check-not=segment_id --implicit-check-not=make_segment
-// RUN: not swage-opt --swage-to-plan='schedule=task-ids' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=REFUSED
+// RUN: swage-opt --swage-to-plan='schedule=task-ids' %s \
+// RUN:   | FileCheck %s --check-prefix=STRIPES --implicit-check-not='swage.map '
 // RUN: not swage-opt --swage-to-plan='schedule=fused-mixed' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=REFUSED
 // RUN: not swage-opt --swage-to-plan='schedule=split-partial' %s 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=REFUSED
+// RUN:   | FileCheck %s --check-prefix=SPLIT
+// RUN: not swage-opt --swage-to-plan='schedule=split-merge' %s 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=SPLIT
 // RUN: not swage-opt --swage-to-plan='schedule=persistent' %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=REFUSED
 
@@ -35,7 +44,16 @@
 // CHECK-NEXT: }
 // CHECK-NEXT: return
 
-// REFUSED: error: planning requires rank-one values: a function over rank-two values has one kernel, the direct schedule, and no task buffer
+// STRIPES: func.func @ragged_softmax_r2(%[[R_VALUES:.*]]: memref<?x?xf32> {{[{].*[}]}}, %[[R_OFFSETS:.*]]: memref<?xi32> {{[{].*[}]}}, %[[R_OUTPUT:.*]]: memref<?x?xf32> {{[{].*[}]}}, %[[R_IDS:.*]]: memref<?xi32>, %[[R_VALUE_COUNT:.*]]: i32 {{[{].*[}]}}, %[[R_TASK_COUNT:.*]]: i32, %[[R_SEGMENT_COUNT:.*]]: i32 {{[{].*[}]}}, %[[R_FEATURE_COUNT:.*]]: i32 {{[{].*[}]}}) attributes {swage_plan.block_threads = 128 : i32} {
+// STRIPES-NEXT: swage_plan.tasks policy<cta> segments(%[[R_VALUES]], %[[R_OFFSETS]] : memref<?x?xf32>, memref<?xi32>) value_count(%[[R_VALUE_COUNT]] : i32) segment_count(%[[R_SEGMENT_COUNT]] : i32) feature_count(%[[R_FEATURE_COUNT]] : i32) ids(%[[R_IDS]] : memref<?xi32>) task_count(%[[R_TASK_COUNT]] : i32) {
+// STRIPES-NEXT: ^bb0(%[[R_SEGMENT:.*]]: !swage.segment<f32>):
+// STRIPES-NEXT: %[[R_MAX:.*]] = swage.reduce %[[R_SEGMENT]] kind<max> : !swage.segment<f32> -> f32 {
+// STRIPES: %[[R_TOTAL:.*]] = swage.reduce %[[R_SEGMENT]] captures(%[[R_MAX]] : f32) kind<sum> : !swage.segment<f32> -> f32 {
+// STRIPES: swage.map_store %[[R_SEGMENT]], %[[R_OUTPUT]] captures(%[[R_MAX]], %[[R_TOTAL]] : f32, f32) : !swage.segment<f32>, memref<?x?xf32> {
+// STRIPES: swage_plan.yield{{$}}
+
+// REFUSED: error: {{fused-mixed|persistent}} planning requires rank-one values: a function over rank-two values runs on the direct, task-ids, split-partial, and split-merge schedules
+// SPLIT: error: planning requires capture-free maps
 
 module {
   func.func @ragged_softmax_r2(

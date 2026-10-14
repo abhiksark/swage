@@ -1,7 +1,11 @@
 <!-- docs/adr/ADR-0022-wider-data-model-for-segmented-reductions.md -->
 # ADR-0022: Wider data model for the segmented reductions
 
-- Status: accepted; steps 1 to 6 of the migration sequence are implemented
+- Status: accepted; steps 1 to 6 of the migration sequence are
+  implemented; superseded in part by
+  [ADR-0023](ADR-0023-row-stripe-tile-for-rank-two-values.md), which
+  gives the public calls on rank-two values a row-stripe tile and a split
+  in place of the one column tile
 - Date: 2026-10-03
 - Accepted: 2026-10-03, with the recommended answer to every question at the
   end

@@ -90,6 +90,7 @@ operation ::= `swage_plan.merge_tasks` `scratch` `(` $scratch `:` type($scratch)
               `merges` `(` $merges `:` type($merges) `)`
               `merge_count` `(` $merge_count `:` type($merge_count) `)`
               `segment_count` `(` $segment_count `:` type($segment_count) `)`
+              (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
               (`ranges` `(` $ranges^ `:` type($ranges) `)`)?
               `into` `(` $output `:` type($output) `)`
               attr-dict-with-keyword $body
@@ -125,6 +126,13 @@ loaded segment is compared with `segment_count`, and one that fails the
 comparison stores nothing. The two range records of an extent are
 addressed through the clamped range of partials.
 
+With `feature_count`, `scratch` holds one row of `feature_count`
+partial results per partial task and `output` one row per segment: the
+region runs once per task and column over the rows of scratch the
+record names, and its scalar is stored at `output[segment, c]`. A range
+record names rows, so an extent is a number of rows. The kernel is the
+row-stripe tile, as for `swage_plan.partial_tasks`.
+
 Example:
 
 ```mlir
@@ -141,19 +149,20 @@ swage_plan.merge_tasks scratch(%scratch : memref<?xf32>)
 }
 ```
 
-Traits: `RecursiveMemoryEffects`, `SingleBlock`
+Traits: `AttrSizedOperandSegments`, `RecursiveMemoryEffects`, `SingleBlock`
 
 ##### Operands:
 
 | Operand | Description |
 | :-----: | ----------- |
-| `scratch` | 1D memref of signless integer or floating-point values |
+| `scratch` | 1D/2D memref of signless integer or floating-point values |
 | `partial_count` | signless integer |
 | `merges` | 1D memref of signless integer values |
 | `merge_count` | signless integer |
 | `segment_count` | signless integer |
-| `output` | 1D memref of signless integer or floating-point values |
+| `output` | 1D/2D memref of signless integer or floating-point values |
 | `ranges` | 1D memref of signless integer values |
+| `feature_count` | signless integer |
 
 
 #### `swage_plan.partial_tasks` (swage_plan::PartialTasksOp)
@@ -167,6 +176,7 @@ operation ::= `swage_plan.partial_tasks` `values` `(` $values `:` type($values) 
               `value_count` `(` $value_count `:` type($value_count) `)`
               `ranges` `(` $ranges `:` type($ranges) `)`
               `partial_count` `(` $partial_count `:` type($partial_count) `)`
+              (`feature_count` `(` $feature_count^ `:` type($feature_count) `)`)?
               `into` `(` $scratch `:` type($scratch) `)`
               attr-dict-with-keyword $body
 ```
@@ -186,6 +196,14 @@ merge of its segment runs the epilogue once.
 
 Every bound the kernel needs is an operand: a loaded range is clamped to
 `value_count`, and a task index is compared with `partial_count`.
+
+With `feature_count`, the values are rank-two rows of `feature_count`
+columns, a range record names rows, and `scratch` holds one row of
+`feature_count` partial results per task: the region runs once per
+task and column, and its scalar is stored at `scratch[t, c]`. The
+kernel is the row-stripe tile: a block runs one task and one group of
+adjacent columns at a time, and the row stripes of one column combine
+across the block.
 
 Example:
 
@@ -208,11 +226,12 @@ Traits: `RecursiveMemoryEffects`, `SingleBlock`
 
 | Operand | Description |
 | :-----: | ----------- |
-| `values` | 1D memref of signless integer or floating-point values |
+| `values` | 1D/2D memref of signless integer or floating-point values |
 | `value_count` | signless integer |
 | `ranges` | 1D memref of signless integer values |
 | `partial_count` | signless integer |
-| `scratch` | 1D memref of signless integer or floating-point values |
+| `scratch` | 1D/2D memref of signless integer or floating-point values |
+| `feature_count` | signless integer |
 
 
 #### `swage_plan.persistent_tasks` (swage_plan::PersistentTasksOp)
@@ -408,8 +427,13 @@ scalar is stored at `output[s, c]`, and `output` is rank-two as well.
 `i + block_threads`, and so on, one after the other. Each thread reduces
 its columns alone and stores its own results, so no thread combines
 with another and a thread holds one scalar per reduction, whatever the
-number of columns. The policy takes no `ids`. `policy<sequential>`
-visits the columns of each segment in order.
+number of columns. The policy takes no `ids`. `policy<cta>` over
+rank-two values is the row-stripe tile, with or without `ids`: a block
+runs one task and one group of adjacent columns at a time, its threads
+split into row stripes of each column of the group, and the stripes of
+one column combine across the block, so a thread still holds one scalar
+per reduction. `policy<sequential>` visits the columns of each segment
+in order. `policy<warp>` takes rank-one values only.
 
 Example:
 

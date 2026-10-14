@@ -100,9 +100,9 @@ LogicalResult analyzeSegmentProgram(func::FuncOp function,
 /// type only. `math.exp2` is admitted for f32 alone.
 LogicalResult verifyConsumerPrograms(SegmentProgramAnalysis &analysis);
 
-/// Admit a single reduction whose element program needs no other stage,
-/// over rank-one values: host classification turns segments of scalars into
-/// tasks, and a rank-two function has one kernel and no task buffer.
+/// Admit a single reduction whose element program needs no other stage:
+/// host classification turns segments into tasks for such a program, over
+/// scalars or over rows of rank-two values.
 LogicalResult verifyPlanningProgram(SegmentProgramAnalysis &analysis);
 
 /// The relative work of the element programs under `root`: one unit per

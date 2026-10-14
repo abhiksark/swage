@@ -4,9 +4,34 @@
 
 // Parse -> print -> parse round trip of the plan functions of rank-two
 // values: the column kernel, whose task operation takes the number of
-// columns and has policy<column>, and the oracle.
+// columns and has policy<column>, the row-stripe kernel, whose task
+// operation has policy<cta> and may take a task buffer, and the oracle.
 
 module {
+  // CHECK-LABEL: func.func @row_stripes(
+  // CHECK-SAME: %[[ROW_VALUES:.*]]: memref<?x?xf32>, %[[ROW_OFFSETS:.*]]: memref<?xi32>, %[[ROW_OUTPUT:.*]]: memref<?x?xf32>, %[[IDS:.*]]: memref<?xi32>, %[[ROW_VALUE_COUNT:.*]]: i32, %[[TASK_COUNT:.*]]: i32, %[[ROW_SEGMENT_COUNT:.*]]: i32, %[[ROW_FEATURE_COUNT:.*]]: i32) attributes {swage_plan.block_threads = 128 : i32} {
+  // CHECK-NEXT: swage_plan.tasks policy<cta> segments(%[[ROW_VALUES]], %[[ROW_OFFSETS]] : memref<?x?xf32>, memref<?xi32>) value_count(%[[ROW_VALUE_COUNT]] : i32) segment_count(%[[ROW_SEGMENT_COUNT]] : i32) feature_count(%[[ROW_FEATURE_COUNT]] : i32) ids(%[[IDS]] : memref<?xi32>) task_count(%[[TASK_COUNT]] : i32) into(%[[ROW_OUTPUT]] : memref<?x?xf32>) {
+  func.func @row_stripes(
+      %values: memref<?x?xf32>, %offsets: memref<?xi32>,
+      %output: memref<?x?xf32>, %ids: memref<?xi32>, %value_count: i32,
+      %task_count: i32, %segment_count: i32, %feature_count: i32)
+      attributes {swage_plan.block_threads = 128 : i32} {
+    swage_plan.tasks policy<cta>
+        segments(%values, %offsets : memref<?x?xf32>, memref<?xi32>)
+        value_count(%value_count : i32) segment_count(%segment_count : i32)
+        feature_count(%feature_count : i32)
+        ids(%ids : memref<?xi32>) task_count(%task_count : i32)
+        into(%output : memref<?x?xf32>) {
+    ^bb0(%column: !swage.segment<f32>):
+      %sum = swage.reduce %column kind<sum> : !swage.segment<f32> -> f32 {
+      ^bb0(%value: f32):
+        swage.yield %value : f32
+      }
+      swage_plan.yield %sum : f32
+    }
+    return
+  }
+
   // CHECK-LABEL: func.func @columns(
   // CHECK-SAME: %[[VALUES:.*]]: memref<?x?xf32>, %[[OFFSETS:.*]]: memref<?xi32>, %[[OUTPUT:.*]]: memref<?x?xf32>, %[[VALUE_COUNT:.*]]: i32, %[[SEGMENT_COUNT:.*]]: i32, %[[FEATURE_COUNT:.*]]: i32) attributes {swage_plan.block_threads = 128 : i32} {
   // CHECK-NEXT: swage_plan.tasks policy<column> segments(%[[VALUES]], %[[OFFSETS]] : memref<?x?xf32>, memref<?xi32>) value_count(%[[VALUE_COUNT]] : i32) segment_count(%[[SEGMENT_COUNT]] : i32) feature_count(%[[FEATURE_COUNT]] : i32) into(%[[OUTPUT]] : memref<?x?xf32>) {
