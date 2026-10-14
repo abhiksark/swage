@@ -253,6 +253,143 @@ def _count_python_launches(monkeypatch):
     return calls
 
 
+def test_warm_launch_observes_native_launcher_class_override(monkeypatch):
+    """A prepared owner still uses the class's live call method."""
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.ones(129, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    owner, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    assert owner is not None
+    primary = RuntimeError("caller rejects native launcher lookup")
+    calls = []
+
+    def refuse(launcher, *args):
+        calls.append(launcher)
+        raise primary
+
+    python_launches = _count_python_launches(monkeypatch)
+    output.fill_(-777.0)
+    version = output._version
+    monkeypatch.setattr(type(owner), "__call__", refuse)
+    with pytest.raises(RuntimeError) as caught:
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    torch.cuda.synchronize()
+    assert caught.value is primary
+    assert calls == [owner]
+    assert python_launches == []
+    assert torch.all(output == -777.0)
+    assert output._version == version
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "driver",
+        "context",
+        "function",
+        "cache_resident",
+        "unloading",
+        "unloaded",
+        "unload_blocked",
+        "pending_streams",
+    ],
+)
+def test_native_launch_preserves_deleted_entry_slot_error(monkeypatch, name):
+    """Deleted object slots raise before enqueue and leave output untouched."""
+    from swage import _cuda_backend
+
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.ones(129, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    assert fast_launch is not None
+    entry = next(reversed(_cuda_backend._loaded_functions.values()))
+    output.fill_(-777.0)
+    version = output._version
+    with monkeypatch.context() as patch:
+        patch.delattr(entry, name)
+        with pytest.raises(AttributeError, match=name):
+            fast_launch(arguments, constexprs, grid)
+    torch.cuda.synchronize()
+    assert torch.all(output == -777.0)
+    assert output._version == version
+
+
+def test_native_launch_declines_replaced_entry_descriptor(monkeypatch):
+    """A replaced descriptor retains ordinary lookup's exception identity."""
+    from swage import _cuda_backend
+
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.ones(129, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    primary = RuntimeError("caller rejects entry function")
+
+    def reject_function(entry):
+        raise primary
+
+    output.fill_(-777.0)
+    version = output._version
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            _cuda_backend._LoadedModule, "function", property(reject_function)
+        )
+        assert fast_launch(arguments, constexprs, grid) is False
+        assert output._version == version
+        with pytest.raises(RuntimeError) as caught:
+            kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+        assert caught.value is primary
+    torch.cuda.synchronize()
+    assert torch.all(output == -777.0)
+    assert output._version == version + 1
+
+
+def test_native_launch_rechecks_entry_after_stream_query(monkeypatch):
+    """Pre-enqueue reentrancy retains the deleted-slot exception."""
+    from swage import _cuda_backend
+
+    original = torch._C._cuda_getCurrentRawStream
+    active = False
+    entry = None
+
+    def query_stream(device):
+        if active:
+            del entry.function
+        return original(device)
+
+    monkeypatch.setattr(torch._C, "_cuda_getCurrentRawStream", query_stream)
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.ones(129, device="cuda")
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    entry = next(reversed(_cuda_backend._loaded_functions.values()))
+    function = entry.function
+    output.fill_(-777.0)
+    version = output._version
+    active = True
+    try:
+        with pytest.raises(AttributeError, match="function"):
+            fast_launch(arguments, constexprs, grid)
+    finally:
+        active = False
+        entry.function = function
+    torch.cuda.synchronize()
+    assert torch.all(output == -777.0)
+    assert output._version == version
+
+
 @pytest.mark.parametrize("failure", ["allocator", "version", "both"])
 def test_native_launch_marks_output_after_allocator_recording_error(
     monkeypatch, failure,
@@ -307,6 +444,92 @@ def test_native_launch_marks_output_after_allocator_recording_error(
     assert recorded == [id(x), id(y), id(output)]
     assert torch.equal(output, x + y)
     assert output._version == version + 1
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["success", "error"])
+def test_native_launch_keeps_captured_allocator_after_class_mutation(
+    monkeypatch, fail
+):
+    """Keep all allocator records on the callable captured before enqueue."""
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, device="cuda", dtype=torch.float32)
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    original_record = torch.Tensor.record_stream
+    recorded = []
+    replacements = []
+    active = False
+    primary = RuntimeError("captured allocator failed")
+
+    def replacement(tensor, stream):
+        replacements.append(id(tensor))
+        raise RuntimeError("replacement allocator must not run")
+
+    def captured_record(tensor, stream):
+        original_record(tensor, stream)
+        if active:
+            recorded.append(id(tensor))
+            if tensor is x:
+                monkeypatch.setattr(torch.Tensor, "record_stream", replacement)
+                if fail:
+                    raise primary
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", captured_record)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    assert fast_launch is not None
+    python_launches = _count_python_launches(monkeypatch)
+    output.fill_(-777.0)
+    version = output._version
+    active = True
+
+    if fail:
+        with pytest.raises(RuntimeError) as caught:
+            kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+        assert caught.value is primary
+    else:
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    torch.cuda.synchronize()
+
+    assert python_launches == []
+    assert recorded == [id(x), id(y), id(output)]
+    assert replacements == []
+    assert torch.equal(output, x + y)
+    assert output._version == version + 1
+
+
+@pytest.mark.parametrize("override", ["class", "instance"])
+def test_warm_launch_preserves_contiguity_method_overrides(
+    monkeypatch, override
+):
+    """Refuse changed contiguity lookup before writing any output."""
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, device="cuda", dtype=torch.float32)
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    python_launches = _count_python_launches(monkeypatch)
+    output.fill_(-777.0)
+    version = output._version
+    primary = RuntimeError("caller rejects contiguity lookup")
+
+    def reject_contiguity(*args, **kwargs):
+        raise primary
+
+    target = torch.Tensor if override == "class" else x
+    monkeypatch.setattr(target, "is_contiguous", reject_contiguity)
+    assert fast_launch(arguments, constexprs, grid) is False
+    with pytest.raises(RuntimeError) as caught:
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    torch.cuda.synchronize()
+
+    assert caught.value is primary
+    assert python_launches == [1]
+    assert torch.all(output == -777.0)
+    assert output._version == version
 
 
 def test_native_launch_declines_while_its_stream_captures():
