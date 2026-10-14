@@ -47,6 +47,22 @@ tasks; read only the sections needed for the change.
 - Do not add placeholder directories, empty passes, or scaffold "for
   later".
 
+## Branch workflow
+
+- Start ordinary feature and maintenance work from `dev` and target `dev`.
+- Keep `main` as the default and release branch. Only this repository's
+  `dev`, nonempty `hotfix/*` branches, and authenticated same-repository
+  Dependabot PRs target `main`.
+- Merge `dev` into `main` with a merge commit. Synchronize `dev` with every
+  reviewed main change before accepting more development work, independently
+  of whether a release is published. Preserve dirty local checkouts.
+- Require applicable tests and explicit merge authorization. Release tags
+  must identify a commit on the first-parent history of `main` and satisfy
+  the existing signed-tag, native-wheel, and GPU gates.
+- The metadata-only branch-policy job is advisory. Do not make it required
+  without separately authorized operator changes and proof that the result
+  is bound to the trusted workflow and current PR.
+
 ## Status reporting
 
 Every completed task reports: files changed; whether semantic behavior

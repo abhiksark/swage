@@ -291,7 +291,26 @@ The required checks on `main` are `test (3.10)`, `test (3.13)`, `docs`, and
 publisher requires separate authorization; this page is not evidence of
 that setup. On a tag run, the publication workflow checks GitHub's
 cryptographic tag verification as well as tag identity and main protection
-and ancestry.
+and ancestry. The source commit must also occur on `main`'s first-parent
+history. A commit reachable only through a merged side branch is refused,
+even though it is an ancestor of `main`. This condition supplements the
+existing tag, clean-source, native-wheel, and installed GPU gates.
+
+The metadata-only `branch-policy` workflow is advisory. Its local routing
+fixtures check same-repository and fork PRs, authentic bot identity, deleted
+repositories, malformed metadata, and event/current/final PR association.
+They do not prove GitHub can prevent a PR-controlled job from substituting
+for the trusted result. The checker runs from default `main`, with read-only
+permissions and no PR code, artifacts, or dependency installation.
+
+Before an operator requires this policy, record effective Actions event
+policies, trusted workflow binding, current-head/base association, and real
+retargeting and spoofed-check outcomes. Check names and expected-app
+selection are insufficient workflow binding. Protection, event allowance,
+and environment changes require separate authorization. Keep the job
+advisory when platform binding or event availability cannot be proven.
+See [Actions policies](https://docs.github.com/en/actions/concepts/about-actions-policies)
+and [ruleset check matching](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/troubleshooting-rules).
 
 The scheduled and manual `ci-gpu` workflow runs only on trusted `main`
 through the self-hosted `[linux, x64, swage-gpu]` runner. Its

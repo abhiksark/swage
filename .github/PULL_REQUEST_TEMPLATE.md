@@ -1,6 +1,16 @@
+<!-- .github/PULL_REQUEST_TEMPLATE.md -->
+
 ## Summary
 
 <!-- What changed, in one or two sentences. -->
+
+## Branch target
+
+<!-- Ordinary PRs target dev. Only same-repository dev release PRs,
+nonempty hotfix/* branches, and authentic same-repository Dependabot PRs
+target main. See CONTRIBUTING.md. -->
+
+- [ ] Base is `dev`, or the PR meets a documented `main` exception.
 
 ## Motivation
 

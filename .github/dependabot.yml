@@ -3,6 +3,7 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    target-branch: dev
     schedule:
       interval: weekly
   # Covers pyproject.toml and requirements-ci.txt. The hosted workflows and
@@ -10,6 +11,7 @@ updates:
   # from requirements-ci.txt.
   - package-ecosystem: pip
     directory: /
+    target-branch: dev
     schedule:
       interval: weekly
     ignore:
