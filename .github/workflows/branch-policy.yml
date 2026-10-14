@@ -1,0 +1,45 @@
+# .github/workflows/branch-policy.yml
+name: branch-policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: branch-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Advisory branch routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Only the trusted default-main checker is checked out. Never use a
+      # PR ref, execute PR artifacts, or install PR-selected dependencies.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Evaluate authenticated current pull request metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          endpoint="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"
+          gh api "$endpoint" > "$RUNNER_TEMP/branch-policy-current.json"
+          gh api "$endpoint" > "$RUNNER_TEMP/branch-policy-final.json"
+          printf 'Trusted checker revision: `%s`\n\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Advisory routing only. Trusted workflow binding and current-PR check association require operator proof before enforcement.\n' >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/check-pr-branch-policy.sh \
+            "$GITHUB_EVENT_PATH" \
+            "$RUNNER_TEMP/branch-policy-current.json" \
+            "$RUNNER_TEMP/branch-policy-final.json"
