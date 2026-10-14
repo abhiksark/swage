@@ -1,3 +1,5 @@
+<!-- CHANGELOG.md -->
+
 # Changelog
 
 All notable changes to Swage are documented here. The format follows
@@ -511,6 +513,14 @@ semantic versioning (`0.x`; anything may change).
 
 ### Fixed
 
+- Fixed and segmented launches attempt allocator recording and output-version
+  updates when an enqueue or cleanup fails, preserving the first error.
+  One-shot calls release every acquired module lease. An attempted
+  output-writing phase advances the version even when the backend cannot
+  report whether its enqueue completed.
+- Forked children discard unfinished fixed and segmented compile flights and
+  recreate their synchronization mutex, allowing the same cold key to compile
+  without waiting for a parent worker that the child does not contain.
 - The private CPU oracle returned one unwritten value for a batch with zero
   segments. It now returns an empty result.
 - A contiguous negation view passed to `launch()` was read with the

@@ -248,8 +248,25 @@ def _single_flight(flights, key, lookup, build):
         return build() if value is None else value
     finally:
         with _flights_lock:
-            del flights[key]
-        flight.set()
+            owns_flight = flights.get(key) is flight
+            if owns_flight:
+                del flights[key]
+        # A builder can fork outside its compile place and continue in the
+        # child after its flight was cleared. It must leave a new flight
+        # alone, including the inherited event's possibly locked condition.
+        if owns_flight:
+            flight.set()
+
+
+def _after_fork_in_child():
+    """Reset fixed compile synchronization in the forked child."""
+    global _flights_lock
+    # A flight can be published before its compile place is taken, or stay
+    # published after that place is returned. Waiting for places therefore
+    # cannot make the flight registry or its mutex safe to inherit.
+    _flights_lock = threading.Lock()
+    _compile_flights.clear()
+    _compile_lock.after_fork()
 
 
 def _wait_for_cold_path_at_exit():
@@ -278,7 +295,7 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(
         before=_compile_lock.before_fork,
         after_in_parent=_compile_lock.after_fork,
-        after_in_child=_compile_lock.after_fork,
+        after_in_child=_after_fork_in_child,
     )
 
 
@@ -484,6 +501,7 @@ def launch(kernel, *, arguments, constexprs, grid, backend="cuda"):
             stream_handle = None
             capturing = False
         lease = adapter.lease(artifact, capturing=capturing)
+        failed = True
         try:
             adapter.launch(
                 lease,
@@ -493,12 +511,9 @@ def launch(kernel, *, arguments, constexprs, grid, backend="cuda"):
                 stream=stream_handle,
                 capturing=capturing,
             )
+            failed = False
         finally:
-            adapter.release(lease)
-            if adapter.name == "cuda":
-                for tensor in spec.tensors:
-                    tensor.record_stream(spec.stream)
-        _advance_version(torch, spec.tensors[2])
+            _finish_fixed_launch(adapter, lease, torch, spec, failed)
         if adapter.name == "cuda" and not capturing:
             _cuda_backend._prepare_fixed_launch(
                 kernel,
@@ -544,6 +559,34 @@ def _advance_version(torch, tensor):
     counter. An inference tensor has no counter and is skipped by PyTorch.
     """
     torch.autograd.graph.increment_version(tensor)
+
+
+def _finish_fixed_launch(adapter, lease, torch, spec, failed):
+    """Attempt all cleanup after a fixed output-writing launch was attempted.
+
+    A backend error cannot prove that no write occurred. Retain CUDA storage
+    and conservatively mark the output even on error, preserving the enqueue
+    error or otherwise the first cleanup error.
+    """
+    cleanup_error = None
+    try:
+        adapter.release(lease)
+    except BaseException as error:
+        cleanup_error = error
+    if adapter.name == "cuda":
+        for tensor in spec.tensors:
+            try:
+                tensor.record_stream(spec.stream)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+    try:
+        _advance_version(torch, spec.tensors[2])
+    except BaseException as error:
+        if cleanup_error is None:
+            cleanup_error = error
+    if not failed and cleanup_error is not None:
+        raise cleanup_error
 
 
 def _launch_location(kernel):

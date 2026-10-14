@@ -78,6 +78,10 @@ The command takes these options:
 | `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with `_r2` appended, `softmax`, or `softmax_r2`. A kind alone names the reduction over rank-one float32 values, `_f64` the one over float64 values, and `_r2` the program over rank-two values. Repeat it to include several. Without it, all eighteen are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one that the native bindings carry. See [The runtime library](#the-runtime-library). |
 
+Inputs shaped `[N, 1]` use the corresponding rank-one program. When selecting
+programs explicitly for rank-two calls, include both forms, for example
+`--program sum --program sum_r2`.
+
 These rules hold for every run:
 
 - The target must be the processor of the serving device. On that host,

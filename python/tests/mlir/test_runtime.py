@@ -253,6 +253,62 @@ def _count_python_launches(monkeypatch):
     return calls
 
 
+@pytest.mark.parametrize("failure", ["allocator", "version", "both"])
+def test_native_launch_marks_output_after_allocator_recording_error(
+    monkeypatch, failure,
+):
+    """An accepted native write stays visible to autograd when cleanup fails."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    kernel = sw.jit(add_kernel.__wrapped__)
+    x = torch.arange(129, device="cuda", dtype=torch.float32)
+    y = torch.ones_like(x)
+    output = torch.zeros_like(x)
+    original_record = torch.Tensor.record_stream
+    original_version = torch.autograd.graph.increment_version
+    recorded = []
+    fail = False
+    primary = RuntimeError("allocator recording failed")
+    version_error = RuntimeError("version update failed")
+
+    def record_stream(tensor, stream):
+        original_record(tensor, stream)
+        recorded.append(id(tensor))
+        if fail and failure != "version" and tensor is x:
+            raise primary
+
+    def increment_version(tensor):
+        original_version(tensor)
+        if fail and failure != "allocator":
+            raise version_error
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+    monkeypatch.setattr(
+        torch.autograd.graph, "increment_version", increment_version
+    )
+    fast_launch, arguments, constexprs, grid = _prepared_fast_launch(
+        kernel, x, y, output
+    )
+    assert isinstance(fast_launch, native_swage._FixedCUDALaunch)
+    python_launches = _count_python_launches(monkeypatch)
+    recorded.clear()
+    output.fill_(-777.0)
+    version = output._version
+    fail = True
+
+    with pytest.raises(RuntimeError) as caught:
+        kernel.launch(arguments=arguments, constexprs=constexprs, grid=grid)
+    torch.cuda.synchronize()
+
+    assert caught.value is (version_error if failure == "version" else primary)
+    assert python_launches == []
+    assert recorded == [id(x), id(y), id(output)]
+    assert torch.equal(output, x + y)
+    assert output._version == version + 1
+
+
 def test_native_launch_declines_while_its_stream_captures():
     """Hand a launch to the Python path while the launch stream captures.
 

@@ -50,8 +50,9 @@ class _PreparedPersistentSum(NamedTuple):
     launch is still in flight on another stream, and when the current CUDA
     context is not the one it was prepared in. A launch queued behind an
     earlier one on the same stream is ordered by the stream and admitted.
-    Two things are not checked: launches recorded during a graph capture,
-    and replays of a graph.
+    Completion uncertainty after a failed call blocks another stream even
+    during capture. Two things are otherwise not checked: launches recorded
+    during a graph capture, and replays of a graph.
     """
 
     launch: Callable[[], None]
@@ -100,6 +101,61 @@ def _block_size(torch, block_size):
     return block_size
 
 
+def _finish_launch(
+    torch,
+    leases,
+    tensors,
+    stream,
+    output,
+    failed,
+    *,
+    wrote_output=None,
+    completion=None,
+):
+    """Finish launch ownership without replacing a setup or enqueue error.
+
+    Every allocator recording, output-version update, and lease release is
+    attempted even if another cleanup action fails. When the launch itself
+    succeeded, the first cleanup error is raised after the remaining actions.
+    Prepared launches pass no leases and use `wrote_output` to keep their
+    offsets-version bookkeeping in step with the output counter. A persistent
+    launch also supplies `completion` to fence its reusable storage.
+    `tensors` and `output` describe attempted enqueues, not successful ones:
+    the opaque enqueue helper cannot report whether a failing call submitted
+    work before its error. A scratch-only phase leaves `output` as None.
+    """
+    cleanup_error = None
+    for tensor in tensors:
+        try:
+            tensor.record_stream(stream)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    if completion is not None:
+        try:
+            completion()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    if output is not None:
+        try:
+            if wrote_output is None:
+                _runtime._advance_version(torch, output)
+            else:
+                wrote_output()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    for lease in leases:
+        try:
+            lease.release()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    if not failed and cleanup_error is not None:
+        raise cleanup_error
+
+
 def _launch_one(torch, kernel, module_text, tensors, counts, blocks, named):
     """Bind, lease, and enqueue one kernel on the current stream.
 
@@ -125,17 +181,18 @@ def _launch_one(torch, kernel, module_text, tensors, counts, blocks, named):
     )
     arguments = _execution._bind(kernel, user, named)
     context = _cuda_backend.ensure_context(torch, torch.cuda.current_device())
-    lease = _execution._lease(torch, kernel)
     stream = torch.cuda.current_stream()
+    lease = _execution._lease(torch, kernel)
+    failed = True
     try:
+        # Treat this output-writing enqueue as attempted even if its capture
+        # check or event allocation fails before the driver accepts work.
         _execution._enqueue(
             torch, lease, kernel, arguments, blocks, stream, context=context
         )
+        failed = False
     finally:
-        lease.release()
-    for tensor in tensors:
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
+        _finish_launch(torch, (lease,), tensors, stream, output, failed)
 
 
 def _launch_columns(
@@ -414,7 +471,8 @@ def _prepare_planned_reduction(
         writes to values and output are fine, and a tensor that was given
         another data pointer, element count, or dtype since, for example
         through `tensor.data = other`, raises RuntimeError before anything
-        is enqueued. Each launch advances the version counter of output,
+        is enqueued. Each launch that attempts an output-writing enqueue
+        advances the output version once, even when enqueue or cleanup raises,
         and preparation advances it once to learn whether offsets share
         that counter. Kernels are compiled once per kernel and target and
         loaded once per CUDA context, so a preparation compiles and loads
@@ -612,19 +670,30 @@ def _prepare_planned_reduction(
             torch, device_index, prepared_context, "reduction"
         )
         wait_for_tasks(stream)
-        _execution._enqueue(
-            torch,
-            lease,
-            kernel,
-            arguments,
-            segment_count,
-            stream,
-            capturing=_cuda_backend.is_current_stream_capturing(torch),
-            context=prepared_context,
-        )
-        for tensor in (values, offsets, output, all_tasks):
-            tensor.record_stream(stream)
-        wrote_output()
+        capturing = _cuda_backend.is_current_stream_capturing(torch)
+        failed = True
+        try:
+            _execution._enqueue(
+                torch,
+                lease,
+                kernel,
+                arguments,
+                segment_count,
+                stream,
+                capturing=capturing,
+                context=prepared_context,
+            )
+            failed = False
+        finally:
+            _finish_launch(
+                torch,
+                (),
+                (values, offsets, output, all_tasks),
+                stream,
+                output,
+                failed,
+                wrote_output=wrote_output,
+            )
         return None
 
     def warp():
@@ -632,6 +701,16 @@ def _prepare_planned_reduction(
 
     def cta():
         return submit(cta_lease, cta_kernel, cta_arguments)
+
+    def enqueue_phase(lease, kernel, arguments, grid, stream, tensors, known):
+        failed = True
+        try:
+            _execution._enqueue(
+                torch, lease, kernel, arguments, grid, stream, **known
+            )
+            failed = False
+        finally:
+            _finish_launch(torch, (), tensors, stream, None, failed)
 
     def mixed():
         unchanged()
@@ -644,43 +723,52 @@ def _prepare_planned_reduction(
             "capturing": _cuda_backend.is_current_stream_capturing(torch),
             "context": prepared_context,
         }
-        if direct_count:
-            _execution._enqueue(
+        output_attempted = False
+        failed = True
+        try:
+            if direct_count:
+                output_attempted = True
+                enqueue_phase(
+                    mixed_lease,
+                    mixed_kernel,
+                    mixed_arguments,
+                    (direct_warp_count + warp_slots - 1) // warp_slots
+                    + direct_cta_count,
+                    stream,
+                    (values, offsets, output, task_records),
+                    known,
+                )
+            if partial_count:
+                enqueue_phase(
+                    partial_lease,
+                    partial_kernel,
+                    partial_arguments,
+                    partial_count,
+                    stream,
+                    (values, offsets, task_records, scratch),
+                    known,
+                )
+                output_attempted = True
+                enqueue_phase(
+                    merge_lease,
+                    merge_kernel,
+                    merge_arguments,
+                    merge_count,
+                    stream,
+                    (offsets, output, task_records, scratch),
+                    known,
+                )
+            failed = False
+        finally:
+            _finish_launch(
                 torch,
-                mixed_lease,
-                mixed_kernel,
-                mixed_arguments,
-                (direct_warp_count + warp_slots - 1) // warp_slots
-                + direct_cta_count,
+                (),
+                (),
                 stream,
-                **known,
+                output if output_attempted else None,
+                failed,
+                wrote_output=wrote_output,
             )
-            for tensor in (values, offsets, output, task_records):
-                tensor.record_stream(stream)
-        if partial_count:
-            _execution._enqueue(
-                torch,
-                partial_lease,
-                partial_kernel,
-                partial_arguments,
-                partial_count,
-                stream,
-                **known,
-            )
-            for tensor in (values, offsets, task_records, scratch):
-                tensor.record_stream(stream)
-            _execution._enqueue(
-                torch,
-                merge_lease,
-                merge_kernel,
-                merge_arguments,
-                merge_count,
-                stream,
-                **known,
-            )
-            for tensor in (offsets, output, task_records, scratch):
-                tensor.record_stream(stream)
-        wrote_output()
         return None
 
     return _PreparedReduction(warp, cta, cta if use_direct_cta else mixed)
@@ -734,8 +822,12 @@ def _launch_planned_reduction(
         kernel_name: Name of the segment function in the module.
 
     Returns:
-        None. The version counter of the output is advanced once, after the
-        enqueue; a batch without segments enqueues nothing and leaves it.
+        None. The version counter of the output is advanced once when an
+        output-writing enqueue is attempted, including when it raises. An
+        enqueue error does not reveal whether the driver accepted the work;
+        even a capture-check or event-allocation error inside that helper is
+        conservatively treated as an attempted write. Setup failures, batches
+        without segments, and scratch-only failures leave the counter alone.
     """
     torch = _runtime._import_torch()
     warp_max_elements, cta_chunk_elements = _plan._planning_limits(None, None)
@@ -828,6 +920,7 @@ def _launch_planned_reduction(
                 compile_kernel("_compile_fused_segmented_reduction_ptx"),
                 (direct_warp_count + warp_slots - 1) // warp_slots
                 + direct_cta_count,
+                True,
             )
         )
     if partial_count:
@@ -835,17 +928,25 @@ def _launch_planned_reduction(
             (
                 compile_kernel("_compile_split_partial_reduction_ptx"),
                 partial_count,
+                False,
             )
         )
         launched.append(
             (
                 compile_kernel("_compile_split_merge_reduction_ptx"),
                 merge_count,
+                True,
             )
         )
     context = _cuda_backend.ensure_context(torch, device.index)
-    leases = [_execution._lease(torch, kernel) for kernel, _ in launched]
+    leases = []
+    retained = ()
+    stream = None
+    enqueue_attempted = output_attempted = False
+    failed = True
     try:
+        for kernel, _, _ in launched:
+            leases.append(_execution._lease(torch, kernel))
         # One upload carries every record: the warp ids, the CTA ids, the
         # partial ranges, and the merge records, in that order. The private
         # copy of int64 offsets follows them in the same tensor.
@@ -889,19 +990,33 @@ def _launch_planned_reduction(
             segment_count=segment_count,
         )
         arguments = [
-            _execution._bind(kernel, user, named) for kernel, _ in launched
+            _execution._bind(kernel, user, named) for kernel, _, _ in launched
         ]
         stream = torch.cuda.current_stream()
-        for lease, (kernel, grid), bound in zip(leases, launched, arguments):
+        for lease, (kernel, grid, writes_output), bound in zip(
+            leases, launched, arguments
+        ):
+            enqueue_attempted = True
+            output_attempted |= writes_output
             _execution._enqueue(
                 torch, lease, kernel, bound, grid, stream, context=context
             )
+        failed = False
     finally:
-        for lease in leases:
-            lease.release()
-    for tensor in retained:
-        tensor.record_stream(stream)
-    _runtime._advance_version(torch, output)
+        if not enqueue_attempted:
+            retained = ()
+        elif not output_attempted:
+            retained = tuple(
+                tensor for tensor in retained if tensor is not output
+            )
+        _finish_launch(
+            torch,
+            leases,
+            retained,
+            stream,
+            output if output_attempted else None,
+            failed,
+        )
     return None
 
 
@@ -922,10 +1037,12 @@ def _prepare_persistent_sum(
     preparation: in-place writes to values and output are fine, and a
     tensor that was given another data pointer, element count, or dtype
     since, for example through `tensor.data = other`, raises RuntimeError
-    before anything is enqueued. Each launch advances the version counter
-    of output, and preparation advances it once to learn whether offsets
-    share that counter. The kernel is compiled once per target and loaded
-    once per CUDA context.
+    before anything is enqueued. Each attempted kernel enqueue advances the
+    version counter of output, including when enqueue or cleanup raises, and
+    preparation advances it once to learn whether offsets share that counter.
+    A failed completion record forbids scratch reuse on another stream until
+    a later launch on the same stream records a valid completion event. The
+    kernel is compiled once per target and loaded once per CUDA context.
     """
     if resident_blocks is not None and (
         type(resident_blocks) is not int
@@ -1057,16 +1174,21 @@ def _prepare_persistent_sum(
     launching = threading.Lock()
     in_flight = torch.cuda.Event()
     in_flight_stream = None
+    in_flight_recorded = False
 
     def require_idle(stream, capturing):
         # A launch on the stream of the previous one is ordered behind it.
         # CUDA forbids an event query during a capture, so a launch that is
-        # being captured is not checked.
-        if (
-            capturing
-            or in_flight_stream is None
-            or in_flight_stream == stream.cuda_stream
-        ):
+        # being captured skips the query, but never an uncertain prior fence.
+        if in_flight_stream is None or in_flight_stream == stream.cuda_stream:
+            return
+        if not in_flight_recorded:
+            raise RuntimeError(
+                "prepared persistent sum has uncertain completion on another "
+                "stream; launch on the original stream to establish a fresh "
+                "completion event before reusing scratch on another stream"
+            )
+        if capturing:
             return
         if not in_flight.query():
             raise RuntimeError(
@@ -1090,14 +1212,28 @@ def _prepare_persistent_sum(
         else:
             stream.wait_event(tasks_ready)
 
+    def wrote_output():
+        nonlocal offsets_version
+        _runtime._advance_version(torch, output)
+        offsets_version += version_step
+
     def launch():
-        nonlocal in_flight_stream, offsets_version
+        nonlocal in_flight_stream, in_flight_recorded
         unchanged()
         if not launching.acquire(blocking=False):
             raise RuntimeError(
                 "prepared persistent sum is already launching on another "
                 "thread; one prepared object admits one launch at a time"
             )
+        reset_attempted = enqueue_attempted = False
+        failed = True
+
+        def completion():
+            nonlocal in_flight_recorded
+            if not capturing:
+                in_flight.record(stream)
+                in_flight_recorded = True
+
         try:
             stream = _prepared_stream(
                 torch, device_index, prepared_context, "persistent sum"
@@ -1105,7 +1241,15 @@ def _prepare_persistent_sum(
             capturing = torch.cuda.is_current_stream_capturing()
             require_idle(stream, capturing)
             wait_for_tasks(stream)
+            # Even a failed reset or enqueue may have queued mutable work.
+            # Invalidate the old event before either operation can run.
+            previous_stream = in_flight_stream
+            previous_recorded = in_flight_recorded
+            in_flight_stream = stream.cuda_stream
+            in_flight_recorded = False
+            reset_attempted = True
             counters.zero_()
+            enqueue_attempted = True
             _execution._enqueue(
                 torch,
                 lease,
@@ -1116,22 +1260,31 @@ def _prepare_persistent_sum(
                 capturing=capturing,
                 context=prepared_context,
             )
-            for tensor in (
-                values,
-                offsets,
-                output,
-                task_records,
-                scratch,
-                counters,
-            ):
-                tensor.record_stream(stream)
-            if not capturing:
-                in_flight.record(stream)
-                in_flight_stream = stream.cuda_stream
-            _runtime._advance_version(torch, output)
-            offsets_version += version_step
+            failed = False
         finally:
-            launching.release()
+            try:
+                if reset_attempted:
+                    _finish_launch(
+                        torch,
+                        (),
+                        (
+                            values, offsets, output, task_records, scratch,
+                            counters,
+                        )
+                        if enqueue_attempted else (counters,),
+                        stream,
+                        output if enqueue_attempted else None,
+                        failed,
+                        wrote_output=wrote_output,
+                        completion=completion,
+                    )
+                    if capturing and not failed:
+                        # A successful capture keeps the existing protocol:
+                        # captured launches and graph replays are unchecked.
+                        in_flight_stream = previous_stream
+                        in_flight_recorded = previous_recorded
+            finally:
+                launching.release()
         return None
 
     return _PreparedPersistentSum(

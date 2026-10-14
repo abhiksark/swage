@@ -819,9 +819,16 @@ public:
           failure = std::current_exception();
       }
     }
+    // An enqueue or allocator error cannot prove that the output was not
+    // written. Attempt its version update without replacing the first error.
+    try {
+      callOne(incrementVersion, tensors[2]);
+    } catch (...) {
+      if (!failure)
+        failure = std::current_exception();
+    }
     if (failure)
       std::rethrow_exception(failure);
-    callOne(incrementVersion, tensors[2]);
     return true;
   }
 

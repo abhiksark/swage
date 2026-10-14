@@ -846,6 +846,53 @@ def test_launch_without_work_advances_no_version(monkeypatch):
     assert torch.advanced == []
 
 
+@pytest.mark.parametrize("failure", ["fence", "allocator", "release"])
+def test_fixed_launch_finishes_cleanup_after_an_attempted_write(
+    monkeypatch, failure
+):
+    """Retain all tensors and mark output despite enqueue or cleanup errors."""
+    torch, stream = _fake_torch()
+    arguments = _arguments(torch)
+    driver = _install_launch_fakes(monkeypatch, torch)
+    primary = RuntimeError(f"{failure} failed")
+    secondary = RuntimeError("allocator cleanup failed")
+
+    def record_failure(recorded_stream):
+        arguments["x_ptr"].recorded_streams.append(recorded_stream)
+        raise secondary if failure == "fence" else primary
+
+    if failure == "fence":
+        def fence_failure(_event, _stream):
+            raise primary
+
+        monkeypatch.setattr(driver, "event_record", fence_failure)
+    if failure in {"fence", "allocator"}:
+        monkeypatch.setattr(
+            arguments["x_ptr"], "record_stream", record_failure
+        )
+    if failure == "release":
+        release = _cuda_backend.CUDA_BACKEND.release
+
+        def release_failure(lease):
+            release(lease)
+            raise primary
+
+        monkeypatch.setattr(
+            _cuda_backend.CUDA_BACKEND, "release", release_failure
+        )
+
+    with pytest.raises(RuntimeError) as caught:
+        add_kernel.launch(
+            arguments=arguments, constexprs={"BLOCK": 128}, grid=(2,)
+        )
+
+    assert caught.value is primary
+    assert len(driver.launches) == 1
+    for tensor in tuple(arguments.values())[:3]:
+        assert tensor.recorded_streams == [stream]
+    assert torch.advanced == [(arguments["output_ptr"], [stream])]
+
+
 def test_repeated_launch_reuses_loaded_function_without_retaining_tensors(
     monkeypatch,
 ):
