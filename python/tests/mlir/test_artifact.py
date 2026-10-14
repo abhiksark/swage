@@ -1499,6 +1499,70 @@ def test_a_program_missing_from_the_artifact_is_refused_before_a_launch(
 
 
 @_needs_cuda
+@pytest.mark.parametrize("columns", [None, 3], ids=["r1", "r2"])
+@pytest.mark.parametrize(
+    ("kind", "dtype"),
+    [
+        (kind, dtype)
+        for kind in ("softmax", "mean", "max", "min")
+        for dtype in (torch.float32, torch.float64)
+        if kind != "softmax" or dtype == torch.float32
+    ],
+)
+def test_an_artifact_without_sum_refuses_the_derivative_that_needs_it(
+    kind, dtype, columns, tmp_path, monkeypatch
+):
+    """Run the forward, then refuse a missing sum without any enqueue."""
+    suffix = ("_f64" if dtype == torch.float64 else "") + (
+        "_r2" if columns else ""
+    )
+    artifact = _written(
+        tmp_path / "artifact", _device_target(), "--program", kind + suffix
+    )
+    shape = (8,) if columns is None else (8, columns)
+    values = (
+        torch.arange(8 * (columns or 1), dtype=dtype, device="cuda")
+        .reshape(shape)
+        .requires_grad_()
+    )
+    offsets = torch.tensor([0, 3, 8], dtype=torch.int32, device="cuda")
+    _select(monkeypatch, artifact)
+    monkeypatch.setenv("SWAGE_NO_COMPILE", "1")
+
+    result = (
+        swage.segment_softmax(values, offsets)
+        if kind == "softmax"
+        else swage.segment_reduce(values, offsets, kind)
+    )
+    upstream = torch.full_like(result, 0.5, requires_grad=True)
+    if kind != "softmax":
+        (first,) = torch.autograd.grad(
+            result, values, upstream, create_graph=True
+        )
+
+    driver = _cuda_backend._get_driver()
+    launches = []
+    launch_entry = driver.launch_entry
+
+    def record_launch(*arguments):
+        launches.append(arguments)
+        return launch_entry(*arguments)
+
+    monkeypatch.setattr(driver, "launch_entry", record_launch)
+    version = values._version
+    with pytest.raises(
+        RuntimeError, match="holds no planned program with the text of this"
+    ):
+        if kind == "softmax":
+            torch.autograd.grad(result, values, upstream)
+        else:
+            torch.autograd.grad(first, upstream, torch.ones_like(first))
+    assert not launches
+    assert values._version == version
+    assert values.grad is None
+
+
+@_needs_cuda
 def test_a_damaged_artifact_is_refused_before_the_offsets_are_copied(
     device_artifact, tmp_path, monkeypatch
 ):

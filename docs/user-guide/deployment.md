@@ -78,6 +78,20 @@ The command takes these options:
 | `--program` | `sum`, `max`, `min`, `mean`, `sum_f64`, `max_f64`, `min_f64`, `mean_f64`, the same eight names with `_r2` appended, `softmax`, or `softmax_r2`. A kind alone names the reduction over rank-one float32 values, `_f64` the one over float64 values, and `_r2` the program over rank-two values. Repeat it to include several. Without it, all eighteen are included. |
 | `--runtime-library` | A `libSwageRuntime.so` to ship in place of the one that the native bindings carry. See [The runtime library](#the-runtime-library). |
 
+Inputs shaped `[N, 1]` use the corresponding rank-one program. When selecting
+programs explicitly for rank-two calls, include both forms, for example
+`--program sum --program sum_r2`.
+
+When an artifact will serve gradients, include the sum program of the same
+dtype and effective rank as well. The first derivative of a softmax needs
+it, as do second derivatives of a mean, maximum, and minimum. For example,
+use `--program softmax_r2 --program sum_r2` for rank-two float32 softmax
+gradients, or `--program mean_f64 --program sum_f64` for second derivatives
+of a rank-one float64 mean. A forward can succeed with only its own
+program, but a derivative that needs an omitted sum program raises instead
+of compiling or selecting another implementation. The default bundle
+includes all these dependencies.
+
 These rules hold for every run:
 
 - The target must be the processor of the serving device. On that host,

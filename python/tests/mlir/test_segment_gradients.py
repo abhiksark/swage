@@ -35,6 +35,8 @@ from test_public_segments import (  # noqa: F401 (fixtures)
     empty_kernel_memo,
     event_counts,
 )
+from test_segment_columns import _block_depth
+from test_segment_columns import _depth as _row_depth
 from test_segmented_numerics import _softmax_bound
 from test_segmented_runtime import _EPS32, _bits, _offsets
 
@@ -866,6 +868,20 @@ def _backward_bound(result, upstream, depth):
     return (depth + 3) * _EPS32 * scale * result
 
 
+def _sum_depth(length, columns):
+    """Return the rounding depth of the sum used by a backward."""
+    if columns in (None, 1):
+        return _public_depth(length)
+    return _row_depth(length, columns)
+
+
+def _split_lengths(columns):
+    """Include both sides of the sum's row-stripe split boundary."""
+    width = min(32, 1 << ((columns or 1) - 1).bit_length())
+    boundary = 4096 // width
+    return [2, 129, boundary - 1, boundary, boundary + 1, 1, 300]
+
+
 @pytest.mark.parametrize("columns", COLUMNS, ids=["r1", "c1", "c3", "c64"])
 @pytest.mark.parametrize("spread", [8, 20, 50, 80])
 def test_the_softmax_backward_is_the_formula_on_its_own_result(spread, columns):
@@ -874,9 +890,9 @@ def test_the_softmax_backward_is_the_formula_on_its_own_result(spread, columns):
     The sum of the backward is the sum kernel of `segment_reduce`, whose
     rounding depends on its schedule, so the bound uses `k` of that
     schedule: the rank-one bound of "Sum rounding" for scalars and
-    `[N, 1]` values, and `n - 1`, which bounds every tree, for rows.
+    `[N, 1]` values, and the row-stripe and split bounds for other rows.
     """
-    lengths = [2, 129, 1024, 4096, 1, 300]
+    lengths = _split_lengths(columns)
     logits, offsets, upstream = _softmax_case(lengths, spread, columns)
 
     result, gradient = _softmax_gradient(logits, offsets, upstream)
@@ -888,9 +904,7 @@ def test_the_softmax_backward_is_the_formula_on_its_own_result(spread, columns):
             y, g = y.view(-1, 1), g.view(-1, 1)
         exact = y * (g - (g * y).sum(0))
         length = rows.stop - rows.start
-        depth = length - 1 if columns not in (None, 1) else _public_depth(
-            length
-        )
+        depth = _sum_depth(length, columns)
         actual = gradient[rows].double().cpu().view_as(exact)
         error = (actual - exact).abs()
         assert (error <= _backward_bound(y, g, depth)).all(), (
@@ -898,7 +912,7 @@ def test_the_softmax_backward_is_the_formula_on_its_own_result(spread, columns):
         )
 
 
-@pytest.mark.parametrize("columns", [None, 3])
+@pytest.mark.parametrize("columns", [None, 3, 64])
 def test_the_softmax_backward_of_one_long_segment(columns):
     """Bound the backward of a segment of 100,003 rows the same way."""
     logits, offsets, upstream = _softmax_case([100_003], 20, columns, seed=3)
@@ -910,7 +924,7 @@ def test_the_softmax_backward_of_one_long_segment(columns):
     if y.dim() == 1:
         y, g = y.view(-1, 1), g.view(-1, 1)
     exact = y * (g - (g * y).sum(0))
-    depth = 100_002 if columns else _public_depth(100_003)
+    depth = _sum_depth(100_003, columns)
     error = (gradient.double().cpu().view_as(exact) - exact).abs()
     assert (error <= _backward_bound(y, g, depth)).all()
 
@@ -938,11 +952,13 @@ def test_the_softmax_gradient_agrees_with_float64_pytorch(spread, columns):
         reference = torch.softmax(leaf, 0)
         (expected,) = torch.autograd.grad(reference, leaf, g)
         length = rows.stop - rows.start
-        rank_two = columns is not None
+        row_tile = columns not in (None, 1)
         forward = _softmax_bound(
-            x, reference.detach(), length - 1 if rank_two else None
+            x,
+            reference.detach(),
+            _block_depth(length, columns) if row_tile else None,
         ).amax(0)
-        depth = length - 1 if rank_two else _public_depth(length)
+        depth = _sum_depth(length, columns)
         y = reference.detach()
         tolerance = 3 * forward * g.abs().amax(0) * y + _backward_bound(
             y, g, depth
@@ -1008,7 +1024,7 @@ def _product_scale(y, g, v):
     return g.abs().amax(0) * v.abs().amax(0) * total * total * y
 
 
-@pytest.mark.parametrize("columns", [None, 3])
+@pytest.mark.parametrize("columns", COLUMNS, ids=["r1", "c1", "c3", "c64"])
 @pytest.mark.parametrize("spread", [8, 50])
 def test_the_softmax_second_derivative_is_bounded_by_its_formula(
     spread, columns
@@ -1026,7 +1042,7 @@ def test_the_softmax_second_derivative_is_bounded_by_its_formula(
     forward bound of "Ragged Softmax", moves the product by at most
     `13 * b * scale` more.
     """
-    lengths = [2, 40, 129, 300]
+    lengths = _split_lengths(columns)
     logits, offsets, upstream = _softmax_case(lengths, spread, columns, seed=4)
     generator = torch.Generator().manual_seed(5)
     direction = torch.randn(logits.shape, generator=generator).cuda()
@@ -1037,14 +1053,14 @@ def test_the_softmax_second_derivative_is_bounded_by_its_formula(
     )
     (product,) = torch.autograd.grad(gradient, logits, direction)
 
-    rank_two = columns is not None
+    row_tile = columns not in (None, 1)
     for rows in _segment_slices(offsets):
         length = rows.stop - rows.start
         x, y, g, v, actual = (
             tensor[rows].detach().double().cpu().view(length, -1)
             for tensor in (logits, result, upstream, direction, product)
         )
-        depth = length - 1 if rank_two else _public_depth(length)
+        depth = _sum_depth(length, columns)
         own = (7 * depth + 43) * _EPS32 * _product_scale(y, g, v)
         assert ((actual - _softmax_product(y, g, v)).abs() <= own).all()
 
@@ -1053,7 +1069,9 @@ def test_the_softmax_second_derivative_is_bounded_by_its_formula(
         (first,) = torch.autograd.grad(reference, leaf, g, create_graph=True)
         (expected,) = torch.autograd.grad(first, leaf, v)
         forward = _softmax_bound(
-            x, reference.detach(), length - 1 if rank_two else None
+            x,
+            reference.detach(),
+            _block_depth(length, columns) if row_tile else None,
         ).amax(0)
         scale = _product_scale(reference.detach(), g, v)
         tolerance = 13 * forward * scale + (7 * depth + 43) * _EPS32 * scale
@@ -1211,7 +1229,7 @@ def test_the_softmax_takes_an_expanded_upstream_gradient(columns):
         g = torch.ones_like(y)
         exact = y * (g - y.sum(0))
         length = rows.stop - rows.start
-        depth = length - 1 if columns else _public_depth(length)
+        depth = _sum_depth(length, columns)
         actual = logits.grad[rows].double().cpu().view_as(exact)
         assert ((actual - exact).abs() <= _backward_bound(y, g, depth)).all()
 

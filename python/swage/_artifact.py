@@ -445,27 +445,28 @@ def _require_glibc(contents, subject):
 _LOADED_LIBRARIES = []
 
 
-def _verified_library_path(contents):
-    """Return a path that opens exactly `contents`, for the dynamic loader.
+def _load_verified_library(contents):
+    """Load exactly `contents` and retain the memory file after success.
 
-    The bytes go to an anonymous memory file that nothing else can reach,
-    and the loader opens it through `/proc/self/fd`. So the library that
-    is loaded is the one whose digest was checked, whatever happens to the
+    The bytes go to an anonymous memory file, and the loader opens it
+    through `/proc/self/fd`. The loaded library is the one whose digest
+    was checked, whatever happens to the
     file of the artifact after that check.
 
     Raises:
-        OSError: The memory file cannot be created or written.
+        OSError: The memory file cannot be created, written, or loaded.
     """
     descriptor = os.memfd_create("libSwageRuntime.so", os.MFD_CLOEXEC)
     try:
         view = memoryview(contents)
         while view:
             view = view[os.write(descriptor, view) :]
+        library = ctypes.PyDLL(f"/proc/self/fd/{descriptor}")
     except BaseException:
         os.close(descriptor)
         raise
     _LOADED_LIBRARIES.append(descriptor)
-    return f"/proc/self/fd/{descriptor}"
+    return library
 
 
 class _Artifact:
@@ -817,7 +818,7 @@ class _Artifact:
             # The functions run for microseconds and never call back into
             # Python, so the GIL stays held, as it is for the launcher of
             # the native bindings.
-            library = ctypes.PyDLL(_verified_library_path(contents))
+            library = _load_verified_library(contents)
             reported = library.swageRuntimeAbiVersion
             count = library.swageRuntimeCountTasks
             write = library.swageRuntimeWriteTasks

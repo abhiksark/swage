@@ -9,6 +9,7 @@ The native tier runs the same loader on artifacts that the compiler wrote.
 """
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -49,6 +50,8 @@ PROGRAM_TEXTS = {
     "ragged_softmax_r2": _programs._softmax_text(2),
 }
 RUNTIME_BYTES = b"placeholder for the runtime library\n"
+# The autouse fixture substitutes PyDLL for normal LLVM-free coverage.
+_REAL_RUNTIME_LOADER = ctypes.PyDLL
 
 
 def _digest(data):
@@ -1042,6 +1045,7 @@ def test_a_library_with_another_abi_version_is_refused(
     """Ask the loaded library itself, not only the manifest."""
     monkeypatch.setattr(_FakeLibrary, "abi_version", 3)
     _select(monkeypatch, artifact_dir)
+    before = len(_artifact._LOADED_LIBRARIES)
 
     with pytest.raises(
         RuntimeError,
@@ -1051,6 +1055,41 @@ def test_a_library_with_another_abi_version_is_refused(
         ),
     ):
         _artifact.selected()
+    # A successful load remains known to the dynamic loader even when
+    # subsequent ABI validation refuses it. Its path must not be reused.
+    assert len(_artifact._LOADED_LIBRARIES) == before + 1
+    os.fstat(_artifact._LOADED_LIBRARIES[-1])
+
+
+def test_failed_library_load_retries_close_their_memory_files(
+    artifact_dir, monkeypatch
+):
+    """Repeated real dlopen failures leave no descriptors or retained files."""
+    created = []
+    create = os.memfd_create
+
+    def remember(*args):
+        descriptor = create(*args)
+        created.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "memfd_create", remember)
+    monkeypatch.setattr(ctypes, "PyDLL", _REAL_RUNTIME_LOADER)
+    _select(monkeypatch, artifact_dir)
+    retained = tuple(_artifact._LOADED_LIBRARIES)
+    before = len(tuple(pathlib.Path("/proc/self/fd").iterdir()))
+    for _ in range(8):
+        with pytest.raises(
+            RuntimeError, match="cannot be loaded from its verified bytes"
+        ) as refused:
+            _artifact.selected()
+        assert isinstance(refused.value.__cause__, OSError)
+        with pytest.raises(OSError) as closed:
+            os.fstat(created[-1])
+        assert closed.value.errno == errno.EBADF
+        assert tuple(_artifact._LOADED_LIBRARIES) == retained
+        assert len(tuple(pathlib.Path("/proc/self/fd").iterdir())) == before
+    assert len(created) == 8
 
 
 def test_a_library_that_does_not_load_is_refused(artifact_dir, monkeypatch):

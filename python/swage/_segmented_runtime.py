@@ -19,6 +19,7 @@ cold-path lock; see `_runtime._compile_lock`. The private segmented path
 has no persistent cache.
 """
 
+import os
 import types
 
 from . import _abi, _artifact, _cuda_backend, _runtime
@@ -35,6 +36,10 @@ _memo_lock = _runtime._compile_lock
 _ptx_memo = _runtime._BoundedCache(_runtime._CACHE_LIMIT)
 # The compile in flight for each memo key; see `_runtime._single_flight`.
 _flights = {}
+# Other parent threads do not survive in the child. Clear only the flights
+# this module owns; completed kernels remain in the inherited memo.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_flights.clear)
 # The NVPTX processor of each CUDA device index. A device keeps its compute
 # capability for as long as the process runs.
 _targets = {}
