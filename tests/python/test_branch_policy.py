@@ -44,9 +44,22 @@ def _replace(record, changes):
     return result
 
 
-def _run(tmp_path, pull_request, *, current=None, final=None, actor="alice"):
+def _run(
+    tmp_path,
+    pull_request,
+    *,
+    current=None,
+    final=None,
+    actor="alice",
+    event_repository=None,
+):
     """Evaluate an event against two independent current API records."""
-    event = {"repository": _REPOSITORY, "pull_request": pull_request}
+    event = {
+        "repository": (
+            _REPOSITORY if event_repository is None else event_repository
+        ),
+        "pull_request": pull_request,
+    }
     current = pull_request if current is None else current
     final = current if final is None else final
     records = (event, current, final)
@@ -253,3 +266,19 @@ def test_dependabot_version_updates_target_development():
     path = _CHECKER.parents[1] / "dependabot.yml"
     updates = yaml.safe_load(path.read_text())["updates"]
     assert all(update["target-branch"] == "dev" for update in updates)
+
+
+@pytest.mark.parametrize(
+    "event_repository",
+    [
+        {"id": 999, "full_name": "owner/swage"},
+        {"id": 123, "full_name": "other/swage"},
+    ],
+)
+def test_event_repository_must_match_trusted_context(
+    tmp_path, event_repository
+):
+    """Reject mismatched event repository IDs and names independently."""
+    result = _run(tmp_path, _pull_request(), event_repository=event_repository)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["allowed"] is False
