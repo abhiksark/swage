@@ -122,9 +122,48 @@ use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and
 [Verification](docs/internals/verification.md) for the affected
 surface.
 
+## Branch workflow
+
+`dev` is the integration branch for ordinary work. `main` remains the
+default and release branch, so select `dev` explicitly when opening a PR.
+
+- Feature and maintenance branches start from `dev` and target `dev`.
+- A release PR comes from this repository's `dev` branch and targets
+  `main`. Prepare the version and changelog on `dev`, then use a merge
+  commit so the released revision is on `main`'s first-parent history.
+- An emergency fix starts from `main` on a nonempty `hotfix/*` branch in
+  this repository and targets `main`.
+- Dependabot version updates target `dev`. Authentic same-repository
+  Dependabot PRs may target `main`; the author identity establishes the
+  exception, and the branch name does not establish that an update is
+  security-only. The actor rerunning a job is not the PR author.
+
+After every reviewed change to `main`, synchronize remote `dev` before
+accepting more development work. Do this independently of publication:
+when `dev` is an ancestor, a maintainer can fast-forward it to `main`;
+when it has advanced, use a reviewed back-merge. Never reset a dirty local
+`dev` checkout or force-push the remote branch.
+
+Python and C++ CI cover PRs and pushes to both branches. Trusted GPU
+qualification stays on `main`. A release still needs the existing signed
+protected tag, clean source identity, repaired native wheels,
+reproducibility checks, and installed-wheel GPU evidence. A merge or
+provenance check alone does not publish or qualify a release.
+
+The `branch-policy` workflow evaluates authenticated event metadata and two
+current API snapshots with a checker from default `main`. It is advisory.
+Its local tests establish routing behavior, not platform enforcement.
+Operators must separately authorize protection or Actions policy changes
+and verify trusted workflow binding, PR association, retargeting, and
+resistance to a PR-controlled check with the same name before requiring it.
+The ordinary required-check name and expected GitHub Actions app do not
+provide that workflow binding. GitHub's default public-repository
+`pull_request_target` restrictions also require an effective-policy check.
+
 ## Pull requests
 
-1. Branch from `main` and make one coherent change.
+1. Branch from `dev`, make one coherent change, and target `dev` unless the
+   change meets a `main` exception above.
 2. Run the smallest relevant test, then the full applicable tier.
 3. Report files changed, semantic impact, tests run and skipped, GPU
    architecture used if any, limitations, and follow-up work.
