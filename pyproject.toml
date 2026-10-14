@@ -44,7 +44,7 @@ dev = [
 docs = ["mkdocs", "mkdocs-material"]
 figures = ["pymupdf"]
 # The segmented calls copy the offsets into a numpy array on the host.
-pytorch = ["torch>=2.6,<3", "numpy"]
+pytorch = ["torch>=2.14.1,<3", "numpy"]
 
 # Tools that only the hosted workflows install, on top of the dev and docs
 # extras. The MLIR binding entries repeat the ranges in
