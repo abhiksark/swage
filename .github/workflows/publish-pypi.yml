@@ -76,6 +76,9 @@ jobs:
           assert version == "0.5.2", "this release policy is for v0.5.2"
           git("fetch", "--no-tags", "origin", "main:refs/remotes/origin/main")
           git("merge-base", "--is-ancestor", revision, "refs/remotes/origin/main")
+          assert revision in git(
+              "rev-list", "--first-parent", "refs/remotes/origin/main"
+          ).splitlines(), "release source must lie on main's first-parent history"
           if os.environ["GITHUB_EVENT_NAME"] == "push":
               tag = os.environ["GITHUB_REF_NAME"]
               assert os.environ["GITHUB_REF_TYPE"] == "tag" and tag == f"v{version}"
