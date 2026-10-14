@@ -2,4 +2,39 @@
 
 ## 'swage_plan' Dialect
 
-_Runtime task classification for admitted Swage kernels_
+_Planned kernels: a kernel signature and its task operation_
+
+The `swage_plan` dialect holds what a kernel lowering consumes. A plan
+function is a `func.func` with the attribute `swage_plan.block_threads`,
+which gives the launch width of the kernel in threads:
+
+```mlir
+func.func @segmented_sum(
+    %values: memref<?xf32>, %offsets: memref<?xi32>,
+    %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+    attributes {swage_plan.block_threads = 128 : i32} {
+  swage_plan.tasks policy<cta> ... { ... }
+  return
+}
+```
+
+- The signature of a plan function is the parameter list of its kernel,
+  in order: every buffer is a rank-one memref with a dynamic size, the
+  identity layout, and the default memory space, and every count is a
+  signless integer. There is no result.
+- The body is one task operation followed by a return. The task
+  operation takes every buffer and every bound of the kernel as an
+  operand and holds the reductions and stores of one bound segment.
+
+The dialect verifies both. A planning parameter that no kernel reads,
+such as a limit that steers host classification, is not part of plan IR.
+
+A parameter of a plan function that the segment function declared, such
+as the values or the segment count, may carry the argument attribute
+`swage_plan.source_index`: the position of that argument in the segment
+function, a nonnegative i32. The planner sets it on every such parameter,
+because a plan function takes its parameters in the order of its kernel
+and not in the order the segment function declared them. The kernel
+contract binds the caller's arguments by these positions. A parameter
+without the attribute, in a plan function written by hand, is bound at
+its own position: such a plan function is the function its caller calls.

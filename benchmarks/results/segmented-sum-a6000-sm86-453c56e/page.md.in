@@ -1,0 +1,310 @@
+<!-- benchmarks/results/segmented-sum-a6000-sm86-453c56e/page.md.in -->
+
+# Segmented sum on RTX A6000 at `453c56e`: fresh offsets and frozen comparison
+
+This record holds two measurements of the private segmented sum on one
+{{gpu}} (`{{target}}`) at revision `{{revision}}`. Each was repeated in five
+independent processes. The first times a call that sees a new offsets layout
+every time. The second times repeated launches of one frozen layout. They
+answer different questions and have different results:
+
+- With a new layout per call, the private planned sum is slower than
+  `torch.segment_reduce` in every row at every size, and the best
+  configuration of a looped Triton kernel with no planner is at or below
+  torch.
+- With a frozen layout, the mixed policy is faster than
+  `torch.segment_reduce` on eight rows and equal to it on `uniform`. It is
+  faster than a looped Triton kernel on the rows of short segments and on
+  the one row with segments above 4,096 elements, and slower on the four
+  rows that mix short segments with segments of up to 4,096 elements.
+
+These are research measurements, not a performance gate. The machine was not
+idle while they were taken; [Machine and conditions](#machine-and-conditions)
+says what ran.
+
+The records name revision `453c56e`. The branch history was rewritten after
+the runs, to remove a directory that the measurements do not use, so that
+commit is not in the published history. Its counterpart is `4e87184`: the
+two trees differ only in the removed files, and every file the harness
+imports, hashes, or compiles is identical.
+
+## What the record holds
+
+The directory
+[`segmented-sum-a6000-sm86-453c56e/`](segmented-sum-a6000-sm86-453c56e/)
+holds seven runs:
+
+{{runs_table}}
+
+Each run directory holds:
+
+- `summary.json`, written by `benchmarks/benchmark_processes.py`: for every
+  row, timing method, and candidate, the median of each process and the
+  median, minimum, and maximum of those five medians. It is committed as the
+  driver wrote it.
+- `process-1.json.xz` to `process-5.json.xz`: the record of each process
+  with every raw sample, compressed with `xz -9`. Each decompressed file has
+  the SHA-256 that `summary.json` lists for it under `process_records`.
+
+[`conditions.txt`](segmented-sum-a6000-sm86-453c56e/conditions.txt) holds
+the machine state sampled at the start and at the end of the campaign.
+[`page.md.in`](segmented-sum-a6000-sm86-453c56e/page.md.in) is the template
+of this page.
+
+To read a process record, or to summarize a run against other reference
+candidates with `benchmark_processes.py --summarize`, decompress it first:
+
+```sh
+cd benchmarks/results/segmented-sum-a6000-sm86-453c56e/comparison
+xz -dk process-*.json.xz
+```
+
+`xz -dk` keeps the compressed files. Do not commit the decompressed ones.
+
+## What was measured
+
+### Fresh offsets
+
+`benchmarks/benchmark_fresh_offsets.py` gives every iteration an offsets
+layout that no earlier iteration used. The timed region of every candidate
+runs from offsets in to result out. Three sizes were run, each once without
+the pad-to-max candidate and once with every candidate. The facts below are
+quoted from the records:
+
+{{fresh_facts_table}}
+
+The candidates, and what the timed region of each covers:
+
+{{fresh_candidates_table}}
+
+The Triton candidates are swept: `triton_looped` and `triton_planned_looped`
+over 15 block and warp configurations, and `triton_planned` over 4 warp
+settings. The record adds this about the Swage candidates:
+
+{{fresh_policy_note}}
+
+The public `swage.segment_reduce` call is not a candidate. `swage_mixed` is
+the private preparation with schedule selection disabled, followed by the
+mixed launch. The public call prepares and launches the same mixed policy
+with automatic schedule selection, and it allocates its result when no `out`
+is passed.
+
+### Frozen comparison
+
+`benchmarks/benchmark_triton_comparison.py` prepares one layout per row once
+and times repeated launches of it. Preparation, compilation, and the Triton
+task lists are outside the timed launch. The three Swage policies come from
+`_prepare_planned_sum`, which uses the default limits and disables schedule
+selection. The facts below are quoted from the records:
+
+{{comparison_facts_table}}
+
+The baselines, as the record describes them:
+
+{{triton_families_table}}
+
+## Machine and conditions
+
+{{machine_table}}
+
+The machine was a desktop workstation in use, not a quiet benchmark host.
+The process records hold these facts:
+
+{{conditions_list}}
+
+The desktop session of the maintainer ran on the same machine and the same
+GPU throughout. `conditions.txt` holds, for the start and for the end of
+the campaign, the time, the load average, and the GPU utilization,
+temperature, and memory in use. For the start it also lists the five
+processes that used the most CPU. The names of three desktop programs are
+replaced by a description in brackets; the shares are as captured:
+
+```text
+{{conditions_file}}
+```
+
+## How the tables are built
+
+- Every process contributes the median of its own samples. A cell in
+  microseconds is the median of the five per-process medians.
+- A ratio is formed inside each process from its two medians. A ratio cell
+  gives the median of the five ratios and, in brackets, their minimum and
+  maximum. Ratios to torch are the ones the summaries hold. The other
+  ratios are formed by the same rule from the per-process medians in the
+  summaries.
+- Microseconds are rounded to one decimal and ratios to two.
+- A "best" Triton configuration is the one with the lowest median in that
+  row. It is chosen after the run from a sweep, separately for every row,
+  so it is an optimistic bound for a Triton user who must pick one
+  configuration in advance. The tables also count how many configurations
+  of the sweep are at or below torch, or faster than the Swage candidate.
+- Two medians within {{parity_percent}} percent of each other are called
+  equal in the statements.
+
+## Fresh offsets: a new layout on every call
+
+{{fresh_swage_statement}}
+
+{{fresh_call_statement}}
+
+{{fresh_looped_statement}}
+
+{{fresh_planned_statement}}
+
+The range of each ratio over the nine distributions:
+
+{{fresh_ranges_table}}
+
+### 2,048 segments
+
+Swage against `torch.segment_reduce`. The preparation column is the part of
+the `swage_mixed` sample spent in the private preparation, taken from the
+process records:
+
+{{fresh_swage_table_2048}}
+
+Triton in the same regime. "Best planned" is taken over the one-block and
+the looping planned configurations together, with the partition timed:
+
+{{fresh_triton_table_2048}}
+
+### 8,192 segments
+
+{{fresh_swage_table_8192}}
+
+{{fresh_triton_table_8192}}
+
+### 32,768 segments
+
+{{fresh_swage_table_32768}}
+
+{{fresh_triton_table_32768}}
+
+### Pad-to-max
+
+{{pad_statement}}
+
+{{pad_agreement_statement}}
+
+{{pad_table}}
+
+## Frozen comparison: one layout, repeated launches
+
+Graph-replay timing is the primary method here, as in the older comparison
+record: it replays captured launches and leaves host dispatch out. Each
+statement uses the median across processes of the per-process ratio, at
+32,768 segments with all-one values:
+
+{{frozen_statements}}
+
+### Graph replay
+
+The Swage policies and the PyTorch baselines:
+
+{{frozen_swage_table_graph}}
+
+`swage_mixed` against torch and against the best configuration of each
+Triton family, chosen after the run. A comparator cell gives the median
+time of the comparator and, in parentheses, the median ratio of
+`swage_mixed` to it. A ratio above one means Swage took longer:
+
+{{frozen_overview_table_graph}}
+
+Against the looped Triton kernel, one program per segment with no planner,
+with the range of the ratio across processes and the number of the 15
+configurations that are faster than `swage_mixed`:
+
+{{frozen_triton_looped_table_graph}}
+
+Against the matched planned Triton scheduler, which packs short tasks four
+per program and reads one block of 4,096 elements per longer task:
+
+{{frozen_triton_planned_table_graph}}
+
+Against the looping planned Triton scheduler, which packs short tasks the
+same way and loops over the longer ones:
+
+{{frozen_triton_planned_looped_table_graph}}
+
+`swage_mixed` against the fixed Triton kernel, which reads one block per
+segment and is the baseline of the older record
+`swage-triton-a6000-sm86.json`:
+
+{{frozen_fixed_table_graph}}
+
+### Synchronized calls
+
+The same comparison under synchronized wall-clock timing of one call, which
+includes host dispatch:
+
+{{frozen_swage_table_call}}
+
+{{frozen_overview_table_call}}
+
+One process of this run has irregular call timings on `many-tiny`, listed
+under [Irregular processes](#irregular-processes). The medians above absorb
+it. The summary also holds batched CUDA event timing for every candidate.
+
+## Irregular processes
+
+{{irregular_count}} candidate rows have per-process medians whose largest
+value exceeds {{irregular_ratio}} times the smallest. A median in the tables
+absorbs one irregular process out of five. A bracketed range does not:
+
+{{irregular_table}}
+
+## What the results support
+
+- The private planned sum pays a host preparation on every new layout. With
+  a new layout per call, that makes it slower than `torch.segment_reduce`
+  on this machine at every measured size and distribution.
+- A looped Triton kernel needs no preparation, and the median of its best
+  configuration is at or below torch in that regime.
+- With a frozen layout, the mixed policy is faster than torch on eight rows
+  and equal to it on `uniform`. Its packing of short segments and its
+  splitting of very long ones beat a looped kernel on the rows they apply
+  to.
+- With a frozen layout, a looped Triton kernel is faster than the mixed
+  policy on the four rows that mix short segments with segments of up to
+  4,096 elements, and a planned Triton scheduler matches or beats the mixed
+  policy on most rows.
+
+## What the results do not support
+
+- A statement about another GPU or architecture. One {{gpu}} (`{{target}}`)
+  ran everything.
+- A statement about other seeds. Every row uses seed {{seed}}. The
+  fresh-offsets layouts of a row differ by iteration, and the comparison
+  has one layout per row.
+- A statement about other values in the frozen comparison. Its values are
+  all one. Fresh offsets uses seeded quarter multiples.
+- A statement about a quiet machine. The desktop session was running, the
+  GPU was shared with it, the CPU frequency governor was `powersave`
+  throughout, and one process started beside another compute process.
+- The cost of the public `swage.segment_reduce` call. It is not a
+  candidate. The fresh-offsets candidate is the private preparation with
+  selection disabled.
+- A ranking of Triton configurations that a user could pick in advance.
+  Every "best" is chosen after the run.
+- A gate. No threshold was declared before the run.
+
+## Reproduce
+
+With the native build, CUDA-enabled PyTorch, and Triton available, from a
+clean worktree, and with `OUT` set to a new directory outside the checkout:
+
+```sh
+export PYTHONPATH="$PWD/python:$PWD/build/python_packages"
+{{reproduce_commands}}
+```
+
+A rerun is a new measurement. Do not write it into `benchmarks/results/`.
+
+To regenerate this page and the documentation fragments from the committed
+summaries, and to check them and the digests of the compressed process
+records:
+
+```sh
+python benchmarks/campaign_tables.py
+python benchmarks/campaign_tables.py --check
+```

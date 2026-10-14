@@ -5,33 +5,116 @@ import ast
 import functools
 import hashlib
 import inspect
+import math
 import textwrap
 from collections.abc import Mapping
 from typing import NamedTuple
 
 from . import _native, language
-from ._errors import CompilationError
+from ._errors import BackendUnavailableError, CompilationError
 
-_FLOAT_MLIR_TYPES = {
-    language.float32: "F32Type",
-    language.float16: "F16Type",
-    language.float8_e4m3fn: "Float8E4M3FNType",
-    language.float8_e5m2: "Float8E5M2Type",
+_INDEX_MIN = -(1 << 63)
+_INDEX_MAX = (1 << 63) - 1
+_OPERATORS = {
+    ast.Add: "+",
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.MatMult: "@",
+    ast.Div: "/",
+    ast.FloorDiv: "//",
+    ast.Mod: "%",
+    ast.Pow: "**",
+    ast.LShift: "<<",
+    ast.RShift: ">>",
+    ast.BitOr: "|",
+    ast.BitXor: "^",
+    ast.BitAnd: "&",
+}
+_INSTALLATION = (
+    "docs/getting-started/installation.md in https://github.com/abhiksark/swage"
+)
+
+
+class _FloatFormat(NamedTuple):
+    """What the frontend needs to know about one storage element type.
+
+    `mlir` names the type in MLIR text and in diagnostics, and `binding`
+    the class of the Python bindings that builds it. A finite value is
+    rounded to `mantissa_bits` fraction bits, with the exponent clamped at
+    `min_exponent`, the exponent of the smallest normal value, below which
+    values are subnormal; the largest finite value is `max_finite`.
+    """
+
+    mlir: str
+    binding: str
+    mantissa_bits: int
+    min_exponent: int
+    max_finite: float
+
+
+_FLOAT_FORMATS = {
+    language.float32: _FloatFormat(
+        "f32", "F32Type", 23, -126, 3.4028234663852886e38
+    ),
+    language.float16: _FloatFormat("f16", "F16Type", 10, -14, 65504.0),
+    language.float8_e4m3fn: _FloatFormat(
+        "f8E4M3FN", "Float8E4M3FNType", 3, -6, 448.0
+    ),
+    language.float8_e5m2: _FloatFormat(
+        "f8E5M2", "Float8E5M2Type", 2, -14, 57344.0
+    ),
 }
 
 
+def _round_to_format(value, element):
+    """Round a finite number to the nearest value of one element type.
+
+    Rounding is to nearest with ties to even, as an MLIR float constant of
+    the type rounds. Values below the smallest normal value round to the
+    subnormal grid.
+
+    Args:
+        value: A finite Python float or integer.
+        element: A float type of `swage.language`.
+
+    Returns:
+        The rounded value as a float, or None when it exceeds the largest
+        finite value of the type.
+    """
+    layout = _FLOAT_FORMATS[element]
+    if value == 0:
+        return 0.0
+    magnitude = abs(value)
+    exponent = max(math.frexp(magnitude)[1] - 1, layout.min_exponent)
+    quantum = math.ldexp(1.0, exponent - layout.mantissa_bits)
+    rounded = round(magnitude / quantum) * quantum
+    if rounded > layout.max_finite:
+        return None
+    return math.copysign(rounded, value)
+
+
 class _Value(NamedTuple):
-    """An MLIR value and the small type fact needed while emitting."""
+    """An MLIR value, its kind, and its compile-time index range.
+
+    `value` is None while a body is checked without the native package.
+    `bounds` is the inclusive `(low, high)` range of an index value whose
+    operands are all known at compile time, and None for every other value.
+    `element` is the `swage.language` float type of a pointer or a float
+    vector, and None for every other value.
+    """
 
     value: object
     kind: str
+    bounds: tuple | None = None
+    element: object = None
 
 
 class _Address(NamedTuple):
-    """A transient base buffer and vector offset pair."""
+    """A transient base buffer, its vector offsets, and its element type."""
 
     base: object
     offsets: object
+    element: object = None
 
 
 class _Kernel:
@@ -66,8 +149,24 @@ class _Kernel:
                 f"{function.__name__}: expected one function definition"
             )
         self.function = parsed.body[0]
+        self._plain_parameters = False
+        # Annotations are evaluated where the kernel is defined, so they see
+        # the module under a name that the kernel also takes as a parameter.
+        # Inside the body that name is the parameter.
+        self.enclosing_language_names = _language_names(function, self.function)
+        self.language_names = self.enclosing_language_names - {
+            node.arg
+            for node in ast.walk(self.function.args)
+            if isinstance(node, ast.arg)
+        }
+        # The names bound to the language module are part of what the source
+        # means, so two kernels with one spelling and different bindings
+        # must not share a compiled artifact.
         self.source_digest = hashlib.sha256(
-            ast.dump(self.function, include_attributes=False).encode()
+            (
+                ast.dump(self.function, include_attributes=False)
+                + repr(sorted(self.enclosing_language_names))
+            ).encode()
         ).hexdigest()
         self.parameter_names = [
             argument.arg for argument in self.function.args.args
@@ -75,9 +174,11 @@ class _Kernel:
         self.constexpr_names = {
             argument.arg
             for argument in self.function.args.args
-            if _is_constexpr_annotation(argument.annotation)
+            if self._is_constexpr_annotation(argument.annotation)
         }
         functools.update_wrapper(self, function)
+        # A weak reference to the native fixed CUDA launcher of the last
+        # Python launch, which `launch` tries first; see `_cuda_backend`.
         self._cuda_fast_launch = None
         if not (self.__name__.isascii() and self.__name__.isidentifier()):
             self._raise(
@@ -102,15 +203,16 @@ class _Kernel:
             "use kernel.launch()"
         )
 
-    def launch(
-        self,
-        *,
-        arguments,
-        constexprs,
-        grid,
-        backend="cuda",
-    ):
-        """Launch canonical fixed vector addition or multiplication."""
+    def launch(self, *, arguments, constexprs, grid, backend="cuda"):
+        """Launch the canonical fixed vector addition or multiplication.
+
+        On the `cuda` backend the launch is asynchronous on the current
+        stream. On the `cpu` backend it runs to completion before it
+        returns. After a first CUDA launch, the native launcher that
+        launch prepared serves the same specialization without Python
+        work; it hands any call it cannot serve to the Python path, which
+        applies every check.
+        """
         if type(backend) is str and backend == "cuda":
             reference = self._cuda_fast_launch
             if reference is not None:
@@ -120,7 +222,6 @@ class _Kernel:
                     arguments, constexprs, grid
                 ):
                     return None
-
         from ._runtime import launch
 
         return launch(
@@ -132,11 +233,36 @@ class _Kernel:
         )
 
     def emit_mlir(self, *, signature=None, arguments=None, constexprs):
-        """Emit and return a live native MLIR module for this kernel."""
+        """Emit and return a live native MLIR module for this kernel.
+
+        The body is checked against the kernel language before the native
+        package is imported. A body outside the language therefore raises
+        `CompilationError` on an install that has only the pure Python
+        package, and a missing native package is reported only for a body
+        that passed the check.
+        """
         runtime_types, static_values = self._validate_inputs(
             signature, arguments, constexprs
         )
-        ir, arith, func, swage, vector = _native.load_ir()
+        _Checker(self, runtime_types, static_values).check()
+        try:
+            from . import _runtime
+
+            # Checks the bindings against this swage before any is used.
+            _runtime._native_bindings()
+            ir, arith, func, swage, vector = _native.load_ir()
+        except (ImportError, OSError, BackendUnavailableError) as error:
+            cause = error
+            if isinstance(error, BackendUnavailableError):
+                cause = error.__cause__ or error
+            raise BackendUnavailableError(
+                "Swage emit_mlir() requires the mlir_swage bindings, which "
+                "this installation does not have; "
+                f"kernel '{self.__name__}' passed the language check",
+                code="native-unavailable",
+                backend="native",
+                remediation=f"see {_INSTALLATION} for the native build",
+            ) from cause
 
         emitter = _Emitter(
             self,
@@ -325,6 +451,13 @@ class _Kernel:
         return signature
 
     def _require_plain_parameters(self):
+        """Reject every parameter form the kernel ABI does not express.
+
+        `launch` calls this on every launch. The parsed source never
+        changes, so a parameter list that passed is not walked again.
+        """
+        if self._plain_parameters:
+            return
         syntax_arguments = self.function.args
         if syntax_arguments.posonlyargs:
             self._raise(
@@ -346,6 +479,47 @@ class _Kernel:
                 syntax_arguments.kwarg,
                 "variadic keyword parameters are unsupported",
             )
+        parameters = syntax_arguments.args
+        if syntax_arguments.defaults:
+            defaults = syntax_arguments.defaults
+            name = parameters[len(parameters) - len(defaults)].arg
+            self._raise(
+                defaults[0],
+                f"parameter '{name}' has a default value; defaults are "
+                "unsupported, so pass every value when the kernel is "
+                "emitted or launched",
+            )
+        for parameter in parameters:
+            annotation = parameter.annotation
+            if annotation is None or parameter.arg in self.constexpr_names:
+                continue
+            self._raise(
+                annotation,
+                f"unsupported {_describe_annotation(annotation)} on "
+                f"parameter '{parameter.arg}'; the only accepted annotation "
+                "is constexpr through a name bound to the swage.language "
+                "module, such as sl.constexpr",
+            )
+        returns = self.function.returns
+        if returns is not None and not (
+            isinstance(returns, ast.Constant) and returns.value is None
+        ):
+            self._raise(
+                returns,
+                f"unsupported return {_describe_annotation(returns)}; a "
+                "kernel returns nothing, so the only accepted return "
+                "annotation is None",
+            )
+        self._plain_parameters = True
+
+    def _is_constexpr_annotation(self, node):
+        """Tell whether an annotation is `constexpr` on the language module."""
+        return (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in self.enclosing_language_names
+            and node.attr == "constexpr"
+        )
 
     def _require_keys(self, label, actual, expected):
         if actual == expected:
@@ -375,31 +549,31 @@ class _Kernel:
         )
 
 
-class _Emitter:
-    """Minimal direct AST-to-MLIR emitter for the fixed-block slice."""
+class _Checker:
+    """Walks a kernel body, enforces the language, and tracks value kinds.
 
-    def __init__(
-        self,
-        kernel,
-        runtime_types,
-        constexprs,
-        ir,
-        arith,
-        func,
-        swage,
-        vector,
-    ):
+    Nothing in this class needs the native package, and every diagnostic is
+    raised here. `_Emitter` repeats the same walk and overrides only the
+    `_build_*` hooks, which create nothing in this class, so the check and
+    the emission accept the same bodies and report the same text.
+    """
+
+    def __init__(self, kernel, runtime_types, constexprs):
         self.kernel = kernel
         self.runtime_types = runtime_types
         self.constexprs = constexprs
-        self.ir = ir
-        self.arith = arith
-        self.func = func
-        self.swage = swage
-        self.vector = vector
+        self.block = constexprs.get("BLOCK")
         self.symbols = {}
 
-    def emit(self):
+    def check(self):
+        """Raise `CompilationError` unless the body is in the language."""
+        body = self._body()
+        self._bind_arguments([None] * len(self._runtime_parameters()))
+        for statement in body:
+            self._statement(statement)
+
+    def _body(self):
+        """Return the statements to walk, without a leading docstring."""
         body = self.kernel.function.body
         if (
             body
@@ -414,12 +588,460 @@ class _Emitter:
                     statement,
                     "empty return must be the final statement",
                 )
+        return body
+
+    def _runtime_parameters(self):
+        return [
+            argument
+            for argument in self.kernel.function.args.args
+            if argument.arg in self.runtime_types
+        ]
+
+    def _bind_arguments(self, values):
+        for syntax, value in zip(
+            self._runtime_parameters(), values, strict=True
+        ):
+            declared = self.runtime_types[syntax.arg]
+            if declared is language.int32:
+                self.symbols[syntax.arg] = _Value(value, "i32")
+            else:
+                self.symbols[syntax.arg] = _Value(
+                    value, "pointer", element=declared.element_type
+                )
+
+    def _statement(self, node):
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(
+                node.targets[0], ast.Name
+            ):
+                self._error(node, "only single-name assignments are supported")
+            target = node.targets[0]
+            if target.id in self.constexprs:
+                self._error(
+                    target,
+                    f"cannot assign to constexpr parameter '{target.id}'",
+                )
+            if target.id in self.kernel.enclosing_language_names:
+                self._error(
+                    target,
+                    f"cannot assign to '{target.id}'; the name is bound to "
+                    "the swage.language module",
+                )
+            self.symbols[target.id] = self._expression(node.value)
+            return
+        if isinstance(node, ast.Expr):
+            if (
+                isinstance(node.value, ast.Call)
+                and self._language_call(node.value) == "store"
+            ):
+                self._store(node.value)
+                return
+            value = self._expression(node.value)
+            if value is not None:
+                self._error(node, "only sl.store may be used as a statement")
+            return
+        if isinstance(node, ast.Return):
+            if node.value is not None:
+                self._error(node, "return values are unsupported")
+            self._build_return(node)
+            return
+        self._error(node, f"unsupported statement '{type(node).__name__}'")
+
+    def _expression(self, node):
+        if isinstance(node, ast.Name):
+            if node.id in self.symbols:
+                return self.symbols[node.id]
+            if node.id in self.constexprs:
+                return self._index_constant(self.constexprs[node.id], node)
+            self._error(node, f"unknown name '{node.id}'")
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return self._index_constant(node.value, node)
+        if isinstance(node, ast.Constant) and type(node.value) is float:
+            self._error(
+                node,
+                f"float literal {ast.unparse(node)} is unsupported here; a "
+                "float literal is accepted only as the other= value of load",
+            )
+        if isinstance(node, ast.BinOp):
+            return self._binary(node)
+        if isinstance(node, ast.Compare):
+            return self._compare(node)
+        if isinstance(node, ast.Call):
+            return self._call(node)
+        self._error(node, f"unsupported expression '{type(node).__name__}'")
+
+    def _binary(self, node):
+        left = self._expression(node.left)
+        right = self._expression(node.right)
+        if isinstance(left, _Value) and left.kind == "pointer":
+            if (
+                isinstance(node.op, ast.Add)
+                and isinstance(right, _Value)
+                and right.kind == "index_vector"
+            ):
+                return _Address(left.value, right.value, left.element)
+            self._error(node, "pointers support only addition with offsets")
+        if not isinstance(left, _Value) or not isinstance(right, _Value):
+            self._error(node, "unsupported binary operands")
+        operator = _OPERATORS.get(type(node.op), type(node.op).__name__)
+        if "float_vector" in {left.kind, right.kind}:
+            if not isinstance(node.op, (ast.Add, ast.Mult)):
+                self._error(
+                    node,
+                    f"'{operator}' is not supported on float vectors; only "
+                    "'+' and '*' are",
+                )
+            if left.kind != right.kind:
+                self._error(
+                    node,
+                    f"'{operator}' on a float vector requires another float "
+                    "vector",
+                )
+            if left.element is not right.element:
+                operation = (
+                    "addition"
+                    if isinstance(node.op, ast.Add)
+                    else "multiplication"
+                )
+                self._error(
+                    node,
+                    f"floating-point {operation} requires matching element "
+                    f"types; got {_FLOAT_FORMATS[left.element].mlir} and "
+                    f"{_FLOAT_FORMATS[right.element].mlir}",
+                )
+            result = self._build_float_binary(left, right, node)
+            return _Value(result, "float_vector", element=left.element)
+        if not isinstance(node.op, (ast.Add, ast.Mult)):
+            self._error(
+                node,
+                f"unsupported binary operator '{operator}'; index "
+                "arithmetic supports only '+' and '*'",
+            )
+        left, right = self._broadcast_index_pair(left, right, node)
+        bounds = self._index_bounds(left, right, node, operator)
+        if isinstance(node.op, ast.Add):
+            result = self._build_add_index(left, right, node)
+        else:
+            result = self._build_mul_index(left, right, node)
+        return _Value(result, left.kind, bounds)
+
+    def _broadcast_index_pair(self, left, right, node):
+        allowed = {"index", "index_vector"}
+        if left.kind not in allowed or right.kind not in allowed:
+            self._error(node, "integer arithmetic requires index operands")
+        if left.kind == right.kind:
+            return left, right
+        if left.kind == "index":
+            left = _Value(
+                self._build_index_broadcast(left, node),
+                "index_vector",
+                left.bounds,
+            )
+        else:
+            right = _Value(
+                self._build_index_broadcast(right, node),
+                "index_vector",
+                right.bounds,
+            )
+        return left, right
+
+    def _index_bounds(self, left, right, node, operator):
+        """Range-check index arithmetic on compile-time operands.
+
+        MLIR index arithmetic wraps at 64 bits where Python integers do
+        not. A result whose operands are all literals, constexpr values, or
+        `arange` lanes has a range known here, and a range that leaves
+        signed 64-bit is rejected. An operand that depends on a program
+        coordinate is known only at run time, so its results are unchecked.
+        """
+        if left.bounds is None or right.bounds is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            low = left.bounds[0] + right.bounds[0]
+            high = left.bounds[1] + right.bounds[1]
+        else:
+            products = [a * b for a in left.bounds for b in right.bounds]
+            low, high = min(products), max(products)
+        if low < _INDEX_MIN or high > _INDEX_MAX:
+            self._error(
+                node,
+                f"'{operator}' on compile-time index operands leaves signed "
+                f"64-bit; the result ranges from {low} to {high}",
+            )
+        return low, high
+
+    def _compare(self, node):
+        if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Lt):
+            self._error(node, "only a single '<' comparison is supported")
+        reason = "comparison requires index offsets and i32"
+        left = self._require_value(
+            self._expression(node.left), node.left, reason
+        )
+        right = self._require_value(
+            self._expression(node.comparators[0]),
+            node.comparators[0],
+            reason,
+        )
+        if left.kind != "index_vector" or right.kind not in {"i32", "index"}:
+            self._error(node, reason)
+        return _Value(self._build_less_than(left, right, node), "bool_vector")
+
+    def _call(self, node):
+        name = self._language_call(node)
+        callee = ast.unparse(node.func)
+        handlers = {
+            "program_id": self._program_id,
+            "arange": self._arange,
+            "load": self._load,
+        }
+        if name == "store":
+            self._error(
+                node,
+                f"{callee} is only supported as an expression statement",
+            )
+        if name not in handlers:
+            self._error(
+                node,
+                f"unsupported call '{callee}'; a kernel can call only "
+                "program_id, arange, load, and store, each through a name "
+                "bound to the swage.language module, such as sl.load",
+            )
+        return handlers[name](node, callee)
+
+    def _language_call(self, node):
+        """Return the attribute a call takes from the language module."""
+        function = node.func
+        if (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Name)
+            and function.value.id in self.kernel.language_names
+        ):
+            return function.attr
+        return None
+
+    def _program_id(self, node, callee):
+        if node.keywords or len(node.args) != 1:
+            self._error(node, f"{callee} expects one axis literal")
+        axis = node.args[0]
+        if (
+            not isinstance(axis, ast.Constant)
+            or type(axis.value) is not int
+            or axis.value < 0
+        ):
+            self._error(axis, "program_id axis must be a nonnegative integer")
+        if axis.value > (1 << 31) - 1:
+            self._error(axis, "program_id axis must fit signed i32")
+        return _Value(self._build_program_id(axis.value, node), "index")
+
+    def _arange(self, node, callee):
+        if node.keywords or len(node.args) != 2:
+            self._error(node, f"{callee} expects start and end")
+        start, end = node.args
+        if (
+            not isinstance(start, ast.Constant)
+            or type(start.value) is not int
+            or start.value != 0
+            or not isinstance(end, ast.Name)
+            or end.id != "BLOCK"
+        ):
+            self._error(
+                node,
+                f"{ast.unparse(node)} is unsupported; the start must be the "
+                "literal 0 and the end must be the compile-time parameter "
+                "named BLOCK",
+            )
+        if self.block is None:
+            self._error(node, "BLOCK is required for vector operations")
+        return _Value(
+            self._build_arange(node), "index_vector", (0, self.block - 1)
+        )
+
+    def _load(self, node, callee):
+        keywords = self._keywords(node)
+        if len(node.args) != 1 or set(keywords) != {"mask", "other"}:
+            self._error(
+                node,
+                f"{callee} requires one address, mask=..., and other=...; "
+                "both keywords are required",
+            )
+        address = self._expression(node.args[0])
+        mask = self._require_value(
+            self._expression(keywords["mask"]),
+            keywords["mask"],
+            f"{callee} mask must be a vector",
+        )
+        if not isinstance(address, _Address):
+            self._error(node.args[0], f"{callee} requires pointer + offsets")
+        if mask.kind != "bool_vector":
+            self._error(keywords["mask"], f"{callee} mask must be a vector")
+        other = self._float_literal(keywords["other"], callee, address.element)
+        return _Value(
+            self._build_load(address, mask, other, node),
+            "float_vector",
+            element=address.element,
+        )
+
+    def _float_literal(self, node, callee, element):
+        """Return the `other` literal if its element type can hold it.
+
+        A float literal rounds to the nearest value of the element type of
+        the loaded pointer, as a constant of that type does in any language.
+        It is rejected when the result is not finite or when a nonzero
+        literal rounds to zero. An integer literal is rejected unless the
+        element type represents it exactly.
+        """
+        literal = node
+        negative = isinstance(node, ast.UnaryOp) and isinstance(
+            node.op, ast.USub
+        )
+        if negative:
+            literal = node.operand
+        if not isinstance(literal, ast.Constant) or type(literal.value) not in {
+            int,
+            float,
+        }:
+            self._error(node, f"{callee} other must be a numeric literal")
+        value = -literal.value if negative else literal.value
+        written = f"{callee} other={ast.unparse(node)}"
+        name = element.value
+        try:
+            exact = float(value)
+        except OverflowError:
+            self._error(node, f"{written} is outside the {name} range")
+        if not math.isfinite(exact):
+            self._error(node, f"{callee} other must be a finite literal")
+        rounded = _round_to_format(exact, element)
+        if rounded is None:
+            self._error(node, f"{written} is outside the {name} range")
+        if value != 0 and rounded == 0:
+            self._error(node, f"{written} rounds to zero in {name}")
+        if type(value) is int and rounded != value:
+            self._error(
+                node,
+                f"{written} is an integer that {name} cannot hold exactly",
+            )
+        return exact
+
+    def _store(self, node):
+        callee = ast.unparse(node.func)
+        keywords = self._keywords(node)
+        if len(node.args) != 2 or set(keywords) != {"mask"}:
+            self._error(node, f"{callee} expects address, value, and mask=...")
+        address = self._expression(node.args[0])
+        reason = f"{callee} requires float values and a mask"
+        value = self._require_value(
+            self._expression(node.args[1]), node.args[1], reason
+        )
+        mask = self._require_value(
+            self._expression(keywords["mask"]), keywords["mask"], reason
+        )
+        if not isinstance(address, _Address):
+            self._error(node.args[0], f"{callee} requires pointer + offsets")
+        if value.kind != "float_vector" or mask.kind != "bool_vector":
+            self._error(node, reason)
+        if value.element is not address.element:
+            self._error(
+                node,
+                f"{callee} requires matching value and pointer element "
+                f"types; got {_FLOAT_FORMATS[value.element].mlir} and "
+                f"{_FLOAT_FORMATS[address.element].mlir}",
+            )
+        self._build_store(address, value, mask, node)
+        return None
+
+    def _keywords(self, node):
+        if any(keyword.arg is None for keyword in node.keywords):
+            self._error(node, "keyword expansion is unsupported")
+        names = [keyword.arg for keyword in node.keywords]
+        if len(names) != len(set(names)):
+            self._error(node, "duplicate keyword argument")
+        return {keyword.arg: keyword.value for keyword in node.keywords}
+
+    def _index_constant(self, value, node):
+        if not _INDEX_MIN <= value <= _INDEX_MAX:
+            self._error(node, "integer literal must fit signed 64-bit")
+        return _Value(
+            self._build_index_constant(value, node), "index", (value, value)
+        )
+
+    def _require_value(self, value, node, reason):
+        if not isinstance(value, _Value):
+            self._error(node, reason)
+        return value
+
+    def _error(self, node, reason):
+        self.kernel._raise(node, reason)
+
+    # The hooks below create MLIR in `_Emitter` and nothing here. They must
+    # not raise a diagnostic: a body that reaches a hook is already accepted.
+
+    def _build_return(self, node):
+        return None
+
+    def _build_index_constant(self, value, node):
+        return None
+
+    def _build_index_broadcast(self, scalar, node):
+        return None
+
+    def _build_float_binary(self, left, right, node):
+        return None
+
+    def _build_add_index(self, left, right, node):
+        return None
+
+    def _build_mul_index(self, left, right, node):
+        return None
+
+    def _build_less_than(self, left, right, node):
+        return None
+
+    def _build_program_id(self, axis, node):
+        return None
+
+    def _build_arange(self, node):
+        return None
+
+    def _build_load(self, address, mask, other, node):
+        return None
+
+    def _build_store(self, address, value, mask, node):
+        return None
+
+
+class _Emitter(_Checker):
+    """Direct AST-to-MLIR emitter for the fixed-block slice.
+
+    The walk and its diagnostics live in `_Checker`. This class supplies the
+    MLIR module around the walk and the operation each hook creates.
+    """
+
+    def __init__(
+        self,
+        kernel,
+        runtime_types,
+        constexprs,
+        ir,
+        arith,
+        func,
+        swage,
+        vector,
+    ):
+        super().__init__(kernel, runtime_types, constexprs)
+        self.ir = ir
+        self.arith = arith
+        self.func = func
+        self.swage = swage
+        self.vector = vector
+
+    def emit(self):
+        """Build, verify, and return the MLIR module for the kernel."""
+        body = self._body()
         context = self.ir.Context()
         with context:
             self.swage.register_dialects(context)
             self.i32 = self.ir.IntegerType.get_signless(32)
             self.index = self.ir.IndexType.get()
-            self.block = self.constexprs.get("BLOCK")
             location = self._location(self.kernel.function)
             with location:
                 module = self.ir.Module.create(location)
@@ -453,269 +1075,88 @@ class _Emitter:
     def _argument_types(self):
         dynamic = self.ir.ShapedType.get_dynamic_size()
         types = []
-        for argument in self.kernel.function.args.args:
-            if argument.arg not in self.runtime_types:
-                continue
+        for argument in self._runtime_parameters():
             declared = self.runtime_types[argument.arg]
             if declared is language.int32:
                 types.append(self.i32)
             else:
-                element_type = getattr(
-                    self.ir, _FLOAT_MLIR_TYPES[declared.element_type]
-                ).get()
-                types.append(self.ir.MemRefType.get([dynamic], element_type))
+                types.append(
+                    self.ir.MemRefType.get(
+                        [dynamic], self._element_type(declared.element_type)
+                    )
+                )
         return types
 
-    def _bind_arguments(self, arguments):
-        runtime_arguments = (
-            argument
-            for argument in self.kernel.function.args.args
-            if argument.arg in self.runtime_types
-        )
-        for syntax, value in zip(runtime_arguments, arguments, strict=True):
-            declared = self.runtime_types[syntax.arg]
-            kind = "i32" if declared is language.int32 else "pointer"
-            self.symbols[syntax.arg] = _Value(value, kind)
+    def _build_return(self, node):
+        self.func.ReturnOp([], loc=self._location(node))
 
-    def _statement(self, node):
-        if isinstance(node, ast.Assign):
-            if len(node.targets) != 1 or not isinstance(
-                node.targets[0], ast.Name
-            ):
-                self._error(node, "only single-name assignments are supported")
-            target = node.targets[0]
-            if target.id in self.constexprs:
-                self._error(
-                    target,
-                    f"cannot assign to constexpr parameter '{target.id}'",
-                )
-            self.symbols[target.id] = self._expression(node.value)
-            return
-        if isinstance(node, ast.Expr):
-            if (
-                isinstance(node.value, ast.Call)
-                and self._symbolic_call_name(node.value) == "store"
-            ):
-                self._store(node.value)
-                return
-            value = self._expression(node.value)
-            if value is not None:
-                self._error(node, "only sl.store may be used as a statement")
-            return
-        if isinstance(node, ast.Return):
-            if node.value is not None:
-                self._error(node, "return values are unsupported")
-            self.func.ReturnOp([], loc=self._location(node))
-            return
-        self._error(node, f"unsupported statement '{type(node).__name__}'")
-
-    def _expression(self, node):
-        if isinstance(node, ast.Name):
-            if node.id in self.symbols:
-                return self.symbols[node.id]
-            if node.id in self.constexprs:
-                return self._index_constant(self.constexprs[node.id], node)
-            self._error(node, f"unknown name '{node.id}'")
-        if isinstance(node, ast.Constant) and type(node.value) is int:
-            return self._index_constant(node.value, node)
-        if isinstance(node, ast.BinOp):
-            return self._binary(node)
-        if isinstance(node, ast.Compare):
-            return self._compare(node)
-        if isinstance(node, ast.Call):
-            return self._call(node)
-        self._error(node, f"unsupported expression '{type(node).__name__}'")
-
-    def _binary(self, node):
-        left = self._expression(node.left)
-        right = self._expression(node.right)
-        if isinstance(left, _Value) and left.kind == "pointer":
-            if (
-                isinstance(node.op, ast.Add)
-                and isinstance(right, _Value)
-                and right.kind == "index_vector"
-            ):
-                return _Address(left.value, right.value)
-            self._error(node, "pointers support only addition with offsets")
-        if not isinstance(left, _Value) or not isinstance(right, _Value):
-            self._error(node, "unsupported binary operands")
-        location = self._location(node)
-        if isinstance(node.op, (ast.Add, ast.Mult)):
-            is_add = isinstance(node.op, ast.Add)
-            if left.kind == right.kind == "float_vector":
-                if left.value.type != right.value.type:
-                    left_type = self.ir.VectorType(left.value.type).element_type
-                    right_type = self.ir.VectorType(
-                        right.value.type
-                    ).element_type
-                    operation = "addition" if is_add else "multiplication"
-                    self._error(
-                        node,
-                        f"floating-point {operation} requires matching element "
-                        f"types; got {left_type} and {right_type}",
-                    )
-                operation = self.arith.AddFOp if is_add else self.arith.MulFOp
-                result = operation(left.value, right.value, loc=location).result
-                return _Value(result, "float_vector")
-            left, right = self._broadcast_index_pair(left, right, node)
-            operation = self.arith.AddIOp if is_add else self.arith.MulIOp
-            result = operation(left.value, right.value, loc=location).result
-            return _Value(result, left.kind)
-        operator = type(node.op).__name__
-        self._error(node, f"unsupported binary operator '{operator}'")
-
-    def _broadcast_index_pair(self, left, right, node):
-        allowed = {"index", "index_vector"}
-        if left.kind not in allowed or right.kind not in allowed:
-            self._error(node, "integer arithmetic requires index operands")
-        if left.kind == right.kind:
-            return left, right
-        vector_type = self._index_vector_type(node)
-        location = self._location(node)
-        if left.kind == "index":
-            left = _Value(
-                self.vector.BroadcastOp(
-                    vector_type, left.value, loc=location
-                ).result,
-                "index_vector",
-            )
-        else:
-            right = _Value(
-                self.vector.BroadcastOp(
-                    vector_type, right.value, loc=location
-                ).result,
-                "index_vector",
-            )
-        return left, right
-
-    def _compare(self, node):
-        if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Lt):
-            self._error(node, "only a single '<' comparison is supported")
-        reason = "comparison requires index offsets and i32"
-        left = self._require_value(
-            self._expression(node.left), node.left, reason
-        )
-        right = self._require_value(
-            self._expression(node.comparators[0]),
-            node.comparators[0],
-            reason,
-        )
-        if left.kind != "index_vector" or right.kind not in {"i32", "index"}:
-            self._error(node, reason)
-        location = self._location(node)
-        if right.kind == "i32":
-            right = _Value(
-                self.arith.IndexCastOp(
-                    self.index, right.value, loc=location
-                ).result,
-                "index",
-            )
-        right = self.vector.BroadcastOp(
-            self._index_vector_type(node), right.value, loc=location
+    def _build_index_constant(self, value, node):
+        return self.arith.ConstantOp(
+            self.index, value, loc=self._location(node)
         ).result
-        result = self.arith.CmpIOp(
+
+    def _build_index_broadcast(self, scalar, node):
+        return self.vector.BroadcastOp(
+            self._index_vector_type(), scalar.value, loc=self._location(node)
+        ).result
+
+    def _build_float_binary(self, left, right, node):
+        operation = (
+            self.arith.AddFOp
+            if isinstance(node.op, ast.Add)
+            else self.arith.MulFOp
+        )
+        return operation(
+            left.value, right.value, loc=self._location(node)
+        ).result
+
+    def _build_add_index(self, left, right, node):
+        return self.arith.AddIOp(
+            left.value, right.value, loc=self._location(node)
+        ).result
+
+    def _build_mul_index(self, left, right, node):
+        return self.arith.MulIOp(
+            left.value, right.value, loc=self._location(node)
+        ).result
+
+    def _build_less_than(self, left, right, node):
+        location = self._location(node)
+        bound = right.value
+        if right.kind == "i32":
+            bound = self.arith.IndexCastOp(
+                self.index, bound, loc=location
+            ).result
+        bound = self.vector.BroadcastOp(
+            self._index_vector_type(), bound, loc=location
+        ).result
+        return self.arith.CmpIOp(
             self.arith.CmpIPredicate.slt,
             left.value,
-            right,
+            bound,
             loc=location,
         ).result
-        return _Value(result, "bool_vector")
 
-    def _call(self, node):
-        name = self._symbolic_call_name(node)
-        handlers = {
-            "program_id": self._program_id,
-            "arange": self._arange,
-            "load": self._load,
-        }
-        if name == "store":
-            self._error(
-                node,
-                "sl.store is only supported as an expression statement",
-            )
-        if name not in handlers:
-            self._error(node, "unsupported call")
-        return handlers[name](node)
-
-    @staticmethod
-    def _symbolic_call_name(node):
-        function = node.func
-        if (
-            isinstance(function, ast.Attribute)
-            and isinstance(function.value, ast.Name)
-            and function.value.id == "sl"
-        ):
-            return function.attr
-        return None
-
-    def _program_id(self, node):
-        if node.keywords or len(node.args) != 1:
-            self._error(node, "sl.program_id expects one axis literal")
-        axis = node.args[0]
-        if (
-            not isinstance(axis, ast.Constant)
-            or type(axis.value) is not int
-            or axis.value < 0
-        ):
-            self._error(axis, "program_id axis must be a nonnegative integer")
-        if axis.value > (1 << 31) - 1:
-            self._error(axis, "program_id axis must fit signed i32")
-        result = self.swage.ProgramIdOp(
-            self.index, axis.value, loc=self._location(node)
+    def _build_program_id(self, axis, node):
+        return self.swage.ProgramIdOp(
+            self.index, axis, loc=self._location(node)
         ).result
-        return _Value(result, "index")
 
-    def _arange(self, node):
-        if node.keywords or len(node.args) != 2:
-            self._error(node, "sl.arange expects start and end")
-        start, end = node.args
-        if (
-            not isinstance(start, ast.Constant)
-            or type(start.value) is not int
-            or start.value != 0
-            or not isinstance(end, ast.Name)
-            or end.id != "BLOCK"
-        ):
-            self._error(node, "only sl.arange(0, BLOCK) is supported")
-        result = self.vector.StepOp(
-            self._index_vector_type(node), loc=self._location(node)
+    def _build_arange(self, node):
+        return self.vector.StepOp(
+            self._index_vector_type(), loc=self._location(node)
         ).result
-        return _Value(result, "index_vector")
 
-    def _load(self, node):
-        keywords = self._keywords(node)
-        if len(node.args) != 1 or set(keywords) != {"mask", "other"}:
-            self._error(
-                node,
-                "sl.load expects address, mask=..., and other=...",
-            )
-        address = self._expression(node.args[0])
-        mask = self._require_value(
-            self._expression(keywords["mask"]),
-            keywords["mask"],
-            "sl.load mask must be a vector",
-        )
-        other_node = keywords["other"]
-        if not isinstance(address, _Address):
-            self._error(node.args[0], "sl.load requires pointer + offsets")
-        if mask.kind != "bool_vector":
-            self._error(keywords["mask"], "sl.load mask must be a vector")
-        if not isinstance(other_node, ast.Constant) or type(
-            other_node.value
-        ) not in {int, float}:
-            self._error(other_node, "sl.load other must be a numeric literal")
+    def _build_load(self, address, mask, other, node):
         location = self._location(node)
-        element_type = self.ir.MemRefType(address.base.type).element_type
-        vector_type = self._float_vector_type(node, element_type)
-        other = self.arith.ConstantOp(
-            element_type, float(other_node.value), loc=location
-        ).result
+        element = self._element_type(address.element)
+        constant = self.arith.ConstantOp(element, other, loc=location).result
         pass_through = self.vector.BroadcastOp(
-            vector_type, other, loc=location
+            self._float_vector_type(element), constant, loc=location
         ).result
         zero = self.arith.ConstantOp(self.index, 0, loc=location).result
-        result = self.vector.GatherOp(
-            vector_type,
+        return self.vector.GatherOp(
+            self._float_vector_type(element),
             address.base,
             [zero],
             address.offsets,
@@ -723,32 +1164,8 @@ class _Emitter:
             pass_through,
             loc=location,
         ).result
-        return _Value(result, "float_vector")
 
-    def _store(self, node):
-        keywords = self._keywords(node)
-        if len(node.args) != 2 or set(keywords) != {"mask"}:
-            self._error(node, "sl.store expects address, value, and mask=...")
-        address = self._expression(node.args[0])
-        reason = "sl.store requires float values and a mask"
-        value = self._require_value(
-            self._expression(node.args[1]), node.args[1], reason
-        )
-        mask = self._require_value(
-            self._expression(keywords["mask"]), keywords["mask"], reason
-        )
-        if not isinstance(address, _Address):
-            self._error(node.args[0], "sl.store requires pointer + offsets")
-        if value.kind != "float_vector" or mask.kind != "bool_vector":
-            self._error(node, "sl.store requires float values and a mask")
-        element_type = self.ir.MemRefType(address.base.type).element_type
-        value_type = self.ir.VectorType(value.value.type).element_type
-        if value_type != element_type:
-            self._error(
-                node,
-                "sl.store requires matching value and pointer element "
-                f"types; got {value_type} and {element_type}",
-            )
+    def _build_store(self, address, value, mask, node):
         location = self._location(node)
         zero = self.arith.ConstantOp(self.index, 0, loc=location).result
         self.vector.ScatterOp(
@@ -760,38 +1177,16 @@ class _Emitter:
             value.value,
             loc=location,
         )
-        return None
 
-    def _keywords(self, node):
-        if any(keyword.arg is None for keyword in node.keywords):
-            self._error(node, "keyword expansion is unsupported")
-        names = [keyword.arg for keyword in node.keywords]
-        if len(names) != len(set(names)):
-            self._error(node, "duplicate keyword argument")
-        return {keyword.arg: keyword.value for keyword in node.keywords}
-
-    def _index_constant(self, value, node):
-        if not -(1 << 63) <= value <= (1 << 63) - 1:
-            self._error(node, "integer literal must fit signed 64-bit")
-        result = self.arith.ConstantOp(
-            self.index, value, loc=self._location(node)
-        ).result
-        return _Value(result, "index")
-
-    def _require_value(self, value, node, reason):
-        if not isinstance(value, _Value):
-            self._error(node, reason)
-        return value
-
-    def _index_vector_type(self, node):
-        if self.block is None:
-            self._error(node, "BLOCK is required for vector operations")
+    def _index_vector_type(self):
         return self.ir.VectorType.get([self.block], self.index)
 
-    def _float_vector_type(self, node, element_type):
-        if self.block is None:
-            self._error(node, "BLOCK is required for vector operations")
-        return self.ir.VectorType.get([self.block], element_type)
+    def _float_vector_type(self, element):
+        return self.ir.VectorType.get([self.block], element)
+
+    def _element_type(self, element):
+        """Return the MLIR type of a `swage.language` float type."""
+        return getattr(self.ir, _FLOAT_FORMATS[element].binding).get()
 
     def _location(self, node):
         line = self.kernel.source_line + node.lineno - 1
@@ -802,17 +1197,45 @@ class _Emitter:
         )
         return self.ir.Location.name(self.kernel.__name__, child)
 
-    def _error(self, node, reason):
-        self.kernel._raise(node, reason)
+
+def _describe_annotation(node):
+    """Return an annotation as written, saying when it is a string."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return f"string annotation {node.value!r}"
+    return f"annotation '{ast.unparse(node)}'"
 
 
-def _is_constexpr_annotation(node):
-    return (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "sl"
-        and node.attr == "constexpr"
-    )
+def _language_names(function, syntax):
+    """Return the names in a kernel that are bound to `swage.language`.
+
+    A name counts when the scope that defines the kernel binds it to the
+    module object, as seen through the function's closure or its globals.
+    The match is on the object, so any import name works and a different
+    object spelled `sl` does not. A name the kernel takes as a parameter or
+    assigns to is included; the caller decides what that means.
+
+    Args:
+        function: The Python function being captured.
+        syntax: Its parsed `ast.FunctionDef`.
+
+    Returns:
+        A frozenset of names.
+    """
+    cells = dict(zip(function.__code__.co_freevars, function.__closure__ or ()))
+    names = set()
+    for name in {
+        node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)
+    }:
+        if name in cells:
+            try:
+                bound = cells[name].cell_contents
+            except ValueError:
+                continue
+        else:
+            bound = function.__globals__.get(name)
+        if bound is language:
+            names.add(name)
+    return frozenset(names)
 
 
 def jit(function):

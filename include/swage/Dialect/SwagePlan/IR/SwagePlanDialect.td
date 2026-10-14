@@ -13,10 +13,59 @@ include "mlir/IR/OpBase.td"
 
 def SwagePlan_Dialect : Dialect {
   let name = "swage_plan";
-  let summary = "Runtime task classification for admitted Swage kernels";
+  let summary = "Planned kernels: a kernel signature and its task operation";
+  let description = [{
+    The `swage_plan` dialect holds what a kernel lowering consumes. A plan
+    function is a `func.func` with the attribute `swage_plan.block_threads`,
+    which gives the launch width of the kernel in threads:
+
+    ```mlir
+    func.func @segmented_sum(
+        %values: memref<?xf32>, %offsets: memref<?xi32>,
+        %output: memref<?xf32>, %value_count: i32, %segment_count: i32)
+        attributes {swage_plan.block_threads = 128 : i32} {
+      swage_plan.tasks policy<cta> ... { ... }
+      return
+    }
+    ```
+
+    - The signature of a plan function is the parameter list of its kernel,
+      in order: every buffer is a rank-one memref with a dynamic size, the
+      identity layout, and the default memory space, and every count is a
+      signless integer. There is no result.
+    - The body is one task operation followed by a return. The task
+      operation takes every buffer and every bound of the kernel as an
+      operand and holds the reductions and stores of one bound segment.
+
+    The dialect verifies both. A planning parameter that no kernel reads,
+    such as a limit that steers host classification, is not part of plan IR.
+
+    A parameter of a plan function that the segment function declared, such
+    as the values or the segment count, may carry the argument attribute
+    `swage_plan.source_index`: the position of that argument in the segment
+    function, a nonnegative i32. The planner sets it on every such parameter,
+    because a plan function takes its parameters in the order of its kernel
+    and not in the order the segment function declared them. The kernel
+    contract binds the caller's arguments by these positions. A parameter
+    without the attribute, in a plan function written by hand, is bound at
+    its own position: such a plan function is the function its caller calls.
+  }];
   let cppNamespace = "::mlir::swage_plan";
-  let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+  let hasOperationAttrVerify = 1;
+  let hasRegionArgAttrVerify = 1;
+  let extraClassDeclaration = [{
+    /// The name of the function attribute that makes a function a plan
+    /// function and gives the launch width of its kernel in threads.
+    static ::llvm::StringRef getBlockThreadsAttrName() {
+      return "swage_plan.block_threads";
+    }
+    /// The name of the argument attribute that gives the position, in the
+    /// segment function, of the argument a plan function parameter came from.
+    static ::llvm::StringRef getSourceIndexAttrName() {
+      return "swage_plan.source_index";
+    }
+  }];
 }
 
 class SwagePlan_Op<string mnemonic, list<Trait> traits = []>

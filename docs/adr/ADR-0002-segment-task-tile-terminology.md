@@ -1,3 +1,4 @@
+<!-- docs/adr/ADR-0002-segment-task-tile-terminology.md -->
 # ADR-0002: Segment, Task, and Tile terminology
 
 - Status: accepted
@@ -14,12 +15,12 @@ Overloading one word for all three (as early drafts did with
 
 Three terms, used consistently in APIs, IR, and docs:
 
-- **Segment** — logical, runtime-sized, internally dense data object:
+- **Segment**: logical, runtime-sized, internally dense data object:
   `values[offsets[i] : offsets[i+1]]`. Semantic model.
-- **Task** — schedulable unit of execution (a packed group of short
+- **Task**: schedulable unit of execution (a packed group of short
   segments, a chunk of a long one, a partial reduction, a merge…).
   Planning model.
-- **Tile** — fixed-size physical unit (`tile<32xf32>`) processed by a warp
+- **Tile**: fixed-size physical unit (`tile<32xf32>`) processed by a warp
   or CTA. Hardware-lowering model.
 
 `RaggedBlock` is not used in new APIs or IR. The Python-visible domain is

@@ -1,3 +1,4 @@
+<!-- docs/adr/ADR-0009-python-bindings-package-and-ci.md -->
 # ADR-0009: Self-contained Python bindings package and CI bindings build
 
 - Status: accepted
@@ -48,7 +49,7 @@ installed pin:
   the accepted v0.5.2 extension below supplies public `swage` stubs.
 - Tests are pytest (`python/tests/mlir/`), importing `mlir_swage` from
   the build tree: a positive path that programmatically builds segment
-  and region ops — captures and `kind` included — verifies, and
+  and region ops, captures and `kind` included, verifies, and
   round-trips the text against the lit suite's expectations; a negative
   path asserting a verifier failure surfaces as a Python exception. A
   `check-swage-python` target runs them with the correct `PYTHONPATH`.
@@ -151,4 +152,4 @@ for operator prerequisites and the immutable yank-and-patch policy.
 - An LLVM pin bump rebuilds the bindings with the same single pin; no
   second version can drift.
 - Changing the CI Python minor version invalidates the LLVM cache by
-  design — that is the correctness property, not a bug.
+  design. That is the correctness property, not a bug.

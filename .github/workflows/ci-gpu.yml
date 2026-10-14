@@ -52,14 +52,11 @@ jobs:
             tests/python/test_runtime.py::test_cache_round_trip_and_corruption_rejection \
             tests/python/test_runtime.py::test_cache_rejects_unsafe_entries
 
+      # The whole directory, not a list of files: every CUDA-gated test,
+      # including any file added later, runs on this runner. Hosted CI has
+      # no GPU and skips those tests.
       - name: Test CUDA correctness, streams, and process reuse
-        run: |
-          python -m pytest -q \
-            python/tests/mlir/test_runtime.py \
-            python/tests/mlir/test_low_precision_runtime.py \
-            python/tests/mlir/test_operation_dispatch.py \
-            python/tests/mlir/test_segmented_runtime.py \
-            python/tests/mlir/test_persistent_runtime.py
+        run: python -m pytest -q python/tests/mlir
 
       - name: Run the documented fixed vector-add walkthrough
         run: |
@@ -69,11 +66,20 @@ jobs:
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.mlir' -print -quit)"
           test -n "$(find "$RUNNER_TEMP/swage-example-dumps" -type f -name '*.ptx' -print -quit)"
 
+      # Fresh processes share a cache directory of their own: the first must
+      # compile once and publish one entry, the second must compile nothing
+      # and read that entry under the same key. A skipped case observes no
+      # reuse, so a skip fails the step.
       - name: Test persistent cache reuse in a new process
         run: |
-          test -n "$(find "$SWAGE_CACHE_DIR" -name kernel.ptx -type f -print -quit)"
-          python -m pytest -q \
-            'python/tests/mlir/test_runtime.py::test_vector_add_matches_pytorch[129]'
+          set -o pipefail
+          python -m pytest -q -rs \
+            python/tests/mlir/test_cache_process_reuse.py \
+            | tee "$RUNNER_TEMP/cache-process-reuse.txt"
+          if grep -qi skipped "$RUNNER_TEMP/cache-process-reuse.txt"; then
+            echo "a cache reuse case was skipped" >&2
+            exit 1
+          fi
 
   fixed-runtime-slo:
     if: github.ref == 'refs/heads/main'
@@ -92,10 +98,12 @@ jobs:
           test -z "$(git status --porcelain)"
           python -m venv --system-site-packages "$work/venv"
           py="$work/venv/bin/python"
-          "$py" -m pip install build scikit-build-core==1.0.3 nanobind==2.15.0
+          # The build tools come from the hash lock, so the build runs
+          # without isolation.
+          "$py" -m pip install --require-hashes -r requirements-ci.txt
           pin="$(cat cmake/llvm-version.txt)"
           llvm="$HOME/.swage/llvm/install-$pin"
-          "$py" -m build --wheel --outdir "$work/dist" \
+          "$py" -m build --wheel --no-isolation --outdir "$work/dist" \
             -Cbuild-dir="$work/build" \
             -Ccmake.define.MLIR_DIR="$llvm/lib/cmake/mlir" \
             -Ccmake.define.LLVM_DIR="$llvm/lib/cmake/llvm" \
@@ -112,6 +120,31 @@ jobs:
           env -u PYTHONPATH "$FIXED_WORK/venv/bin/python" \
             "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py" \
             --backend cuda --expected-revision "$GITHUB_SHA"
+      # The private CPU oracle of the segmented tests runs swage-opt, which
+      # the wheel does not hold; a bindings-off build provides it.
+      - name: Qualify the installed public segmented calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(cat cmake/llvm-version.txt)"
+          llvm="$HOME/.swage/llvm/install-$pin"
+          cmake -G Ninja -S "$GITHUB_WORKSPACE" -B "$FIXED_WORK/oracle-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLIR_DIR="$llvm/lib/cmake/mlir" \
+            -DLLVM_DIR="$llvm/lib/cmake/llvm" \
+            -DSWAGE_PYTHON_BINDINGS=OFF
+          ninja -C "$FIXED_WORK/oracle-build" swage-opt
+          "$GITHUB_WORKSPACE/scripts/qualify_installed_segments.sh" \
+            "$FIXED_WORK/venv/bin/python" "$FIXED_WORK/oracle-build" \
+            "$FIXED_WORK/segmented-qualification"
+      # The gates are inclusive and live in the wheel (swage/_benchmark.py).
+      # The 2^18 throughput ceiling is 1.80, set from
+      # benchmarks/results/fixed-runtime-gate-a6000-sm86-0ea2a78.json, which
+      # supersedes the 1.85 of fixed-runtime-gate-a6000-sm86.json. At that
+      # size the ratio measures the host cost of a launch. Every launch now
+      # advances the version counter of its output for autograd correctness,
+      # and on this host main's own wheel fails the earlier 1.50 in every run
+      # and the commit that set 1.50 measures at it.
       - name: Enforce fixed-runtime A6000 SLOs
         shell: bash
         run: |

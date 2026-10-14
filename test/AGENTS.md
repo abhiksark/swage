@@ -14,3 +14,7 @@ Rules for the lit/FileCheck suite (`ninja -C build check-swage`).
   line carries it.
 - Tests must pass against an install-tree LLVM: depend only on `swage-*`
   tools plus FileCheck/not/count from the LLVM install.
+- A test that executes lowered code declares `REQUIRES: mlir-runner`. The
+  feature is set when the LLVM install holds `mlir-opt`, `mlir-runner`,
+  `libmlir_runner_utils`, and `libmlir_c_runner_utils`, and lit reports the
+  test as unsupported otherwise. No other test may depend on those tools.

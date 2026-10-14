@@ -97,5 +97,11 @@ LogicalResult MakeSegmentOp::verify() {
                          << valuesType.getElementType()
                          << " does not match segment element type "
                          << segmentType.getElementType();
+  // A rank-two buffer holds rows, and a segment is a run of scalars: the
+  // column says which scalar of each row.
+  if ((valuesType.getRank() == 2) != static_cast<bool>(getColumn()))
+    return emitOpError()
+           << "takes a column exactly when its values have rank two, got "
+           << valuesType << (getColumn() ? " with" : " without") << " a column";
   return success();
 }

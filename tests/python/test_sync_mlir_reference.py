@@ -47,7 +47,9 @@ Trailing text.
 
 """
 
-    assert sync.normalize_markdown(source) == """<!-- generated -->
+    assert (
+        sync.normalize_markdown(source)
+        == """<!-- generated -->
 ## Dialect
 
 ### Operation
@@ -58,6 +60,7 @@ Trailing text.
 
 Trailing text.
 """
+    )
 
 
 def test_normalize_preserves_content_in_longer_fences():

@@ -1,5 +1,6 @@
 // test/Conversion/SwageToCPU/ragged-softmax-runner.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s \
+// REQUIRES: mlir-runner
+// RUN: swage-opt --swage-to-plan='schedule=sequential' --swage-plan-to-scf %s \
 // RUN:   | mlir-opt -pass-pipeline='builtin.module(func.func(convert-scf-to-cf,convert-math-to-llvm,convert-arith-to-llvm),finalize-memref-to-llvm,convert-func-to-llvm,convert-cf-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner -e main -entry-point-result=void \
 // RUN:       -shared-libs=%llvm_lib_dir/libmlir_runner_utils%shlibext \
@@ -14,8 +15,11 @@
 // makes "map_store never writes past offsets[-1]" a checked invariant.
 module {
   func.func @ragged_softmax(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -70,6 +74,7 @@ module {
     %o3 = arith.constant 3 : i32
     %o4 = arith.constant 4 : i32
     %o7 = arith.constant 7 : i32
+    %o8 = arith.constant 8 : i32
     %sentinel = arith.constant -1.0 : f32
     %five = arith.constant 5.0 : f32
     %zero = arith.constant 0.0 : f32
@@ -99,8 +104,8 @@ module {
     memref.store %o3, %offsets[%c3] : memref<?xi32>
     memref.store %o7, %offsets[%c4] : memref<?xi32>
 
-    call @ragged_softmax(%values, %offsets, %output)
-        : (memref<?xf32>, memref<?xi32>, memref<?xf32>) -> ()
+    call @ragged_softmax(%values, %offsets, %output, %o8, %o4)
+        : (memref<?xf32>, memref<?xi32>, memref<?xf32>, i32, i32) -> ()
     %unranked = memref.cast %output : memref<?xf32> to memref<*xf32>
     call @printMemrefF32(%unranked) : (memref<*xf32>) -> ()
     memref.dealloc %values_storage : memref<8xf32>

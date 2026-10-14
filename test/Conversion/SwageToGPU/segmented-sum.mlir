@@ -1,20 +1,24 @@
 // test/Conversion/SwageToGPU/segmented-sum.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-gpu='block-size=128' %s \
+// RUN: swage-opt --swage-to-plan='schedule=direct block-threads=128' \
+// RUN:   --swage-plan-to-gpu %s \
 // RUN:   | FileCheck %s
 
 module {
   func.func @segmented_sum(
-      %sink: memref<?xf32>, %data: memref<?xf32>,
-      %bounds: memref<?xi32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %data, %bounds, %sid
+    %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %sink[%sid] : memref<?xf32>
+    memref.store %sum, %output[%sid] : memref<?xf32>
     return
   }
 }
@@ -23,7 +27,7 @@ module {
 // CHECK: gpu.module @segmented_sum_module
 // CHECK: gpu.func @segmented_sum(%[[VALUES:[^,]+]]: !llvm.ptr, %[[OFFSETS:[^,]+]]: !llvm.ptr, %[[OUTPUT:[^,]+]]: !llvm.ptr, %[[VALUE_COUNT:[^,]+]]: i32, %[[SEGMENT_COUNT:[^)]+]]: i32) kernel
 // CHECK-SAME: nvvm.reqntid = array<i32: 128, 1, 1>
-// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 2 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 0 : i64}, {key = "value_count", kind = "i32", origin = "derived"}, {key = "segment_count", kind = "i32", origin = "derived"}], backend = "cuda", entry = "segmented_sum", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
+// CHECK-SAME: swage.kernel_contract = {arguments = [{access = "read", kind = "ptr", origin = "user", source_index = 0 : i64}, {access = "read", kind = "ptr", origin = "user", source_index = 1 : i64}, {access = "write", kind = "ptr", origin = "user", source_index = 2 : i64}, {kind = "i32", origin = "user", source_index = 3 : i64}, {kind = "i32", origin = "user", source_index = 4 : i64}], backend = "cuda", entry = "segmented_sum", launch = {block = array<i32: 128, 1, 1>, model = "spmd-grid"}, version = 2 : i64}
 // CHECK: %[[SID:.*]] = gpu.block_id x
 // CHECK: %[[THREAD:.*]] = gpu.thread_id x
 // CHECK: %[[SEGMENTS:.*]] = arith.index_cast %[[SEGMENT_COUNT]] : i32 to index
@@ -33,8 +37,12 @@ module {
 // CHECK:   %[[START_I32:.*]] = llvm.load %[[START_ADDRESS]] : !llvm.ptr -> i32
 // CHECK:   %[[END_ADDRESS:.*]] = llvm.getelementptr %[[OFFSETS]]
 // CHECK:   %[[END_I32:.*]] = llvm.load %[[END_ADDRESS]] : !llvm.ptr -> i32
-// CHECK:   %[[START:.*]] = arith.index_cast %[[START_I32]] : i32 to index
-// CHECK:   %[[END:.*]] = arith.index_cast %[[END_I32]] : i32 to index
+// Both loaded offsets are clamped against the value count before they become
+// loop bounds; segment-bounds.mlir pins the full clamp.
+// CHECK:   %[[START_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[VALUE_COUNT]] : i32
+// CHECK:   %[[END_CLAMPED:.*]] = arith.minsi %{{.*}}, %[[VALUE_COUNT]] : i32
+// CHECK:   %[[START:.*]] = arith.index_cast %[[START_CLAMPED]] : i32 to index
+// CHECK:   %[[END:.*]] = arith.index_cast %[[END_CLAMPED]] : i32 to index
 // CHECK:   %[[FIRST:.*]] = arith.addi %[[START]], %[[THREAD]] : index
 // CHECK:   %[[IDENTITY:.*]] = arith.constant 0.000000e+00 : f32
 // CHECK:   %[[LOCAL:.*]] = scf.for %[[I:.*]] = %[[FIRST]] to %[[END]] step %{{.*}} iter_args(%[[ACC:.*]] = %[[IDENTITY]]) -> (f32) {

@@ -1,3 +1,4 @@
+// test/Dialect/Swage/invalid.mlir
 // RUN: swage-opt %s --split-input-file --verify-diagnostics
 
 func.func @element_type_mismatch(%values: memref<?xf32>, %offsets: memref<?xi32>, %sid: index) {
@@ -35,3 +36,10 @@ func.func @offsets_not_integer(%values: memref<?xf32>, %offsets: memref<?xf32>, 
 // Segment element types are restricted to integers and floats.
 // expected-error @below {{segment element type must be an integer or float type}}
 func.func private @bad_element_type(%s: !swage.segment<memref<2xf32>>)
+
+// -----
+
+func.func @yield_outside_region(%x: f32) {
+  // expected-error @below {{expects parent op to be one of 'swage.map, swage.reduce, swage.map_store'}}
+  swage.yield %x : f32
+}

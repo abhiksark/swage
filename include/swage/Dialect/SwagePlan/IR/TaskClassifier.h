@@ -26,6 +26,33 @@ classifyTasks(llvm::ArrayRef<int64_t> offsets, int64_t valueCount,
               int64_t segmentCount, int64_t warpMaxElements,
               int64_t ctaChunkElements);
 
+/// The launch records of one classification in one buffer: the warp segment
+/// ids, then the CTA segment ids, then one [begin, end] pair per partial
+/// task, then one [segment_id, partial_begin, partial_end] triple per merge,
+/// then the index of the merge of each partial task. The counts are in ids,
+/// pairs, and triples, so the buffer holds
+/// `warpCount + ctaCount + 3 * partialCount + 3 * mergeCount` values.
+struct TaskRecords {
+  llvm::SmallVector<int32_t, 0> records;
+  int32_t warpCount = 0;
+  int32_t ctaCount = 0;
+  int32_t partialCount = 0;
+  int32_t mergeCount = 0;
+};
+
+/// Classifies i32 offsets straight into launch records, without building
+/// descriptors. It admits and rejects what classifyTasks does, with the same
+/// messages, and returns the records its descriptors regroup to: a warp
+/// descriptor gives a warp id, a CTA descriptor of an unsplit segment a CTA
+/// id, a CTA descriptor of a split segment a partial pair, and a stage-one
+/// descriptor a merge triple. The merge index of a partial task is the
+/// position of the merge triple whose range holds it.
+llvm::Expected<TaskRecords> classifyTaskRecords(llvm::ArrayRef<int32_t> offsets,
+                                                int64_t valueCount,
+                                                int64_t segmentCount,
+                                                int64_t warpMaxElements,
+                                                int64_t ctaChunkElements);
+
 } // namespace mlir::swage_plan
 
 #endif // SWAGE_DIALECT_SWAGEPLAN_IR_TASKCLASSIFIER_H

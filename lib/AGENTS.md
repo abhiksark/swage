@@ -6,9 +6,11 @@ Rules for the C++ MLIR components (`include/swage/**`, `lib/**`,
 - Operations, types, and attributes are defined in ODS/TableGen under
   `include/swage/Dialect/*/IR/`; no hand-written parsers unless the
   declarative format genuinely cannot express the syntax.
-- Naming: `Swage_FooOp` defs, `swage.foo` mnemonics, `MLIRSwage*` CMake
-  targets. Generated-file includes go through
-  `swage/Dialect/Swage/IR/*.inc`.
+- Naming: follow the dialect being edited: `Swage_FooOp` / `swage.foo` for
+  Swage, `SwagePlan_FooOp` / `swage_plan.foo` for SwagePlan, and
+  `MLIRSwage*` CMake targets. Generated-file includes use the owning dialect's
+  `IR/` directory: `swage/Dialect/Swage/IR/` or
+  `swage/Dialect/SwagePlan/IR/`.
 - No string-based operation dispatch; use generated op classes.
 - Every operation with invariants gets a C++ or ODS verifier and both a
   positive (`roundtrip.mlir`) and negative (`invalid.mlir`) lit test.

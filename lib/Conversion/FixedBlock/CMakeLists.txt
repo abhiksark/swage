@@ -1,3 +1,4 @@
+# lib/Conversion/FixedBlock/CMakeLists.txt
 add_mlir_conversion_library(MLIRSwageFixedBlock
   Analysis.cpp
   GPU.cpp
@@ -19,5 +20,6 @@ add_mlir_conversion_library(MLIRSwageFixedBlock
   MLIRSCFDialect
   MLIRSwage
   MLIRSwageSupport
+  MLIRSwageTarget
   MLIRVectorDialect
 )

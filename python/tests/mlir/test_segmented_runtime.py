@@ -1,21 +1,36 @@
 # python/tests/mlir/test_segmented_runtime.py
 """Differential qualification for native segmented reductions."""
 
+import dataclasses
+import functools
 import gc
-import json
+import os
+import re
 import threading
 import weakref
+from collections import OrderedDict
+from itertools import pairwise
+from typing import NamedTuple
 
 import pytest
 import torch
 from reduction_programs import reduction_module
-from swage import _cuda_backend, _runtime, _segmented_oracle
-from swage import _segmented_runtime as segmented_runtime
+from swage import _abi, _cuda_backend, _runtime
+from swage import _segmented_oracle as _oracle
+from swage import _segmented_plan as _plan
+from swage import _segmented_runtime as _execution
 from swage._segmented_oracle import (
     _execute,
+    _llvm_tool,
     _runner_module,
     cpu_oracle,
     cpu_softmax_oracle,
+)
+from swage._segmented_programs import (
+    _parameter_roles,
+    _program_element,
+    _reduction_kernel,
+    _semantic_module,
 )
 from swage._segmented_qualification import (
     _launch_segmented_sum_tasks,
@@ -32,202 +47,55 @@ from swage._segmented_validation import (
 )
 
 
-class _DriverLifecycle:
-    def event_create(self):
-        next_event = getattr(self, "_next_event", 0) + 1
-        self._next_event = next_event
-        return next_event
-
-    def is_stream_capturing(self, _stream):
-        return False
-
-    def event_record(self, _event, _stream):
-        return None
-
-    def event_query(self, _event):
-        return True
-
-    def event_destroy(self, _event):
-        return None
-
-    def module_unload(self, _module):
-        return None
+def _offsets(lengths):
+    """Return the host offset list for consecutive segment lengths."""
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    return offsets
 
 
-def _fake_compiled_artifact(
-    _semantic,
-    *,
-    kernel_name,
-    block_size,
-    lowering_kind,
-    lowering_options=None,
-    **_kwargs,
-):
-    user = [
-        {
-            "kind": "ptr",
-            "origin": "user",
-            "source_index": index,
-            "access": access,
-        }
-        for index, access in enumerate(("read", "read", "write"))
-    ]
-    if lowering_kind == "segmented":
-        arguments = list(user)
-        if (lowering_options or {}).get("use_task_ids"):
-            arguments += [
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": "task_ids",
-                    "access": "read",
-                },
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {"kind": "i32", "origin": "derived", "key": "task_count"},
-            ]
-        else:
-            arguments += [
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {"kind": "i32", "origin": "derived", "key": "segment_count"},
-            ]
-    elif lowering_kind == "segmented_fused":
-        arguments = user + [
-            {
-                "kind": "ptr",
-                "origin": "plan",
-                "key": "task_ids",
-                "access": "read",
-            },
-            {"kind": "i32", "origin": "derived", "key": "value_count"},
-            {"kind": "i32", "origin": "derived", "key": "warp_task_count"},
-            {"kind": "i32", "origin": "derived", "key": "cta_task_count"},
-        ]
-    elif lowering_kind == "segmented_split_partial":
-        arguments = [
-            user[0],
-            {
-                "kind": "ptr",
-                "origin": "plan",
-                "key": "partial_ranges",
-                "access": "read",
-            },
-            {
-                "kind": "ptr",
-                "origin": "scratch",
-                "key": "partials",
-                "access": "write",
-            },
-            {"kind": "i32", "origin": "derived", "key": "value_count"},
-            {
-                "kind": "i32",
-                "origin": "derived",
-                "key": "partial_task_count",
-            },
-        ]
-    elif lowering_kind == "segmented_split_merge":
-        arguments = [
-            {
-                "kind": "ptr",
-                "origin": "scratch",
-                "key": "partials",
-                "access": "read",
-            },
-            user[2],
-            {
-                "kind": "ptr",
-                "origin": "plan",
-                "key": "merge_ranges",
-                "access": "read",
-            },
-            {
-                "kind": "i32",
-                "origin": "derived",
-                "key": "partial_task_count",
-            },
-            {
-                "kind": "i32",
-                "origin": "derived",
-                "key": "merge_task_count",
-            },
-        ]
-    else:
-        arguments = (
-            user
-            + [
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": key,
-                    "access": "read",
-                }
-                for key in (
-                    "warp_task_ids",
-                    "cta_task_ids",
-                    "partial_ranges",
-                    "partial_merge_ids",
-                    "merge_ranges",
-                )
-            ]
-            + [
-                {
-                    "kind": "ptr",
-                    "origin": "scratch",
-                    "key": "partials",
-                    "access": "readwrite",
-                },
-                {
-                    "kind": "ptr",
-                    "origin": "scratch",
-                    "key": "counters",
-                    "access": "readwrite",
-                },
-            ]
-            + [
-                {"kind": "i32", "origin": "derived", "key": key}
-                for key in (
-                    "value_count",
-                    "warp_task_count",
-                    "cta_task_count",
-                    "partial_task_count",
-                    "merge_task_count",
-                )
-            ]
-        )
-    raw = json.dumps(
-        {
-            "version": 2,
-            "backend": "cuda",
-            "entry": kernel_name,
-            "launch": {
-                "model": "spmd-grid",
-                "block": [block_size, 1, 1],
-            },
-            "arguments": arguments,
-        },
-        separators=(",", ":"),
-    )
-    contract = _runtime._parse_compiler_contract(raw)
-    return _runtime._make_artifact(
-        f"{lowering_kind}-{block_size}",
-        _cuda_backend.CUDA_BACKEND,
-        _kwargs.get("target", "sm_86"),
-        "",
-        "ptx",
-        raw,
-        contract,
-    )
+_EXACT_PERIOD = 67
+
+
+def _exact_values(first, last):
+    """Return the exactly summable test pattern on an index range.
+
+    Element ``index`` is ``(2 * (index % 67) - 65) / 4``, an odd number of
+    quarters that climbs by one half from -16.25 to 16.75 and then wraps.
+
+    - Every value is a multiple of 0.25. In CASES and TASK_CASES the
+      magnitudes of a segment sum to less than 2**20, so a sum is the same
+      f32 under any association and tests can compare with no tolerance.
+    - No value is zero, so dropping or repeating one element changes a sum.
+    - The 67 values of a period are distinct and 67 exceeds the largest
+      shift the tests guard, so a window moved by 1 to 64 elements reads
+      different values. One period sums to 16.75 rather than zero, so
+      whole periods do not cancel.
+    - Squares are multiples of 1/16 and their sum over the longest exactly
+      compared segment (8193 elements) stays below 2**20.
+
+    A segment whose length is a multiple of 67 would still read the same
+    multiset after any shift. No pattern with bounded values avoids every
+    such coincidence, so the informative-input tests below check the
+    properties for the shapes they cover.
+
+    The magnitudes of a LONG_CASES segment sum to more than 2**22, so its
+    sum is not exact under every association. It is exact in float64, in
+    sequential order, and under the lane and chunk structures the static
+    policies use, which test_long_exact_inputs_are_informative_and_exact
+    checks.
+    """
+    index = torch.arange(first, last)
+    return (2 * (index % _EXACT_PERIOD) - 65).to(torch.float32) / 4
 
 
 def _case(lengths):
     """Build deterministic values and offsets for segment lengths."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.tensor(
-        [((index % 17) - 8) / 4 for index in range(offsets[-1])],
-        dtype=torch.float32,
+    offsets = _offsets(lengths)
+    return _exact_values(0, offsets[-1]), torch.tensor(
+        offsets, dtype=torch.int32
     )
-    return values, torch.tensor(offsets, dtype=torch.int32)
 
 
 CASES = [
@@ -258,17 +126,177 @@ TASK_CASES = [
 ]
 
 
+# Planning limits (warp_max_elements, cta_chunk_elements) of the two
+# classified preparations. "mixed" holds the defaults. "split" lowers both
+# so that every segment longer than 16 elements takes the partial and merge
+# kernels.
+_PLANNING_LIMITS = {"mixed": (32, 4096), "split": (1, 16)}
+
+# Segments longer than any in CASES and TASK_CASES, with short neighbours on
+# both sides. A merge kernel has 512 lanes, so a lane chains more than one
+# partial only above 512 chunks.
+# - 65537 elements: 17 partials under the default limits, at most one per
+#   merge lane, and 4097 under the split limits, 8 or 9 per lane.
+# - 4096 * 1536 + 1 elements: 1537 partials under the default limits, 3 or
+#   4 per merge lane, and 393217 under the split limits, 768 or 769 per
+#   lane.
+LONG_CASES = [
+    pytest.param([33, 65537, 1], id="seventeen-partials"),
+    pytest.param([1, 4096 * 1536 + 1, 33], id="chained-merge"),
+]
+
+_SHIFT_LIMIT = 64
+
+
+def _assert_informative(values, offsets):
+    """Require sums that are nonzero and sensitive to the segment window.
+
+    Every value must be a nonzero multiple of 0.25, so dropping or
+    duplicating any one element changes a sum. Every non-empty segment must
+    have a nonzero sum that changes when both window ends move by any 1 to
+    64 elements in either direction, which a length that is a multiple of
+    the pattern period could never satisfy.
+    """
+    count = values.numel()
+    quarters = values.double() * 4
+    assert torch.equal(quarters, quarters.round())
+    assert (quarters != 0).all()
+
+    extended = _exact_values(-_SHIFT_LIMIT, count + _SHIFT_LIMIT)
+    assert torch.equal(extended[_SHIFT_LIMIT : _SHIFT_LIMIT + count], values)
+    prefix = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int64),
+            (extended.double() * 4).to(torch.int64).cumsum(0),
+        ]
+    )
+    shifts = torch.tensor(
+        [shift for shift in range(-_SHIFT_LIMIT, _SHIFT_LIMIT + 1) if shift]
+    )
+    for begin, end in pairwise(offsets.tolist()):
+        if begin == end:
+            continue
+        assert (end - begin) % _EXACT_PERIOD
+        total = prefix[end + _SHIFT_LIMIT] - prefix[begin + _SHIFT_LIMIT]
+        assert total != 0
+        shifted = (
+            prefix[end + _SHIFT_LIMIT + shifts]
+            - prefix[begin + _SHIFT_LIMIT + shifts]
+        )
+        assert (shifted != total).all()
+
+
+@pytest.mark.parametrize("lengths", [*CASES, *TASK_CASES])
+def test_exact_inputs_are_informative_for_every_case(lengths):
+    """Each non-empty segment has a nonzero sum that depends on its window.
+
+    A kernel that reads the right number of elements from the wrong place,
+    or drops or repeats one, must change the expected value, which
+    _assert_informative checks for every segment.
+
+    This also checks what makes an exact comparison valid: every value is a
+    multiple of 0.25, and the per-segment sums of magnitudes and of squares
+    stay below 2**20, so the identity and squared sums are exact in f32
+    under any association.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        assert segment.abs().sum() < 2**20
+        assert segment.square().sum() < 2**20
+
+
+def _largest_intermediate(values, lanes):
+    """Bound every intermediate of a lanes-then-tree sum of float64 values.
+
+    Lane t accumulates values[t::lanes] in order and a tree then adds whole
+    lanes. An intermediate is therefore a lane prefix, or a sum of whole
+    lanes, whose magnitude is at most the sum of the lane total magnitudes.
+    """
+    rows = -(-values.numel() // lanes)
+    padded = torch.zeros(rows * lanes, dtype=torch.float64)
+    padded[: values.numel()] = values
+    prefix = padded.view(rows, lanes).cumsum(0)
+    return max(prefix.abs().max(), prefix[-1].abs().sum())
+
+
+@pytest.mark.parametrize("lengths", LONG_CASES)
+def test_long_exact_inputs_are_informative_and_exact(lengths):
+    """Long segments keep the window properties and stay exactly summable.
+
+    The magnitudes of these segments sum to more than 2**22, so exactness
+    cannot rest on "any association". Multiples of 0.25 add exactly in f32
+    while every intermediate stays below 2**22, and this bounds every
+    intermediate of the structures the static policies use:
+
+    - warp and cta: 32 or 128 lanes stride the segment, then a tree adds
+      whole lanes.
+    - partial and merge, under both planning limits: any order inside one
+      chunk, because the magnitudes of a chunk sum to less than 2**22, then
+      512 lanes stride the chunk sums and a tree adds whole lanes.
+
+    A schedule outside these structures could round an intermediate. The
+    exact comparison would then fail, it could not pass by accident.
+    """
+    values, offsets = _case(lengths)
+    _assert_informative(values, offsets)
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        for lanes in (32, 128):
+            assert _largest_intermediate(segment, lanes) < 2**22
+        for _, chunk in _PLANNING_LIMITS.values():
+            rows = -(-segment.numel() // chunk)
+            chunks = torch.zeros(rows * chunk, dtype=torch.float64)
+            chunks[: segment.numel()] = segment
+            chunks = chunks.view(rows, chunk)
+            assert chunks.abs().sum(1).max() < 2**22
+            assert _largest_intermediate(chunks.sum(1), 512) < 2**22
+
+
+def _exact_sums(values, offsets):
+    """Return each segment's sum, computed in float64 and exact in f32.
+
+    A float64 sum of multiples of 0.25 is exact far beyond these lengths.
+    The cast is exact when the sum is below 2**22, which is asserted.
+    """
+    lengths = (offsets[1:] - offsets[:-1]).long()
+    sums = torch.segment_reduce(values.double(), "sum", lengths=lengths)
+    assert torch.equal(sums.float().double(), sums)
+    return sums.float()
+
+
+def test_exact_values_stay_exact_for_the_longest_compared_segments():
+    """Bound the two largest exact comparisons at every pattern phase.
+
+    Squared values are multiples of 1/16, exact in f32 while every partial
+    sum stays below 2**20. The longest segment compared exactly after
+    squaring has 8193 elements. Identity values are multiples of 1/4, exact
+    below 2**22, and the longest identity segment has 65537 elements.
+    """
+    values = _exact_values(0, 65537 + 67).double()
+    squares = torch.cat([torch.zeros(1), values.square().cumsum(0)])
+    magnitudes = torch.cat([torch.zeros(1), values.abs().cumsum(0)])
+    starts = torch.arange(67)
+
+    assert (squares[starts + 8193] - squares[starts]).max() < 2**20
+    assert (magnitudes[starts + 65537] - magnitudes[starts]).max() < 2**22
+
+
 def _pytorch_reference(values, offsets, kind):
     """Compute the PyTorch reference while preserving empty identities."""
+    if len(offsets) < 2:
+        return torch.empty(0, dtype=values.dtype)
     results = []
     for index in range(len(offsets) - 1):
         segment = values[offsets[index] : offsets[index + 1]]
         if kind == "sum":
             results.append(segment.sum())
         elif segment.numel():
-            results.append(segment.max())
+            results.append(segment.max() if kind == "max" else segment.min())
         else:
-            results.append(torch.tensor(float("-inf"), dtype=torch.float32))
+            identity = float("-inf") if kind == "max" else float("inf")
+            results.append(torch.tensor(identity, dtype=values.dtype))
     return torch.stack(results)
 
 
@@ -292,38 +320,57 @@ def _transformed_values(values, transform):
     return values
 
 
-def _launches(prepared):
-    """Return the warp, CTA, and mixed launches of a prepared execution."""
-    return (prepared.launch_warp, prepared.launch_cta, prepared.launch_mixed)
+_TRANSFORM_RTOL = _TRANSFORM_ATOL = 1e-5
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+def _assert_tolerance_sees_every_element(values, offsets, kind):
+    """Require a toleranced sum comparison to reject any single drop.
+
+    A tolerance relative to a segment sum admits the loss of every element
+    smaller than it. Each compared element must therefore exceed the
+    tolerance of its own segment. Max has no such requirement: it is exact
+    apart from element rounding and never depends on a non-maximal value.
+    """
+    if kind != "sum":
+        return
+    for begin, end in pairwise(offsets.tolist()):
+        segment = values[begin:end].double()
+        if segment.numel():
+            allowed = _TRANSFORM_ATOL + _TRANSFORM_RTOL * segment.sum().abs()
+            assert segment.abs().min() > allowed
+
+
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
-def test_composable_reduction_cpu_oracle(kind, transform):
+def test_composable_reduction_cpu_oracle(kind, transform, element):
     """The same native program supplies a sequential composition oracle."""
     values, offsets = _case([0, 1, 2, 3, 5, 6, 10, 11])
+    dtype = torch.float32 if element == "f32" else torch.float64
+    values = values.to(dtype)
     printed = _execute(
         _runner_module(
             values,
             offsets,
-            reduction_module(kind, transform),
-            f"segmented_{kind}",
+            reduction_module(kind, transform, element),
+            _reduction_kernel(kind, element),
             len(offsets) - 1,
-        )
+        ),
+        element,
     )
     expected = _pytorch_reference(
         _transformed_values(values, transform), offsets, kind
     )
     torch.testing.assert_close(
-        torch.tensor(printed, dtype=torch.float32),
+        torch.tensor(printed, dtype=dtype),
         expected,
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
 @pytest.mark.parametrize("small_chunks", [False, True])
 def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
@@ -366,10 +413,10 @@ def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
         torch.testing.assert_close(
             torch.tensor(printed, dtype=torch.float32),
             expected,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=0,
+            atol=0,
         )
-    for launch in _launches(prepared):
+    for launch in prepared:
         for _ in range(2):
             output[:-1].fill_(float("nan"))
             launch()
@@ -383,12 +430,17 @@ def test_composable_reduction_gpu_schedules(kind, transform, small_chunks):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize(
     "transform",
     [
-        "square", "maps", "exp2", "exp2_chain", "rational8",
-        "affine4", "affine32",
+        "square",
+        "maps",
+        "exp2",
+        "exp2_chain",
+        "rational8",
+        "affine4",
+        "affine32",
     ],
 )
 def test_composable_reduction_nontrivial_f32(kind, transform):
@@ -398,9 +450,9 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
     offsets = torch.tensor(
         [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
     )
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_planned_reduction(
         values.cuda(),
@@ -409,18 +461,18 @@ def test_composable_reduction_nontrivial_f32(kind, transform):
         module_text=reduction_module(kind, transform),
         kernel_name=f"segmented_{kind}",
     )
-    for launch in _launches(prepared):
+    for launch in prepared:
         launch()
         torch.testing.assert_close(
             output.cpu(),
             expected,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=_TRANSFORM_RTOL,
+            atol=_TRANSFORM_ATOL,
         )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize(
     "transform", ["identity", "square", "maps", "affine4", "affine32", "exp2"]
 )
@@ -428,42 +480,70 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
     kind, transform, monkeypatch
 ):
     """A selected CTA reuses the program, output guards, and graph support."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native
+
     count = torch.cuda.get_device_properties(0).multi_processor_count
     host_values, host_offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(host_values, transform), host_offsets, kind
-    ).cuda()
+    if transform == "exp2":
+        # exp2 of the full pattern spans 33 binades, so a tolerance relative
+        # to the sum would admit dropping most elements. One eighth of the
+        # pattern is still exact in f32 and position dependent, and keeps
+        # exp2 within [0.24, 4.3], above the tolerance of an 8192-element
+        # sum.
+        host_values = host_values / 8
+    toleranced = transform in ("exp2", "affine32")
+    transformed = _transformed_values(host_values, transform)
+    if toleranced:
+        _assert_tolerance_sees_every_element(transformed, host_offsets, kind)
+    expected = _pytorch_reference(transformed, host_offsets, kind).cuda()
     output = torch.full((count + 1,), -123.0, device="cuda")
-    compile_artifact = segmented_runtime._compile_artifact
 
-    def compile_without_split(semantic, **kwargs):
-        if kwargs["lowering_kind"].startswith("segmented_split"):
-            raise AssertionError("selected CTA must not compile split kernels")
-        return compile_artifact(semantic, **kwargs)
+    def unexpected_split(*args, **kwargs):
+        raise AssertionError("selected CTA must not compile split kernels")
 
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", compile_without_split
-    )
-    prepared = _prepare_planned_reduction(
-        host_values.cuda(), host_offsets.cuda(), output,
-        module_text=reduction_module(kind, transform),
-        kernel_name=f"segmented_{kind}",
-    )
-    assert prepared.direct_cta
-    assert not {"partial", "merge"} & set(prepared.contracts)
-    assert not prepared.scratch_buffers
-    prepared.launch_mixed()
+    for name in ("partial", "merge"):
+        monkeypatch.setattr(
+            native, f"_compile_split_{name}_reduction_ptx", unexpected_split
+        )
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    # A split allocates its partial results with torch.empty, one per chunk
+    # and of the type of the values; nothing else in a preparation does.
+    original_empty = torch.empty
+    scratch = []
+
+    def empty(*args, **kwargs):
+        tensor = original_empty(*args, **kwargs)
+        if tensor.dtype == values.dtype:
+            scratch.append(tensor)
+        return tensor
+
+    with monkeypatch.context() as preparing:
+        preparing.setattr(torch, "empty", empty)
+        prepared = _prepare_planned_reduction(
+            values,
+            offsets,
+            output,
+            module_text=reduction_module(kind, transform),
+            kernel_name=f"segmented_{kind}",
+        )
+    assert prepared.mixed is prepared.cta
+    assert not scratch
+    prepared.mixed()
     tolerance = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if transform in ("exp2", "affine32") else {"rtol": 0, "atol": 0}
+        {"rtol": _TRANSFORM_RTOL, "atol": _TRANSFORM_ATOL}
+        if toleranced
+        else {"rtol": 0, "atol": 0}
     )
     torch.testing.assert_close(output[:-1], expected, **tolerance)
-    # Capture needs a completed task-storage wait: launch, sync, launch.
-    prepared.launch_mixed()
+    # The first launch may only queue the wait for task storage. Capture
+    # needs a launch that observes the storage ready.
+    torch.cuda.synchronize()
+    prepared.mixed()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        prepared.launch_mixed()
+        prepared.mixed()
     output[:-1].fill_(float("nan"))
     graph.replay()
     torch.testing.assert_close(output[:-1], expected, **tolerance)
@@ -471,27 +551,42 @@ def test_regular_split_batch_selects_cta_without_split_kernels(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
-@pytest.mark.parametrize(
-    "transform", ["exp2_chain", "rational8"]
-)
-def test_expensive_regular_batch_retains_split_execution(kind, transform):
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("transform", ["exp2_chain", "rational8"])
+def test_expensive_regular_batch_retains_split_execution(
+    kind, transform, monkeypatch
+):
     """A shape eligible for CTA still splits an expensive element program."""
     count = torch.cuda.get_device_properties(0).multi_processor_count
     values, offsets = _case([8192] * count)
-    expected = _pytorch_reference(
-        _transformed_values(values, transform), offsets, kind
-    )
+    transformed = _transformed_values(values, transform)
+    _assert_tolerance_sees_every_element(transformed, offsets, kind)
+    expected = _pytorch_reference(transformed, offsets, kind)
     output = torch.empty(count, device="cuda")
+    compile_once = _execution._compile_once
+    compiled = []
+
+    def record_compile(compile_ptx, *args, **kwargs):
+        compiled.append(compile_ptx.__name__)
+        return compile_once(compile_ptx, *args, **kwargs)
+
+    monkeypatch.setattr(_execution, "_compile_once", record_compile)
     prepared = _prepare_planned_reduction(
-        values.cuda(), offsets.cuda(), output,
+        values.cuda(),
+        offsets.cuda(),
+        output,
         module_text=reduction_module(kind, transform),
         kernel_name=f"segmented_{kind}",
     )
-    assert not prepared.direct_cta
-    assert {"partial", "merge"} <= set(prepared.contracts)
-    prepared.launch_mixed()
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    assert prepared.mixed is not prepared.cta
+    assert {
+        "_compile_split_partial_reduction_ptx",
+        "_compile_split_merge_reduction_ptx",
+    } <= set(compiled)
+    prepared.mixed()
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=_TRANSFORM_RTOL, atol=_TRANSFORM_ATOL
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -518,15 +613,20 @@ def test_direct_cta_selection_retains_other_schedules(case):
     values, offsets = _case(lengths)
     output = torch.empty(len(lengths), device="cuda")
     prepared = _prepare_planned_reduction(
-        values.cuda(), offsets.cuda(), output,
+        values.cuda(),
+        offsets.cuda(),
+        output,
         module_text=reduction_module("sum", "identity"),
-        kernel_name="segmented_sum", **options,
+        kernel_name="segmented_sum",
+        **options,
     )
-    assert not prepared.direct_cta
-    prepared.launch_mixed()
+    assert prepared.mixed is not prepared.cta
+    prepared.mixed()
     torch.testing.assert_close(
-        output.cpu(), _pytorch_reference(values, offsets, "sum"),
-        rtol=0, atol=0,
+        output.cpu(),
+        _pytorch_reference(values, offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -534,7 +634,11 @@ def test_schedule_selection_requires_a_boolean():
     """Reject accidental string configuration before preparing any work."""
     with pytest.raises(TypeError, match="select_schedule must be a bool"):
         _prepare_planned_reduction(
-            None, None, None, module_text="", kernel_name="",
+            None,
+            None,
+            None,
+            module_text="",
+            kernel_name="",
             select_schedule="false",
         )
 
@@ -577,7 +681,7 @@ def test_planned_max_preserves_special_values_across_chunks():
             0.0,
         ]
     )
-    for launch in _launches(prepared):
+    for launch in prepared:
         launch()
         actual = output.cpu()
         torch.testing.assert_close(
@@ -615,24 +719,333 @@ def test_cpu_oracle_rejects_empty_offsets_with_the_validator_message():
         cpu_oracle(values, offsets, "sum")
 
 
-def test_cpu_oracle_uses_configured_build_directory(monkeypatch, tmp_path):
-    """Resolve compiler tools from the build selected by the workflow."""
-    configured = tmp_path / "native-build"
-    monkeypatch.setenv("SWAGE_BUILD_DIR", str(configured))
+def _sequential_f32_sum(values):
+    """Accumulate left to right in float32, the order of the CPU oracle."""
+    total = torch.zeros((), dtype=torch.float32)
+    for value in values:
+        total += value
+    return total
 
-    def llvm_root(build):
-        assert build == configured
-        return tmp_path / "llvm"
 
-    def run(command, _source):
-        assert command[0] == configured / "bin" / "swage-opt"
-        raise RuntimeError("selected configured build")
+def _bits(tensor):
+    """Return the IEEE-754 bit patterns of a float32 or float64 tensor."""
+    word = torch.int32 if tensor.dtype == torch.float32 else torch.int64
+    return tensor.contiguous().view(word).tolist()
 
-    monkeypatch.setattr(_segmented_oracle, "_llvm_root", llvm_root)
-    monkeypatch.setattr(_segmented_oracle, "_run", run)
 
-    with pytest.raises(RuntimeError, match="selected configured build"):
-        _segmented_oracle._execute("module {}")
+def test_cpu_sum_oracle_is_bit_exact_for_seeded_randn():
+    """The oracle transports result bits, not six-digit decimal text.
+
+    A 65537-element zero-mean segment has a float32 sum that six significant
+    digits cannot hold, so this fails on any decimal transport. The expected
+    value is a scalar float32 loop in the oracle's own left-to-right order,
+    which makes bit equality the correct assertion.
+    """
+    generator = torch.Generator().manual_seed(0)
+    values = torch.randn(65537, generator=generator)
+    offsets = torch.tensor([0, 65537], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    expected = _sequential_f32_sum(values).reshape(1)
+    assert _bits(actual) == _bits(expected)
+
+
+def test_cpu_oracle_round_trips_every_float32_class():
+    """Singleton maxima return their input bits through the transport."""
+    values = torch.tensor(
+        [
+            1 / 3,
+            -0.0,
+            0.0,
+            float("inf"),
+            float("-inf"),
+            torch.finfo(torch.float32).max,
+            torch.finfo(torch.float32).tiny,
+            1e-45,
+            -16777215.0,
+        ],
+        dtype=torch.float32,
+    )
+    offsets = torch.arange(values.numel() + 1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "max")
+
+    assert _bits(actual) == _bits(values)
+
+
+def test_cpu_sum_oracle_is_bit_exact_for_float64_values():
+    """An f64 sum is the left-to-right float64 sum, bit for bit.
+
+    The expected value is a Python loop, whose floats are float64 and whose
+    order is the oracle's. A transport or a kernel that passed through
+    float32 would lose most of the bits of this sum.
+    """
+    generator = torch.Generator().manual_seed(0)
+    values = torch.randn(65537, dtype=torch.float64, generator=generator)
+    offsets = torch.tensor([0, 65537], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    total = 0.0
+    for value in values.tolist():
+        total += value
+    assert actual.dtype == torch.float64
+    assert _bits(actual) == _bits(torch.tensor([total], dtype=torch.float64))
+    assert total != float(torch.tensor(total, dtype=torch.float32))
+
+
+@pytest.mark.parametrize("kind", ["max", "min"])
+def test_cpu_oracle_round_trips_every_float64_class(kind):
+    """Singleton extremes return their float64 input bits.
+
+    The values include the largest finite float64, the smallest normal and
+    the smallest subnormal, and a value next to one, none of which a
+    float32 holds.
+    """
+    values = torch.tensor(
+        [
+            1 / 3,
+            -0.0,
+            0.0,
+            float("inf"),
+            float("-inf"),
+            torch.finfo(torch.float64).max,
+            torch.finfo(torch.float64).tiny,
+            2.0**-1074,
+            1.0 + 2.0**-52,
+            -9007199254740991.0,
+        ],
+        dtype=torch.float64,
+    )
+    offsets = torch.arange(values.numel() + 1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    assert actual.dtype == torch.float64
+    assert _bits(actual) == _bits(values)
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.float64], ids=["float32", "float64"]
+)
+@pytest.mark.parametrize("lengths", CASES)
+def test_cpu_mean_oracle_is_the_sequential_sum_over_the_length(lengths, dtype):
+    """The oracle of a mean divides the oracle of the sum, bit for bit.
+
+    The division is one IEEE-754 division by the length as a value of the
+    dtype. The values are exactly summable, so the quotient is also the
+    correctly rounded mean. An empty segment gives NaN.
+    """
+    values, offsets = _case(lengths)
+    values = values.to(dtype)
+    counts = torch.tensor(lengths, dtype=dtype)
+
+    mean = cpu_oracle(values, offsets, "mean")
+
+    expected = cpu_oracle(values, offsets, "sum") / counts
+    empty = counts == 0
+    assert mean.dtype == dtype
+    assert mean[empty].isnan().all()
+    assert _bits(mean[~empty]) == _bits(expected[~empty])
+    exact = torch.tensor(
+        [
+            values[begin:end].double().sum() / (end - begin)
+            for begin, end in pairwise(offsets.tolist())
+            if end > begin
+        ],
+        dtype=torch.float64,
+    )
+    assert _bits(mean[~empty]) == _bits(exact.to(dtype))
+
+
+def test_cpu_softmax_oracle_is_bit_exact_for_equal_logits():
+    """Three equal logits normalize to the float32 nearest one third.
+
+    exp2 of zero is exactly one and the sum is exactly three, so the only
+    rounding is the final division, which six decimal digits cannot carry.
+    """
+    values = torch.full((3,), 5.0)
+    offsets = torch.tensor([0, 3], dtype=torch.int32)
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    expected = (torch.ones(3) / 3).to(torch.float32)
+    assert _bits(actual) == _bits(expected)
+
+
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+def test_cpu_oracle_returns_nothing_for_zero_segments(kind):
+    """A segment-free call yields an empty result, not an unwritten slot."""
+    values = torch.empty(0, dtype=torch.float32)
+    offsets = torch.zeros(1, dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    assert actual.shape == (0,)
+    assert actual.dtype == torch.float32
+
+
+def test_cpu_oracle_ignores_llvm_tools_on_path(tmp_path, monkeypatch):
+    """A different LLVM on PATH must not become the oracle.
+
+    The runner libraries always come from the pinned install, so tools
+    from another LLVM would pair with them silently. Decoys placed first
+    on PATH record any use and fail.
+    """
+    marker = tmp_path / "used"
+    for name in ("mlir-opt", "mlir-runner"):
+        decoy = tmp_path / name
+        decoy.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    values, offsets = _case([3, 4])
+
+    actual = cpu_oracle(values, offsets, "sum")
+
+    torch.testing.assert_close(
+        actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
+    )
+    assert not marker.exists()
+
+
+def test_cpu_oracle_takes_its_build_directory_from_the_checkout(
+    tmp_path, monkeypatch
+):
+    """Without the variable, use `build` beside the imported package.
+
+    The checkout is a stand-in, so the test does not depend on where the
+    build of this run is: `check-swage-python` names it with the variable.
+    """
+    checkout = tmp_path / "checkout"
+    build = checkout / "build"
+    (build / "bin").mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text("")
+    (build / "bin" / "swage-opt").write_text("")
+    monkeypatch.setattr(
+        _oracle,
+        "__file__",
+        str(checkout / "python" / "swage" / "_segmented_oracle.py"),
+    )
+    monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
+    assert _oracle._oracle_build() == build
+
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", "")
+    assert _oracle._oracle_build() == build
+
+
+def test_cpu_oracle_takes_its_build_directory_from_the_environment(
+    tmp_path, monkeypatch
+):
+    """Run the oracle with the tools of a build directory named elsewhere.
+
+    A `swage` that was installed from a wheel has no `build` beside it.
+    The named directory here holds a `swage-opt` that records its use and
+    then runs the real one, so the test shows which tool the oracle ran.
+    """
+    real = _oracle._oracle_build()
+    named = tmp_path / "another-build"
+    (named / "bin").mkdir(parents=True)
+    (named / "CMakeCache.txt").write_text((real / "CMakeCache.txt").read_text())
+    marker = tmp_path / "used"
+    tool = named / "bin" / "swage-opt"
+    tool.write_text(
+        f'#!/bin/sh\ntouch {marker}\nexec {real / "bin" / "swage-opt"} "$@"\n'
+    )
+    tool.chmod(0o755)
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", str(named))
+    values, offsets = _case([3, 4])
+
+    assert _oracle._oracle_build() == named
+    actual = cpu_oracle(values, offsets, "sum")
+
+    torch.testing.assert_close(
+        actual, _pytorch_reference(values, offsets, "sum"), rtol=0, atol=0
+    )
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("present", ["CMakeCache.txt", "bin/swage-opt"])
+def test_cpu_oracle_names_what_a_named_build_directory_lacks(
+    present, tmp_path, monkeypatch
+):
+    """Refuse a directory that is not a Swage build, in its own words."""
+    named = tmp_path / "not-a-build"
+    (named / present).parent.mkdir(parents=True, exist_ok=True)
+    (named / present).write_text("")
+    lacking = {"CMakeCache.txt", "bin/swage-opt"} - {present}
+    monkeypatch.setenv("SWAGE_ORACLE_BUILD_DIR", str(named))
+    values, offsets = _case([3, 4])
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^SWAGE_ORACLE_BUILD_DIR names {re.escape(str(named))}, which "
+            f"lacks {lacking.pop()}; the CPU oracle needs a Swage build "
+            "directory"
+        ),
+    ):
+        cpu_oracle(values, offsets, "sum")
+
+
+def test_cpu_oracle_names_the_variable_when_no_checkout_build_exists(
+    tmp_path, monkeypatch
+):
+    """Say how to name a build directory to a `swage` outside a checkout."""
+    installed = tmp_path / "site-packages" / "swage"
+    monkeypatch.delenv("SWAGE_ORACLE_BUILD_DIR", raising=False)
+    monkeypatch.setattr(
+        _oracle, "__file__", str(installed / "_segmented_oracle.py")
+    )
+    values, offsets = _case([3, 4])
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            f"^{re.escape(str(tmp_path / 'build'))} lacks CMakeCache.txt and "
+            "bin/swage-opt; the CPU oracle needs a Swage build directory. "
+            "Set SWAGE_ORACLE_BUILD_DIR to one$"
+        ),
+    ):
+        cpu_oracle(values, offsets, "sum")
+
+
+def _fake_tool(directory, name):
+    """Create an executable placeholder and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_llvm_tool_prefers_the_pinned_install_over_path(tmp_path, monkeypatch):
+    """Use the install's tool even when PATH offers another one."""
+    pinned = _fake_tool(tmp_path / "install" / "bin", "mlir-opt")
+    _fake_tool(tmp_path / "elsewhere", "mlir-opt")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-opt") == pinned
+
+
+def test_llvm_tool_falls_back_to_path_when_the_install_lacks_it(
+    tmp_path, monkeypatch
+):
+    """An install without the tool defers to PATH."""
+    found = _fake_tool(tmp_path / "elsewhere", "mlir-runner")
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    assert _llvm_tool(tmp_path / "install", "mlir-runner") == found
+
+
+def test_llvm_tool_names_both_places_when_the_tool_is_missing(
+    tmp_path, monkeypatch
+):
+    """Fail with the searched locations instead of an exec error."""
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+
+    with pytest.raises(RuntimeError, match="neither at .*install.* nor on"):
+        _llvm_tool(tmp_path / "install", "mlir-opt")
 
 
 @pytest.mark.parametrize("count", [-1, 1 << 31])
@@ -648,7 +1061,11 @@ def test_rejects_wrong_offset_dtype_rank_and_undersized_output():
     """Validate tensor metadata before device or pointer access."""
     values = torch.empty(2)
     output = torch.empty(1)
-    with pytest.raises(TypeError, match="offsets must have dtype torch.int32"):
+    # The private helpers pass the caller's offsets to their kernels, so
+    # they take int32 only. The public calls narrow int64 offsets.
+    with pytest.raises(
+        TypeError, match="^offsets must have dtype torch.int32$"
+    ):
         _validate_tensors(values, torch.tensor([0, 2]), output)
     with pytest.raises(TypeError, match="offsets must have rank one"):
         _validate_tensors(
@@ -664,7 +1081,116 @@ def test_rejects_wrong_offset_dtype_rank_and_undersized_output():
         )
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+def test_a_program_takes_values_and_output_of_its_element_type():
+    """Refuse a tensor whose dtype is not the element type of the kernel.
+
+    A kernel reads and writes elements of one width, so a tensor of the
+    other width would be read at the wrong stride. Each refusal comes
+    before any device or pointer access, so the tensors can stay on the
+    host.
+    """
+    offsets = torch.tensor([0, 2], dtype=torch.int32)
+    single, double = torch.empty(2), torch.empty(2, dtype=torch.float64)
+    with pytest.raises(
+        TypeError, match="^output must have dtype torch.float64$"
+    ):
+        launch_gpu(double, offsets, single, "sum")
+    with pytest.raises(
+        TypeError, match="^output must have dtype torch.float32$"
+    ):
+        launch_gpu(single, offsets, double, "sum")
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        launch_gpu(single.half(), offsets, single, "sum")
+    # The softmax and the persistent sum have f32 kernels only.
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        launch_softmax_gpu(double, offsets, double)
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        _prepare_persistent_sum(double, offsets, double)
+    # A prepared reduction takes the element type from its program.
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float64$"
+    ):
+        _prepare_planned_reduction(
+            single,
+            offsets,
+            single,
+            module_text=reduction_module("sum", "identity", "f64"),
+            kernel_name="segmented_sum_f64",
+        )
+    with pytest.raises(
+        TypeError, match="^values must have dtype torch.float32$"
+    ):
+        _prepare_planned_reduction(
+            double,
+            offsets,
+            double,
+            module_text=reduction_module("sum", "identity"),
+            kernel_name="segmented_sum",
+        )
+
+
+def test_program_element_reads_the_declared_values_type():
+    """The element type of a program is the one its values declare."""
+    assert _program_element(reduction_module("max", "maps")) == "f32"
+    assert _program_element(reduction_module("max", "maps", "f64")) == "f64"
+    with pytest.raises(ValueError, match="declares no swage.role<values>"):
+        _program_element(reduction_module("max", "maps").replace("f32", "f16"))
+
+
+def _f64_case(lengths):
+    """Build float64 values that no float32 holds, and their offsets.
+
+    Each value is the exact value of `_case` plus a multiple of 2**-30 that
+    depends on its position. Every partial sum of the compared segments is
+    a multiple of 2**-30 below 2**20, so each sum is exact in float64 under
+    any association, and no value survives a round trip through float32.
+    """
+    values, offsets = _case(lengths)
+    index = torch.arange(values.numel())
+    return values.double() + (index % 5).double() * 2.0**-30, offsets
+
+
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("lengths", CASES)
+def test_cpu_reduction_matches_pytorch_for_float64(lengths, kind):
+    """The sequential f64 reductions equal the float64 reference exactly."""
+    values, offsets = _f64_case(lengths)
+
+    actual = cpu_oracle(values, offsets, kind)
+    expected = _pytorch_reference(values, offsets, kind)
+
+    assert actual.dtype == expected.dtype == torch.float64
+    assert _bits(actual) == _bits(expected)
+    if values.numel() > 1:
+        assert not torch.equal(values.float().double(), values)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+@pytest.mark.parametrize("lengths", CASES)
+def test_gpu_reduction_matches_pytorch_and_cpu_oracle_for_float64(
+    lengths, kind
+):
+    """Qualify the one-CTA f64 reductions against both references."""
+    host_values, host_offsets = _f64_case(lengths)
+    output = torch.empty(len(lengths), dtype=torch.float64, device="cuda")
+
+    launch_gpu(host_values.cuda(), host_offsets.cuda(), output, kind)
+
+    actual = output.cpu()
+    assert _bits(actual) == _bits(
+        _pytorch_reference(host_values, host_offsets, kind)
+    )
+    assert _bits(actual) == _bits(cpu_oracle(host_values, host_offsets, kind))
+
+
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("lengths", CASES)
 def test_cpu_reduction_matches_pytorch(lengths, kind):
     """Execute sequential reductions through upstream mlir-runner."""
@@ -673,11 +1199,11 @@ def test_cpu_reduction_matches_pytorch(lengths, kind):
     actual = cpu_oracle(values, offsets, kind)
     expected = _pytorch_reference(values, offsets, kind)
 
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 @pytest.mark.parametrize("lengths", CASES)
 def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     """Qualify one-CTA reductions against both independent references."""
@@ -691,29 +1217,20 @@ def test_gpu_reduction_matches_pytorch_and_cpu_oracle(lengths, kind):
     torch.testing.assert_close(
         output.cpu(),
         _pytorch_reference(host_values, host_offsets, kind),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, kind),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize(
-    "host_offsets",
-    [
-        pytest.param([0], id="empty"),
-        pytest.param([0, 1], id="nonempty"),
-    ],
-)
-def test_invalid_gpu_reduction_kind_precedes_compiler_and_driver(
-    monkeypatch, host_offsets
-):
-    """Reject every unsupported kind before native or driver work."""
+def test_invalid_gpu_reduction_kind_precedes_compiler_and_driver(monkeypatch):
+    """Reject an unsupported kind before native or driver work."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
@@ -723,18 +1240,20 @@ def test_invalid_gpu_reduction_kind_precedes_compiler_and_driver(
 
     monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
     monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
-    values = torch.ones(host_offsets[-1], device="cuda")
-    offsets = torch.tensor(host_offsets, device="cuda", dtype=torch.int32)
-    output = torch.empty(len(host_offsets) - 1, device="cuda")
+    values = torch.ones(1, device="cuda")
+    offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
 
     with pytest.raises(ValueError) as raised:
         launch_gpu(values, offsets, output, "unsupported")
 
-    assert str(raised.value) == "reduction kind must be 'sum' or 'max'"
+    assert str(raised.value) == (
+        "reduction kind must be 'sum', 'max', 'min', or 'mean'"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_empty_gpu_reduction_is_validated_no_op(monkeypatch, kind):
     """Keep valid zero-segment reductions free of compiler and driver work."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
@@ -754,47 +1273,306 @@ def test_empty_gpu_reduction_is_validated_no_op(monkeypatch, kind):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("lengths", LONG_CASES)
+@pytest.mark.parametrize("policy", ["warp", "cta", "mixed", "split"])
+def test_static_policies_own_every_element_of_long_segments(policy, lengths):
+    """Compare long position-dependent sums exactly under every policy.
+
+    This is the ownership check above 8193 elements. No value is zero and
+    the comparison has no tolerance, so one dropped or repeated element, a
+    window moved by 1 to 64 elements, a skipped or repeated chunk, and a
+    zero result all change the outcome. The rounding bound of the
+    randomized test cannot see those on a long segment.
+
+    "mixed" prepares with the default limits and "split" with the limits
+    that split every segment longer than 16 elements (_PLANNING_LIMITS).
+    LONG_CASES states how many partials each merge lane chains in both.
+    Each policy runs twice and is checked after each launch.
+    """
+    host_values, host_offsets = _case(lengths)
+    expected = _exact_sums(host_values, host_offsets)
+    output = torch.full((len(lengths),), float("nan"), device="cuda")
+    warp_max, chunk = _PLANNING_LIMITS[
+        "split" if policy == "split" else "mixed"
+    ]
+    prepared = _prepare_planned_reduction(
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
+        module_text=reduction_module("sum", "identity"),
+        kernel_name="segmented_sum",
+        warp_max_elements=warp_max,
+        cta_chunk_elements=chunk,
+        select_schedule=False,
+    )
+    launch = getattr(prepared, "mixed" if policy == "split" else policy)
+
+    for _ in range(2):
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+RANDOM_LENGTHS = [0, 1, 31, 32, 33, 4095, 4096, 4097, 65537]
+RANDOM_SUITES = ["randn", "cancellation", "magnitude"]
+_EPS32 = torch.finfo(torch.float32).eps
+_EPS64 = torch.finfo(torch.float64).eps
+
+
+def _random_values(suite, count, generator):
+    """Draw one segment of order-sensitive f32 values."""
+    if suite == "randn":
+        return torch.randn(count, generator=generator)
+    if suite == "cancellation":
+        # Exactly opposite pairs near 1e4 around terms near 1e-3, shuffled
+        # so partners rarely share a lane. The true sum is the small terms.
+        pairs = count // 3
+        large = (1 + torch.rand(pairs, generator=generator)) * 1e4
+        small = torch.randn(count - 2 * pairs, generator=generator) * 1e-3
+        values = torch.cat([large, -large, small])
+        return values[torch.randperm(count, generator=generator)]
+    assert suite == "magnitude"
+    # Log-uniform magnitudes from 1e-6 to 1e6 with random signs.
+    exponents = torch.empty(count).uniform_(-6, 6, generator=generator)
+    signs = torch.randint(0, 2, (count,), generator=generator) * 2 - 1
+    return signs * torch.pow(10.0, exponents)
+
+
+def _random_case(suite, seed):
+    """Build seeded values and offsets for RANDOM_LENGTHS."""
+    generator = torch.Generator().manual_seed(seed)
+    values = torch.cat(
+        [_random_values(suite, length, generator) for length in RANDOM_LENGTHS]
+    )
+    assert values.dtype == torch.float32
+    return values, torch.tensor(_offsets(RANDOM_LENGTHS), dtype=torch.int32)
+
+
+def _float64_reference(values, kind):
+    """Reduce each random segment in float64, outside the compiler."""
+    return torch.segment_reduce(
+        values.double(), kind, lengths=torch.tensor(RANDOM_LENGTHS)
+    )
+
+
+def _summation_depth(policy, count):
+    """Bound the rounding additions one element of a segment passes through.
+
+    Every schedule is a summation tree. B lanes stride the segment, so a
+    lane holds at most ceil(count / B) elements and chains one addition
+    fewer than that after its first, because adding to the zero identity is
+    exact. The lanes are then combined by a balanced tree.
+
+    - sequential (CPU oracle): one chain, count - 1 additions.
+    - warp: B = 32, then five XOR-shuffle levels.
+    - cta: B = 128, then gpu.all_reduce, five levels inside each warp and
+      two across the four warp leaders.
+    - partial and merge kernels: B = 512, then gpu.all_reduce, five levels
+      inside each warp and four across the sixteen warp leaders. A split
+      segment passes through a partial over at most one chunk and then
+      through the merge over its ceil(count / chunk) partials.
+    - mixed and split: the path the planner classifies the length into
+      under _PLANNING_LIMITS, which is warp, cta, or partial plus merge.
+
+    An addition with an exact zero operand is exact and the subtrees merged
+    along one path hold distinct elements, so no element sees more than
+    count - 1 rounding additions whatever the tree.
+    """
+
+    def chain(elements, lanes):
+        return max(-(-elements // lanes) - 1, 0)
+
+    if policy == "sequential":
+        depth = count - 1
+    elif policy == "warp":
+        depth = chain(count, 32) + 5
+    elif policy == "cta":
+        depth = chain(count, 128) + 7
+    else:
+        warp_max, chunk = _PLANNING_LIMITS[policy]
+        if count <= warp_max:
+            depth = chain(count, 32) + 5
+        elif count <= chunk:
+            depth = chain(count, 128) + 7
+        else:
+            partials = -(-count // chunk)
+            depth = chain(chunk, 512) + 9 + chain(partials, 512) + 9
+    return max(min(depth, count - 1), 0)
+
+
+def _assert_matches_float64_reference(actual, values, kind, policy):
+    """Compare one policy's f32 results with the float64 reference.
+
+    Max and min must be exact. A sum must lie within k * eps32 * sum(|x|)
+    of the reference per segment, where k is _summation_depth. The worst-case
+    error of a summation tree is ((1 + u) ** k - 1) * sum(|x|) with unit
+    roundoff u = eps32 / 2, which is below 2 * k * u while k * u <= 1 / 2.
+    The factor of two in eps32 is that margin, and it also covers the
+    rounding of the float64 reference.
+    """
+    reference = _float64_reference(values, kind)
+    if kind != "sum":
+        torch.testing.assert_close(
+            actual, reference.float(), rtol=0, atol=0, msg=policy
+        )
+        return
+    magnitude = _float64_reference(values.abs(), "sum")
+    depth = torch.tensor(
+        [_summation_depth(policy, length) for length in RANDOM_LENGTHS],
+        dtype=torch.float64,
+    )
+    error = (actual.double() - reference).abs()
+    bound = depth * _EPS32 * magnitude
+    assert (error <= bound).all(), (
+        f"{policy}: error {error.tolist()} exceeds bound {bound.tolist()} "
+        f"for lengths {RANDOM_LENGTHS}"
+    )
+
+
+@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("suite", RANDOM_SUITES)
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+def test_cpu_oracle_matches_float64_reference_on_random_values(
+    kind, suite, seed
+):
+    """Bound the sequential oracle against float64 on order-sensitive data.
+
+    The oracle accumulates left to right, so k is count - 1 per segment in
+    the bound k * eps32 * sum(|x|) of _assert_matches_float64_reference.
+
+    This is an accuracy check, not an ownership check: the bound admits a
+    dropped element on a long segment. The bit-exact 65537-element oracle
+    test and the exact tests on CASES check which elements are read.
+    """
+    values, offsets = _random_case(suite, seed)
+
+    actual = cpu_oracle(values, offsets, kind)
+
+    _assert_matches_float64_reference(actual, values, kind, "sequential")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("suite", RANDOM_SUITES)
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
+def test_gpu_policies_match_float64_reference_on_random_values(
+    kind, suite, seed
+):
+    """Bound every static policy against float64 on order-sensitive data.
+
+    Values are seeded normal draws, cancelling pairs around small terms,
+    and magnitudes spread over twelve decades. Lengths cover the empty and
+    singleton segments, both sides of the warp and chunk limits, and one
+    segment of 65537 elements.
+
+    Max is compared exactly. Each sum must lie within
+    k * eps32 * sum(|x|) of torch.segment_reduce in float64, with eps32 =
+    2**-23 and k the number of rounding additions on the longest path of
+    that policy's reduction tree for that segment length, capped at
+    count - 1 (see _summation_depth for the derivation):
+
+    - warp: k = ceil(count / 32) - 1 + 5.
+    - cta: k = ceil(count / 128) - 1 + 7.
+    - split: k = (ceil(chunk / 512) - 1 + 9)
+      + (ceil(ceil(count / chunk) / 512) - 1 + 9) with 16-element chunks,
+      so 26 for 65537 elements.
+    - mixed: the warp formula up to 32 elements, the cta formula up to
+      4096, and the split formula with 4096-element chunks beyond, so 25
+      for 65537 elements.
+
+    The private API has no separate split closure. Splitting is the path
+    the mixed closure takes for a segment longer than the chunk limit, so
+    "split" is the mixed closure of a second preparation whose limits send
+    every segment longer than 16 elements through partial and merge.
+
+    Every policy also runs twice and must reproduce its own bits.
+
+    This is an accuracy check, not an ownership check. The bound scales
+    with the magnitudes of a whole segment, so on a long segment it admits
+    a result that drops or repeats one element, and in the cancellation
+    suite it admits a zero result. Ownership is checked exactly on the
+    position-dependent pattern, up to the lengths in LONG_CASES, by
+    test_static_policies_own_every_element_of_long_segments and the exact
+    tests on CASES and TASK_CASES.
+    """
+    host_values, host_offsets = _random_case(suite, seed)
+    values, offsets = host_values.cuda(), host_offsets.cuda()
+    output = torch.empty(len(RANDOM_LENGTHS), device="cuda")
+    launches = {}
+    for policy, (warp_max, chunk) in _PLANNING_LIMITS.items():
+        prepared = _prepare_planned_reduction(
+            values,
+            offsets,
+            output,
+            module_text=reduction_module(kind, "identity"),
+            kernel_name=f"segmented_{kind}",
+            warp_max_elements=warp_max,
+            cta_chunk_elements=chunk,
+            select_schedule=False,
+        )
+        if policy == "mixed":
+            launches["warp"] = prepared.warp
+            launches["cta"] = prepared.cta
+        launches[policy] = prepared.mixed
+
+    for policy, launch in launches.items():
+        runs = []
+        for _ in range(2):
+            output.fill_(float("nan"))
+            launch()
+            runs.append(output.cpu())
+        assert _bits(runs[0]) == _bits(runs[1]), policy
+        _assert_matches_float64_reference(runs[0], host_values, kind, policy)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("block_size", [32, 128], ids=["warp", "cta"])
 @pytest.mark.parametrize("lengths", TASK_CASES)
-def test_gpu_task_sum_matches_exact_segment_lengths(lengths, block_size):
+def test_gpu_task_sum_matches_exact_position_dependent_sums(
+    lengths, block_size
+):
     """Execute every segment through each private direct task policy."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
     task_ids = torch.arange(len(lengths), device="cuda", dtype=torch.int32)
 
     _launch_segmented_sum_tasks(
-        values, device_offsets, output, task_ids, block_size=block_size
+        host_values.cuda(),
+        host_offsets.cuda(),
+        output,
+        task_ids,
+        block_size=block_size,
     )
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("lengths", TASK_CASES)
-def test_prepared_mixed_sum_matches_exact_segment_lengths(lengths):
+def test_prepared_mixed_sum_matches_exact_position_dependent_sums(lengths):
     """Execute one fused launch with stable warp IDs before stable CTA IDs."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
 
-    prepared = _prepare_planned_sum(values, device_offsets, output)
-    prepared.launch_mixed()
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
+    prepared.mixed()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -822,24 +1600,23 @@ def test_persistent_sum_rejects_invalid_residency_before_tensor_work(
         pytest.param([0, 33, 4097, 1, 8193], id="mixed-split"),
     ],
 )
-def test_persistent_sum_matches_exact_segment_lengths(lengths):
+def test_persistent_sum_matches_exact_position_dependent_sums(lengths):
     """Drain direct warp and CTA queues without dropped or duplicate work."""
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full(
         (len(lengths),), float("nan"), device="cuda", dtype=torch.float32
     )
 
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=4
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=4
     )
-    prepared.launch_persistent()
+    prepared.launch()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -847,27 +1624,23 @@ def test_persistent_sum_matches_exact_segment_lengths(lengths):
 def test_persistent_sum_resets_queues_for_repeated_and_graph_launches():
     """Reset claims on every submission and preserve capture replay."""
     lengths = [1, 32, 33, 4096, 4097, 2, 8193]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=3
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=3
     )
-    expected = torch.tensor(lengths, dtype=torch.float32)
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
 
-    prepared.launch_persistent()
-    torch.cuda.synchronize()
+    prepared.launch()
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     output.fill_(float("nan"))
-    prepared.launch_persistent()
+    prepared.launch()
     torch.cuda.synchronize()
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        prepared.launch_persistent()
+        prepared.launch()
     output.fill_(float("nan"))
     graph.replay()
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
@@ -877,21 +1650,22 @@ def test_persistent_sum_resets_queues_for_repeated_and_graph_launches():
 def test_persistent_sum_uses_current_non_default_stream():
     """Submit queue reset and resident workers on the current stream."""
     lengths = [1, 33, 2, 4096]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_persistent_sum(values, device_offsets, output)
+    prepared = _prepare_persistent_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
     stream = torch.cuda.Stream()
 
     with torch.cuda.stream(stream):
-        prepared.launch_persistent()
+        prepared.launch()
     stream.synchronize()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -907,32 +1681,39 @@ def test_persistent_split_sum_matches_nontrivial_oracles():
     prepared = _prepare_persistent_sum(
         values, offsets, output, resident_blocks=5
     )
-    prepared.launch_persistent()
+    prepared.launch()
 
     expected = _pytorch_reference(host_values, host_offsets, "sum")
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "sum"),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
+
+
+# The short tail segments have 31 elements, not 32. On the exact pattern a
+# 32-element window that starts at -7.75 sums to zero, which 31 of 2048
+# such segments would do, and a zero sum equals the empty-segment identity.
+_SKEW_LENGTHS = [1] * 2048 + [65_537] * 8 + [31] * 2048
+
+
+def test_extreme_skew_inputs_are_informative():
+    """Every skewed segment has a nonzero, window-dependent sum."""
+    _assert_informative(*_case(_SKEW_LENGTHS))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_extreme_skew_completes_without_starvation():
     """Drain many claims and dependency groups repeatedly with seven CTAs."""
-    lengths = [1] * 2048 + [65_537] * 8 + [32] * 2048
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    lengths = _SKEW_LENGTHS
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
     prepared = _prepare_persistent_sum(
-        values, device_offsets, output, resident_blocks=7
+        host_values.cuda(), host_offsets.cuda(), output, resident_blocks=7
     )
-    expected = torch.tensor(lengths, dtype=torch.float32)
+    expected = _pytorch_reference(host_values, host_offsets, "sum").cuda()
 
     assert prepared.resident_blocks == 7
     assert prepared.warp_tasks == 4096
@@ -941,10 +1722,264 @@ def test_persistent_extreme_skew_completes_without_starvation():
     assert prepared.merge_tasks == 8
     for _ in range(10):
         output.fill_(float("nan"))
-        prepared.launch_persistent()
-    torch.cuda.synchronize()
+        prepared.launch()
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
-    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+class _Launch(NamedTuple):
+    """One launch the runtime asked of a fake driver."""
+
+    function: object
+    contract: _abi.KernelContract
+    values: tuple
+    grid: tuple
+    stream: int
+
+    @property
+    def block(self):
+        """Return the block, which comes from the contract."""
+        return self.contract.launch.block
+
+    @property
+    def phase(self):
+        """Return `partial` or `merge` for a split kernel, else `direct`."""
+        for phase in ("partial", "merge"):
+            if self.contract.entry.endswith(f"__{phase}"):
+                return phase
+        return "direct"
+
+    @property
+    def arguments(self):
+        """Name each launched value by its contract binding.
+
+        A user argument takes the role of the parameter of the canonical sum
+        it binds, and every other argument takes its contract key.
+        """
+        roles = _parameter_roles(_semantic_module("sum"))
+        named = {}
+        for argument, value in zip(
+            self.contract.arguments, self.values, strict=True
+        ):
+            if argument.origin == "user":
+                named[roles[argument.source_index]] = value
+            else:
+                named[argument.key] = value
+        return named
+
+
+class _Driver:
+    """Stand in for the CUDA driver: record loads and launches, run nothing.
+
+    The context is fixed. Every load returns fresh module and function
+    handles, and every launch is recorded as a `_Launch`.
+    """
+
+    context = 1
+
+    def __init__(self):
+        self.loads = []
+        self.launches = []
+        self.events = 0
+
+    def current_context(self):
+        return self.context
+
+    def load(self, ptx, kernel_name):
+        self.loads.append((ptx, kernel_name))
+        return 100 + len(self.loads), len(self.loads)
+
+    def launch_entry(self, function, contract, bindings, grid, stream):
+        kinds, values = bindings
+        assert tuple(kinds) == tuple(
+            argument.kind for argument in contract.arguments
+        )
+        self.launches.append(_Launch(function, contract, values, grid, stream))
+
+    def event_create(self):
+        self.events += 1
+        return self.events
+
+    def event_record(self, _event, _stream):
+        return None
+
+    def is_stream_capturing(self, _stream):
+        return False
+
+    def event_query(self, _event):
+        return True
+
+    def event_destroy(self, _event):
+        return None
+
+    def module_unload(self, _module):
+        return None
+
+
+def _install_driver(monkeypatch, driver):
+    """Make `driver` the CUDA driver of this test, with nothing loaded.
+
+    The loaded-module cache is replaced too, so a fake module never meets a
+    real one, and the real cache is back after the test.
+    """
+    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
+    return driver
+
+
+def _upload_shared_segment_ids():
+    """Upload the shared segment ids of the current device, once.
+
+    The first preparation of a process uploads them with `torch.tensor`. A
+    test that replaces `torch.tensor` calls this first, so that it sees the
+    task records of its preparation and nothing else.
+    """
+    _plan._identity_ids(
+        torch, torch.device("cuda", torch.cuda.current_device()), 0
+    )
+
+
+# The arguments of the kernels the native compile functions emit for the
+# canonical sum, as their contracts give them. A user argument binds a
+# parameter of the segment function by position; every other argument names
+# its value by key.
+_VALUES = _abi.KernelArgument("ptr", "user", 0, access="read")
+_OFFSETS = _abi.KernelArgument("ptr", "user", 1, access="read")
+_OUTPUT = _abi.KernelArgument("ptr", "user", 2, access="write")
+_VALUE_COUNT = _abi.KernelArgument("i32", "user", 3)
+_SEGMENT_COUNT = _abi.KernelArgument("i32", "user", 4)
+
+
+def _plan_argument(key):
+    """Return a contract argument for one task record list."""
+    return _abi.KernelArgument("ptr", "plan", key=key, access="read")
+
+
+def _derived_argument(key):
+    """Return a contract argument for one count of the plan."""
+    return _abi.KernelArgument("i32", "derived", key=key)
+
+
+def _scratch_argument(key, access):
+    """Return a contract argument for one private buffer of the launch."""
+    return _abi.KernelArgument("ptr", "scratch", key=key, access=access)
+
+
+_FAKE_ARGUMENTS = {
+    "_compile_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        _plan_argument("task_ids"),
+        _VALUE_COUNT,
+        _derived_argument("task_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_fused_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        _plan_argument("task_ids"),
+        _VALUE_COUNT,
+        _derived_argument("warp_task_count"),
+        _derived_argument("cta_task_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_split_partial_reduction_ptx": (
+        _VALUES,
+        _plan_argument("partial_ranges"),
+        _scratch_argument("scratch", "write"),
+        _VALUE_COUNT,
+        _derived_argument("partial_count"),
+    ),
+    "_compile_split_merge_reduction_ptx": (
+        _scratch_argument("scratch", "read"),
+        _OUTPUT,
+        _plan_argument("merge_records"),
+        _derived_argument("partial_count"),
+        _derived_argument("merge_count"),
+        _SEGMENT_COUNT,
+    ),
+    "_compile_persistent_segmented_reduction_ptx": (
+        _VALUES,
+        _OFFSETS,
+        _OUTPUT,
+        *map(
+            _plan_argument,
+            (
+                "warp_ids",
+                "cta_ids",
+                "partial_ranges",
+                "partial_merge_ids",
+                "merge_records",
+            ),
+        ),
+        _scratch_argument("scratch", "readwrite"),
+        _scratch_argument("counters", "readwrite"),
+        _VALUE_COUNT,
+        *map(
+            _derived_argument,
+            (
+                "warp_task_count",
+                "cta_task_count",
+                "partial_count",
+                "merge_count",
+            ),
+        ),
+        _SEGMENT_COUNT,
+    ),
+}
+
+
+def _fake_compiler(name, arguments=None):
+    """Return a stand-in for one native compile function of the planner.
+
+    It emits no code. It returns placeholder PTX, one text per kernel, and
+    the launch contract the native function gives the canonical sum, with
+    the block it requests or the one the target description gives the
+    kernel. It carries the native name, which the runtime reads to check
+    the entry of the contract.
+
+    Args:
+        name: Name of the native compile function.
+        arguments: Contract arguments that replace the native ones.
+    """
+    blocks = _execution._target_description()
+    suffix = {
+        "_compile_split_partial_reduction_ptx": "__partial",
+        "_compile_split_merge_reduction_ptx": "__merge",
+    }.get(name, "")
+    default_block = {
+        "_compile_fused_segmented_reduction_ptx": blocks.cta_block_threads,
+        "_compile_persistent_segmented_reduction_ptx": (
+            blocks.persistent_block_threads
+        ),
+    }.get(name, blocks.split_block_threads)
+
+    def compile_ptx(_module, *, kernel_name, target, **options):
+        block = options.get("block_size", default_block)
+        contract = _abi.KernelContract(
+            _abi._VERSION,
+            "cuda",
+            kernel_name + suffix,
+            _abi.KernelLaunch("spmd-grid", (block, 1, 1)),
+            _FAKE_ARGUMENTS[name] if arguments is None else arguments,
+        )
+        ptx = f"{name} {kernel_name} {target} {sorted(options.items())}"
+        return "", ptx, _abi.serialize_kernel_contract(contract)
+
+    compile_ptx.__name__ = compile_ptx.__qualname__ = name
+    return compile_ptx
+
+
+def _install_fake_compilers(monkeypatch, *names):
+    """Replace the named native compile functions, or all, with fakes."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
+    for name in names or _FAKE_ARGUMENTS:
+        monkeypatch.setattr(native_swage, name, _fake_compiler(name))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -971,41 +2006,16 @@ def test_empty_persistent_sum_does_not_compile_allocate_or_launch(monkeypatch):
     prepared = _prepare_persistent_sum(values, offsets, output)
 
     assert prepared.resident_blocks == 0
-    assert prepared.launch_persistent() is None
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_persistent_sum_rejects_mismatched_plan_before_work(monkeypatch):
-    """Reject malformed dependency metadata before compilation or allocation."""
-    from mlir_swage._mlir_libs._swageDialectsNanobind import (
-        swage as native_swage,
-    )
-
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
-
-    def fail(*_args, **_kwargs):
-        pytest.fail("malformed persistent work must not continue")
-
-    monkeypatch.setattr(
-        native_swage,
-        "_materialize_segmented_plan",
-        lambda *_args, **_kwargs: ([], [], [0, 4096], [0, 0, 1]),
-    )
-    monkeypatch.setattr(
-        native_swage, "_compile_persistent_segmented_reduction_ptx", fail
-    )
-    monkeypatch.setattr(torch, "tensor", fail)
-    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
-
-    with pytest.raises(RuntimeError, match="materialized plan does not match"):
-        _prepare_persistent_sum(values, offsets, output)
+    assert prepared.launch() is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
     """Surface compilation failure before allocating private device state."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
@@ -1016,7 +2026,11 @@ def test_persistent_compile_failure_precedes_allocation_and_driver(monkeypatch):
     def continue_fail(*_args, **_kwargs):
         pytest.fail("persistent compile failure must stop preparation")
 
-    monkeypatch.setattr(segmented_runtime, "_compile_artifact", compile_fail)
+    monkeypatch.setattr(
+        native_swage,
+        "_compile_persistent_segmented_reduction_ptx",
+        compile_fail,
+    )
     monkeypatch.setattr(torch, "tensor", continue_fail)
     monkeypatch.setattr(_cuda_backend, "_get_driver", continue_fail)
 
@@ -1030,14 +2044,8 @@ def test_persistent_allocation_failure_precedes_launch(monkeypatch):
     values = torch.ones(4097, device="cuda")
     offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    monkeypatch.setattr(
-        _cuda_backend,
-        "_get_driver",
-        lambda: pytest.fail("allocation failure must precede driver access"),
-    )
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     monkeypatch.setattr(
         torch,
         "tensor",
@@ -1048,63 +2056,35 @@ def test_persistent_allocation_failure_precedes_launch(monkeypatch):
 
     with pytest.raises(MemoryError, match="persistent allocation failed"):
         _prepare_persistent_sum(values, offsets, output)
+    assert not driver.launches
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_launch_failure_has_no_static_fallback(monkeypatch):
     """Propagate the resident launch error without submitting another policy."""
 
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.launches = 0
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *_arguments):
-            self.launches += 1
+    class _FailingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
             raise RuntimeError("persistent launch failed")
 
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _FailingDriver())
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
     prepared = _prepare_persistent_sum(values, offsets, output)
 
     with pytest.raises(RuntimeError, match="persistent launch failed"):
-        prepared.launch_persistent()
-    assert driver.launches == 1
+        prepared.launch()
+    assert len(driver.launches) == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
     """Reject device drift before resetting counters or launching workers."""
-
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.launches = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *arguments):
-            self.launches.append(arguments)
-
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(33, device="cuda")
     offsets = torch.tensor([0, 33], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
@@ -1112,31 +2092,18 @@ def test_persistent_sum_rejects_a_different_current_device(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 999)
 
     with pytest.raises(ValueError, match="prepared device"):
-        prepared.launch_persistent()
+        prepared.launch()
     assert not driver.launches
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
     """Keep every private device allocation alive across submissions."""
-
-    class _Driver(_DriverLifecycle):
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *_arguments):
-            return None
-
     values = torch.ones(4098, device="cuda")
     offsets = torch.tensor([0, 1, 4098], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    monkeypatch.setattr(_cuda_backend, "_get_driver", _Driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     original_empty = torch.empty
     original_tensor = torch.tensor
     original_zeros = torch.zeros
@@ -1167,8 +2134,9 @@ def test_persistent_sum_retains_queue_and_dependency_storage(monkeypatch):
     assert references
     assert all(reference() is not None for reference in references)
 
-    prepared.launch_persistent()
+    prepared.launch()
     gc.collect()
+    assert len(driver.launches) == 1
     assert all(reference() is not None for reference in references)
 
 
@@ -1188,15 +2156,15 @@ def test_prepared_split_sum_matches_nontrivial_oracles(lengths):
     offsets = host_offsets.cuda()
     output = torch.full((len(lengths),), float("nan"), device="cuda")
 
-    _prepare_planned_sum(values, offsets, output).launch_mixed()
+    _prepare_planned_sum(values, offsets, output).mixed()
 
     expected = _pytorch_reference(host_values, host_offsets, "sum")
-    torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "sum"),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=0,
+        atol=0,
     )
 
 
@@ -1224,21 +2192,22 @@ def test_prepared_sum_rejects_output_aliases_before_driver_work(monkeypatch):
 def test_prepared_sum_uses_current_non_default_stream(policy):
     """Launch every prepared policy on PyTorch's current stream."""
     lengths = [0, 32, 33, 4097]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
     stream = torch.cuda.Stream()
 
     with torch.cuda.stream(stream):
-        getattr(prepared, f"launch_{policy}")()
+        getattr(prepared, policy)()
     stream.synchronize()
 
     torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
+        output.cpu(),
+        _pytorch_reference(host_values, host_offsets, "sum"),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -1247,18 +2216,17 @@ def test_prepared_sum_uses_current_non_default_stream(policy):
 def test_prepared_sum_supports_cuda_graph_replay(policy):
     """Capture prepared work after its immutable task IDs are ready."""
     lengths = [0, 32, 33, 4096]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.full((len(lengths),), float("nan"), device="cuda")
-    prepared = _prepare_planned_sum(values, device_offsets, output)
-    launch = getattr(prepared, f"launch_{policy}")
-    launch()
-    torch.cuda.synchronize()
-    launch()
-    torch.cuda.synchronize()
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
+    launch = getattr(prepared, policy)
+    for _ in range(2):
+        output.fill_(float("nan"))
+        launch()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -1266,30 +2234,29 @@ def test_prepared_sum_supports_cuda_graph_replay(policy):
     output.fill_(float("nan"))
     graph.replay()
 
-    torch.testing.assert_close(
-        output.cpu(), torch.tensor(lengths, dtype=torch.float32), rtol=0, atol=0
-    )
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("policy", ["warp", "cta", "mixed"])
+@pytest.mark.parametrize("slow", ["record upload", "segment id fill"])
 def test_prepared_sum_waits_for_task_initialization_across_streams(
-    monkeypatch, policy
+    monkeypatch, policy, slow
 ):
-    """Order asynchronous task initialization before another stream launches."""
+    """Order asynchronous task initialization before another stream launches.
+
+    A preparation leaves two kinds of task storage that may still be filling
+    when it returns: the uploaded records, and segment ids past the shared
+    tensor, which are filled on the device. Either one is made slow here.
+    """
     preparation_stream = torch.cuda.Stream()
     launch_stream = torch.cuda.Stream()
     launch_observed = torch.cuda.Event()
     launch_completed = threading.Event()
 
-    class _Driver(_DriverLifecycle):
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *_arguments):
+    class _ObservingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
             launch_observed.record(launch_stream)
 
     values = torch.ones(34, device="cuda", dtype=torch.float32)
@@ -1297,27 +2264,31 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     output = torch.empty(2, device="cuda", dtype=torch.float32)
     all_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
     mixed_task_storage = torch.empty(2, device="cuda", dtype=torch.int32)
+    _upload_shared_segment_ids()
     torch.cuda.synchronize()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", _Driver)
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
+    driver = _install_driver(monkeypatch, _ObservingDriver())
 
     def asynchronous_arange(*_args, **_kwargs):
-        torch.cuda._sleep(2_000_000_000)
+        if slow == "segment id fill":
+            torch.cuda._sleep(2_000_000_000)
         return all_task_storage
 
     def asynchronous_tensor(_data, *, dtype, device):
         assert dtype == torch.int32
         assert device == offsets.device
+        if slow == "record upload":
+            torch.cuda._sleep(2_000_000_000)
         return mixed_task_storage
 
+    if slow == "segment id fill":
+        # Two segments are past this limit, so their ids are filled here.
+        monkeypatch.setattr(_plan, "_IDENTITY_LIMIT", 1)
     monkeypatch.setattr(torch, "arange", asynchronous_arange)
     monkeypatch.setattr(torch, "tensor", asynchronous_tensor)
     with torch.cuda.stream(preparation_stream):
         prepared = _prepare_planned_sum(values, offsets, output)
     with torch.cuda.stream(launch_stream):
-        getattr(prepared, f"launch_{policy}")()
+        getattr(prepared, policy)()
 
     def observe_launch():
         launch_observed.synchronize()
@@ -1330,6 +2301,7 @@ def test_prepared_sum_waits_for_task_initialization_across_streams(
     launch_stream.synchronize()
     observer.join()
 
+    assert len(driver.launches) == 1
     assert not bypassed_initialization
 
 
@@ -1348,43 +2320,12 @@ def test_prepared_mixed_uses_one_ordered_fused_launch(
     monkeypatch, lengths, expected_ids, expected_counts, expected_grid
 ):
     """Submit stable warp IDs before CTA IDs through one fused kernel."""
-
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.loads = []
-            self.launches = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, ptx, kernel_name):
-            self.loads.append((ptx, kernel_name))
-            function = len(self.loads)
-            return function + 100, function
-
-        def launch_entry(self, function, contract, bindings, grid, stream):
-            self.launches.append(
-                (
-                    "mixed",
-                    function,
-                    grid,
-                    contract.launch.block[0],
-                    stream,
-                    bindings[1],
-                )
-            )
-
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
+    offsets = _offsets(lengths)
     values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
     device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     output = torch.empty(len(lengths), device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
+    driver = _install_driver(monkeypatch, _Driver())
+    _upload_shared_segment_ids()
     original_tensor = torch.tensor
     task_tensors = []
 
@@ -1397,66 +2338,34 @@ def test_prepared_mixed_uses_one_ordered_fused_launch(
     monkeypatch.setattr(torch, "tensor", capture_tensor)
 
     prepared = _prepare_planned_sum(values, device_offsets, output)
-    prepared.launch_mixed()
+    prepared.mixed()
 
     assert len(driver.launches) == 1
     assert len(task_tensors) == 1
-    kind, _, grid, block, _, arguments = driver.launches[0]
+    (launch,) = driver.launches
+    arguments = launch.arguments
     mixed_ids, mixed_tasks = task_tensors[-1]
-    assert kind == "mixed"
-    assert grid == expected_grid
-    assert block == 128
+    assert launch.grid == expected_grid
+    assert launch.block == (128, 1, 1)
     assert mixed_ids == expected_ids
-    assert arguments[3] == mixed_tasks.data_ptr()
-    assert arguments[5:] == expected_counts
+    # Only the fused kernel takes the two direct counts.
+    assert arguments["task_ids"] == mixed_tasks.data_ptr()
+    assert (
+        arguments["warp_task_count"],
+        arguments["cta_task_count"],
+    ) == expected_counts
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     """Submit direct work before every partial and every final merge."""
-
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.loads = []
-            self.launches = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, ptx, kernel_name):
-            self.loads.append((ptx, kernel_name))
-            return 100 + len(self.loads), len(self.loads)
-
-        def launch_entry(self, function, contract, bindings, grid, stream):
-            if contract.entry.endswith("__partial"):
-                phase = "partial"
-            elif contract.entry.endswith("__merge"):
-                phase = "merge"
-            else:
-                phase = "direct"
-            self.launches.append(
-                (
-                    phase,
-                    function,
-                    grid,
-                    contract.launch.block[0],
-                    stream,
-                    bindings[1],
-                )
-            )
-
     lengths = [1, 33, 4097, 8192, 0]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
+    offsets = _offsets(lengths)
     values = torch.ones(offsets[-1], device="cuda")
     device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     output = torch.empty(len(lengths), device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
+    driver = _install_driver(monkeypatch, _Driver())
+    _upload_shared_segment_ids()
     original_tensor = torch.tensor
     descriptor_tensors = []
 
@@ -1469,182 +2378,188 @@ def test_prepared_mixed_orders_direct_partial_and_merge_phases(monkeypatch):
     monkeypatch.setattr(torch, "tensor", capture_tensor)
 
     prepared = _prepare_planned_sum(values, device_offsets, output)
-    prepared.launch_mixed()
+    prepared.mixed()
 
-    assert [launch[0] for launch in driver.launches] == [
+    assert [launch.phase for launch in driver.launches] == [
         "direct",
         "partial",
         "merge",
     ]
     direct, partial, merge = driver.launches
-    assert direct[2:4] == ((2, 1, 1), 128)
-    assert direct[5][5:] == (2, 1)
-    assert partial[2:4] == ((4, 1, 1), 512)
-    assert partial[5][3:] == (offsets[-1], 4)
-    assert merge[2:4] == ((2, 1, 1), 512)
-    assert merge[5][3:] == (4, 2)
+    assert (direct.grid, direct.block) == ((2, 1, 1), (128, 1, 1))
+    assert (
+        direct.arguments["warp_task_count"],
+        direct.arguments["cta_task_count"],
+    ) == (2, 1)
+    assert (partial.grid, partial.block) == ((4, 1, 1), (512, 1, 1))
+    assert (
+        partial.arguments["value_count"],
+        partial.arguments["partial_count"],
+    ) == (offsets[-1], 4)
+    assert (merge.grid, merge.block) == ((2, 1, 1), (512, 1, 1))
+    assert (
+        merge.arguments["partial_count"],
+        merge.arguments["merge_count"],
+    ) == (4, 2)
+    # The merge reads the partial results where the partial kernel wrote
+    # them.
+    assert merge.arguments["scratch"] == partial.arguments["scratch"]
+    # One upload holds the direct ids, then the partial ranges, then the
+    # merge records, and each phase reads its list at its place in it. The
+    # merge of every partial task follows; only the persistent kernel reads
+    # that list.
     assert [data for data, _ in descriptor_tensors] == [
-        [0, 4, 1],
-        [34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],
-        [2, 0, 2, 3, 2, 4],
+        [
+            *[0, 4, 1],
+            *[34, 4130, 4130, 4131, 4131, 8227, 8227, 12323],
+            *[2, 0, 2, 3, 2, 4],
+            *[0, 0, 1, 1],
+        ]
     ]
-    assert direct[5][3] == descriptor_tensors[0][1].data_ptr()
-    assert partial[5][1] == descriptor_tensors[1][1].data_ptr()
-    assert merge[5][2] == descriptor_tensors[2][1].data_ptr()
+    records = descriptor_tensors[0][1].data_ptr()
+    assert direct.arguments["task_ids"] == records
+    assert partial.arguments["partial_ranges"] == records + 4 * 3
+    assert merge.arguments["merge_records"] == records + 4 * (3 + 8)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_split_only_mixed_skips_the_direct_phase(monkeypatch):
     """Do not compile, allocate, or launch an empty direct phase."""
-
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.launches = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, _function, _contract, _bindings, grid, _stream):
-            self.launches.append(grid)
-
-    def compile_without_direct(*args, lowering_kind, **kwargs):
-        if lowering_kind == "segmented_fused":
-            pytest.fail("split-only work must not compile a direct kernel")
-        return _fake_compiled_artifact(
-            *args, lowering_kind=lowering_kind, **kwargs
-        )
-
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", compile_without_direct
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
-
-    _prepare_planned_sum(values, offsets, output).launch_mixed()
-
-    assert driver.launches == [(2, 1, 1), (1, 1, 1)]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize(
-    "materialized",
-    [
-        ([0], [], [0, 4096, 4096, 4097], [0, 0, 2]),
-        ([], [], [0, 4096, 4095, 4097], [0, 0, 2]),
-        ([], [], [0, 4096, 4096, 4097], [1, 0, 2]),
-        ([], [], [0, 4096], [0, 0, 1]),
-    ],
-)
-def test_prepared_sum_rejects_mismatched_materialized_plan_before_work(
-    monkeypatch, materialized
-):
-    """Reject duplicate, overlapping, misassigned, or omitted split work."""
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
 
-    def fail(*_args, **_kwargs):
-        pytest.fail("malformed split work must not continue")
+    def reject_direct(*_args, **_kwargs):
+        pytest.fail("split-only work must not compile a direct kernel")
 
     monkeypatch.setattr(
-        native_swage,
-        "_materialize_segmented_plan",
-        lambda *_args, **_kwargs: materialized,
+        native_swage, "_compile_fused_segmented_reduction_ptx", reject_direct
     )
-    monkeypatch.setattr(native_swage, "_compile_segmented_reduction_ptx", fail)
-    monkeypatch.setattr(torch, "arange", fail)
-    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(4097, device="cuda")
     offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
     output = torch.empty(1, device="cuda")
 
-    with pytest.raises(RuntimeError, match="materialized plan does not match"):
-        _prepare_planned_sum(values, offsets, output)
+    _prepare_planned_sum(values, offsets, output).mixed()
+
+    assert [(launch.phase, launch.grid) for launch in driver.launches] == [
+        ("partial", (2, 1, 1)),
+        ("merge", (1, 1, 1)),
+    ]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_warm_preparation_reuses_compilation_and_context_load(monkeypatch):
-    """Compile and load each identical prepared entry only once."""
-    original_compile = _cuda_backend._compile_native
-    driver = _cuda_backend._get_driver()
-    original_load = driver.load
+    """Compile and load each kernel once, and lease it per preparation.
+
+    A preparation holds one lease on each module it launches for as long
+    as it lives. Collecting it gives the leases back, and the modules stay
+    loaded for the next preparation.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
+
     compiles = []
     loads = []
 
-    def compile_native(*args, **kwargs):
-        compiles.append((args[4], dict(args[5])))
-        return original_compile(*args, **kwargs)
+    def counted(compile_ptx):
+        @functools.wraps(compile_ptx)
+        def compile_and_count(module, **options):
+            compiles.append(compile_ptx.__name__)
+            return compile_ptx(module, **options)
+
+        return compile_and_count
+
+    for name in (
+        "_compile_segmented_reduction_ptx",
+        "_compile_fused_segmented_reduction_ptx",
+    ):
+        monkeypatch.setattr(
+            native_swage, name, counted(getattr(native_swage, name))
+        )
+    driver = _cuda_backend._get_driver()
+    original_load = driver.load
 
     def load(ptx, entry):
         loads.append(entry)
         return original_load(ptx, entry)
 
-    monkeypatch.setattr(
-        _runtime,
-        "_cached_identity",
-        lambda: {"revision": None, "clean": False, "llvm": "llvm-pin"},
-    )
-    monkeypatch.setattr(_cuda_backend, "_compile_native", compile_native)
     monkeypatch.setattr(driver, "load", load)
-    _runtime._artifact_cache.clear()
-    _cuda_backend._loaded_functions.clear()
-    _cuda_backend._retired_loaded.clear()
+    monkeypatch.setattr(
+        _execution,
+        "_ptx_memo",
+        _runtime._BoundedCache(_runtime._CACHE_LIMIT),
+    )
+    monkeypatch.setattr(_cuda_backend, "_loaded_functions", OrderedDict())
+    monkeypatch.setattr(_cuda_backend, "_retired_loaded", {})
     values = torch.ones(34, device="cuda")
     offsets = torch.tensor([0, 1, 34], dtype=torch.int32, device="cuda")
     output = torch.empty(2, device="cuda")
 
     first = _prepare_planned_sum(values, offsets, output)
     second = _prepare_planned_sum(values, offsets, output)
+    entries = list(_cuda_backend._loaded_functions.values())
 
-    assert first is not second
-    assert sorted(kind for kind, _ in compiles) == [
-        "segmented",
-        "segmented",
-        "segmented_fused",
+    # The pure warp and CTA kernels, then the fused one.
+    assert sorted(compiles) == [
+        "_compile_fused_segmented_reduction_ptx",
+        "_compile_segmented_reduction_ptx",
+        "_compile_segmented_reduction_ptx",
     ]
-    assert len(loads) == 3
-    assert first._leases.keys() == second._leases.keys()
-    for name, lease in first._leases.items():
-        assert lease.entry is second._leases[name].entry
-        assert lease.entry.leases == 2
+    assert loads == ["segmented_sum"] * 3
+    assert len(entries) == 3
+    assert [entry.leases for entry in entries] == [2, 2, 2]
+
+    del first
+    gc.collect()
+    assert [entry.leases for entry in entries] == [1, 1, 1]
+    del second
+    gc.collect()
+    assert [entry.leases for entry in entries] == [0, 0, 0]
+    assert all(entry.cache_resident for entry in entries)
+    assert not any(entry.unloaded for entry in entries)
+    # The modules leave the cache with this test. Nothing launched or
+    # leases them, so they are unloaded here.
+    for entry in entries:
+        driver.module_unload(entry.module)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_contract_binding_failure_precedes_plan_allocation(monkeypatch):
-    """Reject an unknown named plan binding before allocation or driver work."""
+def test_contract_binding_failure_precedes_any_launch(monkeypatch):
+    """Refuse a contract that names a value the runtime lacks, unlaunched.
 
-    def compile_with_bad_fused_contract(*args, lowering_kind, **kwargs):
-        artifact = _fake_compiled_artifact(
-            *args, lowering_kind=lowering_kind, **kwargs
-        )
-        if lowering_kind != "segmented_fused":
-            return artifact
-        raw = artifact.contract_json.replace('"task_ids"', '"unknown_tasks"')
-        return artifact._replace(
-            contract_json=raw,
-            contract=_runtime._parse_compiler_contract(raw),
-        )
-
-    def fail(*_args, **_kwargs):
-        pytest.fail("binding failure must precede allocation and driver work")
-
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", compile_with_bad_fused_contract
+    The fused contract here names `unknown_tasks` where the kernel takes
+    `task_ids`. Arguments are bound once the task storage exists, so the
+    refusal follows the module loads and the uploads, and precedes every
+    launch.
+    """
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
     )
-    monkeypatch.setattr(torch, "arange", fail)
-    monkeypatch.setattr(_cuda_backend, "_get_driver", fail)
+
+    name = "_compile_fused_segmented_reduction_ptx"
+    renamed = tuple(
+        dataclasses.replace(argument, key="unknown_tasks")
+        if argument.key == "task_ids"
+        else argument
+        for argument in _FAKE_ARGUMENTS[name]
+    )
+    _install_fake_compilers(monkeypatch)
+    monkeypatch.setattr(native_swage, name, _fake_compiler(name, renamed))
+    driver = _install_driver(monkeypatch, _Driver())
     values = torch.ones(1, device="cuda")
     offsets = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     output = torch.empty(1, device="cuda")
 
-    with pytest.raises(ValueError, match="missing unknown_tasks"):
+    with pytest.raises(
+        ValueError,
+        match="^plan bindings do not match contract: missing unknown_tasks$",
+    ):
         _prepare_planned_sum(values, offsets, output)
+    # The warp, CTA, and fused modules were leased before binding.
+    assert len(driver.loads) == 3
+    assert not driver.launches
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1677,15 +2592,17 @@ def test_prepared_sum_rejects_invalid_limits_before_work(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
     """Surface split compilation failure without allocating runtime state."""
+    from mlir_swage._mlir_libs._swageDialectsNanobind import (
+        swage as native_swage,
+    )
 
-    def compile_or_fail(*args, lowering_kind, **kwargs):
-        if lowering_kind == "segmented_split_partial":
-            raise RuntimeError("partial compile failed")
-        return _fake_compiled_artifact(
-            *args, lowering_kind=lowering_kind, **kwargs
-        )
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("partial compile failed")
 
-    monkeypatch.setattr(segmented_runtime, "_compile_artifact", compile_or_fail)
+    _install_fake_compilers(monkeypatch, "_compile_segmented_reduction_ptx")
+    monkeypatch.setattr(
+        native_swage, "_compile_split_partial_reduction_ptx", fail
+    )
     monkeypatch.setattr(
         torch,
         "arange",
@@ -1707,28 +2624,25 @@ def test_split_compile_failure_precedes_allocation_and_driver(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_split_allocation_failure_precedes_launch(monkeypatch):
     """Surface descriptor allocation failure without dispatching a kernel."""
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    monkeypatch.setattr(
-        _cuda_backend,
-        "_get_driver",
-        lambda: pytest.fail("allocation failure must precede driver access"),
-    )
-
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
+    values = torch.ones(4097, device="cuda")
+    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
+    output = torch.empty(1, device="cuda")
+    # The records are the task storage a preparation allocates; the segment
+    # ids are shared and already on the device.
+    _upload_shared_segment_ids()
     monkeypatch.setattr(
         torch,
-        "arange",
+        "tensor",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             MemoryError("task allocation failed")
         ),
     )
-    values = torch.ones(4097, device="cuda")
-    offsets = torch.tensor([0, 4097], device="cuda", dtype=torch.int32)
-    output = torch.empty(1, device="cuda")
 
     with pytest.raises(MemoryError, match="task allocation failed"):
         _prepare_planned_sum(values, offsets, output)
+    assert not driver.launches
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -1745,60 +2659,30 @@ def test_split_launch_failures_stop_later_phases(
 ):
     """Stop the ordered stream sequence at its first launch failure."""
 
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.phases = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, kernel_name):
-            return 1, kernel_name
-
-        def launch_entry(self, _function, contract, *_arguments):
-            if contract.entry.endswith("__partial"):
-                phase = "partial"
-            elif contract.entry.endswith("__merge"):
-                phase = "merge"
-            else:
-                phase = "direct"
-            self.phases.append(phase)
+    class _FailingDriver(_Driver):
+        def launch_entry(self, *arguments):
+            super().launch_entry(*arguments)
+            phase = self.launches[-1].phase
             if phase == failed_phase:
                 raise RuntimeError(f"{phase} launch failed")
 
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _FailingDriver())
     values = torch.ones(4098, device="cuda")
     offsets = torch.tensor([0, 1, 4098], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
     prepared = _prepare_planned_sum(values, offsets, output)
 
     with pytest.raises(RuntimeError, match=f"{failed_phase} launch failed"):
-        prepared.launch_mixed()
-    assert driver.phases == expected
+        prepared.mixed()
+    assert [launch.phase for launch in driver.launches] == expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_sum_retains_private_split_storage(monkeypatch):
     """Keep task descriptors and scratch alive for every prepared launch."""
-
-    class _Driver(_DriverLifecycle):
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *_arguments):
-            return None
-
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
-    monkeypatch.setattr(_cuda_backend, "_get_driver", _Driver)
+    _install_fake_compilers(monkeypatch)
+    driver = _install_driver(monkeypatch, _Driver())
     original_arange = torch.arange
     original_empty = torch.empty
     original_tensor = torch.tensor
@@ -1832,8 +2716,9 @@ def test_prepared_sum_retains_private_split_storage(monkeypatch):
     assert references
     assert all(reference() is not None for reference in references)
 
-    prepared.launch_mixed()
+    prepared.mixed()
     gc.collect()
+    assert len(driver.launches) == 3
     assert all(reference() is not None for reference in references)
 
 
@@ -1861,41 +2746,23 @@ def test_empty_prepared_sum_does_not_compile_allocate_or_launch(monkeypatch):
 
     prepared = _prepare_planned_sum(values, offsets, output)
 
-    assert prepared.launch_warp() is None
-    assert prepared.launch_cta() is None
-    assert prepared.launch_mixed() is None
+    assert prepared.warp() is None
+    assert prepared.cta() is None
+    assert prepared.mixed() is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_prepared_sum_rejects_a_different_current_device(monkeypatch):
     """Do not dispatch a prepared policy after the current device changes."""
-
-    class _Driver(_DriverLifecycle):
-        def __init__(self):
-            self.launches = []
-
-        def current_context(self):
-            return id(self)
-
-        def load(self, _ptx, _kernel_name):
-            return 1, 1
-
-        def launch_entry(self, *arguments):
-            self.launches.append(arguments)
-
     values = torch.ones(34, device="cuda", dtype=torch.float32)
     offsets = torch.tensor([0, 1, 34], device="cuda", dtype=torch.int32)
     output = torch.empty(2, device="cuda")
-    driver = _Driver()
-    monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
-    monkeypatch.setattr(
-        segmented_runtime, "_compile_artifact", _fake_compiled_artifact
-    )
+    driver = _install_driver(monkeypatch, _Driver())
     prepared = _prepare_planned_sum(values, offsets, output)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 999)
 
     with pytest.raises(ValueError, match="prepared device"):
-        prepared.launch_mixed()
+        prepared.mixed()
     assert not driver.launches
 
 
@@ -1903,24 +2770,21 @@ def test_prepared_sum_rejects_a_different_current_device(monkeypatch):
 def test_prepared_mixed_sum_is_repeatable():
     """Run the same fused launch twice without stale warp or CTA state."""
     lengths = [0, 32, 33, 0, 1, 4097]
-    offsets = [0]
-    for length in lengths:
-        offsets.append(offsets[-1] + length)
-    values = torch.ones(offsets[-1], device="cuda", dtype=torch.float32)
-    device_offsets = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    host_values, host_offsets = _case(lengths)
     output = torch.empty(len(lengths), device="cuda", dtype=torch.float32)
-    prepared = _prepare_planned_sum(values, device_offsets, output)
+    prepared = _prepare_planned_sum(
+        host_values.cuda(), host_offsets.cuda(), output
+    )
+    expected = _pytorch_reference(host_values, host_offsets, "sum")
 
-    prepared.launch_mixed()
-    first = output.clone()
-    output.fill_(float("nan"))
-    prepared.launch_mixed()
-
-    torch.testing.assert_close(output, first, rtol=0, atol=0)
+    for _ in range(2):
+        output.fill_(float("nan"))
+        prepared.mixed()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min"])
 def test_gpu_reduction_is_repeatable(kind):
     """Run the same loaded shape twice without stale CTA state."""
     host_values, host_offsets = _case([0, 2, 0, 129])
@@ -1933,7 +2797,7 @@ def test_gpu_reduction_is_repeatable(kind):
     output.fill_(float("nan"))
     launch_gpu(values, offsets, output, kind)
 
-    torch.testing.assert_close(output, first)
+    torch.testing.assert_close(output, first, rtol=0, atol=0)
 
 
 def test_cpu_max_propagates_nan_and_uses_negative_infinity_identity():
@@ -1946,6 +2810,8 @@ def test_cpu_max_propagates_nan_and_uses_negative_infinity_identity():
     torch.testing.assert_close(
         actual,
         torch.tensor([float("nan"), float("-inf"), 5.0]),
+        rtol=0,
+        atol=0,
         equal_nan=True,
     )
 
@@ -1962,15 +2828,59 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
     launch_gpu(values, offsets, output, "max")
 
     expected = torch.tensor([float("nan"), float("-inf"), 5.0])
-    torch.testing.assert_close(output.cpu(), expected, equal_nan=True)
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
     torch.testing.assert_close(
         output.cpu(),
         cpu_oracle(host_values, host_offsets, "max"),
+        rtol=0,
+        atol=0,
         equal_nan=True,
     )
 
 
-# Softmax tolerances, measured on an RTX A6000 at sm_86.
+def test_cpu_min_propagates_nan_and_uses_positive_infinity_identity():
+    """Make min NaN and empty semantics explicit in the CPU oracle."""
+    values = torch.tensor([3.0, float("nan"), 1.0, 5.0, 4.0])
+    offsets = torch.tensor([0, 3, 3, 5], dtype=torch.int32)
+
+    actual = cpu_oracle(values, offsets, "min")
+
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([float("nan"), float("inf"), 4.0]),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_min_propagates_nan_and_uses_positive_infinity_identity():
+    """Match the specified min semantics through CTA reduction."""
+    host_values = torch.tensor([3.0, float("nan"), 1.0, 5.0, 4.0])
+    host_offsets = torch.tensor([0, 3, 3, 5], dtype=torch.int32)
+    values = host_values.cuda()
+    offsets = host_offsets.cuda()
+    output = torch.empty(3, device="cuda")
+
+    launch_gpu(values, offsets, output, "min")
+
+    expected = torch.tensor([float("nan"), float("inf"), 4.0])
+    torch.testing.assert_close(
+        output.cpu(), expected, rtol=0, atol=0, equal_nan=True
+    )
+    torch.testing.assert_close(
+        output.cpu(),
+        cpu_oracle(host_values, host_offsets, "min"),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
+
+
+# GPU softmax tolerance against PyTorch, measured on an RTX A6000 at sm_86.
 #
 # The dominant term is the f32 rounding of `x * 1.44269502`, whose relative
 # effect on exp2 is about 6e-08 per unit of intra-segment spread. It is
@@ -1980,19 +2890,67 @@ def test_gpu_max_propagates_nan_and_uses_negative_infinity_identity():
 # constant, so the fix for a failure just above rtol is the distribution.
 _GPU_RTOL, _GPU_ATOL = 2e-6, 1e-7
 
-# Anything compared against cpu_softmax_oracle carries a hard 5e-06 relative
-# floor, because the oracle parses printMemrefF32's six-significant-digit
-# text. That floor is the transport, not the arithmetic.
-_ORACLE_RTOL, _ORACLE_ATOL = 1e-5, 1e-6
+# Tolerances against cpu_softmax_oracle, derived instead of measured.
+#
+# The oracle returns exact f32 bit patterns, so nothing here pays for a
+# transport. What remains is arithmetic, counted in unit roundoffs
+# u = eps32 / 2 for one segment of n elements whose logits are quarter
+# multiples (the shift by the maximum is then exact) with spread at most 4.
+#
+# Each exponential differs between two paths by at most 11 u:
+# - Oracle against PyTorch. The oracle evaluates exp2(fl(c * log2e)) where
+#   PyTorch evaluates exp(c). Rounding the product moves the result by
+#   |c| u, at most 4 u, and the f32 constant log2e is 0.22 u low, at most
+#   0.9 u more. glibc documents a known maximum error of 1 ulp (2 u) for
+#   exp2f, and 2 ulp (4 u) are budgeted for PyTorch's exp.
+# - GPU against oracle. Both use the same f32 product, so that term
+#   cancels. PTX documents ex2.approx.f32 within 2 ulp of the correctly
+#   rounded result (5 u), and exp2f adds 2 u, 7 u together.
+#
+# The normalizer is a sum of positive terms. It inherits at most the same
+# 11 u from its terms, plus (n - 1) u of rounding on each side, because no
+# summation order puts an element through more than n - 1 rounding
+# additions. The final division rounds once on each side.
+#
+# The normalizer is common to a segment, so the ratio between any two
+# outputs of one segment does not depend on it. To first order:
+#   outputs within a segment agree up to one common factor within
+#       (2 * 11 + 4) u = 13 eps32, and
+#   that factor is within
+#       (2 * 11 + 2 + 2 * (n - 1)) u = (12 + n - 1) eps32 of one.
+# _SOFTMAX_ELEMENT_EPS = 14 leaves one eps32 for the higher-order terms.
+#
+# The first bound is independent of n and resolves 1.7e-06 at every
+# position. The second is what the reduction order requires: the oracle
+# chains n - 1 additions, so the relative bound reaches 4.9e-04 for the
+# 4096-element segment. The former flat pair (rtol 1e-05, atol 1e-06) was
+# dominated by its absolute term on long segments, whose outputs are near
+# 1e-03 or smaller, so the allowed error is now smaller at every compared
+# element except the outlier itself (1.0 in a 127-element segment, 1.7e-05
+# against 1.1e-05). On an RTX A6000 at sm_86 the largest observed
+# deviations are 2.9e-06 for the common factor (the 4096-element segment)
+# and 3.3e-07 for the spread within a segment.
+#
+# Outputs below the smallest normal f32 are subnormal and carry absolute
+# accuracy only. That covers the one-outlier segment, whose other outputs
+# are near 4e-44 and whose spread of 102 is outside the budget above.
+_SOFTMAX_ELEMENT_EPS = 14
 
 
 def _softmax_case(lengths, outlier=None):
-    """Build a softmax case, optionally planting one dominant value."""
-    values, offsets = _case(lengths)
+    """Build a softmax case, optionally planting one dominant value.
+
+    Softmax keeps its own logits, quarter steps from -2 to 2 with period
+    17, instead of the reduction pattern. The tolerances below are sized
+    by intra-segment spread, and every output element is compared, so the
+    position of each value is already observable here.
+    """
+    offsets = _offsets(lengths)
+    index = torch.arange(offsets[-1])
+    values = ((index % 17) - 8).to(torch.float32) / 4
     if outlier is not None:
-        values = values.clone()
-        values[int(offsets[1])] = outlier
-    return values, offsets
+        values[offsets[1]] = outlier
+    return values, torch.tensor(offsets, dtype=torch.int32)
 
 
 SOFTMAX_CASES = [
@@ -2003,6 +2961,26 @@ SOFTMAX_CASES = [
     pytest.param([1, 127, 640], 100.0, id="one-outlier"),
     pytest.param([0, 5, 0, 7, 0, 3, 0, 1, 0], None, id="alternating-empty"),
 ]
+
+
+def _assert_softmax_matches_oracle(actual, expected, offsets):
+    """Compare two f32 softmax results under the derived segment bounds."""
+    assert actual.shape == expected.shape
+    floor = torch.finfo(torch.float32).tiny
+    for begin, end in pairwise(offsets.tolist()):
+        got = actual[begin:end].double()
+        want = expected[begin:end].double()
+        rtol = (_SOFTMAX_ELEMENT_EPS + end - begin - 1) * _EPS32
+        assert ((got - want).abs() <= floor + rtol * want.abs()).all(), (
+            f"segment [{begin}, {end}) exceeds rtol {rtol}"
+        )
+        normal = want >= floor
+        if normal.any():
+            ratio = got[normal] / want[normal]
+            limit = 1 + _SOFTMAX_ELEMENT_EPS * _EPS32
+            assert ratio.max() <= ratio.min() * limit, (
+                f"segment [{begin}, {end}) disagrees between positions"
+            )
 
 
 def _pytorch_softmax_reference(values, offsets):
@@ -2033,9 +3011,7 @@ def test_cpu_softmax_matches_pytorch(lengths, outlier):
     actual = cpu_softmax_oracle(values, offsets)
     expected = _pytorch_softmax_reference(values, offsets)
 
-    torch.testing.assert_close(
-        actual, expected, rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL
-    )
+    _assert_softmax_matches_oracle(actual, expected, offsets)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -2058,11 +3034,10 @@ def test_gpu_softmax_matches_pytorch_and_cpu_oracle(lengths, outlier):
     torch.testing.assert_close(
         output.cpu(), expected, rtol=_GPU_RTOL, atol=_GPU_ATOL
     )
-    torch.testing.assert_close(
+    _assert_softmax_matches_oracle(
         output.cpu(),
         cpu_softmax_oracle(host_values, host_offsets),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
+        host_offsets,
     )
 
 
@@ -2079,17 +3054,16 @@ def test_gpu_softmax_is_repeatable():
     output.fill_(float("nan"))
     launch_softmax_gpu(values, offsets, output)
 
-    torch.testing.assert_close(output, first)
+    torch.testing.assert_close(output, first, rtol=0, atol=0)
 
 
 def test_cpu_softmax_of_singleton_is_exactly_one():
-    """A one-element segment normalizes to 1.0 within the text transport.
+    """A one-element segment normalizes to exactly 1.0.
 
-    The assertion uses no tolerance, but the value reaches it through
-    printMemrefF32's six significant digits, so its real strictness is the
-    5e-06 floor documented above and not bit equality. That is still about
-    twice as tight as _ORACLE_RTOL. The bit-exactness claim belongs to the
-    GPU twin, which compares device memory directly.
+    The shifted logit is zero, exp2 of zero is one, a sum of one term is
+    that term, and a value divided by itself is one. The oracle returns
+    result bits, so the zero tolerance here is bit equality, the same claim
+    the GPU twin makes on device memory.
     """
     values, offsets = _softmax_case([1, 1, 1])
 
@@ -2114,6 +3088,46 @@ def test_gpu_softmax_of_singleton_is_exactly_one():
     launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
 
     torch.testing.assert_close(output.cpu(), torch.ones(3), rtol=0, atol=0)
+
+
+def _uniform_softmax_case():
+    """Segments of identical logits whose softmax is exactly 1 / n.
+
+    Within a segment every shifted logit is exactly zero, exp2 of zero is
+    exactly one on both backends, n ones sum to n in any order, and one
+    divided by a power of two is exact. A normalizer that misses or repeats
+    one element gives 1 / (n - 1) or 1 / (n + 1) instead, which the derived
+    tolerance admits on a long segment. Neighbouring segments hold
+    different logits, so a window that reaches into a neighbour changes the
+    maximum or a term. This checks how many elements the normalizer
+    counted, not which positions were read inside one segment.
+    """
+    lengths = [2, 4096, 1, 65536, 64]
+    levels = torch.tensor([0.5, -1.25, 3.0, 1.75, -0.25])
+    counts = torch.tensor(lengths)
+    values = torch.repeat_interleave(levels, counts)
+    expected = torch.repeat_interleave(1 / counts.float(), counts)
+    return values, torch.tensor(_offsets(lengths), dtype=torch.int32), expected
+
+
+def test_cpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The sequential normalizer counts every element of a long segment."""
+    values, offsets, expected = _uniform_softmax_case()
+
+    actual = cpu_softmax_oracle(values, offsets)
+
+    assert _bits(actual) == _bits(expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_gpu_softmax_of_identical_logits_is_exactly_uniform():
+    """The one-CTA normalizer counts every element of a long segment."""
+    host_values, host_offsets, expected = _uniform_softmax_case()
+    output = torch.full((expected.numel(),), float("nan"), device="cuda")
+
+    launch_softmax_gpu(host_values.cuda(), host_offsets.cuda(), output)
+
+    assert _bits(output.cpu()) == _bits(expected)
 
 
 def _semantic_edge_case():
@@ -2207,54 +3221,51 @@ def test_rejects_softmax_output_aliasing_offsets():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_mismatched_blockdim_fails_at_launch_instead_of_wrong_sums():
     """Turn a launch-geometry mismatch into a driver error via reqntid."""
-    from mlir_swage import ir
     from mlir_swage._mlir_libs._swageDialectsNanobind import (
         swage as native_swage,
     )
-    from mlir_swage.dialects import swage as swage_dialect
-    from swage import _runtime
-    from swage._segmented_programs import _semantic_module
 
     values = torch.ones(256, device="cuda")
     offsets = torch.tensor([0, 256], dtype=torch.int32, device="cuda")
     output = torch.zeros(1, device="cuda")
-    major, minor = torch.cuda.get_device_capability()
-    with ir.Context() as context:
-        swage_dialect.register_dialects(context)
-        module = ir.Module.parse(_semantic_module("sum"))
-        _, ptx, contract_json = native_swage._compile_segmented_reduction_ptx(
-            module,
-            kernel_name="segmented_sum",
-            block_size=128,
-            target=f"sm_{major}{minor}",
-        )
-
+    module_text = _semantic_module("sum")
+    kernel = _execution._compile_once(
+        native_swage._compile_segmented_reduction_ptx,
+        module_text,
+        kernel_name="segmented_sum",
+        block_size=128,
+        target=_execution._target(torch, torch.cuda.current_device()),
+    )
+    bindings = _execution._bind(
+        kernel,
+        _execution._user_arguments(
+            module_text,
+            values=values.data_ptr(),
+            offsets=offsets.data_ptr(),
+            output=output.data_ptr(),
+            value_count=256,
+            segment_count=1,
+        ),
+        {},
+    )
+    # The same kernel and arguments, with 64 threads per block.
+    mismatched = dataclasses.replace(
+        kernel.contract, launch=_abi.KernelLaunch("spmd-grid", (64, 1, 1))
+    )
     driver = _cuda_backend._get_driver()
-    _, function = driver.load(ptx, "segmented_sum")
-    stream = torch.cuda.current_stream()
-    contract = _runtime._parse_compiler_contract(contract_json)
-    bindings = segmented_runtime._bind_artifact(
-        contract,
-        (values, offsets, output),
-        {"value_count": 256, "segment_count": 1},
-        {},
-        {},
-    )
-    mismatched = _runtime._abi.KernelContract(
-        contract.version,
-        contract.backend,
-        contract.entry,
-        _runtime._abi.KernelLaunch("spmd-grid", (64, 1, 1)),
-        contract.arguments,
-    )
+    module, function = driver.load(kernel.image, kernel.contract.entry)
+    stream = torch.cuda.current_stream().cuda_stream
 
-    with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
+    try:
+        with pytest.raises(RuntimeError, match="cuLaunchKernel failed"):
+            driver.launch_entry(
+                function, mismatched, bindings, (1, 1, 1), stream
+            )
+
         driver.launch_entry(
-            function, mismatched, bindings, (1, 1, 1), stream.cuda_stream
+            function, kernel.contract, bindings, (1, 1, 1), stream
         )
-
-    driver.launch_entry(
-        function, contract, bindings, (1, 1, 1), stream.cuda_stream
-    )
-    torch.cuda.synchronize()
+    finally:
+        torch.cuda.synchronize()
+        driver.module_unload(module)
     assert output.item() == 256.0

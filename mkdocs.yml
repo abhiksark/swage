@@ -65,6 +65,8 @@ nav:
   - User guide:
       - user-guide/index.md
       - Ragged Data: user-guide/ragged-data.md
+      - Segmented Calls: user-guide/segmented-calls.md
+      - Running Without the Compiler: user-guide/deployment.md
       - Writing Kernels: user-guide/writing-kernels.md
       - Launching Kernels: user-guide/launching.md
       - Execution Model: user-guide/execution-model.md
@@ -74,6 +76,7 @@ nav:
       - swage.language: reference/swage-language.md
       - Kernel Language: reference/kernel-language.md
       - Runtime and Environment: reference/runtime-environment.md
+      - Support Matrix: reference/support-matrix.md
       - Benchmarking: reference/benchmarking.md
   - Internals:
       - internals/index.md
@@ -82,11 +85,11 @@ nav:
       - Textual Swage IR: language/swage-ir.md
       - Segmented Reductions: internals/segmented-reductions.md
       - Ragged Softmax: internals/ragged-softmax.md
+      - SwagePlan Dialect: internals/swage-plan-dialect.md
       - Task Planning: internals/planning.md
       - Task Execution: internals/task-execution.md
       - Split Execution: internals/split-execution.md
       - Persistent Execution: internals/persistent-execution.md
-      - SwagePlan Dialect: internals/swage-plan-dialect.md
       - Compiler Tools and Passes: internals/compiler-tools.md
       - Verification: internals/verification.md
       - Benchmarks: internals/benchmarks.md
@@ -112,4 +115,7 @@ nav:
       - "ADR-0017: Private split-CTA reductions": adr/ADR-0017-private-split-cta-reductions.md
       - "ADR-0018: Private persistent task queue": adr/ADR-0018-private-persistent-task-queue.md
       - "ADR-0019: Composable private reductions": adr/ADR-0019-composable-private-reductions.md
+      - "ADR-0020: Planned per-function lowering": adr/ADR-0020-planned-per-function-lowering.md
+      - "ADR-0021: Artifact format": adr/ADR-0021-ahead-of-time-artifact-format.md
+      - "ADR-0022: Wider data model": adr/ADR-0022-wider-data-model-for-segmented-reductions.md
       - "ADR-0025: Compiler-generated launch contracts": adr/ADR-0025-compiler-generated-kernel-contracts.md

@@ -48,6 +48,6 @@
   <text x="920" y="440" font-size="20" font-weight="750" fill="#17212B" text-anchor="middle">retain submitted tensors</text>
   <text x="920" y="475" font-size="18" font-weight="500" fill="#00664B" text-anchor="middle">record_stream() on the launch stream</text>
   <text x="920" y="505" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">storage stays owned by PyTorch</text>
-  <text x="600" y="600" font-size="17" font-weight="650" fill="#17212B" text-anchor="middle">No copy, cast, device change, context creation, synchronization or fallback.</text>
+  <text x="600" y="600" font-size="17" font-weight="650" fill="#17212B" text-anchor="middle">No copy, cast, device change, context creation, synchronization, or fallback.</text>
   <text x="600" y="638" font-size="16" font-weight="500" fill="#4B5563" text-anchor="middle">Cache or driver integrity failures stop instead of selecting another backend.</text>
 </svg>

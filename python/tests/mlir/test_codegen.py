@@ -180,7 +180,11 @@ def test_multiply_codegen_preserves_source_and_launch_contract(backend, dtype):
         assert "vector." not in first[0]
         if backend == "cuda":
             assert first[1] == second[1]
-            assert "mul.rn.f32" in first[1]
+            # The LLVM passes of code generation narrow the f32 product of
+            # two f16 values to one f16 multiply. That rounds the same way:
+            # the exact product of two f16 values fits in an f32.
+            multiply = "mul.rn.f16" if dtype == "f16" else "mul.rn.f32"
+            assert multiply in first[1]
             assert ".reqntid 128, 1, 1" in first[1]
         else:
             assert first[1].entry == "multiply_kernel"

@@ -1,10 +1,23 @@
+# .github/dependabot.yml
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+  # Covers pyproject.toml and requirements-ci.txt. The hosted workflows and
+  # docs/requirements.txt, which Read the Docs installs, take every pin
+  # from requirements-ci.txt.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # mlir/python/requirements.txt of the pinned LLVM release caps these.
+      # Raise a limit only in the change that moves the pin.
+      - dependency-name: ml-dtypes
+        versions: [">0.6.0"]
+      - dependency-name: nanobind
+        versions: [">=3.0"]
+      - dependency-name: numpy
+        versions: [">2.1.2"]

@@ -8,11 +8,11 @@ disagree, the reference is normative.
 
 | Page | Scope |
 |---|---|
-| [swage](swage.md) | Package exports: `jit`, kernel objects, `emit_mlir`, `launch`, exceptions, `swage.env` |
+| [swage](swage.md) | Package exports: `jit`, kernel objects, `emit_mlir`, `launch`, `segment_reduce`, `segment_softmax`, exceptions, `swage.compile`, `swage.env` |
 | [swage.language](swage-language.md) | The symbolic kernel-language exports |
 | [Kernel Language](kernel-language.md) | The accepted Python source grammar |
-| [Runtime and Environment](runtime-environment.md) | Launch validation, targets, cache, streams, and diagnostics |
-| [Benchmarking](benchmarking.md) | Installed-wheel vector-add CLI, frozen raw evidence, and enforcement |
+| [Runtime and Environment](runtime-environment.md) | Launch validation, segmented calls, targets, cache, artifacts, streams, and diagnostics |
+| [Support Matrix](support-matrix.md) | Tested, admitted, and unknown Python, PyTorch, driver, and GPU environments |
 
 Compiler-facing references, including the MLIR dialects and registered
 passes, live under [Internals](../internals/index.md); they are not public

@@ -2,48 +2,70 @@
 
 # User Guide
 
-The user guide explains how Swage thinks about ragged data and how to use
-the supported public surface. It reads in order; each page builds on the
-one before it.
+The user guide explains how Swage models ragged data and how to use the
+public surface. The two meet in one place: two functions run a fixed
+reduction or a softmax over segments. The first page describes the segment
+storage model, the second calls those two functions on it, and the third
+serves them from kernels that were compiled ahead of time. The next two
+pages write and launch the kernels the kernel language accepts, a fixed-block
+vector add or multiply that uses no segment, because there is no public
+segment syntax. The last page returns to the model and states which parts
+of it are public.
 
-This guide describes the v0.5.2 native-wheel contract; publication and release
-qualification are pending, and v0.5.1 remains the latest released tag. See
-[Installation](../getting-started/installation.md) before using version-pinned
-install commands.
+This guide describes the `v0.5.2` native-wheel contract. Its publication and
+release qualification are pending, and `v0.5.1` remains the latest released
+tag. Read [Installation](../getting-started/installation.md) before using a
+version-pinned install command.
 
-Runnable snippets state their requirements:
+Status labels are load-bearing everywhere in this documentation. Public is
+the application surface, not a claim that an unreleased artifact is
+qualified. Private qualification is tested contributor machinery, not
+public API. Planned work has not passed a public gate.
 
-- **wheel-only**: a v0.5.2 native wheel, including private `mlir_swage`,
-  needs no local compiler build. It can import `swage`, capture kernels,
-  emit MLIR with an explicit signature, and run `python -m swage.env --json`
-  without PyTorch or a GPU.
-- **Native CPU**: that wheel plus PyTorch CPU tensors for explicit
-  `backend="cpu"` launch.
-- **CUDA GPU**: that wheel, a CUDA-enabled PyTorch build, an admitted NVIDIA
-  GPU, and the installed driver for explicit `backend="cuda"` launch.
+Runnable snippets in this guide state one of three requirement tiers:
+
+- **wheel-only**: the `v0.5.2` native wheel, which includes the private
+  `mlir_swage` bindings, with no PyTorch and no GPU. It can import `swage`,
+  capture kernels, emit MLIR with an explicit signature, and run
+  `python -m swage.env --json`. With `numpy` added, it can also write an
+  artifact with `python -m swage.compile`.
+- **Native CPU**: that wheel plus PyTorch, for an explicit `backend="cpu"`
+  launch on CPU tensors.
+- **CUDA GPU**: that wheel, a CUDA-enabled PyTorch build, `numpy`, an
+  admitted NVIDIA GPU, and the installed driver, for an explicit
+  `backend="cuda"` launch and for the two segmented calls.
 
 A [source build](../getting-started/installation.md#build-from-source) can
-supply native bindings instead of a wheel. A frontend-only editable install
-can capture source and report the environment, but cannot emit or launch
-without those bindings. The authoritative
-[support matrix](../reference/runtime-environment.md#support-matrix) defines
-supported ABIs and qualified versus best-effort CUDA targets. CUDA is the
-default selection; neither backend silently falls back.
+supply the native bindings instead of a wheel, through
+`PYTHONPATH=build/python_packages`. A frontend-only editable install has no
+bindings: it can capture source, check a kernel against the kernel language,
+and report the environment, but it cannot emit or launch, and it runs a
+segmented call only from an artifact directory. The
+[Support Matrix](../reference/support-matrix.md) lists the versions each
+tier is tested with, and the qualified and best-effort CUDA targets. CUDA is
+the default backend of `launch()`; neither backend falls back to the other.
 
-Status labels are load-bearing everywhere. Public is the application surface,
-not a claim that an unreleased artifact is qualified. Private qualification
-is tested contributor machinery, not public API, and its Python modules are
-excluded from native wheels. Planned work has not passed a public gate.
+Four committed examples follow the guide: `examples/emit_fixed_vector_add.py`
+runs at the wheel-only tier, `examples/fixed_vector_add.py` and
+`examples/fixed_vector_multiply.py` run at the Native CPU or CUDA GPU tier,
+and `examples/segment_reduce.py` runs at the CUDA GPU tier.
 
 Read the guide in this order:
 
-1. [Ragged Data](ragged-data.md): the storage model behind everything.
-2. [Writing Kernels](writing-kernels.md): capture, the kernel language,
-   and compile-only emission.
-3. [Launching Kernels](launching.md): what happens between `launch()`
-   and the explicitly selected backend.
-4. [Execution Model](execution-model.md): segments, tasks, and tiles,
-   and how execution machinery grows from them.
+1. [Ragged Data](ragged-data.md): the segment storage model and its
+   offsets contract. Public today for the two segmented calls.
+2. [Segmented Calls](segmented-calls.md): `segment_reduce` and
+   `segment_softmax`, their results, their cost, and their limits. Public
+   today.
+3. [Running Without the Compiler](deployment.md): compiling the kernels of
+   those two calls ahead of time and serving the calls from the result.
+   Public today.
+4. [Writing Kernels](writing-kernels.md): capture, the kernel language,
+   and compile-only emission of the fixed-block kernels. Public today.
+5. [Launching Kernels](launching.md): what happens between `launch()` and
+   the explicitly selected backend for those kernels. Public today.
+6. [Execution Model](execution-model.md): segments, tasks, and tiles,
+   and which of them each status covers.
 
 Continue with [Ragged Data](ragged-data.md), or jump to the
 [API reference](../reference/index.md) for exact contracts.

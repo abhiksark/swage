@@ -1,0 +1,163 @@
+# python/tests/mlir/artifact_child.py
+"""Run the public segmented calls from an artifact in a bare process.
+
+`test_artifact.py` starts this script in a process of its own, with
+`SWAGE_ARTIFACT_DIR` set and with a copy of the pure `swage` package on the
+path. The script runs every case it is given and reports what the process
+loaded:
+
+    python artifact_child.py CASES RESULTS [importable]
+
+CASES is a `torch.save` file of `{name: (kind, values, offsets)}` with host
+tensors, where kind is a kind of `segment_reduce` or `"softmax"`. RESULTS
+receives
+the host result of every case, the files mapped into the process, and what
+the driver launches with.
+
+Without the third argument the script makes `mlir_swage` unimportable
+first. With `importable` it leaves the bindings on the path, checks that
+the segmented calls did not import them, and then launches the fixed
+vector add, which does need them, to show that both run in one process.
+"""
+
+import importlib.abc
+import os
+import re
+import sys
+
+# The file names a compiler library of Swage, LLVM, or MLIR is mapped under.
+COMPILER_LIBRARY = re.compile(
+    r"LLVM|MLIR|mlir|SwagePythonCAPI|swageDialects|nanobind"
+)
+
+
+class _NoNativeBindings(importlib.abc.MetaPathFinder):
+    """Refuse every import of `mlir_swage`, wherever it could be found."""
+
+    def find_spec(self, name, path=None, target=None):
+        """Raise for `mlir_swage` and its submodules; pass on the rest."""
+        if name == "mlir_swage" or name.startswith("mlir_swage."):
+            raise ModuleNotFoundError(
+                f"{name} is unimportable in this process", name=name
+            )
+        return None
+
+
+def mapped_files():
+    """Return the files that are mapped into this process."""
+    with open("/proc/self/maps", encoding="utf-8") as maps:
+        return sorted(
+            {
+                fields[5]
+                for fields in (line.split(None, 5) for line in maps)
+                if len(fields) == 6 and fields[5].startswith("/")
+            }
+        )
+
+
+def _launch_vector_add(swage, torch):
+    """Compile and launch the fixed vector add, which needs the bindings.
+
+    Returns:
+        The output and the expected sum, on the host.
+    """
+    import swage.language as sl
+
+    @swage.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK: sl.constexpr):
+        pid = sl.program_id(0)
+        offsets = pid * BLOCK + sl.arange(0, BLOCK)
+        mask = offsets < n
+        x = sl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = sl.load(y_ptr + offsets, mask=mask, other=0.0)
+        sl.store(output_ptr + offsets, x + y, mask=mask)
+
+    count, block = 1025, 64
+    x = torch.arange(count, dtype=torch.float32, device="cuda")
+    y = torch.full((count,), 0.5, device="cuda")
+    output = torch.full((count,), float("nan"), device="cuda")
+    add_kernel.launch(
+        arguments={"x_ptr": x, "y_ptr": y, "output_ptr": output, "n": count},
+        constexprs={"BLOCK": block},
+        grid=((count + block - 1) // block,),
+    )
+    return output.cpu(), (x + y).cpu()
+
+
+def _compiler_libraries():
+    """Return the mapped files that belong to the compiler."""
+    return [
+        path.strip()
+        for path in mapped_files()
+        if COMPILER_LIBRARY.search(os.path.basename(path.strip()))
+    ]
+
+
+def _launches_with_the_runtime_library(cuda_backend, artifact):
+    """Return whether the driver launches through the library of `artifact`.
+
+    The driver prefers the compiled launcher of the bindings and takes the
+    split launcher only without one, so both are checked.
+    """
+    driver = cuda_backend._get_driver()
+    return (
+        driver._native_launch is None
+        and getattr(driver._split_launch, "__self__", None) is artifact
+    )
+
+
+def main(cases_path, results_path, bindings="blocked"):
+    """Run every case from the selected artifact and save the report."""
+    if bindings == "blocked":
+        sys.meta_path.insert(0, _NoNativeBindings())
+    import swage
+    import torch
+    from swage import _artifact, _cuda_backend
+
+    results = {}
+    for name, (kind, values, offsets) in torch.load(cases_path).items():
+        values, offsets = values.cuda(), offsets.cuda()
+        if kind == "softmax":
+            result = swage.segment_softmax(values, offsets)
+        else:
+            result = swage.segment_reduce(values, offsets, kind)
+        results[name] = result.cpu()
+
+    mapped = [path.strip() for path in mapped_files()]
+    compiler = [
+        path
+        for path in mapped
+        if COMPILER_LIBRARY.search(os.path.basename(path))
+    ]
+    assert "mlir_swage" not in sys.modules, "mlir_swage was imported"
+    assert not compiler, f"compiler libraries are mapped: {compiler}"
+    report = {
+        "results": results,
+        "mapped": mapped,
+        "swage_file": swage.__file__,
+        "path": list(sys.path),
+        "modules": sorted(
+            name for name in sys.modules if name.startswith("mlir")
+        ),
+        "launches_with_the_runtime_library": (
+            _launches_with_the_runtime_library(
+                _cuda_backend, _artifact.selected()
+            )
+        ),
+    }
+    if bindings == "importable":
+        # The same process can still compile: the public launch imports the
+        # bindings, and the driver keeps the launcher of the artifact.
+        output, expected = _launch_vector_add(swage, torch)
+        report["vector_add"] = (output, expected)
+        report["compiler_mapped_after_the_launch"] = _compiler_libraries()
+        report["launcher_after_the_launch_is_the_runtime_library"] = (
+            _launches_with_the_runtime_library(
+                _cuda_backend, _artifact.selected()
+            )
+        )
+    torch.save(report, results_path)
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])

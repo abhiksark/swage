@@ -101,3 +101,30 @@ program meaning.
   remain distinct backend contracts.
 - Public segmented syntax, additional policies, dtypes, and operations remain
   separate capability decisions with independent gates.
+
+## Amendment: segmented arguments under ADR-0020
+
+- Date: 2026-10-04
+
+The planned segmented lowerings take the segment ABI of
+[ADR-0020](ADR-0020-planned-per-function-lowering.md): a segment function
+declares `values`, `offsets`, `output`, `value_count`, and `segment_count`,
+and `feature_count` for rank-two values, as parameters with a `swage.role`.
+Their contracts therefore record the declared counts as `user` arguments, like
+the three buffers. The source index of a `user` argument is the position of
+its parameter in the segment function, which the planner records on the plan
+function parameter as `swage_plan.source_index`, because a plan function takes
+its parameters in the order of its kernel. Only the counts that the plan
+produces are `derived`: `task_count`, `warp_task_count`, `cta_task_count`,
+`partial_count`, and `merge_count`.
+
+The binding keys of the `plan`, `scratch`, and `derived` arguments are the
+field names of the kernel layout that the lowering builds the entry from:
+`task_ids`, `warp_ids`, `cta_ids`, `partial_ranges`, `partial_merge_ids`,
+`merge_records`, `scratch`, `counters`, and the derived counts above.
+
+The private segmented runner binds every segmented launch through these
+contracts. A format 2 artifact manifest records the arguments of each kernel
+by role and C type, from which the loader derives the same contract;
+`python -m swage.compile` checks that derivation against the contract of the
+compiler before it writes an artifact.

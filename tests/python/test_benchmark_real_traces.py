@@ -24,9 +24,7 @@ from benchmarks.real_traces import (
 )
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_TRACE_PATH = (
-    _ROOT / "benchmarks/traces/soc-Epinions1-outdegree-sample-v1.txt"
-)
+_TRACE_PATH = _ROOT / "benchmarks/traces/soc-Epinions1-outdegree-sample-v1.txt"
 _PROVENANCE_PATH = _TRACE_PATH.with_suffix(".provenance.json")
 _BANNER = b"%%MatrixMarket matrix coordinate pattern general\n"
 
@@ -40,9 +38,7 @@ def test_committed_trace_matches_frozen_provenance():
         "count": 32_768,
         "encoding": "one unsigned decimal integer plus LF per row",
         "filename": "soc-Epinions1-outdegree-sample-v1.txt",
-        "generator_revision": (
-            "benchmarks/prepare_soc_epinions1_trace.py:v1"
-        ),
+        "generator_revision": ("benchmarks/prepare_soc_epinions1_trace.py:v1"),
         "max": 1669,
         "median": 1.0,
         "min": 0,
@@ -85,8 +81,9 @@ def test_provenance_preserves_license_attribution_and_citations():
         "https://creativecommons.org/licenses/by/4.0/"
     )
     assert "SuiteSparse Matrix Collection" in license_record["attribution"]
-    assert "No vertex IDs or edges are redistributed." in (
-        license_record["modification_notice"]
+    assert (
+        "No vertex IDs or edges are redistributed."
+        in (license_record["modification_notice"])
     )
     assert {citation["doi"] for citation in provenance["citations"]} == {
         "10.1007/978-3-540-39718-2_23",
@@ -194,19 +191,14 @@ def test_matrix_parser_retains_sink_only_zero_rows():
 
     assert vertices == {1, 2, 3, 4}
     assert row_counts == {1: 2, 4: 1}
-    observed = sorted(
-        row_counts.get(vertex, 0) for vertex in vertices
-    )
+    observed = sorted(row_counts.get(vertex, 0) for vertex in vertices)
     assert observed == [0, 0, 1, 2]
 
 
 @pytest.mark.parametrize(
     "matrix_data",
     [
-        (
-            b"%%MatrixMarket matrix coordinate integer general\n"
-            b"2 2 1\n1 2\n"
-        ),
+        (b"%%MatrixMarket matrix coordinate integer general\n2 2 1\n1 2\n"),
         _BANNER + b"3 2 1\n1 2\n",
         _BANNER + b"2 2 2\n1 2\n",
     ],
@@ -245,14 +237,18 @@ def test_hash_selection_is_domain_separated_and_order_independent():
         ),
     )[:3]
 
-    assert _select_vertices(
-        vertices, sample_count=3, domain_separator=domain
-    ) == expected
-    assert _select_vertices(
-        list(reversed(vertices)),
-        sample_count=3,
-        domain_separator=domain,
-    ) == expected
+    assert (
+        _select_vertices(vertices, sample_count=3, domain_separator=domain)
+        == expected
+    )
+    assert (
+        _select_vertices(
+            list(reversed(vertices)),
+            sample_count=3,
+            domain_separator=domain,
+        )
+        == expected
+    )
     expected_lengths = {
         2: 20,
         4: 40,

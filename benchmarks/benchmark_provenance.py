@@ -1,0 +1,429 @@
+# benchmarks/benchmark_provenance.py
+"""Provenance block shared by the benchmark harnesses.
+
+A record names its source revision, but a revision does not say which
+native library produced the PTX, which machine ran it, or what else was
+running on the GPU. This module collects those facts so that every harness
+writes the same block.
+
+Nothing here fails a benchmark. A fact that cannot be read is recorded as
+None with the reason, so a reader can tell an exclusive GPU from an unknown
+one. PyTorch, Triton, and the native bindings are imported by the caller or
+inside functions, never when this module is imported.
+"""
+
+import hashlib
+import importlib.metadata
+import os
+import pathlib
+import subprocess
+import time
+from datetime import datetime, timezone
+
+_GPU_FIELDS = (
+    "uuid",
+    "name",
+    "driver_version",
+    "compute_mode",
+    "pstate",
+    "temperature.gpu",
+    "power.draw",
+    "power.limit",
+    "clocks.current.graphics",
+    "clocks.current.memory",
+    "utilization.gpu",
+)
+_PROCESS_FIELDS = ("gpu_uuid", "pid", "process_name", "used_memory")
+_CPU_ROOT = pathlib.Path("/sys/devices/system/cpu")
+_SAME_READING = 1e-6
+# A reading is on a grid when it is within this fraction of the finest step
+# of a grid point.
+_ON_GRID = 0.25
+# A coarser step is the timer tick when its share of the readings exceeds
+# an even spread by this much.
+_FAVOURED_SHARE = 0.25
+_LARGEST_MULTIPLE = 256
+
+
+def cpu_model(cpuinfo=pathlib.Path("/proc/cpuinfo")):
+    """Return the host processor model, or None when it is not reported."""
+    try:
+        lines = cpuinfo.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        name, _, value = line.partition(":")
+        if name.strip() == "model name":
+            return value.strip()
+    return None
+
+
+def _sysfs_value(path):
+    """Return the stripped text of one sysfs file, or None without it."""
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def cpu_frequency_policy(root=_CPU_ROOT):
+    """Return the frequency governor of every CPU and its driver.
+
+    The host side of a launch runs at whatever frequency the governor
+    grants, so a record states it.
+
+    Args:
+        root: The CPU directory of sysfs.
+
+    Returns:
+        ``governors`` with the number of CPUs under each governor, where a
+        CPU whose ``cpufreq/scaling_governor`` cannot be read counts under
+        ``unknown`` and a machine without CPU directories gives an empty
+        mapping; and the ``scaling_driver`` and
+        ``energy_performance_preference`` of the first CPU, each None when
+        it cannot be read.
+    """
+    governors = {}
+    for cpu in root.glob("cpu[0-9]*"):
+        governor = _sysfs_value(cpu / "cpufreq" / "scaling_governor")
+        governors[governor or "unknown"] = (
+            governors.get(governor or "unknown", 0) + 1
+        )
+    policy = root / "cpu0" / "cpufreq"
+    return {
+        "governors": dict(sorted(governors.items())),
+        "scaling_driver": _sysfs_value(policy / "scaling_driver"),
+        "energy_performance_preference": _sysfs_value(
+            policy / "energy_performance_preference"
+        ),
+    }
+
+
+def cpu_governor_unchanged(before, after):
+    """Return whether two governor samples agree.
+
+    Returns:
+        True when both samples read every CPU and are equal, False when
+        both read every CPU and differ, and None when either sample has an
+        unreadable CPU or no CPU at all.
+    """
+    samples = [before["governors"], after["governors"]]
+    if any(not sample or "unknown" in sample for sample in samples):
+        return None
+    return samples[0] == samples[1]
+
+
+def package_version(name):
+    """Return an installed package version without importing the package."""
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def native_sha256(paths):
+    """Hash the native library files that produce the PTX.
+
+    Args:
+        paths: Library paths; several may be links to one file.
+
+    Returns:
+        The SHA-256 of each distinct file by its resolved path.
+    """
+    digests = {}
+    for path in sorted({pathlib.Path(path).resolve() for path in paths}):
+        digest = hashlib.sha256()
+        with path.open("rb") as library:
+            for chunk in iter(lambda: library.read(1 << 20), b""):
+                digest.update(chunk)
+        digests[str(path)] = digest.hexdigest()
+    return digests
+
+
+def device_uuid(torch, device):
+    """Return the device UUID as nvidia-smi spells it, or None."""
+    uuid = getattr(torch.cuda.get_device_properties(device), "uuid", None)
+    return None if uuid is None else f"GPU-{uuid}"
+
+
+def _query(run, kind, fields):
+    """Return the rows of one nvidia-smi query, split into fields."""
+    result = run(
+        [
+            "nvidia-smi",
+            f"--query-{kind}={','.join(fields)}",
+            "--format=csv,noheader",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"nvidia-smi --query-{kind} exited {result.returncode}: {detail}"
+        )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def gpu_state(uuid, *, pid, run=subprocess.run):
+    """Sample the measured GPU and the other compute processes on it.
+
+    Args:
+        uuid: UUID of the measured device as nvidia-smi spells it, or None
+            when PyTorch does not report one. Without a UUID the state is
+            read only when the machine has a single GPU.
+        pid: Process id of the benchmark itself, left out of the list.
+        run: ``subprocess.run`` or a stand-in.
+
+    Returns:
+        ``gpu`` with the driver version, clocks, power, and temperature;
+        ``other_compute_processes`` with one entry per other process, an
+        empty list when there was none; ``error``; and the sample time. When
+        nvidia-smi cannot answer, ``gpu`` and ``other_compute_processes``
+        are None and ``error`` says why.
+    """
+    state = {
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+        "gpu": None,
+        "other_compute_processes": None,
+        "error": None,
+    }
+    try:
+        gpus = [
+            dict(zip(_GPU_FIELDS, row.split(", "), strict=True))
+            for row in _query(run, "gpu", _GPU_FIELDS)
+        ]
+        if uuid is None and len(gpus) != 1:
+            raise RuntimeError(
+                f"the measured device has no UUID and nvidia-smi lists "
+                f"{len(gpus)} GPUs"
+            )
+        measured = gpus[0]["uuid"] if uuid is None else uuid
+        processes = []
+        for row in _query(run, "compute-apps", _PROCESS_FIELDS):
+            gpu_uuid, process_id, rest = row.split(", ", 2)
+            name, _, memory = rest.rpartition(", ")
+            if gpu_uuid == measured and int(process_id) != pid:
+                processes.append(
+                    {
+                        "pid": int(process_id),
+                        "process_name": name,
+                        "used_memory": memory,
+                    }
+                )
+        state["gpu"] = next(
+            (gpu for gpu in gpus if gpu["uuid"] == measured), None
+        )
+        state["other_compute_processes"] = processes
+    except (OSError, RuntimeError, ValueError) as error:
+        state["error"] = f"{type(error).__name__}: {error}"
+    return state
+
+
+def other_compute_process_seen(before, after):
+    """Return whether another compute process was seen on the GPU.
+
+    Returns:
+        True when either sample lists one, False when both samples are
+        empty, and None when a sample is missing and none was seen, because
+        an unreadable GPU is not an exclusive GPU.
+    """
+    samples = [
+        state["other_compute_processes"] for state in (before, after)
+    ]
+    if any(samples):
+        return True
+    if any(sample is None for sample in samples):
+        return None
+    return False
+
+
+def record_loaded_ptx(driver):
+    """Record a hash of every PTX module the driver loads from now on.
+
+    The hash is taken when the module is loaded, so an entry that the
+    runtime later evicts from a cache is still in the record.
+
+    Args:
+        driver: The runtime CUDA driver wrapper. Its ``load(ptx,
+            kernel_name)`` is replaced by a recording pass-through.
+
+    Returns:
+        The live list of ``kernel``, ``sha256``, and ``bytes`` entries.
+    """
+    loaded = []
+    load = driver.load
+
+    def recording_load(ptx, kernel_name):
+        text = ptx.encode()
+        loaded.append(
+            {
+                "kernel": kernel_name,
+                "sha256": hashlib.sha256(text).hexdigest(),
+                "bytes": len(text),
+            }
+        )
+        return load(ptx, kernel_name)
+
+    driver.load = recording_load
+    return loaded
+
+
+def swage_build():
+    """Identify the Swage build of this process and record what it loads.
+
+    This is the only function of the benchmarks that reaches into the
+    runtime for provenance: the native library paths, the linked LLVM, and
+    the driver whose ``load`` receives every PTX module.
+
+    Returns:
+        The Swage part of the provenance block. ``loaded_ptx`` is the live
+        list from ``record_loaded_ptx``.
+    """
+    import swage
+    from mlir_swage._mlir_libs import _swageDialectsNanobind as extension
+    from swage import _cuda_backend, _runtime
+
+    return {
+        "swage": swage.__version__,
+        "llvm_pin": _runtime._compiler_identity()["llvm"],
+        "llvm_linked": getattr(extension.swage, "__llvm_version__", None),
+        "cuda_driver": _cuda_backend.driver_version(),
+        "native_sha256": native_sha256(_runtime._native_libraries()),
+        "loaded_ptx": record_loaded_ptx(_cuda_backend._get_driver()),
+    }
+
+
+def start(torch, build, *, run=subprocess.run, cpu_root=_CPU_ROOT):
+    """Start the provenance block of one benchmark process.
+
+    Args:
+        torch: The PyTorch module, with CUDA initialized.
+        build: ``swage_build()``.
+        run: ``subprocess.run`` or a stand-in.
+        cpu_root: The CPU directory of sysfs.
+
+    Returns:
+        The block, with the GPU state and the CPU frequency policy sampled
+        before the measurement. Pass it to ``finish`` after the measurement.
+    """
+    device = torch.cuda.current_device()
+    uuid = device_uuid(torch, device)
+    return {
+        "gpu": torch.cuda.get_device_name(device),
+        "gpu_uuid": uuid,
+        "cpu_model": cpu_model(),
+        "pytorch": torch.__version__,
+        "triton": package_version("triton"),
+        **build,
+        "gpu_state_before": gpu_state(uuid, pid=os.getpid(), run=run),
+        "cpu_frequency_before": cpu_frequency_policy(cpu_root),
+    }
+
+
+def finish(block, *, run=subprocess.run, cpu_root=_CPU_ROOT):
+    """Complete a block after the measurement and return it.
+
+    The GPU state and the CPU frequency policy are sampled again, the
+    loaded PTX entries are put in a stable order without repeats,
+    ``other_compute_process_seen`` summarizes the GPU samples, and
+    ``cpu_governor_unchanged`` compares the governor samples. The governor
+    is read at the two ends of the run, not watched in between. A harness
+    that rewrites its record as it goes may call this after every row: the
+    PTX list keeps recording, and a process or a governor change seen at an
+    earlier call stays seen.
+    """
+    block["gpu_state_after"] = gpu_state(
+        block["gpu_uuid"], pid=os.getpid(), run=run
+    )
+    distinct = {
+        (entry["kernel"], entry["sha256"]): entry
+        for entry in block["loaded_ptx"]
+    }
+    # In place: the driver keeps appending to this very list.
+    block["loaded_ptx"][:] = [distinct[key] for key in sorted(distinct)]
+    block["other_compute_process_seen"] = block.get(
+        "other_compute_process_seen"
+    ) or other_compute_process_seen(
+        block["gpu_state_before"], block["gpu_state_after"]
+    )
+    block["cpu_frequency_after"] = cpu_frequency_policy(cpu_root)
+    if block.get("cpu_governor_unchanged") is not False:
+        block["cpu_governor_unchanged"] = cpu_governor_unchanged(
+            block["cpu_frequency_before"], block["cpu_frequency_after"]
+        )
+    return block
+
+
+def smallest_step(values):
+    """Return the finest gap between distinct timer readings, or None.
+
+    A timer returns multiples of its tick, so the smallest gap between two
+    different readings is an upper bound of the tick. Readings that differ
+    by less than one part in a million are one reading: float arithmetic on
+    the same tick count does not always give the same last digit.
+    """
+    distinct = sorted(set(values))
+    gaps = [
+        later - earlier
+        for earlier, later in zip(distinct, distinct[1:])
+        if later - earlier > _SAME_READING * abs(later)
+    ]
+    return min(gaps, default=None)
+
+
+def timer_tick(readings):
+    """Return the step that a timer's readings favour, or None.
+
+    The finest gap between two readings is not always the step that limits
+    a measurement: CUDA event readings are multiples of 32 ns, yet most
+    intervals around a kernel come out as multiples of 1.024 us. This
+    returns the coarsest multiple of the finest step that holds far more of
+    the readings than an even spread over the finest step would put there,
+    and the finest step itself when no multiple does.
+
+    Args:
+        readings: Intervals returned by one timer, in one unit.
+
+    Returns:
+        The step in that unit. A single distinct reading bounds the step by
+        itself. None when no reading is positive.
+    """
+    readings = [reading for reading in readings if reading > 0]
+    fine = smallest_step([0.0, *readings])
+    if fine is None:
+        return None
+    # One long reading divided by its step count pins the finest step far
+    # better than the gap between two neighbouring readings does.
+    longest = max(readings)
+    fine = longest / round(longest / fine)
+
+    def share(step):
+        on_grid = sum(
+            abs(reading - round(reading / step) * step) < _ON_GRID * fine
+            for reading in readings
+        )
+        return on_grid / len(readings)
+
+    tick, excess = fine, _FAVOURED_SHARE
+    for multiple in range(2, _LARGEST_MULTIPLE + 1):
+        above_chance = share(fine * multiple) - 1 / multiple
+        if above_chance >= excess:
+            tick, excess = fine * multiple, above_chance
+    return tick
+
+
+def clock_tick_us(clock=time.perf_counter_ns, reads=10_000):
+    """Return the smallest advance of a nanosecond clock, in microseconds.
+
+    Back-to-back reads include the cost of the call, so the result is an
+    upper bound of the clock tick. None when the clock never advanced.
+    """
+    readings = [clock() for _ in range(reads)]
+    advances = [
+        later - earlier
+        for earlier, later in zip(readings, readings[1:])
+        if later > earlier
+    ]
+    return min(advances) / 1_000.0 if advances else None

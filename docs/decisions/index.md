@@ -28,11 +28,25 @@ gates belong in the roadmap.
 
 - [ADR-0013: Segmented fusion and map-store ABI](../adr/ADR-0013-fusion-and-map-store-abi.md)
 - [ADR-0014: Minimal SwagePlan gate](../adr/ADR-0014-minimal-swage-plan-gate.md)
+  (its planning dialect boundary is superseded by ADR-0020)
 - [ADR-0015: Minimal mixed-policy execution](../adr/ADR-0015-minimal-mixed-policy-execution.md)
 - [ADR-0016: Fused mixed-policy schedule](../adr/ADR-0016-fused-mixed-policy-schedule.md)
 - [ADR-0017: Private split-CTA reductions](../adr/ADR-0017-private-split-cta-reductions.md)
 - [ADR-0018: Private persistent task queue](../adr/ADR-0018-private-persistent-task-queue.md)
 - [ADR-0019: Composable private segmented reductions](../adr/ADR-0019-composable-private-reductions.md)
+- [ADR-0020: Segmented GPU lowering as a planned per-function conversion](../adr/ADR-0020-planned-per-function-lowering.md)
+  (accepted; implemented step by step, and the record says which steps
+  exist)
+
+## Segmented data model
+
+- [ADR-0022: Wider data model for the segmented reductions](../adr/ADR-0022-wider-data-model-for-segmented-reductions.md)
+  (accepted; implemented step by step, and the record says which steps
+  exist)
+
+## Deployment
+
+- [ADR-0021: Ahead-of-time artifact format](../adr/ADR-0021-ahead-of-time-artifact-format.md)
 
 ## Runtime and lowered ABI
 

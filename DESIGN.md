@@ -26,8 +26,10 @@ Three levels remain distinct:
 - A **tile** is a fixed physical warp or CTA step used to execute a task.
 
 Some ADRs use `tile<...>` as conceptual notation. There is no current Swage
-tile type. Current qualified warp and CTA paths use 32-thread and 128-thread
-steps respectively.
+tile type. Current qualified paths use 32-thread warp steps, 128-thread CTA
+steps, and 512-thread split partial and merge steps. Rank-two values use a
+128-thread column step, in which a thread reduces or normalizes one column
+of one segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
@@ -42,32 +44,29 @@ Python source or native test IR
         v
 verified Swage semantic MLIR
         |
-        +-- public canonical fixed vector add or multiply
-        |      +-- Native host lowering -> LLVM ExecutionEngine
-        |      `-- GPU lowering -> LLVM NVPTX -> PTX -> CUDA Driver API
-        +-- private direct segmented CPU/GPU qualification
-        `-- private single-stage sum/max planning and GPU split execution
+        +-- public canonical fixed vector add
+        +-- private direct segmented qualification
+        |     (public segment_softmax runs its softmax module)
+        +-- private single-stage reduction planning and split execution
+        |     (public segment_reduce runs its identity sum, max, and min)
+        |
+        v
+upstream MLIR GPU, SCF, NVVM, and LLVM infrastructure
+        |
+        v
+curated LLVM passes -> LLVM NVPTX -> PTX -> CUDA Driver API
 ```
-
-The backend-neutral boundary is the verified semantic module plus a
-compiler-generated physical launch contract. Backend choice selects one
-explicit admitted lowering; it does not introduce fallback or another IR.
 
 MLIR is the only production IR between Python and LLVM. The Python frontend
 constructs native operations directly through the pinned MLIR bindings.
 Textual MLIR is for tests, debugging, and reproducers, not the JIT
 construction path.
 
-Each admitted physical lowering constructs a versioned launch contract from
-the same ordered specification as its concrete function signature. The
-contract records backend, launch model, physical types, semantic or runtime
-ownership, access, and entry symbol. CUDA contracts additionally record block
-geometry. The contract is compiler metadata rather than another program IR;
-it is validated and removed before downstream lowering.
-
 The current fixed-block frontend and public execution subset are deliberately
 narrow. Native segmented modules exercise a separate private qualification
-surface. The canonical pipeline and links to exact references live in
+surface, and two public calls, `swage.segment_reduce` and
+`swage.segment_softmax`, run three fixed modules of it. The canonical
+pipeline and links to exact references live in
 [`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
 
 ## Semantic invariants
@@ -76,9 +75,19 @@ surface. The canonical pipeline and links to exact references live in
   runtime-sized register array.
 - A segment type carries element type only. Values, offsets, and runtime
   identity remain SSA operands.
+- A trailing feature dimension is a second logical axis. A program instance
+  is one segment and one column, its segment is that column as a run of
+  scalars, and it yields a scalar: neither the number of columns nor the
+  column enters a type, and no lowering holds one accumulator per column.
 - GPU thread and block IDs do not appear in semantic Swage IR.
 - Ordinary scalar arithmetic uses upstream `arith` and `math` operations.
 - Region captures are explicit and ordered.
+- A reduction combines every element of its segment exactly once and fixes
+  no combining order. A maximum and a minimum are the same in every
+  order. A floating-point sum is not: its rounding depends on the order
+  that a lowering and a schedule choose, so changing the task derivation
+  can change the result within rounding error. No lowering adds fast-math
+  flags.
 - Cross-segment effects must be explicit. A map-store writes only the
   corresponding segment range.
 - Unsupported syntax, module shapes, types, policies, and ABIs fail before
@@ -87,89 +96,92 @@ surface. The canonical pipeline and links to exact references live in
 ## Planning invariants
 
 `swage_plan` is a distinct private dialect because scheduling and semantic
-meaning have different invariants. Its current surface records only warp and
-CTA policies, one opaque task-range result, and one classification operation
-for an admitted capture-free, single-stage f32 sum or max. Static emitters
-reuse element programs and map chains; split merges combine scalar partials
-without reapplying element expressions.
+meaning have different invariants. It holds what a kernel lowering consumes:
+a plan function, whose signature is the parameter list of a kernel and whose
+launch width is an attribute, and a task operation that takes every buffer
+and every device bound as an operand. Every segmented kernel, and the
+sequential CPU oracle, is planned and then converted
+([ADR-0020](docs/adr/ADR-0020-planned-per-function-lowering.md)). The
+planning limits steer host classification only and are not part of plan IR.
+Static emitters reuse element programs and map chains; split merges combine
+scalar partials without reapplying element expressions.
 
 Compiler passes do not inspect runtime offset contents. Host classification
 validates that metadata before producing stable direct or split records.
 Split-CTA execution is task decomposition under the CTA policy, not a new
-policy.
-The fused mixed executor privately packs four warp task records into each
-128-thread block. This is a qualified physical execution strategy, not a
-public or general planner policy.
+policy. A function over rank-two values has one kernel schedule, the column
+policy: it has no task buffer, nothing classifies its segments, and no
+segment is split.
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion
 before a unique merge. Its clean A6000 run failed the predeclared performance
 gate, so the path remains experimental.
-General cost inference, public/general packed-warp planner policy, reusable
-queues, and public segmented execution remain planned. They are not current
-Swage ownership claims.
+General cost inference, schedule selection, packed warps, reusable queues, and
+public execution of caller-written segment programs remain planned. They are
+not current Swage ownership claims. The public segmented calls expose none
+of the planning controls: they prepare with the default limits and automatic
+selection.
 
 ## Runtime invariants
 
-- PyTorch owns tensor storage. On CUDA it also owns the active device,
-  context, and current stream.
-- Swage reads raw pointers only after validation and dispatches to exactly one
-  selected backend.
-- CUDA PTX is emitted in process through LLVM NVPTX and launched through the
-  CUDA Driver API. NVRTC is not a production dependency.
-- CUDA launch is asynchronous and records submitted tensors on the stream.
-  Native CPU launch invokes a process-local LLVM JIT entry synchronously.
-- No path silently copies, casts, synchronizes CUDA work, changes devices,
-  creates a CUDA context, or falls back to another backend or policy.
-- Compiler-produced launch contracts are validated against concrete physical
-  functions before executable loading or invocation. CUDA nanobind and ctypes
-  lanes marshal the same ordered typed values.
-- Process artifact state is bounded for both backends. CUDA loaded-entry
-  lookup state is separately bounded; lookup eviction does not imply module
-  unload because leases, per-stream completion events, current context, and
-  graph-capture lifetime are separate gates.
-- CUDA deferred unload only polls in the matching current context and never
-  synchronizes or changes contexts. Graph-captured modules remain pinned until
-  context destruction without an explicit graph lifetime hook.
+- PyTorch owns tensor storage, the active CUDA device and context, and the
+  current stream.
+- Swage reads raw pointers only after validation and launches through the
+  CUDA Driver API.
+- PTX is emitted in process through LLVM NVPTX. NVRTC is not a production
+  dependency. The two public segmented calls can instead read PTX that the
+  same compiler emitted ahead of time into an artifact directory; a process
+  that runs from one compiles nothing and does not import `mlir_swage`.
+- Launch is asynchronous. Submitted tensors are recorded on the stream.
+- No path silently casts, changes devices, creates a context, or falls back
+  to another backend or policy. The public launch path also does not copy. A
+  launch of a loaded kernel does not synchronize; a launch that loads a
+  kernel may synchronize the context once to unload modules that nothing
+  holds.
+- Private segmented qualification validates and classifies offsets, and
+  validates caller-supplied task IDs, on host copies made when a call is
+  validated or a plan is prepared. For CUDA tensors each copy synchronizes
+  with the device.
+- The public segmented calls prepare on every call and keep no plan, so each
+  call makes that host copy. A call is refused while its stream captures a
+  CUDA graph, and it does not synchronize after the enqueue.
 
 Runtime and cache requirements live only in
 [`docs/reference/runtime-environment.md`](docs/reference/runtime-environment.md).
 
 ## Package boundary
 
-The PyPI distribution is `swage-compiler`; its public import package is
-`swage`. The v0.5.2 native-wheel contract bundles self-contained private
-`mlir_swage`, fixed-contract stubs, native runtime libraries, licenses, and
-validated build provenance. Private segmented Python modules remain in source
-distributions and checkouts but are excluded from wheels.
+The PyPI distribution is `swage-compiler`; its import package is `swage`.
+It is built as one native wheel per CPython version, which holds `swage`,
+the private `mlir_swage` bindings, the native runtime library, the
+segmented modules behind the two public segmented calls, the license files,
+and the build record. The source distribution and a frontend-only editable
+install stay CMake-free. The release on PyPI, 0.5.1, is pure Python; the
+native wheel of 0.5.2 is not released yet.
 
-`mlir_swage` embeds the exact pinned MLIR Python core and generated Swage
-bindings. It never layers onto an unrelated external `mlir` package. Normal
-source builds retain `build/python_packages/mlir_swage`; wheel installs use
-the site-packages root. Asking CMake to enable bindings against an MLIR install
-without Python bindings, or against a release other than the exact pin, is an
-error. Native packaging does not expand the admitted public kernel subset.
+`mlir_swage` embeds the pinned MLIR Python core and generated Swage
+bindings. It never layers onto an unrelated external `mlir` package. A
+source build keeps it in `build/python_packages/mlir_swage`; a wheel
+installs it into site-packages. Asking CMake to enable the bindings against
+an MLIR install without Python bindings is an error. Native packaging does
+not widen the admitted public kernel subset.
 
 ## Verification strategy
 
 - Python tests cover source capture, diagnostics, package boundaries, launch
-  validation, specialization, cache integrity, backend selection, and CUDA
-  Driver marshalling.
-- Lit and FileCheck cover dialect parsing, verification, and admitted CPU/GPU
+  validation, specialization, cache integrity, and CUDA Driver marshalling.
+- Lit and FileCheck cover dialect parsing, verification, and admitted
   lowering shapes.
-- Native integration tests construct live MLIR through the build-tree package;
-  installed-wheel gates also exercise the public CPU path on every wheel ABI.
-- C++ tests cover host task classification, descriptor invariants, and
-  physical launch contracts.
+- Native integration tests construct live MLIR through the build-tree package.
+- C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow covers public fixed vector add or multiply plus
-  private segmented runtime qualification on a real NVIDIA device.
+- The trusted GPU workflow covers public fixed vector add, the public
+  segmented calls, and private segmented runtime qualification on a real
+  NVIDIA device.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
-- Release checks inspect native wheel tags, ELF dependencies and relocatability,
-  immutable build identity, licenses, size, and source/sdist byte reproducibility.
-  Installed-artifact A6000 SLO gates are separate from private research gates.
 
 The claim-to-test mapping lives in
 [`docs/internals/verification.md`](docs/internals/verification.md).

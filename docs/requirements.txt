@@ -1,4 +1,4 @@
 # docs/requirements.txt
-
-mkdocs==1.6.1
-mkdocs-material==9.7.7
+# Read the Docs and the hosted docs job install the hash-locked set that the
+# other hosted jobs use. The pins live in that file.
+-r ../requirements-ci.txt

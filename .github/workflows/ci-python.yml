@@ -1,3 +1,4 @@
+# .github/workflows/ci-python.yml
 name: ci-python
 
 on:
@@ -26,16 +27,20 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install frontend with dev extras
+      # requirements-ci.txt pins every tool and its dependencies by hash. The
+      # frontend is then installed in editable mode with the locked build
+      # backend, without CMake and without a download.
+      - name: Install hash-locked tools and the frontend
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" -Cwheel.cmake=false
+          python -m pip install --require-hashes -r requirements-ci.txt
+          python -m pip install --no-deps --no-build-isolation -e . \
+            -Cwheel.cmake=false
       - name: Lint
         run: ruff check .
       - name: Tests including typing and sdist reproducibility
         run: python -m pytest tests/python -q
       - name: Build CMake-free source distribution
-        run: python -m build --sdist
+        run: python -m build --sdist --no-isolation
       - name: Check source distribution metadata strictly
         run: python -m twine check --strict dist/*.tar.gz
 
@@ -69,7 +74,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+      # The file Read the Docs installs, so both builds use one toolchain.
       - name: Install docs toolchain
-        run: python -m pip install -e ".[docs]" -Cwheel.cmake=false
+        run: python -m pip install --require-hashes -r docs/requirements.txt
       - name: Build docs strictly
         run: make docs

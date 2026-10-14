@@ -1,33 +1,36 @@
 // test/Conversion/SwageToCPU/segmented-sum.mlir
-// RUN: swage-opt --swage-segmented-reduction-to-scf %s | FileCheck %s
+// RUN: swage-opt --swage-to-plan='schedule=sequential' \
+// RUN:   --swage-plan-to-scf %s | FileCheck %s
 
 module {
   func.func @segmented_sum(
-      %result: memref<?xf32>, %bounds: memref<?xi32>,
-      %input: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %input, %bounds, %sid
+    %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %result[%sid] : memref<?xf32>
+    memref.store %sum, %output[%sid] : memref<?xf32>
     return
   }
 }
 
 // CHECK-LABEL: func.func @segmented_sum(
-// CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<?xf32>
+// CHECK-SAME: %[[VALUES:[^:]+]]: memref<?xf32>
 // CHECK-SAME: %[[OFFSETS:[^:]+]]: memref<?xi32>
-// CHECK-SAME: %[[VALUES:[^)]+]]: memref<?xf32>
-// CHECK-SAME: )
+// CHECK-SAME: %[[OUTPUT:[^:]+]]: memref<?xf32>
+// CHECK-SAME: %{{[^:]+}}: i32
+// CHECK-SAME: %[[SEGMENT_COUNT:[^)]+]]: i32
 // CHECK: %[[ZERO:.*]] = arith.constant 0 : index
 // CHECK: %[[ONE:.*]] = arith.constant 1 : index
-// CHECK: %[[VALUE_COUNT:.*]] = memref.dim %[[VALUES]], %{{.*}} : memref<?xf32>
-// CHECK: %[[OFFSET_COUNT:.*]] = memref.dim %[[OFFSETS]], %{{.*}} : memref<?xi32>
-// CHECK: %[[SEGMENTS:.*]] = arith.subi %[[OFFSET_COUNT]], %[[ONE]] : index
+// CHECK: %[[SEGMENTS:.*]] = arith.index_cast %[[SEGMENT_COUNT]] : i32 to index
 // CHECK: scf.for %[[SID:.*]] = %[[ZERO]] to %[[SEGMENTS]] step %[[ONE]] {
 // CHECK:   %[[START_I32:.*]] = memref.load %[[OFFSETS]][%[[SID]]]
 // CHECK:   %[[NEXT:.*]] = arith.addi %[[SID]], %[[ONE]] : index

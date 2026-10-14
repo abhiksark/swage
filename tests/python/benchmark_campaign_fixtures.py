@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import sys
+import types
 from functools import lru_cache
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -20,10 +22,15 @@ _DISTRIBUTIONS = (
     "one-outlier",
     "soc-epinions1-outdegree-v1",
 )
+TICKS = {"clock": 0.05, "event": 0.032}
 
 
 @lru_cache(maxsize=None)
 def _module(name):
+    benchmarks = str(_ROOT / "benchmarks")
+    if benchmarks not in sys.path:
+        # The harness imports its sibling modules by name.
+        sys.path.insert(0, benchmarks)
     spec = importlib.util.spec_from_file_location(
         f"_fixture_{name}", _ROOT / "benchmarks" / f"{name}.py"
     )
@@ -32,15 +39,43 @@ def _module(name):
     return module
 
 
-def _measurement(median, samples, *, graph=False):
+def restamp(measurement, *, useful_bytes, tick):
+    """Recompute what a timing entry derives from its raw samples."""
+    samples = measurement["samples_us"]
+    summary = _module("benchmark_campaign").summarize_us(samples)
+    measurement["summary_us"] = summary
+    if "launches_per_sample" in measurement:
+        sample = summary["median"] * measurement["launches_per_sample"]
+        measurement["timer_tick_us"] = tick
+        measurement["tick_fraction_of_sample"] = (
+            None if tick is None else tick / sample
+        )
+        measurement["effective_gb_per_s"] = useful_bytes / (
+            summary["median"] * 1_000.0
+        )
+    return measurement
+
+
+def _measurement(median, samples):
     values = [float(median)] * samples
-    measurement = {
+    return {
         "samples_us": values,
         "summary_us": _module("benchmark_campaign").summarize_us(values),
     }
-    if graph:
-        measurement["available"] = True
-    return measurement
+
+
+def _timing_entry(median, samples, *, metric, useful_bytes):
+    entry = {
+        "samples_us": [float(median)] * samples,
+        "launches_per_sample": 1 if metric == "call" else 32,
+    }
+    if metric == "graph":
+        entry = {"available": True, **entry}
+    return restamp(
+        entry,
+        useful_bytes=useful_bytes,
+        tick=TICKS["clock" if metric == "call" else "event"],
+    )
 
 
 def _timing_method(candidates, samples, *, kernel=False):
@@ -68,14 +103,8 @@ def _timing_method(candidates, samples, *, kernel=False):
                 "graph_preparation": "all graphs captured before timed replay",
                 "units": {
                     "call": "microseconds per synchronized Python call",
-                    "batched_event": (
-                        "microseconds per launch in a "
-                        "32-launch CUDA-event batch"
-                    ),
-                    "graph": (
-                        "microseconds per launch in a captured "
-                        "32-launch graph replay"
-                    ),
+                    "batched_event": "microseconds per launch in a batch",
+                    "graph": "microseconds per launch in a graph replay",
                 },
             }
         )
@@ -84,12 +113,14 @@ def _timing_method(candidates, samples, *, kernel=False):
     return method
 
 
-def _kernel_timings(candidates, median, samples):
+def _kernel_timings(candidates, median, samples, useful_bytes):
     return {
         "timing_method": _timing_method(candidates, samples, kernel=True),
         "timings": {
             name: {
-                metric: _measurement(median, samples, graph=metric == "graph")
+                metric: _timing_entry(
+                    median, samples, metric=metric, useful_bytes=useful_bytes
+                )
                 for metric in ("call", "batched_event", "graph")
             }
             for name in candidates
@@ -97,8 +128,7 @@ def _kernel_timings(candidates, median, samples):
     }
 
 
-def _phase(median, samples, *, planning=False, changing=False):
-    candidates = ["swage_mixed", "triton_matched_task_partition"]
+def _phase(candidates, median, samples, *, planning=False, changing=False):
     phase = {
         "geometry": "rotated lengths" if changing else "fixed offsets reused",
         "included": [
@@ -111,7 +141,7 @@ def _phase(median, samples, *, planning=False, changing=False):
     }
     if planning:
         phase["excluded"] = [
-            "artifact compilation/cache lookup",
+            "kernel compilation/memo lookup",
             "contract binding",
             "module lease/load",
             "output allocation",
@@ -125,6 +155,7 @@ def _phase(median, samples, *, planning=False, changing=False):
 @lru_cache(maxsize=1)
 def _segmented_geometry():
     distributions = _module("distributions")
+    harness = _module("benchmark_triton_comparison")
     rows = []
     for name in _DISTRIBUTIONS:
         if name == _DISTRIBUTIONS[-1]:
@@ -136,21 +167,29 @@ def _segmented_geometry():
         warp_tasks = sum(length <= 32 for length in lengths)
         cta_tasks = len(lengths) - warp_tasks
         warp_programs = (warp_tasks + 3) // 4
-        configs = [
-            {"block": block, "num_warps": warps}
-            for block in (32, 64, 128, 256, 512, 1024, 2048, 4096)
-            if block >= stats["max"]
-            for warps in (1, 2, 4, 8)
-            if warps <= block // 32
-        ]
-        padded_elements = len(lengths) * stats["max"]
-        padding = padded_elements - stats["total"]
         row = {
             "case": "segmented-sum",
             "distribution": name,
+            "seed": 7,
+            "values": "ones",
             "segment_count": len(lengths),
             "statistics": stats,
-            "triton_sweep_configs": configs,
+            "useful_bytes": harness._useful_bytes(stats["total"], len(lengths)),
+            "check": {
+                "exact_segments": len(lengths),
+                "bounded_segments": 0,
+                "unchecked_segments": 0,
+            },
+            "skipped": {},
+            "excluded": [],
+            "triton_sweep_configs": [
+                {"block": block, "num_warps": warps}
+                for block, warps in harness._triton_sum_configs(stats["max"])
+            ],
+            "triton_looped_sweep_configs": [
+                {"block": block, "num_warps": warps}
+                for block, warps in harness._triton_looped_configs()
+            ],
             "matched_task_partition_triton": {
                 "comparison": (
                     "same host task partition; not identical execution"
@@ -180,20 +219,7 @@ def _segmented_geometry():
                 "cta_programs": cta_tasks,
                 "grid_programs": warp_programs + cta_tasks,
             },
-            "padded_layout": {
-                "rows": len(lengths),
-                "columns": stats["max"],
-                "packed_elements": stats["total"],
-                "padded_elements": padded_elements,
-                "padding_elements": padding,
-                "padding_fraction": padding / padded_elements
-                if padded_elements
-                else 0.0,
-                "storage_bytes": padded_elements * 4,
-                "dtype": "float32",
-                "input_materialization_timed": False,
-                "output_preallocated": True,
-            },
+            "padded_layout": harness._padded_layout(lengths),
         }
         if provenance is not None:
             row["trace_provenance"] = provenance
@@ -201,36 +227,26 @@ def _segmented_geometry():
     return rows
 
 
-def _compilation(rows, median):
-    signatures = [
-        {
-            "distribution": row["distribution"],
-            "value_count": row["statistics"]["total"],
-            "segment_count": row["segment_count"],
-            "warp_task_count": row["matched_task_partition_triton"][
-                "warp_tasks"
-            ],
-            "cta_task_count": row["matched_task_partition_triton"]["cta_tasks"],
-            "warp_programs": row["triton_fused_contract"]["warp_programs"],
-        }
-        for row in rows
-    ]
-    fixed = sorted(
-        {
-            (config["block"], config["num_warps"])
-            for row in rows
-            for config in row["triton_sweep_configs"]
-        }
-    )
+def _compilation(rows, method, median):
+    campaign = _module("benchmark_campaign")
+    signatures = campaign._signatures(rows, method)
     swage = ["swage_warp", "swage_cta", "swage_mixed"]
-    triton = [f"triton_b{block}_w{warps}" for block, warps in fixed]
-    triton += [
-        "triton_matched_packed",
-        *(f"triton_matched_cta_w{warps}" for warps in (1, 2, 4, 8)),
-        "triton_fused",
-    ]
+    if not any(
+        candidate.startswith("swage_")
+        for signature in signatures
+        for candidate in signature["candidates"]
+    ):
+        swage = []
+    triton, configurations = campaign._expected_triton_components(signatures)
     timings = {name: _measurement(median, 1) for name in swage + triton}
-    totals = {"swage_total": swage, "triton_total": triton}
+    totals = {
+        name: components
+        for name, components in (
+            ("swage_total", swage),
+            ("triton_total", triton),
+        )
+        if components
+    }
     for name, components in totals.items():
         timings[name] = _measurement(
             sum(
@@ -245,14 +261,8 @@ def _compilation(rows, median):
         "compiler_order": ["swage", "triton"],
         "component_order": swage + triton,
         "configurations": {
-            "swage_artifacts": ["warp", "cta", "mixed"],
-            "triton_fixed": [
-                {"block": block, "num_warps": warps} for block, warps in fixed
-            ],
-            "triton_matched_cta_num_warps": [1, 2, 4, 8],
-            "triton_fused_warp_programs": sorted(
-                {s["warp_programs"] for s in signatures}
-            ),
+            "swage_kernels": [name[len("swage_") :] for name in swage],
+            **configurations,
             "triton_case_signatures": signatures,
         },
         "derived_totals": totals,
@@ -264,16 +274,8 @@ def _compilation(rows, median):
         },
         "scope": {
             "swage": {
-                "included": [
-                    "specialization",
-                    "lowering",
-                    "persistent-cache write",
-                ],
-                "excluded": [
-                    "host plan materialization",
-                    "module load",
-                    "launch",
-                ],
+                "included": ["lowering", "PTX production"],
+                "excluded": ["host classification", "module load", "launch"],
             },
             "triton": {
                 "included": ["warmup specialization and compilation"],
@@ -290,12 +292,81 @@ def _compilation(rows, median):
     }
 
 
-def make_child(*, median=10.0, samples=2, warmups=1, suite="vadd"):
-    """Return a complete valid child; every ordinary measurement uses median."""
+def methodology(*, samples=2, warmups=1, suite="vadd", only=None, exclude=()):
+    """Return the methodology the harness writes for these controls."""
+    arguments = types.SimpleNamespace(
+        suite=suite,
+        warmups=warmups,
+        samples=samples,
+        distributions=list(_DISTRIBUTIONS),
+        segment_count=32_768,
+        seeds=[7],
+        values="ones",
+        candidates=only,
+        exclude_candidates=list(exclude),
+    )
+    method = _module("benchmark_triton_comparison")._methodology(
+        arguments, dict(TICKS)
+    )
+    return method
+
+
+def provenance():
+    """Return a complete provenance block of one process."""
+    return {
+        "gpu": "NVIDIA RTX A6000",
+        "gpu_uuid": "GPU-fixture",
+        "cpu_model": "Fixture CPU",
+        "pytorch": "2.12.0+cu130",
+        "triton": "3.7.0",
+        "swage": "0.5.2",
+        "llvm_pin": "llvmorg-22.1.8",
+        "llvm_linked": "22.1.8",
+        "cuda_driver": "13.0",
+        "native_sha256": {"/build/libSwage.so": "a" * 64},
+        "loaded_ptx": [
+            {"kernel": "segmented_sum", "sha256": "b" * 64, "bytes": 2}
+        ],
+        "gpu_state_before": {"gpu": {"temperature.gpu": "50"}},
+        "cpu_frequency_before": {"governors": {"performance": 24}},
+        "gpu_state_after": {"gpu": {"temperature.gpu": "55"}},
+        "other_compute_process_seen": False,
+        "cpu_frequency_after": {"governors": {"performance": 24}},
+        "cpu_governor_unchanged": True,
+    }
+
+
+def make_child(
+    *,
+    median=10.0,
+    samples=2,
+    warmups=1,
+    suite="vadd",
+    only=None,
+    exclude=(),
+):
+    """Return a complete valid child; every ordinary measurement uses median.
+
+    Args:
+        median: Every sample of every ordinary measurement.
+        samples: Samples per measurement.
+        warmups: Warmups per measurement.
+        suite: ``vadd``, ``segmented-sum``, or ``all``.
+        only: Candidate filter selectors to keep, or None for all.
+        exclude: Candidate filter selectors to leave out.
+    """
     if suite not in {"vadd", "segmented-sum", "all"}:
         raise ValueError("unknown fixture suite")
+    harness = _module("benchmark_triton_comparison")
+    method = methodology(
+        samples=samples,
+        warmups=warmups,
+        suite=suite,
+        only=only,
+        exclude=exclude,
+    )
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark": "swage-triton-comparison",
         "recorded_at": _TIMESTAMP,
         "source": {"revision": "a" * 40, "worktree_clean": True, "dirty": []},
@@ -319,22 +390,8 @@ def make_child(*, median=10.0, samples=2, warmups=1, suite="vadd"):
                 "build_type": "Release",
             },
         },
-        "methodology": {
-            "warmups_per_candidate_per_measurement": warmups,
-            "samples_per_candidate_per_measurement": samples,
-            "candidate_sampling": "deterministic rotating/interleaved order",
-            "batched_launches": 32,
-            "graph_replay_launches": 32,
-            "graph_capture_before_interleaved_replay": True,
-            "kernel_timing_compilation_excluded": True,
-            "end_to_end_compilation_excluded_after_explicit_warmup": True,
-            "planning_output_preallocated": True,
-            "planning_kernel_launch_excluded": True,
-            "planning_compilation_excluded": True,
-            "end_to_end_not_combined_with_graph_samples": True,
-            "correctness_checked_before_timing": True,
-            "triton_dependency": "optional runtime import; not a project dep",
-        },
+        "provenance": provenance(),
+        "methodology": method,
         "compilation": {
             "status": "not-run",
             "reason": "segmented-sum suite not selected",
@@ -356,6 +413,8 @@ def make_child(*, median=10.0, samples=2, warmups=1, suite="vadd"):
                 {
                     "case": "vadd",
                     "n": n,
+                    "seed": 7,
+                    "useful_bytes": 12 * n,
                     "swage_block": 256,
                     "swage_grid": (n + 255) // 256,
                     "triton_sweep_blocks": [128, 256, 512, 1024],
@@ -363,39 +422,49 @@ def make_child(*, median=10.0, samples=2, warmups=1, suite="vadd"):
                         "swage": "BLOCK=256 for the vector-add campaign",
                         "triton": "compile-time BLOCK, one program per block",
                     },
-                    **_kernel_timings(candidates, median, samples),
+                    **_kernel_timings(candidates, median, samples, 12 * n),
                 }
             )
     if suite in {"segmented-sum", "all"}:
         rows = copy.deepcopy(_segmented_geometry())
         for row in rows:
-            candidates = [
-                "swage_warp",
-                "swage_cta",
-                "swage_mixed",
-                "torch_segment_reduce",
-                "torch_padded",
-                "triton_fused",
-                *(
-                    f"triton_b{c['block']}_w{c['num_warps']}"
-                    for c in row["triton_sweep_configs"]
-                ),
-                "triton_matched_task_partition",
-                *(f"triton_matched_task_partition_w{n}" for n in (2, 4, 8)),
+            maximum = row["statistics"]["max"]
+            candidates = harness._case_candidates(maximum, only, exclude)
+            full = harness._row_candidates(maximum)
+            wanted = harness._select(full, only, exclude)
+            row["excluded"] = [name for name in full if name not in wanted]
+            row["candidate_order"] = candidates
+            row.update(
+                _kernel_timings(
+                    candidates, median, samples, row["useful_bytes"]
+                )
+            )
+            orchestrated = [
+                name
+                for name in ("swage_mixed", "triton_matched_task_partition")
+                if name in candidates
             ]
-            row.update(_kernel_timings(candidates, median, samples))
-            row["planning"] = _phase(median, samples, planning=True)
+            if not orchestrated:
+                not_run = {"status": "not-run", "reason": "not timed"}
+                row["planning"] = not_run
+                row["end_to_end"] = dict(not_run)
+                continue
+            row["planning"] = _phase(
+                orchestrated, median, samples, planning=True
+            )
             row["end_to_end"] = {
                 "artifact_jit_warmup": (
                     "one untimed complete operation before all samples"
                 ),
                 "compilation_excluded": True,
                 "graph_samples_combined": False,
-                "warm_preparation": _phase(median, samples),
-                "changing_geometry": _phase(median, samples, changing=True),
+                "warm_preparation": _phase(orchestrated, median, samples),
+                "changing_geometry": _phase(
+                    orchestrated, median, samples, changing=True
+                ),
             }
         record["results"].extend(rows)
-        record["compilation"] = _compilation(rows, median)
+        record["compilation"] = _compilation(rows, method, median)
     return record
 
 
@@ -471,7 +540,7 @@ def write_campaign(directory, *, children=None, archival=True):
     if aggregate["environment"]["compiler"]["build_type"] != "Release":
         reasons.append("compiler build type is not Release")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark": "swage-triton-comparison-process-campaign",
         "recorded_at": _TIMESTAMP,
         "independent_processes": True,
@@ -486,6 +555,7 @@ def write_campaign(directory, *, children=None, archival=True):
             "warmups_per_process": method[
                 "warmups_per_candidate_per_measurement"
             ],
+            "harness_options": [],
             "gpu_execution_mode": "exclusive-asserted"
             if archival
             else "shared-gpu-engineering",

@@ -1,23 +1,188 @@
 # python/tests/mlir/test_segmented_codegen.py
 """Native tests for segmented-reduction NVPTX compilation."""
 
-import json
 import re
 
+import numpy
 import pytest
 from mlir_swage import ir
 from mlir_swage._mlir_libs._swageDialectsNanobind import swage as native_swage
 from mlir_swage.dialects import swage
 from reduction_programs import reduction_module
-from swage._segmented_qualification import _has_small_element_program
+from swage import _abi
+from swage._segmented_plan import _has_small_element_program
+from swage._segmented_programs import (
+    _reduction_kernel,
+    _semantic_module,
+    _softmax_text,
+)
+
+# The parameters of a segment function by role, in the order of
+# SEGMENTED_SUM. A launch contract binds each one as a user argument whose
+# source index is the position of the parameter.
+_ROLES = ("values", "offsets", "output", "value_count", "segment_count")
+
+
+def _user(role, access=None):
+    """Describe the user argument of one parameter role.
+
+    Args:
+        role: Role of the parameter in the segment function.
+        access: Access of a buffer, or None for an i32 count.
+    """
+    return ("ptr" if access else "i32", "user", role, access)
+
+
+def _plan_records(key):
+    """Describe the plan record buffer of one contract key."""
+    return ("ptr", "plan", key, "read")
+
+
+def _scratch(key, access):
+    """Describe the scratch buffer of one contract key."""
+    return ("ptr", "scratch", key, access)
+
+
+def _derived(key):
+    """Describe the derived i32 count of one contract key."""
+    return ("i32", "derived", key, None)
+
+
+def _contract(entry, block, arguments, roles=_ROLES):
+    """Serialize the launch contract that a compile function must return.
+
+    Args:
+        entry: Name of the kernel entry.
+        block: Threads per block of the one-dimensional launch.
+        arguments: The physical arguments in order, as `_user`,
+            `_plan_records`, `_scratch`, and `_derived` describe them.
+        roles: The parameter roles of the segment function in parameter
+            order, which give each user argument its source index.
+
+    Returns:
+        The canonical contract JSON.
+    """
+    described = []
+    for kind, origin, name, access in arguments:
+        user = origin == "user"
+        described.append(
+            _abi.KernelArgument(
+                kind,
+                origin,
+                source_index=roles.index(name) if user else None,
+                key=None if user else name,
+                access=access,
+            )
+        )
+    return _abi.serialize_kernel_contract(
+        _abi.KernelContract(
+            version=2,
+            backend="cuda",
+            entry=entry,
+            launch=_abi.KernelLaunch("spmd-grid", (block, 1, 1)),
+            arguments=tuple(described),
+        )
+    )
+
+
+_BUFFERS = [
+    _user("values", "read"),
+    _user("offsets", "read"),
+    _user("output", "write"),
+]
+_DIRECT_ARGUMENTS = [*_BUFFERS, _user("value_count"), _user("segment_count")]
+_TASK_ARGUMENTS = [
+    *_BUFFERS,
+    _plan_records("task_ids"),
+    _user("value_count"),
+    _derived("task_count"),
+    _user("segment_count"),
+]
+_FUSED_ARGUMENTS = [
+    *_BUFFERS,
+    _plan_records("task_ids"),
+    _user("value_count"),
+    _derived("warp_task_count"),
+    _derived("cta_task_count"),
+    _user("segment_count"),
+]
+_PARTIAL_ARGUMENTS = [
+    _user("values", "read"),
+    _plan_records("partial_ranges"),
+    _scratch("scratch", "write"),
+    _user("value_count"),
+    _derived("partial_count"),
+]
+_MERGE_ARGUMENTS = [
+    _scratch("scratch", "read"),
+    _user("output", "write"),
+    _plan_records("merge_records"),
+    _derived("partial_count"),
+    _derived("merge_count"),
+    _user("segment_count"),
+]
+_PERSISTENT_ARGUMENTS = [
+    *_BUFFERS,
+    *(
+        _plan_records(key)
+        for key in (
+            "warp_ids",
+            "cta_ids",
+            "partial_ranges",
+            "partial_merge_ids",
+            "merge_records",
+        )
+    ),
+    _scratch("scratch", "readwrite"),
+    _scratch("counters", "readwrite"),
+    _user("value_count"),
+    *(
+        _derived(key)
+        for key in (
+            "warp_task_count",
+            "cta_task_count",
+            "partial_count",
+            "merge_count",
+        )
+    ),
+    _user("segment_count"),
+]
+
+
+def _plan(module, kernel_name, offsets, **arguments):
+    """Classify host offsets through the native plan and return lists.
+
+    Args:
+        module: Parsed semantic module to plan.
+        kernel_name: Name of the segment function in the module to admit.
+        offsets: Offsets as Python integers. They cross into native code as
+            one host int32 buffer, the only form the binding accepts.
+        **arguments: The value count, the segment count, and any limit.
+
+    Returns:
+        The warp ids, CTA ids, partial records, and merge records, each as
+        a list.
+    """
+    records = native_swage._materialize_segmented_plan(
+        module,
+        kernel_name,
+        offsets=numpy.asarray(offsets, dtype=numpy.int32),
+        **arguments,
+    )
+    return tuple(array.tolist() for array in records)
 
 
 @pytest.mark.parametrize(
     ("transform", "eligible"),
     [
-        ("identity", True), ("square", True), ("maps", True),
-        ("affine4", True), ("affine32", True), ("exp2", True),
-        ("exp2_chain", False), ("rational8", False),
+        ("identity", True),
+        ("square", True),
+        ("maps", True),
+        ("affine4", True),
+        ("affine32", True),
+        ("exp2", True),
+        ("exp2_chain", False),
+        ("rational8", False),
     ],
 )
 def test_direct_cta_element_work_guard(transform, eligible):
@@ -26,6 +191,53 @@ def test_direct_cta_element_work_guard(transform, eligible):
         swage.register_dialects(context)
         module = ir.Module.parse(reduction_module("sum", transform))
         assert _has_small_element_program(module) is eligible
+
+
+def test_the_division_of_a_mean_is_no_element_work():
+    """A mean has the element work of its sum and stays a small program.
+
+    The division runs once per segment, outside every element region, so
+    the schedule selection treats a mean as it treats the sum.
+    """
+    for transform, work in (("identity", 0), ("square", 1)):
+        with ir.Context() as context:
+            swage.register_dialects(context)
+            module = ir.Module.parse(reduction_module("mean", transform))
+            assert native_swage._element_work(module) == work
+            assert _has_small_element_program(module) is True
+
+
+@pytest.mark.parametrize(
+    ("transform", "work"),
+    [
+        ("identity", 0),
+        ("square", 1),
+        ("affine4", 4),
+        ("affine32", 32),
+        ("exp2", 8),
+        ("exp2_chain", 72),
+        ("rational8", 160),
+    ],
+)
+def test_native_element_work_estimate(transform, work):
+    """Count one unit per cheap operation, eight per exp2, 16 per divide."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module("sum", transform))
+        assert native_swage._element_work(module) == work
+
+
+def test_native_element_work_has_no_estimate_for_an_unweighted_operation():
+    """Give no estimate, and no small program, for an unknown operation."""
+    text = reduction_module("sum", "identity").replace(
+        "swage.yield %value : f32",
+        "%root = math.sqrt %value : f32\n      swage.yield %root : f32",
+    )
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(text)
+        assert native_swage._element_work(module) is None
+        assert not _has_small_element_program(module)
 
 
 def test_direct_cta_work_budget_spans_maps_and_reduction():
@@ -44,74 +256,49 @@ def test_direct_cta_work_budget_spans_maps_and_reduction():
         assert not _has_small_element_program(ir.Module.parse(text))
 
 
-def _contract(entry, block, arguments):
-    return json.dumps(
-        {
-            "version": 2,
-            "backend": "cuda",
-            "entry": entry,
-            "launch": {
-                "model": "spmd-grid",
-                "block": [block, 1, 1],
-            },
-            "arguments": arguments,
-        },
-        separators=(",", ":"),
-    )
-
-
-_USER_BUFFERS = [
-    {
-        "kind": "ptr",
-        "origin": "user",
-        "source_index": 1,
-        "access": "read",
-    },
-    {
-        "kind": "ptr",
-        "origin": "user",
-        "source_index": 2,
-        "access": "read",
-    },
-    {
-        "kind": "ptr",
-        "origin": "user",
-        "source_index": 0,
-        "access": "write",
-    },
-]
-
 SEGMENTED_SUM = """
 module {
   func.func @segmented_sum(
-      %destination: memref<?xf32>, %elements: memref<?xf32>,
-      %boundaries: memref<?xi32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
-    %segment = swage.make_segment %elements, %boundaries, %sid
+    %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
     %sum = swage.reduce %segment kind<sum>
         : !swage.segment<f32> -> f32 {
     ^bb0(%value: f32):
       swage.yield %value : f32
     }
-    memref.store %sum, %destination[%sid] : memref<?xf32>
+    memref.store %sum, %output[%sid] : memref<?xf32>
     return
   }
 }
 """
 
 
-@pytest.mark.parametrize("kind", ["sum", "max"])
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
 @pytest.mark.parametrize("transform", ["identity", "square", "maps"])
-def test_static_schedules_share_reduction_program(kind, transform):
-    """One admitted program compiles unchanged through every static path."""
+def test_static_schedules_share_reduction_program(kind, transform, element):
+    """One admitted program compiles unchanged through every static path.
+
+    The plan of a program does not depend on its element type or on its
+    kind: an f64 program and a mean have the task records of the f32 sum.
+    A mean divides in every kernel but the partial one, whose chunks yield
+    raw sums, and no other kind divides.
+    """
+    kernel_name = _reduction_kernel(kind, element)
     with ir.Context() as context:
         swage.register_dialects(context)
-        module = ir.Module.parse(reduction_module(kind, transform))
+        module = ir.Module.parse(reduction_module(kind, transform, element))
         original = module.operation.get_asm(enable_debug_info=False)
-        assert native_swage._materialize_segmented_plan(
+        assert _plan(
             module,
-            offsets=[0, 1, 34, 4131],
+            kernel_name,
+            [0, 1, 34, 4131],
             value_count=4131,
             segment_count=3,
         ) == ([0], [1], [34, 4130, 4130, 4131], [2, 0, 2])
@@ -132,24 +319,182 @@ def test_static_schedules_share_reduction_program(kind, transform):
             compiler = getattr(native_swage, name)
             first = compiler(
                 module,
-                kernel_name=f"segmented_{kind}",
+                kernel_name=kernel_name,
                 target="sm_86",
                 **arguments,
             )
             assert first == compiler(
                 module,
-                kernel_name=f"segmented_{kind}",
+                kernel_name=kernel_name,
                 target="sm_86",
                 **arguments,
             )
             lowered, ptx, _ = first
             merge = name == "_compile_split_merge_reduction_ptx"
+            partial = name == "_compile_split_partial_reduction_ptx"
             assert ("llvm.fmul" in lowered) == (
                 transform != "identity" and not merge
             )
+            assert ("llvm.fdiv" in lowered) == (kind == "mean" and not partial)
             assert "swage." not in lowered
             assert ".entry segmented_" in ptx
+            other = "f32" if element == "f64" else "f64"
+            assert not re.search(rf"\b{other}\b", lowered)
             assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+_RANK_ONE_SCHEDULES = [
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+    ),
+    ("_compile_fused_segmented_reduction_ptx", {}),
+    ("_compile_split_partial_reduction_ptx", {}),
+    ("_compile_split_merge_reduction_ptx", {}),
+    ("_compile_persistent_segmented_reduction_ptx", {}),
+]
+
+
+@pytest.mark.parametrize("element", ["f32", "f64"])
+@pytest.mark.parametrize("kind", ["sum", "max", "min", "mean"])
+def test_rank_two_programs_have_one_kernel_and_no_task_buffer(kind, element):
+    """A program over rank-two values compiles on the direct schedule only.
+
+    Its kernel takes the three buffers and three counts, the last of which
+    is the feature count, holds nothing that synchronizes threads, and has
+    one loop accumulator per reduction: a thread never holds one value per
+    column. Every schedule that reads a task buffer refuses the program
+    with a diagnostic, and so does host classification.
+    """
+    kernel_name = _reduction_kernel(kind, element, 2)
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_semantic_module(kind, element, 2))
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
+            module, kernel_name=kernel_name, block_size=128, target="sm_86"
+        )
+
+        assert f".entry {kernel_name}(" in ptx
+        declaration = re.search(
+            rf"\.entry {kernel_name}\((.*?)\)", ptx, re.DOTALL
+        )
+        parameters = [
+            "pointer" if ".ptr" in parameter else parameter.split()[1]
+            for parameter in declaration[1].split(",")
+        ]
+        assert parameters == ["pointer"] * 3 + [".u32"] * 3
+        assert "shfl.sync" not in ptx and "bar.sync" not in ptx
+        assert ".shared" not in ptx
+        # One accumulator: of the blocks that take arguments, the header of
+        # the row loop takes one element and no other block takes any.
+        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
+        assert sorted(header.count(f": {element}") for header in headers) == [
+            0,
+            1,
+        ]
+        for name, arguments in _RANK_ONE_SCHEDULES:
+            with pytest.raises(
+                ValueError, match="planning requires rank-one values"
+            ):
+                getattr(native_swage, name)(
+                    module, kernel_name=kernel_name, target="sm_86", **arguments
+                )
+        with pytest.raises(
+            ValueError, match="planning requires rank-one values"
+        ):
+            _plan(
+                module, kernel_name, [0, 1, 34], value_count=34, segment_count=2
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_the_rank_two_softmax_has_one_kernel_and_one_scalar_per_stage():
+    """The softmax over rank-two values compiles on the direct schedule only.
+
+    A thread runs the three stages of its column one after the other, so
+    the kernel needs none of the workgroup buffers, barriers, and shuffles
+    of the rank-one softmax. The two reduction loops carry one accumulator
+    each, and the store loop and the column loop carry none: a thread
+    never holds one value per column or per row.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(_softmax_text(2))
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        lowered, ptx, _ = native_swage._compile_segmented_reduction_ptx(
+            module,
+            kernel_name="ragged_softmax_r2",
+            block_size=128,
+            target="sm_86",
+        )
+
+        declaration = re.search(
+            r"\.entry ragged_softmax_r2\((.*?)\)", ptx, re.DOTALL
+        )
+        parameters = [
+            "pointer" if ".ptr" in parameter else parameter.split()[1]
+            for parameter in declaration[1].split(",")
+        ]
+        assert parameters == ["pointer"] * 3 + [".u32"] * 3
+        assert "shfl.sync" not in ptx and "bar.sync" not in ptx
+        assert ".shared" not in ptx and "__wg_" not in lowered
+        assert ".extern .func" not in ptx
+        assert ptx.count("ex2.approx.f32") == 2
+        headers = re.findall(r"^\s*\^bb\d+\(([^)]*)\):", lowered, re.M)
+        assert sorted(header.count(": f32") for header in headers) == [
+            0,
+            0,
+            1,
+            1,
+        ]
+        for name, arguments in _RANK_ONE_SCHEDULES:
+            with pytest.raises(
+                ValueError, match="planning requires rank-one values"
+            ):
+                getattr(native_swage, name)(
+                    module,
+                    kernel_name="ragged_softmax_r2",
+                    target="sm_86",
+                    **arguments,
+                )
+        with pytest.raises(
+            ValueError, match="planning requires rank-one values"
+        ):
+            _plan(
+                module,
+                "ragged_softmax_r2",
+                [0, 1, 34],
+                value_count=34,
+                segment_count=2,
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_persistent_execution_refuses_f64_values():
+    """The persistent kernel is an f32 kernel, and f64 values are refused.
+
+    The identity sum is the one program persistent execution admits, so
+    the element type is the only reason this program is refused.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(reduction_module("sum", "identity", "f64"))
+        original = module.operation.get_asm(enable_debug_info=False)
+        with pytest.raises(
+            ValueError,
+            match="persistent execution requires f32 values, got f64",
+        ):
+            native_swage._compile_persistent_segmented_reduction_ptx(
+                module, kernel_name="segmented_sum_f64", target="sm_86"
+            )
+        assert module.operation.get_asm(enable_debug_info=False) == original
 
 
 @pytest.mark.parametrize(
@@ -160,6 +505,8 @@ def test_static_schedules_share_reduction_program(kind, transform):
         ("max", "identity"),
         ("max", "square"),
         ("max", "maps"),
+        ("min", "identity"),
+        ("mean", "identity"),
     ],
 )
 def test_persistent_admission_remains_identity_sum(kind, transform):
@@ -235,19 +582,7 @@ def test_compiles_segmented_sum_to_deterministic_ptx():
         assert ".entry segmented_sum" in ptx
         assert "ld.global.b32" in ptx
         assert "st.global.b32" in ptx
-        assert contract == _contract(
-            "segmented_sum",
-            128,
-            _USER_BUFFERS
-            + [
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "segment_count",
-                },
-            ],
-        )
+        assert contract == _contract("segmented_sum", 128, _DIRECT_ARGUMENTS)
         assert ptx.count(".param .u64") == 3
         assert ptx.count(".param .u32") == 2
         assert module.operation.get_asm(enable_debug_info=False) == original
@@ -277,33 +612,18 @@ def test_compiles_identity_sum_with_task_id_indirection():
 
         assert first == second
         lowered, ptx, contract = first
-
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
-        assert signature.group(1).count("i32") == 2
+        assert signature.group(1).count("i32") == 3
         assert "ld.global.b32" in ptx
         assert ".entry segmented_sum" in ptx
         assert "shfl.sync.bfly" in ptx
         assert ".shared" not in ptx
         assert "bar.sync" not in ptx
-        assert contract == _contract(
-            "segmented_sum",
-            32,
-            _USER_BUFFERS
-            + [
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": "task_ids",
-                    "access": "read",
-                },
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {"kind": "i32", "origin": "derived", "key": "task_count"},
-            ],
-        )
+        assert contract == _contract("segmented_sum", 32, _TASK_ARGUMENTS)
         assert ptx.count(".param .u64") == 4
-        assert ptx.count(".param .u32") == 2
+        assert ptx.count(".param .u32") == 3
         assert module.operation.get_asm(enable_debug_info=False) == original
 
 
@@ -327,10 +647,11 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
 
         assert first == second
         lowered, ptx, contract = first
+        assert contract == _contract("segmented_sum", 128, _FUSED_ARGUMENTS)
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 4
-        assert signature.group(1).count("i32") == 3
+        assert signature.group(1).count("i32") == 4
         assert "llvm.udiv" in lowered
         assert "llvm.urem" in lowered
         assert "llvm.mlir.constant(128 : index)" in lowered
@@ -339,34 +660,10 @@ def test_compiles_fused_mixed_identity_sum_to_deterministic_ptx():
         assert "nvvm.barrier0" in lowered
         assert "addr_space = 3" in lowered
         assert ptx.count(".param .u64") == 4
-        assert ptx.count(".param .u32") == 3
+        assert ptx.count(".param .u32") == 4
         assert "shfl.sync.bfly" in ptx
         assert "bar.sync" in ptx
         assert ".entry segmented_sum" in ptx
-        assert contract == _contract(
-            "segmented_sum",
-            128,
-            _USER_BUFFERS
-            + [
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": "task_ids",
-                    "access": "read",
-                },
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "warp_task_count",
-                },
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "cta_task_count",
-                },
-            ],
-        )
         assert module.operation.get_asm(enable_debug_info=False) == original
 
         definitions = {
@@ -458,10 +755,13 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
 
         assert first == second
         lowered, ptx, contract = first
+        assert contract == _contract(
+            "segmented_sum", 512, _PERSISTENT_ARGUMENTS
+        )
         signature = re.search(r"llvm.func @segmented_sum\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 10
-        assert signature.group(1).count("i32") == 5
+        assert signature.group(1).count("i32") == 6
         assert lowered.count("llvm.atomicrmw add") == 4
         assert lowered.count("nvvm.memory.barrier <gpu>") == 2
         assert "nvvm.shfl.sync  idx" in lowered
@@ -470,48 +770,126 @@ def test_compiles_persistent_identity_sum_to_deterministic_ptx():
         # the shared queue-claim broadcast slot.
         assert lowered.count("nvvm.barrier0") == 12
         assert ptx.count(".param .u64") == 10
-        assert ptx.count(".param .u32") == 5
+        assert ptx.count(".param .u32") == 6
         assert ptx.count("atom") >= 4
         assert ptx.count("membar.gl") == 2
         assert "shfl.sync.idx" in ptx
         assert "shfl.sync.bfly" in ptx
         assert ptx.count("bar.sync") == 12
         assert ".entry segmented_sum" in ptx
-        persistent_pointers = [
-            ("plan", "warp_task_ids", "read"),
-            ("plan", "cta_task_ids", "read"),
-            ("plan", "partial_ranges", "read"),
-            ("plan", "partial_merge_ids", "read"),
-            ("plan", "merge_ranges", "read"),
-            ("scratch", "partials", "readwrite"),
-            ("scratch", "counters", "readwrite"),
-        ]
-        persistent_counts = [
-            "value_count",
-            "warp_task_count",
-            "cta_task_count",
-            "partial_task_count",
-            "merge_task_count",
-        ]
-        assert contract == _contract(
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+PERMUTED_SUM = """
+module {
+  func.func @segmented_sum(
+      %destination: memref<?xf32> {swage.role = #swage.role<output>},
+      %segment_total: i32 {swage.role = #swage.role<segment_count>},
+      %elements: memref<?xf32> {swage.role = #swage.role<values>},
+      %element_total: i32 {swage.role = #swage.role<value_count>},
+      %boundaries: memref<?xi32> {swage.role = #swage.role<offsets>}) {
+    %sid = swage.segment_id 0
+    %segment = swage.make_segment %elements, %boundaries, %sid
+        : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+    %sum = swage.reduce %segment kind<sum>
+        : !swage.segment<f32> -> f32 {
+    ^bb0(%value: f32):
+      swage.yield %value : f32
+    }
+    memref.store %sum, %destination[%sid] : memref<?xf32>
+    return
+  }
+}
+"""
+_PERMUTED_ROLES = (
+    "output",
+    "segment_count",
+    "values",
+    "value_count",
+    "offsets",
+)
+
+
+@pytest.mark.parametrize(
+    ("compiler", "options", "entry", "block", "arguments"),
+    [
+        (
+            "_compile_segmented_reduction_ptx",
+            {"block_size": 128},
+            "segmented_sum",
+            128,
+            _DIRECT_ARGUMENTS,
+        ),
+        (
+            "_compile_segmented_reduction_ptx",
+            {"block_size": 32, "use_task_ids": True},
+            "segmented_sum",
+            32,
+            _TASK_ARGUMENTS,
+        ),
+        (
+            "_compile_fused_segmented_reduction_ptx",
+            {},
+            "segmented_sum",
+            128,
+            _FUSED_ARGUMENTS,
+        ),
+        (
+            "_compile_split_partial_reduction_ptx",
+            {},
+            "segmented_sum__partial",
+            512,
+            _PARTIAL_ARGUMENTS,
+        ),
+        (
+            "_compile_split_merge_reduction_ptx",
+            {},
+            "segmented_sum__merge",
+            512,
+            _MERGE_ARGUMENTS,
+        ),
+        (
+            "_compile_persistent_segmented_reduction_ptx",
+            {},
             "segmented_sum",
             512,
-            _USER_BUFFERS
-            + [
-                {
-                    "kind": "ptr",
-                    "origin": origin,
-                    "key": key,
-                    "access": access,
-                }
-                for origin, key, access in persistent_pointers
-            ]
-            + [
-                {"kind": "i32", "origin": "derived", "key": key}
-                for key in persistent_counts
-            ],
+            _PERSISTENT_ARGUMENTS,
+        ),
+    ],
+    ids=["direct", "task-ids", "fused", "partial", "merge", "persistent"],
+)
+def test_contracts_bind_user_arguments_by_parameter_position(
+    compiler, options, entry, block, arguments
+):
+    """Name each user argument by the position of its parameter.
+
+    The kernel takes its arguments in the order of their roles, whatever the
+    order of the parameters, so a permuted segment function compiles to the
+    kernel of the canonical one. Only the source indexes of its contract
+    differ: each one is the position of the parameter with that role.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        permuted = ir.Module.parse(PERMUTED_SUM)
+        original = permuted.operation.get_asm(enable_debug_info=False)
+        compile_ptx = getattr(native_swage, compiler)
+
+        _, ptx, contract = compile_ptx(
+            permuted, kernel_name="segmented_sum", target="sm_80", **options
         )
-        assert module.operation.get_asm(enable_debug_info=False) == original
+        _, canonical_ptx, canonical_contract = compile_ptx(
+            ir.Module.parse(SEGMENTED_SUM),
+            kernel_name="segmented_sum",
+            target="sm_80",
+            **options,
+        )
+
+        assert contract == _contract(
+            entry, block, arguments, roles=_PERMUTED_ROLES
+        )
+        assert canonical_contract == _contract(entry, block, arguments)
+        assert ptx == canonical_ptx
+        assert permuted.operation.get_asm(enable_debug_info=False) == original
 
 
 def test_persistent_lowering_rejects_non_planning_program():
@@ -546,14 +924,31 @@ def test_fused_mixed_lowering_accepts_element_program():
 
 
 @pytest.mark.parametrize(
-    ("compiler", "entry"),
+    ("compiler", "entry", "counts", "arguments"),
     [
-        ("_compile_split_partial_reduction_ptx", "segmented_sum__partial"),
-        ("_compile_split_merge_reduction_ptx", "segmented_sum__merge"),
+        (
+            "_compile_split_partial_reduction_ptx",
+            "segmented_sum__partial",
+            2,
+            _PARTIAL_ARGUMENTS,
+        ),
+        (
+            "_compile_split_merge_reduction_ptx",
+            "segmented_sum__merge",
+            3,
+            _MERGE_ARGUMENTS,
+        ),
     ],
 )
-def test_compiles_deterministic_split_cta_kernels(compiler, entry):
-    """Emit each private three-pointer, two-i32 split ABI at 512 threads."""
+def test_compiles_deterministic_split_cta_kernels(
+    compiler, entry, counts, arguments
+):
+    """Emit each private three-pointer split ABI at 512 threads.
+
+    The partial ABI ends with two i32 counts. The merge ABI adds the segment
+    count that bounds the output segment its records name. Each contract
+    names the entry of its kernel and binds the partial results as scratch.
+    """
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
@@ -573,65 +968,17 @@ def test_compiles_deterministic_split_cta_kernels(compiler, entry):
 
         assert first == second
         lowered, ptx, contract = first
+        assert contract == _contract(entry, 512, arguments)
         signature = re.search(rf"llvm.func @{entry}\(([^)]*)\)", lowered)
         assert signature is not None
         assert signature.group(1).count("!llvm.ptr") == 3
-        assert signature.group(1).count("i32") == 2
+        assert signature.group(1).count("i32") == counts
         assert "llvm.mlir.constant(512 : index)" in lowered
         assert "nvvm.barrier0" in lowered
         assert ptx.count(".param .u64") == 3
-        assert ptx.count(".param .u32") == 2
+        assert ptx.count(".param .u32") == counts
         assert f".entry {entry}" in ptx
         assert "bar.sync" in ptx
-        if compiler == "_compile_split_partial_reduction_ptx":
-            arguments = [
-                _USER_BUFFERS[0],
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": "partial_ranges",
-                    "access": "read",
-                },
-                {
-                    "kind": "ptr",
-                    "origin": "scratch",
-                    "key": "partials",
-                    "access": "write",
-                },
-                {"kind": "i32", "origin": "derived", "key": "value_count"},
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "partial_task_count",
-                },
-            ]
-        else:
-            arguments = [
-                {
-                    "kind": "ptr",
-                    "origin": "scratch",
-                    "key": "partials",
-                    "access": "read",
-                },
-                _USER_BUFFERS[2],
-                {
-                    "kind": "ptr",
-                    "origin": "plan",
-                    "key": "merge_ranges",
-                    "access": "read",
-                },
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "partial_task_count",
-                },
-                {
-                    "kind": "i32",
-                    "origin": "derived",
-                    "key": "merge_task_count",
-                },
-            ]
-        assert contract == _contract(entry, 512, arguments)
         assert module.operation.get_asm(enable_debug_info=False) == original
 
         definitions = {
@@ -701,20 +1048,10 @@ def test_split_lowering_transforms_only_input_elements(compiler):
         "_compile_split_merge_reduction_ptx",
     ],
 )
-def test_split_lowering_rejects_min_and_unsupported_target(compiler):
-    """Keep unsupported reduction kinds and targets outside split lowering."""
+def test_split_lowering_rejects_an_unsupported_target(compiler):
+    """Keep unsupported targets outside split lowering."""
     with ir.Context() as context:
         swage.register_dialects(context)
-        minimum = ir.Module.parse(
-            SEGMENTED_SUM.replace("kind<sum>", "kind<min>")
-        )
-        with pytest.raises(ValueError, match="supports only kind<sum>"):
-            getattr(native_swage, compiler)(
-                minimum,
-                kernel_name="segmented_sum",
-                target="sm_80",
-            )
-
         total = ir.Module.parse(SEGMENTED_SUM)
         with pytest.raises(ValueError, match="target must match"):
             getattr(native_swage, compiler)(
@@ -731,9 +1068,10 @@ def test_materializes_stable_policy_segment_ids_without_mutating_source():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta, partial, merge = native_swage._materialize_segmented_plan(
+        warp, cta, partial, merge = _plan(
             module,
-            offsets=[0, 0, 32, 65, 65, 66],
+            "segmented_sum",
+            [0, 0, 32, 65, 65, 66],
             value_count=66,
             segment_count=5,
             warp_max_elements=32,
@@ -753,9 +1091,10 @@ def test_materializes_split_ranges_and_compact_merge_records():
         module = ir.Module.parse(SEGMENTED_SUM)
         original = module.operation.get_asm(enable_debug_info=False)
 
-        warp, cta, partial, merge = native_swage._materialize_segmented_plan(
+        warp, cta, partial, merge = _plan(
             module,
-            offsets=[0, 32, 65, 4162, 12354],
+            "segmented_sum",
+            [0, 32, 65, 4162, 12354],
             value_count=12354,
             segment_count=4,
             warp_max_elements=32,
@@ -775,18 +1114,20 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         swage.register_dialects(context)
         module = ir.Module.parse(SEGMENTED_SUM)
         with pytest.raises(ValueError, match="offsets must be nondecreasing"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 module,
-                offsets=[0, 2, 1],
+                "segmented_sum",
+                [0, 2, 1],
                 value_count=2,
                 segment_count=2,
                 warp_max_elements=32,
             )
 
         with pytest.raises(ValueError, match="planning limits must satisfy"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 module,
-                offsets=[0, 1],
+                "segmented_sum",
+                [0, 1],
                 value_count=1,
                 segment_count=1,
                 warp_max_elements=33,
@@ -796,9 +1137,10 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
         transformed = ir.Module.parse(RAGGED_SOFTMAX)
         original = transformed.operation.get_asm(enable_debug_info=False)
         with pytest.raises(ValueError, match="capture-free maps"):
-            native_swage._materialize_segmented_plan(
+            _plan(
                 transformed,
-                offsets=[0, 1],
+                "ragged_softmax",
+                [0, 1],
                 value_count=1,
                 segment_count=1,
                 warp_max_elements=32,
@@ -811,8 +1153,11 @@ def test_materialized_plan_rejects_invalid_metadata_and_semantics():
 SEGMENTED_EXPONENTIAL_SUM = """
 module {
   func.func @segmented_sum(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -829,6 +1174,71 @@ module {
   }
 }
 """
+
+
+_EVERY_COMPILER = [
+    ("_compile_segmented_reduction_ptx", {"block_size": 128}),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 32, "use_task_ids": True},
+    ),
+    (
+        "_compile_segmented_reduction_ptx",
+        {"block_size": 128, "use_task_ids": True},
+    ),
+    ("_compile_fused_segmented_reduction_ptx", {}),
+    ("_compile_split_partial_reduction_ptx", {}),
+    ("_compile_split_merge_reduction_ptx", {}),
+    ("_compile_persistent_segmented_reduction_ptx", {}),
+]
+
+
+@pytest.mark.parametrize(("compiler", "arguments"), _EVERY_COMPILER)
+def test_an_f64_exponential_is_refused_before_the_backend(compiler, arguments):
+    """An f64 `math.exp2` raises a diagnostic from every compile function.
+
+    The device has an f32 `ex2.approx` and no f64 one. The pinned NVPTX
+    backend aborts the process on an f64 exp2 intrinsic, and without the
+    planner's rule the libdevice guard would refuse the program late, as an
+    unresolved `__nv_exp2`. The planner refuses the operation by name
+    first, before any lowering runs. This test runs in the test process:
+    an abort would end the run instead of failing one test.
+    """
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(
+            SEGMENTED_EXPONENTIAL_SUM.replace("f32", "f64")
+        )
+        original = module.operation.get_asm(enable_debug_info=False)
+
+        with pytest.raises(
+            ValueError,
+            match="operation 'math.exp2' is admitted for f32 values only: "
+            "the device has no f64 exp2",
+        ):
+            getattr(native_swage, compiler)(
+                module, kernel_name="segmented_sum", target="sm_80", **arguments
+            )
+
+        assert module.operation.get_asm(enable_debug_info=False) == original
+
+
+def test_an_f64_softmax_is_refused_before_the_backend():
+    """The softmax program is refused over f64 for its exponential."""
+    with ir.Context() as context:
+        swage.register_dialects(context)
+        module = ir.Module.parse(RAGGED_SOFTMAX.replace("f32", "f64"))
+
+        with pytest.raises(
+            ValueError,
+            match="operation 'math.exp2' is admitted for f32 values only",
+        ):
+            native_swage._compile_segmented_reduction_ptx(
+                module,
+                kernel_name="ragged_softmax",
+                block_size=128,
+                target="sm_80",
+            )
 
 
 def test_region_exponential_compiles_without_libdevice():
@@ -853,8 +1263,11 @@ def test_region_exponential_compiles_without_libdevice():
 RAGGED_SOFTMAX = """
 module {
   func.func @ragged_softmax(
-      %values: memref<?xf32>, %offsets: memref<?xi32>,
-      %output: memref<?xf32>) {
+      %values: memref<?xf32> {swage.role = #swage.role<values>},
+      %offsets: memref<?xi32> {swage.role = #swage.role<offsets>},
+      %output: memref<?xf32> {swage.role = #swage.role<output>},
+      %value_count: i32 {swage.role = #swage.role<value_count>},
+      %segment_count: i32 {swage.role = #swage.role<segment_count>}) {
     %sid = swage.segment_id 0
     %segment = swage.make_segment %values, %offsets, %sid
         : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
@@ -962,13 +1375,14 @@ BYSTANDER_MODULE = (
 )
 
 
-def test_kernel_name_must_match_the_compiled_kernel():
-    """Reject a name mismatch at compile time, not at module load."""
+def test_kernel_name_must_name_a_segment_function():
+    """Reject a function without Swage operations at compile time."""
     with ir.Context() as context:
         swage.register_dialects(context)
         module = ir.Module.parse(BYSTANDER_MODULE)
         with pytest.raises(
-            ValueError, match="does not match the compiled kernel"
+            ValueError,
+            match="function names @bystander, which holds no Swage segment",
         ):
             native_swage._compile_segmented_reduction_ptx(
                 module,
@@ -1024,7 +1438,7 @@ def test_rejects_an_unverified_module_with_a_diagnostic():
             offsets_type = ir.MemRefType.get([dynamic], i32)
             function = func_dialect.FuncOp(
                 "segmented_sum",
-                ([values_type, offsets_type, values_type], []),
+                ([values_type, offsets_type, values_type, i32, i32], []),
             )
             with ir.InsertionPoint(function.add_entry_block()):
                 segment_id = swage.SegmentIdOp(ir.IndexType.get(), 0)

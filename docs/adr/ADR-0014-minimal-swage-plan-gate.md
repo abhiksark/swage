@@ -1,7 +1,13 @@
 <!-- docs/adr/ADR-0014-minimal-swage-plan-gate.md -->
 # ADR-0014: Minimal SwagePlan gate
 
-- Status: accepted
+- Status: accepted; extended by
+  [ADR-0015](ADR-0015-minimal-mixed-policy-execution.md),
+  [ADR-0017](ADR-0017-private-split-cta-reductions.md), and
+  [ADR-0019](ADR-0019-composable-private-reductions.md); its planning
+  dialect boundary is superseded by
+  [ADR-0020](ADR-0020-planned-per-function-lowering.md); see
+  [Later decisions](#later-decisions)
 - Date: 2026-08-23
 
 ## Context
@@ -140,3 +146,37 @@ This decision does not add:
   mixed-policy GPU execution or benchmark comparison.
 - Later changes must extend this contract explicitly rather than treating
   deferred policies or execution as implied support.
+
+## Later decisions
+
+This record describes the gate as first accepted. Four of its statements
+no longer match the code, and each is replaced by a later record:
+
+- Dialect boundary: this record says the dialect holds the policy
+  attribute, `!swage_plan.task_range`, and `swage_plan.classify`, and that
+  the pass adds a `<kernel>__swage_plan` companion.
+  [ADR-0020](ADR-0020-planned-per-function-lowering.md) removes the type,
+  the operation, and the companion. Plan IR is now a plan function with one
+  task operation that the GPU lowering consumes, and the planning limits
+  are arguments of the host classifier. The split of responsibilities
+  between compile time and run time, and the host descriptors, stand.
+
+- Admission: this record says the pass rejects max reductions, transformed
+  sums, and maps.
+  [ADR-0019](ADR-0019-composable-private-reductions.md) admits one
+  capture-free f32 sum or max with optional single-consumer map chains.
+- Descriptors: this record says a segment is warp or CTA, that
+  `warp_max_elements` may be zero, and that every descriptor has `stage`
+  equal to zero.
+  [ADR-0017](ADR-0017-private-split-cta-reductions.md) adds
+  `cta_chunk_elements`, requires
+  `0 < warp_max_elements <= cta_chunk_elements`, and gives a longer segment
+  ordered stage-zero chunk descriptors plus one stage-one merge descriptor.
+- Execution: this record says the boundary lowers no policy and dispatches
+  no task range.
+  [ADR-0015](ADR-0015-minimal-mixed-policy-execution.md) and
+  [ADR-0016](ADR-0016-fused-mixed-policy-schedule.md) add private warp, CTA,
+  and fused mixed execution of the classified tasks.
+
+Captures, multiple reductions, and map-store terminals are still rejected.
+[Task Planning](../internals/planning.md) states the current contract.

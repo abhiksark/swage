@@ -1,4 +1,5 @@
-# ADR-0005: No Python prototype — PyTorch is the initial oracle
+<!-- docs/adr/ADR-0005-no-prototype-pytorch-oracle.md -->
+# ADR-0005: No Python prototype, PyTorch is the initial oracle
 
 - Status: accepted
 - Date: 2026-08-18
@@ -30,5 +31,5 @@ directory on 2026-08-18. There is nothing to tag, freeze, or migrate.
 ## Consequences
 
 - The roadmap's prototype-freeze phase is closed as "not applicable".
-- Every correctness claim still requires an oracle comparison — the oracle
+- Every correctness claim still requires an oracle comparison. The oracle
   is PyTorch (and later the CPU reference lowering), not a prototype.

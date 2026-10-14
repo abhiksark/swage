@@ -24,6 +24,223 @@ padding or gaps to the values buffer.
 
 *Dense ragged storage, including a repeated offset and empty segment. [Open the full-size figure](../assets/diagrams/ragged-storage.svg).*
 
+## The offsets contract
+
+The public calls `swage.segment_reduce` and `swage.segment_softmax`, which
+[Segmented Calls](segmented-calls.md) introduces, and the private
+qualification path behind them validate one contract. They check it on a
+host copy of the offsets before they compile or launch anything. An input
+that breaks a rule is rejected with an error. Nothing is cast, moved to
+another device, or repaired. Both surfaces need the native bindings, from
+the native wheel or a source build, PyTorch, and `numpy`, which the
+`pytorch` extra in [Installation](../getting-started/installation.md)
+declares. The public calls can instead take their kernels from an artifact
+directory, as [Running Without the Compiler](deployment.md) describes.
+
+For `N` segments over one values buffer:
+
+- `values` is a contiguous rank-one `torch.float32` or `torch.float64`
+  tensor. A reduction takes both dtypes. A softmax takes `torch.float32`
+  only, and so does the private persistent sum. Both public calls also
+  take `[rows, columns]` values, which
+  [Rows of features](#rows-of-features) describes.
+- `offsets` is a contiguous rank-one `torch.int32` tensor with `N + 1`
+  entries. The two public calls also take `torch.int64` offsets, the
+  default integer width of PyTorch.
+- `offsets[0]` is zero.
+- `offsets` never decreases. Two equal neighbors describe an empty segment.
+- `offsets[N]` is at most the number of values. Values past it belong to no
+  segment. `swage.segment_softmax` is stricter: `offsets[N]` must equal the
+  number of values.
+- The number of values and the number of segments are each below `2**31`,
+  for both offset widths.
+- `values` does not require grad.
+- For a GPU launch, both tensors are CUDA tensors on the current device.
+
+The result tensor has the same basic rules on both surfaces: it is a
+contiguous tensor of the dtype of `values` and of their rank on the same
+device, it does not overlap `values` or `offsets` in memory, and it does not
+require grad. A kernel reads and writes elements of one width, so a float64 batch
+with a float32 result is refused, and so is the reverse. Its size differs:
+
+- The public calls take an optional `out` with exactly `N` elements for a
+  reduction and exactly one element per value for a softmax.
+  [Segmented Calls](segmented-calls.md#arguments) states the rules.
+- The private helpers take a required `output` with at least `N` elements
+  for a reduction and at least `offsets[N]` elements for a softmax.
+
+### Rows of features
+
+Both public calls take values of rank two: rows of `D` features,
+contiguous in row order. The contract above then reads with rows in place
+of values:
+
+- The offsets delimit rows. The final offset is at most the number of rows,
+  and equal to it for a softmax, and segment `i` is the rows from
+  `offsets[i]` up to `offsets[i + 1]`.
+- The number of rows, the number of segments, and the number of columns are
+  each below `2**31`. The number of elements, rows times columns, may
+  exceed that.
+- The result of a reduction has one row of `D` elements per segment, and
+  the result of a softmax has the shape of the values: every column of a
+  segment is reduced, or normalized, on its own.
+- A transposed tensor and a slice of columns are not contiguous in row
+  order and are refused. Nothing is copied.
+
+Rows of one feature are a run of scalars and are taken as one. Values of
+rank three or above are refused.
+[Segmented Calls](segmented-calls.md#rows-of-features) states what a call on
+rows costs and how it is rounded.
+
+### int64 offsets
+
+The kernels read every offset as a 32-bit word. A public call that is given
+`torch.int64` offsets therefore does three things on the host, before
+anything is enqueued:
+
+1. It copies the offsets to the host as int64 and checks them against the
+   rules above. The check uses the 64-bit values, so offsets such as
+   `[0, 2**32 + 3, 5]`, which a cast to int32 would turn into valid ones,
+   are refused.
+2. It narrows the checked copy to int32. Every valid offset lies between
+   zero and the number of values, which is below `2**31`, so nothing is
+   lost.
+3. It uploads the narrowed copy as a private int32 tensor, which the
+   kernels read. For `segment_reduce` the copy travels in the tensor that
+   holds the task records, where the call uploads one. Otherwise, and for
+   `segment_softmax`, it is an upload of its own.
+
+The caller's int64 tensor is never read by a kernel. A call with int64
+offsets returns the bits of the same call with int32 offsets, and costs the
+wider host copy, the check, and the upload on top of it.
+
+The private helpers pass the caller's offsets tensor to their kernels and
+take `torch.int32` only.
+
+### Offsets of a prepared launch
+
+The public calls and the private one-shot helpers `launch_gpu` and
+`launch_softmax_gpu` validate the offsets on every call. A prepared launch,
+which the private `_prepare_planned_reduction`, `_prepare_planned_sum`, and
+`_prepare_persistent_sum` return, validates them once at preparation and
+then launches the plan it built from that host copy. Two more rules apply
+to its `offsets`:
+
+- `offsets` is not an inference tensor. Offsets created under
+  `torch.inference_mode()` are rejected at preparation with a `ValueError`,
+  because an inference tensor has no version counter for the next rule to
+  compare. Create the offsets outside the context, or clone them outside
+  it. Offsets created under `torch.no_grad()` are admitted, and a launch
+  may be prepared and run inside `torch.inference_mode()` with offsets that
+  were created outside it. The public calls and the one-shot helpers keep
+  no plan and compare no counter, so they accept inference tensors.
+- `offsets` does not change after preparation. Each launch compares the
+  version counter, data pointer, element count, and dtype of the tensor
+  with the ones recorded at preparation, and raises a `RuntimeError` before
+  anything is enqueued when one differs. Prepare again after changing the
+  offsets. A public call launches what it prepared before it returns and
+  keeps no plan, so this rule and its limits below concern the private
+  prepared launches only.
+
+The second rule is checked on the host through what PyTorch records, so the
+check has these limits:
+
+- A write that PyTorch does not count is not detected. The tests pin two
+  such writes: an in-place write through `offsets.data`, such as
+  `offsets.data.copy_(new)`, and a write through a DLPack alias of the
+  tensor. A write through a raw pointer by another library or by another
+  kernel is not counted either. The launch proceeds and reports nothing.
+  Every access stays in bounds, because the kernels clamp each range they
+  load to the buffer it indexes. The result is not a validated one: a
+  segment that the plan runs as one task is reduced over the new offsets,
+  and a segment that the plan split keeps the ranges recorded at
+  preparation, so the output can mix the old and the new layout.
+- A write to another view of the same tensor is refused although the
+  offsets did not change, because every view of a tensor shares one version
+  counter. Give the offsets a tensor of their own, for example with
+  `clone()`.
+- A replayed CUDA graph runs no host check. A replay after the offsets
+  changed behaves as in the first case.
+
+Assigning other storage to the tensor, as `offsets.data = other` does, is
+not one of these limits: the data pointer changes, and the launch is
+refused also when the new storage has the same size.
+
+## Converting other layouts to offsets
+
+The contract admits one layout. Each layout below is not admitted and needs
+a conversion in PyTorch first:
+
+- Offsets of another integer width than 32 or 64 bits: cast them with
+  `offsets.to(torch.int64)`, which loses nothing.
+- Offsets without the final entry, as `torch.nn.EmbeddingBag` takes them:
+  append the number of values.
+- Offsets that start above zero, as a slice of a larger batch has them:
+  subtract the first offset and pass the matching slice of the values.
+- A lengths vector: prefix-sum it behind a leading zero.
+- A sorted index vector, with one segment id per value in nondecreasing
+  order: count the ids and prefix-sum the counts, as shown below.
+- An unsorted index vector: sort the values by segment id first. There is no
+  scatter form, so the sort and the gather are PyTorch work.
+
+A sorted index vector, such as the batch vector of a graph mini-batch,
+becomes offsets with PyTorch alone:
+
+```python
+import torch
+
+# index[i] is the segment of values[i]: sorted, with ids in [0, 4).
+index = torch.tensor([0, 0, 2, 2, 2, 3])
+segment_count = 4
+
+lengths = torch.bincount(index, minlength=segment_count)
+offsets = torch.zeros(segment_count + 1, dtype=torch.int64)
+offsets[1:] = torch.cumsum(lengths, dim=0)  # tensor([0, 2, 2, 5, 6])
+```
+
+`minlength` keeps segments that have no values, so segment 1 stays in the
+result as an empty segment. The result holds the offsets of the example at
+the top of this page as int64, which the public calls take as they are. For an unsorted index, sort first and carry the values along:
+
+```python
+order = torch.argsort(index, stable=True)
+values, index = values[order], index[order]
+```
+
+## Empty segments and NaN
+
+The public calls and the private qualification path fix seven results:
+
+- The sum of an empty segment is `0.0`.
+- The maximum of an empty segment is negative infinity.
+- The maximum of a segment that contains a NaN is NaN.
+- The minimum of an empty segment is positive infinity.
+- The minimum of a segment that contains a NaN is NaN.
+- The mean of an empty segment is NaN, zero divided by zero.
+- The mean of a segment that contains a NaN is NaN.
+
+The tests pin all seven. On PyTorch 2.12,
+`torch.segment_reduce` returns the same values, and
+`torch.nn.functional.embedding_bag` with `mode="max"` differs on the two
+maximum results: it returns `0.0` for an empty bag and skips a NaN member.
+With `mode="mean"` it returns `0.0` for an empty bag, where these calls
+return NaN. No option changes the empty value. To get zero for empty
+segments, replace by length after the call, not by value, because a segment
+whose values are all negative infinity has the same maximum, one whose
+values are all positive infinity the same minimum, and one that holds a NaN
+the same mean:
+
+```python
+empty = offsets[1:] == offsets[:-1]
+output = output.masked_fill(empty, 0.0)
+```
+
+A sum has one more property that a caller should know, in both dtypes:
+its rounding depends on the schedule. [Execution Model](execution-model.md) introduces
+that, and [Segmented Reductions](../internals/segmented-reductions.md)
+states the bound, the evidence, what a sum does with NaN and infinities,
+and the internal module shapes and ABIs behind this contract.
+
 ## Three questions, three levels
 
 The rest of this guide follows one ladder of questions:
@@ -51,11 +268,13 @@ were part of semantic IR, changing the schedule would require rewriting the
 kernel's meaning.
 
 Swage instead preserves the segment-local meaning and allows task derivation
-to be qualified separately. Today, that separation is public for canonical
-fixed vector add or multiply and privately qualified for selected segmented
-modules.
-General public segmented execution remains planned.
+to be qualified separately. Today two fixed segment programs, a reduction
+and a softmax, are callable from Python. Other segment programs run only as
+privately qualified native modules, and a public segment syntax remains
+planned.
 
-Continue with [Writing Kernels](writing-kernels.md) to put the model on
-the page, or jump ahead to [Execution Model](execution-model.md) for the
-invariants behind each level.
+Continue with [Segmented Calls](segmented-calls.md), which runs the two
+public functions on this storage. [Writing Kernels](writing-kernels.md) then
+turns to the kernel language, which has no segment syntax, and
+[Execution Model](execution-model.md) returns to segments, tasks, and tiles
+and gives the invariants behind each level.

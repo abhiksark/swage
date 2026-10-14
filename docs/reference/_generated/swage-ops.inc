@@ -13,17 +13,26 @@ operation ::= `swage.extent` $segment attr-dict `:` qualified(type($segment))
 Returns the runtime element count of a segment,
 `offsets[segment_id + 1] - offsets[segment_id]`. May be zero.
 
+The operation reads the offsets buffer behind the segment handle and
+declares that read on its operand. Two instances are not merged across
+a write, and an unused instance is still removable.
+
+The lowerings admit the extent in one place: the scalar epilogue of a
+mean, where the extent is cast to the count type, converted to the
+element type, and divides the result of a `sum` reduction of the same
+segment. The division runs once per segment, after the reduction, so a
+mean is a composition and not a reduction kind: a kind has an identity
+and an order-free combine, which a mean lacks. A lowering that splits a
+segment sums the partial results and divides once.
+
 Example:
 
 ```mlir
 %n = swage.extent %seg : !swage.segment<f32>
+%count = arith.index_cast %n : index to i32
+%divisor = arith.sitofp %count : i32 to f32
+%mean = arith.divf %sum, %divisor : f32
 ```
-
-Traits: `AlwaysSpeculatableImplTrait`
-
-Interfaces: `ConditionallySpeculatable`, `NoMemoryEffect (MemoryEffectOpInterface)`
-
-Effects: `MemoryEffects::Effect{}`
 
 ##### Operands:
 
@@ -45,9 +54,9 @@ _Bind one logical segment of a values buffer_
 Syntax:
 
 ```
-operation ::= `swage.make_segment` $values `,` $offsets `,` $segment_id attr-dict
+operation ::= `swage.make_segment` $values `,` $offsets `,` $segment_id (`column` `(` $column^ `)`)? attr-dict
               `:` type($values) `,` type($offsets) `,` type($segment_id)
-              `->` qualified(type($result))
+              (`,` type($column)^)? `->` qualified(type($result))
 ```
 
 Binds segment `segment_id` of the dense `values` buffer, as delimited by
@@ -58,11 +67,22 @@ the `offsets` array, into a `!swage.segment` value:
 The result is a symbolic handle. No data is materialized; consumers of
 the segment are tiled during lowering.
 
+With `column`, `values` is a rank-two buffer of rows and the segment is
+one column of the rows the offsets delimit:
+
+    segment = values[offsets[segment_id] : offsets[segment_id + 1], column]
+
+The segment is still a run of scalars, so its type carries the element
+type alone: neither the number of columns nor the column enters a type.
+A rank-two buffer needs a column, and a rank-one buffer takes none.
+
 Example:
 
 ```mlir
 %seg = swage.make_segment %values, %offsets, %sid
     : memref<?xf32>, memref<?xi32>, index -> !swage.segment<f32>
+%column = swage.make_segment %rows, %offsets, %sid column(%col)
+    : memref<?x?xf32>, memref<?xi32>, index, index -> !swage.segment<f32>
 ```
 
 Traits: `AlwaysSpeculatableImplTrait`
@@ -75,9 +95,10 @@ Effects: `MemoryEffects::Effect{}`
 
 | Operand | Description |
 | :-----: | ----------- |
-| `values` | 1D memref of any type values |
+| `values` | 1D/2D memref of any type values |
 | `offsets` | 1D memref of signless integer values |
 | `segment_id` | index |
+| `column` | index |
 
 ##### Results:
 
@@ -104,6 +125,16 @@ values enter only through `captures`, whose values append to the entry
 block arguments after the element argument, in order. The yield type
 defines the result segment's element type. Over an empty segment the
 result is an empty segment (ADR-0008).
+
+The result is a lazy view of the operand segment. The map computes no
+element where it appears: each consumer of the result applies the region
+to the elements it reads, when it reads them. A consumer therefore sees
+a write to the buffers that happens between the map and the consumer,
+and fusing a map into its consumer does not change a program.
+
+The operation declares a read of the values and offsets buffers behind
+the segment handle on its segment operand, in addition to the effects of
+its region, so two instances are not merged across a write.
 
 Example:
 
@@ -146,10 +177,16 @@ operation ::= `swage.map_store` $segment `,` $output
 For every element of the segment, applies the region (captures appended
 to the block arguments, ADR-0008) and writes the yielded value to the
 segment's own index range in `output`; writing outside that range is
-inexpressible. The declared write effect on `output` keeps the
+inexpressible. For a column segment of rank-two values, `output` is a
+rank-two buffer and the range is the rows of the segment in its column. The declared write effect on `output` keeps the
 operation alive under dead-code elimination. The output buffer must not
 alias the segment's values buffer (a runtime obligation). Over an empty
 segment nothing is written.
+
+The operation also reads the values and offsets buffers behind the
+segment handle and declares that read on its segment operand. Its
+effects include the effects of its region, as for `swage.map` and
+`swage.reduce`, because a fused map runs inside that region.
 
 Example:
 
@@ -160,14 +197,14 @@ swage.map_store %seg, %out : !swage.segment<f32>, memref<?xf32> {
 }
 ```
 
-Traits: `IsolatedFromAbove`
+Traits: `IsolatedFromAbove`, `RecursiveMemoryEffects`
 
 ##### Operands:
 
 | Operand | Description |
 | :-----: | ----------- |
 | `segment` | A runtime-sized, internally dense segment of values |
-| `output` | 1D memref of integer or floating-point values |
+| `output` | 1D/2D memref of integer or floating-point values |
 | `captures` | variadic of integer or floating-point |
 
 
@@ -228,8 +265,33 @@ block arguments, ADR-0008) and combines the yielded values with `kind`.
 The result type equals the yield type. Over an empty segment the result
 is the identity of `kind`: `sum` -> 0, `max` -> negative infinity or the
 minimum integer, `min` -> positive infinity or the maximum integer.
-Every admitted kind is associative and commutative with a known
-identity; that gate is what licenses split reductions later.
+
+Every element contributes exactly once. The order in which the yielded
+values are combined is not part of the operation: a lowering may fold
+them left to right, reduce them as a tree, or reduce parts of the
+segment separately and merge the partial results. What stays guaranteed
+depends on the kind and the element type:
+
+- `max` and `min` are associative and commutative, so the result does
+  not depend on the order. A floating-point `max` is NaN when any
+  element is NaN.
+- Floating-point `sum` is commutative but not associative. The result
+  equals the exact sum of the elements only up to rounding, and the
+  rounding depends on the order that the lowering and the schedule
+  choose. Two lowerings, or two schedules of one program, may return
+  different sums, and bitwise equality between them is not guaranteed.
+  The difference is rounding error: it is bounded relative to the sum of
+  the absolute values of the elements, and it can be large relative to
+  the result when the elements cancel.
+- Integer element types pass the verifier, and no lowering admits them.
+  The overflow behavior of an integer `sum` is not defined.
+
+Swage lowerings add no fast-math flags, so a later pass has no license
+to reorder a sum once a lowering has fixed its order.
+
+The operation reads the values and offsets buffers behind the segment
+handle. It declares that read on its segment operand in addition to the
+effects of its region, so two instances are not merged across a write.
 
 Example:
 
@@ -277,10 +339,15 @@ Returns the index of the logical segment the surrounding program instance
 operates on, along the given logical grid axis. This is a semantic
 coordinate in the logical grid, not a GPU thread or block id.
 
+Axis 0 runs over the segments of the offsets array. Axis 1 runs over the
+trailing dimension of rank-two values: a program instance is then one
+segment and one column, and `swage.segment_id 1` is the column.
+
 Example:
 
 ```mlir
 %sid = swage.segment_id 0
+%col = swage.segment_id 1
 ```
 
 Traits: `AlwaysSpeculatableImplTrait`

@@ -214,58 +214,55 @@ class Svg:
 
 
 def capability_boundary() -> bytes:
-    """Render the four capability-status lanes."""
+    """Render the public, private, and planned capability lanes."""
     svg = Svg(
         "capability-boundary.svg",
         "Swage capability boundary",
-        "Four status lanes distinguish the public fixed vector elementwise "
-        "surface, "
-        "private segmented qualification, the resident-queue experiment, "
-        "and planned segmented APIs.",
-        height=830,
+        "Three separate lanes distinguish the public surface, which is fixed "
+        "vector add or multiply on Native CPU or CUDA and two segmented calls "
+        "on CUDA, built as one native wheel; private segmented "
+        "qualification; and planned segment syntax.",
+        height=680,
     )
     svg.text(48, 54, "Capability boundary", size=32, weight=750)
-    svg.text(
+    svg.multiline(
         48,
         84,
-        "The lanes describe status; none is a fallback from another.",
+        (
+            "The lanes describe status; none is a fallback from another.",
+            "The public lane is built as one native wheel, swage-compiler.",
+        ),
         color="muted",
+        gap=27,
     )
     lanes = (
         (
-            120,
+            150,
             "PUBLIC TODAY",
             "blue",
             "blue_fill",
             ("Python capture", "emit_mlir()", "launch(cpu / cuda)"),
-            "canonical vector add or multiply only",
+            "add or multiply on CPU or CUDA; CUDA segment_reduce and "
+            "segment_softmax calls",
             False,
         ),
         (
-            300,
+            330,
             "PRIVATE QUALIFICATION",
             "purple",
             "purple_fill",
             ("segment semantics", "planning + split", "GPU evidence"),
-            "tested contributor machinery; not a public API",
+            "not a public API; the segmented calls run fixed programs "
+            "through it",
             False,
         ),
         (
-            480,
-            "EXPERIMENTAL",
-            "orange",
-            "orange_fill",
-            ("resident queue", "split publication", "A6000 result"),
-            "correctness passed; performance gate failed",
-            False,
-        ),
-        (
-            660,
+            510,
             "PLANNED",
             "line",
             "gray_fill",
-            ("public segmented API", "packed work", "split max / softmax"),
-            "reusable queues + qualified persistence",
+            ("segment syntax", "packed work", "split softmax"),
+            "persistent scheduling",
             True,
         ),
     )
@@ -556,21 +553,25 @@ def segments_tasks_tiles() -> bytes:
 
 
 def compiler_pipeline() -> bytes:
-    """Render the canonical compiler spine and three admitted branches."""
+    """Render the canonical compiler spine and two admitted branches."""
     svg = Svg(
         "compiler-pipeline.svg",
         "Swage compiler pipeline",
-        "Verified semantic MLIR enters the public fixed-block branch, the "
-        "private direct segmented branch, or private SwagePlan work. Public "
-        "fixed vector add or multiply lowers explicitly to Native LLVM or "
-        "CUDA; "
-        "private segmented CPU oracle work stops separately.",
+        "Verified semantic MLIR enters two admitted branches. The public "
+        "fixed-block branch admits canonical vector add or multiply and "
+        "lowers it for the selected backend: to a Native LLVM JIT "
+        "host call, or through GPU, NVVM, and LLVM to NVPTX, PTX, and the "
+        "CUDA Driver API. The private SwagePlan stage plans every segment "
+        "function. Its GPU kernels each carry a swage.kernel_contract and "
+        "rejoin the CUDA path, and its sequential CPU oracle stops at SCF "
+        "and memref. The public segment_reduce and segment_softmax calls "
+        "run through the SwagePlan stage.",
         height=850,
     )
     svg.text(
         48,
         54,
-        "One compiler spine, three admitted branches",
+        "One compiler spine, two admitted branches",
         size=32,
         weight=750,
     )
@@ -585,33 +586,28 @@ def compiler_pipeline() -> bytes:
             55,
             "PUBLIC TODAY",
             "fixed-block add / multiply",
-            ("same fixed admission", "CUDA or Native host"),
+            ("one fixed admission", "selected cpu or cuda backend"),
             "blue",
             "blue_fill",
         ),
         (
-            420,
+            645,
             "PRIVATE QUALIFICATION",
-            "segmented direct",
-            ("sum, max, stable softmax", "two qualified paths"),
-            "purple",
-            "purple_fill",
-        ),
-        (
-            785,
-            "PRIVATE QUALIFICATION",
-            "SwagePlan direct + split",
-            ("classification companion", "direct or split identity sum"),
+            "SwagePlan stage",
+            (
+                "one plan per segment function",
+                "runs segment_reduce and segment_softmax",
+            ),
             "green",
             "green_fill",
         ),
     )
     for x, status, heading, body, color, fill in branches:
-        svg.box(x, 245, 330, 180, fill=fill, stroke=color)
+        svg.box(x, 245, 500, 180, fill=fill, stroke=color)
         svg.status_tag(x + 22, 265, 250, status, color=color, fill=fill)
-        svg.text(x + 165, 344, heading, size=19, weight=750, anchor="middle")
+        svg.text(x + 250, 344, heading, size=19, weight=750, anchor="middle")
         svg.multiline(
-            x + 165,
+            x + 250,
             384,
             body,
             size=16,
@@ -619,38 +615,36 @@ def compiler_pipeline() -> bytes:
             gap=30,
             anchor="middle",
         )
-    svg.arrow(600, 215, 220, 235)
-    svg.arrow(600, 215, 585, 235)
-    svg.arrow(600, 215, 950, 235)
+    svg.arrow(600, 215, 305, 235)
+    svg.arrow(600, 215, 895, 235)
 
-    svg.arrow(585, 425, 475, 435)
-    svg.arrow(585, 425, 695, 435)
-    svg.box(380, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.arrow(895, 425, 770, 435)
+    svg.arrow(895, 425, 1020, 435)
+    svg.box(655, 445, 230, 105, fill="canvas", stroke="green")
     svg.multiline(
-        475,
+        770,
         480,
-        ("sequential CPU oracle", "SCF / memref stop"),
+        ("plan to SCF", "sequential CPU oracle", "SCF / memref stop"),
         size=16,
         weight=650,
-        color="purple",
+        color="green",
         gap=27,
         anchor="middle",
     )
-    svg.box(600, 445, 190, 105, fill="canvas", stroke="purple")
+    svg.box(905, 445, 230, 105, fill="canvas", stroke="green")
     svg.multiline(
-        695,
+        1020,
         480,
-        ("GPU: one CTA", "per segment", "continues below"),
+        ("plan to GPU", "kernels, each with a", "swage.kernel_contract"),
         size=16,
         weight=650,
-        color="purple",
+        color="green",
         gap=27,
         anchor="middle",
     )
 
-    svg.arrow(220, 425, 350, 565)
-    svg.arrow(695, 550, 600, 565)
-    svg.arrow(950, 425, 850, 565)
+    svg.arrow(305, 425, 420, 565)
+    svg.arrow(1020, 550, 800, 565)
     svg.box(300, 580, 600, 78, fill="gray_fill")
     svg.text(
         600,
@@ -671,9 +665,7 @@ def compiler_pipeline() -> bytes:
 
     svg.arrow(600, 658, 225, 690)
     svg.box(85, 700, 280, 68, fill="blue_fill", stroke="blue")
-    svg.text(
-        225, 742, "Native LLVM JIT", size=17, weight=700, anchor="middle"
-    )
+    svg.text(225, 742, "Native LLVM JIT", size=17, weight=700, anchor="middle")
 
     svg.arrow(600, 658, 515, 690)
     cuda_stages = (
@@ -701,7 +693,7 @@ def split_lifecycle() -> bytes:
     """Render the private split partial and merge ownership lifecycle."""
     svg = Svg(
         "split-lifecycle.svg",
-        "Private split CTA identity-sum lifecycle",
+        "Private split CTA reduction lifecycle",
         "An oversized segment is divided into ordered absolute input ranges, "
         "each partial writes one scratch slot, and one merge writes output "
         "once.",
@@ -709,12 +701,12 @@ def split_lifecycle() -> bytes:
     )
     svg.text(48, 54, "Private split lifecycle", size=32, weight=750)
     svg.status_tag(
-        900, 28, 245, "identity sum only", color="purple", fill="purple_fill"
+        900, 28, 245, "sum, max, or min", color="purple", fill="purple_fill"
     )
     svg.text(
         48,
         88,
-        "One oversized segment; split max and softmax remain planned.",
+        "One oversized segment; split softmax remains planned.",
         color="muted",
     )
 
@@ -899,8 +891,8 @@ def runtime_lifecycle() -> bytes:
     svg.text(
         600,
         600,
-        "No copy, cast, device change, context creation, synchronization or "
-        "fallback.",
+        "No copy, cast, device change, context creation, synchronization, "
+        "or fallback.",
         size=17,
         weight=650,
         anchor="middle",

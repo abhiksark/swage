@@ -7,7 +7,9 @@ variable-sized dense segment programs into fixed-tile GPU tasks.
 
 ## Task routing
 
-Read this file for every task, then open only the smallest relevant guide:
+Read this file for every task, then read each applicable scoped guide and the
+relevant supporting documents below. Routes are cumulative for cross-area
+tasks; read only the sections needed for the change.
 
 - Python, frontend, bindings, and related tests:
   [python/AGENTS.md](python/AGENTS.md).
