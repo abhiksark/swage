@@ -560,7 +560,12 @@ def test_native_launch_declines_while_its_stream_captures():
     torch.cuda.synchronize()
     assert torch.equal(output, x + y)
 
+    # The reset runs on the default stream, so the side stream must wait for
+    # it. A spin keeps the default stream busy, so a missing wait fails here
+    # every time instead of now and then.
+    torch.cuda._sleep(200_000_000)
     output.zero_()
+    side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
         assert fast_launch(arguments, constexprs, grid) is True
     torch.cuda.synchronize()
