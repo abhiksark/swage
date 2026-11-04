@@ -1,0 +1,25 @@
+usage: benchmark_fresh_offsets.py [-h] --output OUTPUT [--smoke]
+                                  [--samples SAMPLES] [--warmups WARMUPS]
+                                  [--distributions NAME [NAME ...]]
+                                  [--segment-count SEGMENT_COUNT]
+                                  [--seed SEED] [--values {quarters,normal}]
+                                  [--kinds KIND [KIND ...]]
+                                  [--features D [D ...]]
+                                  [--dtype {float32,float64}]
+                                  [--pipeline-depth K]
+                                  [--candidates NAME [NAME ...]]
+                                  [--exclude-candidates NAME [NAME ...]]
+                                  [--warm-calls WARM_CALLS]
+benchmark_fresh_offsets.py: error: uniform with 2048 segments of 64 features can reach 536870912 values, more than the 268435456 a rank-two row admits
+{"failure_observations": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank2/failure-observations.json"}
+Traceback (most recent call last):
+  File "/tmp/swage-triton-review-src-98b17f3/benchmarks/run_triton_comparison_campaign.py", line 1088, in <module>
+    main()
+    ~~~~^^
+  File "/tmp/swage-triton-review-src-98b17f3/benchmarks/run_triton_comparison_campaign.py", line 994, in main
+    completed.check_returncode()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/media/abhik/comeback/miniconda3/lib/python3.13/subprocess.py", line 508, in check_returncode
+    raise CalledProcessError(self.returncode, self.args, self.stdout,
+                             self.stderr)
+subprocess.CalledProcessError: Command '['/media/abhik/comeback/miniconda3/bin/python', '/tmp/swage-triton-review-src-98b17f3/benchmarks/benchmark_fresh_offsets.py', '--output', '/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank2/process-000.json', '--distributions', 'many-tiny', 'uniform', 'power-law', 'one-outlier', '--segment-count', '2048', '--features', '3', '64', '--samples', '30', '--warmups', '5', '--values', 'quarters', '--candidates', 'swage_public_call', 'torch', 'triton_rows_looped']' returned non-zero exit status 2.

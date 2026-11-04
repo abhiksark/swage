@@ -1,0 +1,31 @@
+uniform: median_us={'swage_cta_call': 173.0, 'swage_public_call': 209.1, 'torch': 108.4, 'fastest triton_looped_b1024_w4': 105.7}
+log-normal: median_us={'swage_cta_call': 83.3, 'swage_public_call': 138.5, 'torch': 24.7, 'fastest triton_looped_b256_w2': 15.6}
+bimodal: median_us={'swage_cta_call': 90.5, 'swage_public_call': 128.7, 'torch': 31.2, 'fastest triton_looped_b512_w4': 23.9}
+zipf-like: median_us={'swage_cta_call': 88.0, 'swage_public_call': 135.5, 'torch': 29.8, 'fastest triton_looped_b256_w2': 19.4}
+many-tiny: median_us={'swage_cta_call': 82.8, 'swage_public_call': 120.0, 'torch': 23.9, 'fastest triton_looped_b256_w1': 14.7}
+few-huge: median_us={'swage_cta_call': 83.6, 'swage_public_call': 120.1, 'torch': 23.7, 'fastest triton_looped_b256_w2': 15.9}
+one-outlier: median_us={'swage_cta_call': 81.7, 'swage_public_call': 118.4, 'torch': 24.0, 'fastest triton_looped_b128_w2': 15.1}
+alternating-empty: median_us={'swage_cta_call': 81.4, 'swage_public_call': 118.5, 'torch': 21.2, 'fastest triton_looped_b512_w1': 15.0}
+power-law: median_us={'swage_cta_call': 93.6, 'swage_public_call': 158.5, 'torch': 26.1, 'fastest triton_looped_b512_w4': 20.6}
+{"output": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank1/process-000.json", "status": "research run; no performance gate"}
+uniform: median_us={'swage_cta_call': 171.5, 'swage_public_call': 209.1, 'torch': 108.4, 'fastest triton_looped_b1024_w8': 105.9}
+log-normal: median_us={'swage_cta_call': 81.0, 'swage_public_call': 136.1, 'torch': 24.7, 'fastest triton_looped_b256_w2': 15.5}
+bimodal: median_us={'swage_cta_call': 88.9, 'swage_public_call': 127.6, 'torch': 31.4, 'fastest triton_looped_b512_w1': 24.0}
+zipf-like: median_us={'swage_cta_call': 86.3, 'swage_public_call': 133.3, 'torch': 30.0, 'fastest triton_looped_b128_w1': 19.6}
+many-tiny: median_us={'swage_cta_call': 80.7, 'swage_public_call': 116.0, 'torch': 24.2, 'fastest triton_looped_b256_w1': 15.0}
+few-huge: median_us={'swage_cta_call': 81.5, 'swage_public_call': 120.1, 'torch': 23.8, 'fastest triton_looped_b256_w2': 15.9}
+one-outlier: median_us={'swage_cta_call': 81.1, 'swage_public_call': 117.6, 'torch': 24.1, 'fastest triton_looped_b512_w1': 15.1}
+alternating-empty: median_us={'swage_cta_call': 80.3, 'swage_public_call': 117.1, 'torch': 21.5, 'fastest triton_looped_b256_w1': 15.1}
+power-law: median_us={'swage_cta_call': 93.9, 'swage_public_call': 155.5, 'torch': 26.2, 'fastest triton_looped_b512_w4': 20.3}
+{"output": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank1/process-001.json", "status": "research run; no performance gate"}
+uniform: median_us={'swage_cta_call': 172.2, 'swage_public_call': 209.1, 'torch': 107.8, 'fastest triton_looped_b512_w4': 106.0}
+log-normal: median_us={'swage_cta_call': 81.9, 'swage_public_call': 135.0, 'torch': 24.7, 'fastest triton_looped_b128_w1': 15.5}
+bimodal: median_us={'swage_cta_call': 89.3, 'swage_public_call': 127.2, 'torch': 31.3, 'fastest triton_looped_b1024_w2': 23.9}
+zipf-like: median_us={'swage_cta_call': 87.9, 'swage_public_call': 135.0, 'torch': 29.7, 'fastest triton_looped_b128_w1': 19.8}
+many-tiny: median_us={'swage_cta_call': 80.0, 'swage_public_call': 117.1, 'torch': 23.6, 'fastest triton_looped_b128_w1': 14.7}
+few-huge: median_us={'swage_cta_call': 81.9, 'swage_public_call': 119.4, 'torch': 23.8, 'fastest triton_looped_b256_w2': 16.1}
+one-outlier: median_us={'swage_cta_call': 80.6, 'swage_public_call': 120.1, 'torch': 23.7, 'fastest triton_looped_b128_w1': 14.9}
+alternating-empty: median_us={'swage_cta_call': 80.6, 'swage_public_call': 116.9, 'torch': 21.3, 'fastest triton_looped_b512_w1': 14.8}
+power-law: median_us={'swage_cta_call': 91.3, 'swage_public_call': 155.6, 'torch': 25.6, 'fastest triton_looped_b512_w4': 20.2}
+{"output": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank1/process-002.json", "status": "research run; no performance gate"}
+{"output": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank1/summary.json", "summary": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank1/summary.json"}

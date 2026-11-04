@@ -1,0 +1,101 @@
+{
+  "benchmark": "swage-triton-comparison-process-campaign-failure",
+  "recorded_at": "2026-11-04T07:09:50.127578+00:00",
+  "output_dir": "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank2",
+  "error": {
+    "type": "CalledProcessError",
+    "message": "Command '['/media/abhik/comeback/miniconda3/bin/python', '/tmp/swage-triton-review-src-98b17f3/benchmarks/benchmark_fresh_offsets.py', '--output', '/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank2/process-000.json', '--distributions', 'many-tiny', 'uniform', 'power-law', 'one-outlier', '--segment-count', '2048', '--features', '3', '64', '--samples', '30', '--warmups', '5', '--values', 'quarters', '--candidates', 'swage_public_call', 'torch', 'triton_rows_looped']' returned non-zero exit status 2."
+  },
+  "process_observations": [
+    {
+      "process_index": 0,
+      "path": "process-000.json",
+      "command": [
+        "/media/abhik/comeback/miniconda3/bin/python",
+        "/tmp/swage-triton-review-src-98b17f3/benchmarks/benchmark_fresh_offsets.py",
+        "--output",
+        "/home/abhik/Projects/personal/swage/.benchmarks/triton-review-20261104-98b17f3/fresh-rank2/process-000.json",
+        "--distributions",
+        "many-tiny",
+        "uniform",
+        "power-law",
+        "one-outlier",
+        "--segment-count",
+        "2048",
+        "--features",
+        "3",
+        "64",
+        "--samples",
+        "30",
+        "--warmups",
+        "5",
+        "--values",
+        "quarters",
+        "--candidates",
+        "swage_public_call",
+        "torch",
+        "triton_rows_looped"
+      ],
+      "launched": true,
+      "returncode": 2,
+      "stdout": "",
+      "stderr": "usage: benchmark_fresh_offsets.py [-h] --output OUTPUT [--smoke]\n                                  [--samples SAMPLES] [--warmups WARMUPS]\n                                  [--distributions NAME [NAME ...]]\n                                  [--segment-count SEGMENT_COUNT]\n                                  [--seed SEED] [--values {quarters,normal}]\n                                  [--kinds KIND [KIND ...]]\n                                  [--features D [D ...]]\n                                  [--dtype {float32,float64}]\n                                  [--pipeline-depth K]\n                                  [--candidates NAME [NAME ...]]\n                                  [--exclude-candidates NAME [NAME ...]]\n                                  [--warm-calls WARM_CALLS]\nbenchmark_fresh_offsets.py: error: uniform with 2048 segments of 64 features can reach 536870912 values, more than the 268435456 a rank-two row admits\n",
+      "nvidia_telemetry": {
+        "pre_process": {
+          "available": true,
+          "recorded_at": "2026-11-04T07:09:50.010558+00:00",
+          "fields": {
+            "sm_clock_mhz": "MHz",
+            "memory_clock_mhz": "MHz",
+            "power_draw_watts": "W",
+            "temperature_celsius": "degrees Celsius"
+          },
+          "gpus": [
+            {
+              "index": 0,
+              "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b",
+              "sm_clock_mhz": 210,
+              "memory_clock_mhz": 405,
+              "power_draw_watts": 35.2,
+              "temperature_celsius": 58.0
+            }
+          ],
+          "compute_processes": {
+            "available": true,
+            "fields": {
+              "used_memory_mib": "MiB"
+            },
+            "processes": []
+          }
+        },
+        "post_process": {
+          "available": true,
+          "recorded_at": "2026-11-04T07:09:50.127450+00:00",
+          "fields": {
+            "sm_clock_mhz": "MHz",
+            "memory_clock_mhz": "MHz",
+            "power_draw_watts": "W",
+            "temperature_celsius": "degrees Celsius"
+          },
+          "gpus": [
+            {
+              "index": 0,
+              "uuid": "GPU-1b08842a-4c6e-32aa-53de-5b3f8553388b",
+              "sm_clock_mhz": 210,
+              "memory_clock_mhz": 405,
+              "power_draw_watts": 35.28,
+              "temperature_celsius": 58.0
+            }
+          ],
+          "compute_processes": {
+            "available": true,
+            "fields": {
+              "used_memory_mib": "MiB"
+            },
+            "processes": []
+          }
+        }
+      }
+    }
+  ]
+}
