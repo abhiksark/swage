@@ -2,7 +2,7 @@
 
 # Compiler design alternatives for a programmable segment compiler
 
-Review basis: current source at `98b17f38d7feccb8a31d7e45b10db510db5aeed1` on 2026-11-04. These are proposals for the user's decision. No production implementation or performance claim follows from this document.
+Review basis: current source at `98b17f38d7feccb8a31d7e45b10db510db5aeed1` on 2026-11-04. These are proposals for the owner's decision. No production implementation or performance claim follows from this document.
 
 ## Finding and recommendation
 
@@ -13,7 +13,7 @@ There are two credible options:
 1. **Expose the existing single-input program model first.** Compile caller-written maps, reductions, and terminal stores through verified semantic MLIR. Single-stage reductions use the existing direct and split schedules. Programs with captured reduction results use the existing direct fused kernel. This is the recommended first implementation because it tests whether programming the compiler is useful before expanding its planner.
 2. **Build a bounded two-input, two-stage compiler before exposing the language.** Include weighted pooling and dependent reductions that can split across blocks. This serves a broader workload immediately but requires real changes to semantic operands, plan regions, scratch ownership, launch orchestration, and numerical qualification. It is an alternative investment decision, not a prerequisite for option 1.
 
-The user's priority is programmability. Optimizing fixed built-in operators alone would not meet it. Conversely, exposing every construct accepted by the semantic dialect would overstate the admitted lowering surface.
+The owner's priority is programmability. Optimizing fixed built-in operators alone would not meet it. Conversely, exposing every construct accepted by the semantic dialect would overstate the admitted lowering surface.
 
 ## What the current implementation actually supplies
 
@@ -133,7 +133,7 @@ Acceptance tests must include actual caller-written energy, mean-square, normali
 
 Stop expanding the language if these examples require kernel-name or source-text pattern matching, if native facts and runtime binding disagree, or if a valid program needs to execute Python to build its semantic IR. Reject release if malformed source changes IR before diagnostics, if a capture reads a different segment's summary, or if any mismatch is hidden by a loose tolerance.
 
-For utility, require at least one small external caller-written example that uses an element expression absent from the built-ins and one captured normalization example. Do not claim general performance superiority from them. If direct captured programs are too slow for the user's intended lengths, use that measured workload to choose option 2 rather than adding arbitrary optimizations.
+For utility, require at least one small external caller-written example that uses an element expression absent from the built-ins and one captured normalization example. Do not claim general performance superiority from them. If direct captured programs are too slow for the owner's intended lengths, use that measured workload to choose option 2 rather than adding arbitrary optimizations.
 
 ## Option 2: bounded multi-input and staged execution
 
@@ -243,7 +243,7 @@ For values `[1, 3, 2, 6]` and offsets `[0, 2, 2, 4]`, including an empty segment
 
 Arbitrary `caller_*` function names were used, so this evidence does not depend on fixed operator-name dispatch. CPU guard sentinels were checked by the existing oracle helper. Four native compiles and two executed CPU examples passed; the invalid split was rejected as expected. GPU kernels were not launched, and these small examples do not establish numerical or performance qualification of a future public frontend.
 
-## Decision requested from the user
+## Decision requested from the owner
 
 Choose between delivering useful caller-written single-input programs first, or accepting the larger input/stage expansion before the initial programmable interface. My recommendation is option 1, followed by weighted pooling as the first semantic extension, and split dependent stages only when a real captured program demonstrates the direct path's limit.
 

@@ -1,5 +1,7 @@
 <!-- benchmarks/results/segment-design-20261104-98b17f3/strategy-proposals.md -->
 
+# Strategy proposals for a programmable segment compiler
+
 Swage should pursue a useful programmable segment compiler, with composition
 as its first proof of value and scheduling as an optimization that must earn
 its cost. The user has selected that objective. The proposals below are
@@ -101,7 +103,7 @@ current repository rule and is not necessary to test the compiler idea.
 
 | Option | Workload assumption | What it would deliver | What it sacrifices | Reason to reject it |
 |---|---|---|---|---|
-| A. Reliable operators with explicit reusable plans | Offsets, geometry, and selected program repeat for enough calls to amortize preparation | Validated ownership of layout and scratch, repeated launches, explicit lifecycle | Fresh layouts still pay setup; fixed operators do not give callers programmable composition | Reject as the main direction because the user's goal is programmability. Retain only if real applications reuse layouts. |
+| A. Reliable operators with explicit reusable plans | Offsets, geometry, and selected program repeat for enough calls to amortize preparation | Validated ownership of layout and scratch, repeated launches, explicit lifecycle | Fresh layouts still pay setup; fixed operators do not give callers programmable composition | Reject as the main direction because the owner's goal is programmability. Retain only if real applications reuse layouts. |
 | B. Programmable segment-local composition | Callers need fused element work and dependencies between reductions and stores | One source program, compiler-derived legal execution, useful diagnostics, competitive compiled kernels | A bounded language, explicit unsupported programs, no promise of automatic differentiation or every schedule for every program | Reject the proposed surface if new examples still require named special cases throughout native code or only beat unfused baselines. |
 | C. Direct device execution for fresh layouts | Layouts change frequently and the dominant useful programs can run directly | Runtime loops over segments with no mandatory host task classification; later selective decomposition | Direct execution may leave long tails; eliminating eager content checks changes the validation contract | Reject an asynchronous variant if eager validation before any compute enqueue is non-negotiable and inputs are arbitrary device tensors. |
 
@@ -358,6 +360,6 @@ split stages, or persistent scheduling would optimize an invented workload.
 The present evidence is enough to choose a bounded compiler experiment; it
 is insufficient to choose all of those runtime commitments.
 
-This review created only this notes file. It changed no compiler behavior
+This review adds only this file. It changed no compiler behavior
 and ran no additional GPU workload. Source inspection and primary-source
 research support the proposals; their performance gates remain untested.

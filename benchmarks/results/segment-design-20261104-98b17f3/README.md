@@ -7,7 +7,7 @@ The recommended experiment is to expose a bounded caller-written segment languag
 
 The central design problem is that Swage's public execution surface is an operator library while its native implementation already contains a small programmable segment compiler. Closing that gap is more aligned with the chosen goal than adding another scheduler. The present evidence supports a bounded experiment, not a general superiority or novelty claim.
 
-[Open the interactive comparison](showcase.html). Supporting reviews: [compiler semantics](compiler-proposals.md), [frontend and runtime](runtime-proposals.md), and [independent strategy](strategy-proposals.md). Each reviewer inspected a different boundary, then challenged the combined recommendation.
+[Open the interactive comparison](showcase.html). Supporting reviews: [compiler semantics](compiler-proposals.md), [frontend and runtime](runtime-proposals.md), and [independent strategy](strategy-proposals.md). Each review inspects a different boundary, then challenges the combined recommendation.
 
 ## 1. What should remain, and what should change
 
@@ -69,7 +69,7 @@ The three supporting reviews use their own labels for the same choices:
 
 These routes can share components, but their first deliverables differ. A fixed-operator-only plan is not a fourth recommendation: it would not meet the selected priority. A general task DAG, persistent queue, arbitrary combiners, automatic differentiation and tensor-language expansion are not prerequisites for any of the three.
 
-The reviewers' strongest challenge to A is utility, not feasibility: sum of squares already has straightforward Triton and transformed-reduction library implementations. The abstraction must earn its place by admitting new bodies without compiler edits, preserving semantics, and reducing user scheduling work at an acceptable measured cost. Another objection is API ceremony. A convenient checked call should remain available; explicit layout and execution objects belong to callers who need reuse and predictable lifetimes.
+The reviews' strongest challenge to A is utility, not feasibility: sum of squares already has straightforward Triton and transformed-reduction library implementations. The abstraction must earn its place by admitting new bodies without compiler edits, preserving semantics, and reducing user scheduling work at an acceptable measured cost. Another objection is API ceremony. A convenient checked call should remain available; explicit layout and execution objects belong to callers who need reuse and predictable lifetimes.
 
 ## 5. Programs that make the choice tangible
 
@@ -97,7 +97,7 @@ weighted_pool(values_segment, weights_segment):
 | Stable softmax | Existing f32 two-reduction/capture structure | Caller-written expression, approximation documentation | Existing direct fused program; split dependencies are additional work |
 | Weighted pooling | Missing second aligned source | Extend native operands, region verification, map fusion and contracts | Start with two equal-shape/equal-dtype inputs and identical offset/segment coordinates |
 
-The compiler reviewer ran a new [native feasibility check](compiler-native-check.py) with arbitrary names, proving this is not name-based built-in dispatch. `caller_energy([1,3,2,6], [0,2,2,4])` produced `[10,0,40]` on the CPU oracle and compiled direct/partial/merge PTX for `sm_86`. `caller_normalize` produced `[.25,.75,.25,.75]` and compiled direct PTX; split-partial compilation correctly rejected the dependency. Source IR remained unchanged. This establishes native construction, CPU behavior and compilation, **not GPU execution or public source support**. [Recorded results](compiler-native-results.json) and the compiler review retain the exact evidence.
+The compiler review ran a new [native feasibility check](compiler-native-check.py) with arbitrary names, proving this is not name-based built-in dispatch. `caller_energy([1,3,2,6], [0,2,2,4])` produced `[10,0,40]` on the CPU oracle and compiled direct/partial/merge PTX for `sm_86`. `caller_normalize` produced `[.25,.75,.25,.75]` and compiled direct PTX; split-partial compilation correctly rejected the dependency. Source IR remained unchanged. This establishes native construction, CPU behavior and compilation, **not GPU execution or public source support**. [Recorded results](compiler-native-results.json) and the compiler review retain the exact evidence.
 
 Freeze the first advertised subset, then independently write two held-out bodies, for example `max(x*x/(1+x*x))` and `sum(x-max(x))`. They must work without changing production admission, kernel-name tables or runtime dispatch. That is the key abstraction test.
 
