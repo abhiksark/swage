@@ -32,7 +32,7 @@ Separating semantics from scheduling also has substantial prior art. MLIR's Tran
 
 The geometry issue is a **confirmed conditional correctness defect**, not merely design preference. In the preceding review, changing only an artifact's subgroup width from 32 to 16 was accepted and made eight singleton reductions write only four outputs. The current writer emits 32; ordinary generated artifacts were not shown to fail. Fix validation and its execution regression before broadening artifact consumption. The [artifact reproducer](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/segment-design-20261104-98b17f3/artifact-subgroup-repro.py) compiles a temporary artifact and prints intact and mutated results; it intentionally demonstrates the defect in the reviewed revision.
 
-The numerical issue is also concrete: finite f32/f64 inputs `[M, M, -M, -M]`, with `M` the largest finite value, produced NaN under the tested reduction tree; the reordered input `[M, -M, M, -M]` produced zero. Both have real sum zero. An unconditional finite error bound cannot cover that. This does not by itself invalidate an order-free floating-point reduction contract. The documentation must state its assumptions. `DESIGN.md:187-190` at the reviewed revision also incorrectly said the public segment calls were absent from main; this change corrects that bullet.
+The numerical issue is also concrete: finite f32/f64 inputs `[M, M, -M, -M]`, with `M` the largest finite value, produced NaN under the tested reduction tree; the reordered input `[M, -M, M, -M]` produced zero. Both have real sum zero. An unconditional finite error bound cannot cover that. This does not by itself invalidate an order-free floating-point reduction contract. The documentation must state its assumptions. `DESIGN.md:187-190` at the reviewed revision also incorrectly said the public segmented calls were absent from main; this change corrects that bullet.
 
 ## 3. What the measurements establish
 
@@ -63,9 +63,9 @@ The three supporting reviews use their own labels for the same choices:
 | Route above | Compiler review | Runtime review | Strategy review |
 |---|---|---|---|
 | A. Expose bounded programs first | Option 1 | Alternative A | B |
-| B. Add aligned inputs first | Option 2 (its weighted-pooling part) | Not covered | Weighted-pooling-first alternative |
+| B. Add aligned inputs before stabilizing the interface | Option 2 (its weighted-pooling part) | Not covered | Weighted-pooling-first alternative |
 | C. Prioritize fresh-layout execution | Not covered | Alternative B | C, fresh-call-first alternative |
-| Fixed operators only (rejected above) | Not covered | Not covered | A |
+| Fixed operators only (rejected below) | Not covered | Not covered | A |
 
 These routes can share components, but their first deliverables differ. A fixed-operator-only plan is not a fourth recommendation: it would not meet the selected priority. A general task DAG, persistent queue, arbitrary combiners, automatic differentiation and tensor-language expansion are not prerequisites for any of the three.
 
@@ -140,7 +140,7 @@ Arbitrary programs must reject gradient recording until their derivatives are im
 
 ## 8. Experiments that should decide the design
 
-The following are **proposed acceptance rules**, not measured outcomes or existing release gates. The six rules below are the set to freeze; the runtime review's 20%/5% stop rules were its working thresholds and do not form a second gate set. The owner may choose a different acceptable performance premium before any candidate is timed.
+The following are **proposed acceptance rules**, not measured outcomes or existing release gates. The six rules below are the set to freeze. The strategy review's threshold table restates them with selector-regret bounds the owner may adopt; the runtime review's 20%/5% kill criteria (its sections for A and B) were working thresholds. Neither is a second gate set. The owner may choose a different acceptable performance premium before any candidate is timed.
 
 1. **Programmability:** energy/rational pooling, normalization and caller softmax compile through one semantic path. Two held-out bodies require no production edits. Unsupported side effects, captures, types and gradient use fail with source locations.
 2. **Correctness:** compare exact-representable fixtures and independent float64/PyTorch references; cover empty ranges, partial tiles, long tails, cancellation, intermediate overflow, signed zero, NaNs/infinities and expression error. Shared CPU/GPU emission is not the sole oracle. Run racecheck and lifetime/error-path tests for any new asynchronous state.
@@ -153,7 +153,7 @@ Use memory-admitted synthetic strata for short, mixed and long-tail segments, sc
 
 ## 9. Suggested sequence for the owner's judgment
 
-First repair artifact geometry validation and the numerical/status documentation, with focused regression evidence. These are correctness and claim-maintenance issues independent of the chosen route.
+First repair artifact geometry validation and the numerical documentation, with focused regression evidence. These are correctness and claim-maintenance issues independent of the chosen route.
 
 Then make a private end-to-end experiment for caller-written programs: direct AST-to-MLIR, native program facts, a checked convenience call and an owned-layout preparation path. Keep the first execution slice bounded and reject unsupported gradients. Demonstrate the two held-out bodies and publish matched fused comparisons before stabilizing public spelling.
 

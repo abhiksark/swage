@@ -360,6 +360,6 @@ split stages, or persistent scheduling would optimize an invented workload.
 The present evidence is enough to choose a bounded compiler experiment; it
 is insufficient to choose all of those runtime commitments.
 
-This review adds only this file. It changed no compiler behavior
+This review added only this file. It changed no compiler behavior
 and ran no additional GPU workload. Source inspection and primary-source
 research support the proposals; their performance gates remain untested.
