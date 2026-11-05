@@ -4,8 +4,8 @@
 
 Swage should pursue a useful programmable segment compiler, with composition
 as its first proof of value and scheduling as an optimization that must earn
-its cost. The user has selected that objective. The proposals below are
-independent review recommendations, not an implementation decision. The user
+its cost. The owner has selected that objective. The proposals below are
+independent review recommendations, not an implementation decision. The owner
 remains the final judge of scope, numerical guarantees, and acceptance gates.
 
 The recommended direction is B below. It can use a direct execution path
