@@ -141,7 +141,7 @@ within one segment; `eps` is a positive compile-time constant.
 
 | Candidate | Meaning | Existing foundation | What it discriminates |
 |---|---|---|---|
-| P0. Identity sum | `sum(x)` | Existing public operator and every static reduction schedule | Control for runtime and schedule effects; not evidence of programmability |
+| Control. Identity sum | `sum(x)` | Existing public operator and every static reduction schedule | Control for runtime and schedule effects; not evidence of programmability |
 | P1. Rational pooling | `sum(x*x / (1 + x*x))` | Admitted multiplication, addition, division, and single reduction | Caller-written arithmetic must flow through every legal schedule without a kernel per expression |
 | P2. Stable softmax | `m=max(x); z=sum(exp2((x-m)*log2(e))); y=exp2((x-m)*log2(e))/z` | Existing reduction captures and map-store path | A caller can express the same dependency structure as the fixed operator; no body-name dispatch |
 | P3. L1 normalization | `a=sum(max(x, -x)); y=x/(eps+a)` | Existing arithmetic, captured reduction, and map store | An independent two-stage program should use the same machinery as softmax, without adding an algorithm-specific lowering |
