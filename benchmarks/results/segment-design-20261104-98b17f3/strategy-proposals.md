@@ -12,7 +12,7 @@ purpose. A faster implementation of one more built-in reduction is a useful
 control experiment, but it would not establish a programmable compiler.
 
 **The evidence supports a compiler experiment, with a narrow claim.**
-The [current local comparison](../triton-engineering-a6000-sm86-98b17f3/README.md)
+The [current local comparison](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/triton-engineering-a6000-sm86-98b17f3/README.md)
 at source `98b17f3` reports losses to a fixed Triton configuration in all
 17 fresh-offset cases, while the prepared mixed kernel wins four of six
 cases against a fixed configuration and three of six against the best
@@ -33,7 +33,7 @@ shows fused transforms and reductions, but its competing PyTorch path uses
 eager transforms and allocations. It explicitly does not compare against an
 equally fused competing kernel.
 
-The subsequent [local diagnostic profile](public-call-profile.json) adds
+The subsequent [local diagnostic profile](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/segment-design-20261104-98b17f3/public-call-profile.json) adds
 evidence of repeated validation, task tensor creation, and launch-contract
 binding alongside the offset copy. It profiles 100 calls on 8,192 segments
 of length 16. Its cumulative spans overlap, include waits, and are perturbed

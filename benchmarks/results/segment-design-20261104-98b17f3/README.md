@@ -30,13 +30,13 @@ Separating semantics from scheduling also has substantial prior art. MLIR's Tran
 | Kernel geometry still has duplicated knowledge. | NVIDIA subgroup width is fixed at `NVIDIATarget.cpp:44`; artifact validation at `_artifact.py:547` accepts other divisors; row grouping also appears in native and Python code. | Immediately require the supported NVIDIA width. As mappings expand, bind a small versioned work-mapping descriptor to the compiled entry, rather than a general formula interpreter. |
 | Numerical and oracle guarantees need precision. | Current sum documentation promises bounded error without intermediate-overflow conditions; CPU/GPU consumer patterns are shared. | Specify legal reduction trees and assumptions separately from error bounds. Keep independent references and adversarial numerical cases. |
 
-The geometry issue is a **confirmed conditional correctness defect**, not merely design preference. In the preceding review, changing only an artifact's subgroup width from 32 to 16 was accepted and made eight singleton reductions write only four outputs. The current writer emits 32; ordinary generated artifacts were not shown to fail. Fix validation and its execution regression before broadening artifact consumption. The [artifact reproducer](artifact-subgroup-repro.py) compiles a temporary artifact and prints intact and mutated results; it intentionally demonstrates the defect in the reviewed revision.
+The geometry issue is a **confirmed conditional correctness defect**, not merely design preference. In the preceding review, changing only an artifact's subgroup width from 32 to 16 was accepted and made eight singleton reductions write only four outputs. The current writer emits 32; ordinary generated artifacts were not shown to fail. Fix validation and its execution regression before broadening artifact consumption. The [artifact reproducer](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/segment-design-20261104-98b17f3/artifact-subgroup-repro.py) compiles a temporary artifact and prints intact and mutated results; it intentionally demonstrates the defect in the reviewed revision.
 
 The numerical issue is also concrete: finite f32/f64 inputs `[M, M, -M, -M]`, with `M` the largest finite value, produced NaN under the tested reduction tree; the reordered input `[M, -M, M, -M]` produced zero. Both have real sum zero. An unconditional finite error bound cannot cover that. This does not by itself invalidate an order-free floating-point reduction contract. The documentation must state its assumptions. `DESIGN.md:187-190` also incorrectly says the public segment calls are absent from main.
 
 ## 3. What the measurements establish
 
-The [recorded Swage/Triton comparison](../triton-engineering-a6000-sm86-98b17f3/README.md) used three independent processes per configuration, 30 samples per case, exact-checkable f32 values and an NVIDIA RTX A6000 (`sm_86`). It measured installed Triton 3.7.0 and PyTorch 2.12.0+cu130.
+The [recorded Swage/Triton comparison](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/triton-engineering-a6000-sm86-98b17f3/README.md) used three independent processes per configuration, 30 samples per case, exact-checkable f32 values and an NVIDIA RTX A6000 (`sm_86`). It measured installed Triton 3.7.0 and PyTorch 2.12.0+cu130.
 
 | Boundary | Result against the fixed Triton baseline | Interpretation |
 |---|---|---|
@@ -44,9 +44,9 @@ The [recorded Swage/Triton comparison](../triton-engineering-a6000-sm86-98b17f3/
 | Fresh public calls, feature rows | 0 wins / 8 cases; ratios 1.18 to 6.56 | Wider rows narrow some gaps, but do not reverse this result. |
 | Prepared rank-one kernels, graph replay | 4 wins / 6 cases; 3 wins / 6 against the fastest post-hoc sweep configuration | Some kernels are competitive once setup is excluded. This does not establish amortized benefit. |
 
-These boundaries differ. Do not subtract a prepared graph time from fresh wall time to call the difference validation overhead. The comparison is synthetic, local engineering evidence, not release qualification or an end-to-end application result. The prepared driver wrote measurements and then failed a provenance type check; serialized child records were revalidated and summaries recovered. The failure is retained and the campaign gate did not pass. The supporting benchmark records are included alongside this investigation. Their measured source revision is independent of the commit that archives them.
+These boundaries differ. Do not subtract a prepared graph time from fresh wall time to call the difference validation overhead. The comparison is synthetic, local engineering evidence, not release qualification or an end-to-end application result. The prepared driver wrote measurements and then failed a provenance type check; serialized child records were revalidated and summaries recovered. The failure is retained and the campaign gate did not pass. The supporting benchmark records remain in the linked evidence commit, outside this design-review diff. Their measured source revision is independent of the commit that archives them.
 
-A new [diagnostic profile](public-call-profile.json), with [reproducer](profile_public_call.py), tested 8,192 segments of length 16 with exact quarter-valued inputs. Fifty unprofiled synchronized calls had a **111.955 microsecond median**. One hundred cProfile-instrumented calls took 19.804 milliseconds. Across those 100 calls, offset/shape validation occupied 5.315 ms cumulatively, `torch.tensor` 2.981 ms, tensor CPU transfer 2.091 ms, and binding 2.512 ms cumulatively. Correctness assertions passed.
+A new [diagnostic profile](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/segment-design-20261104-98b17f3/public-call-profile.json), with [reproducer](https://github.com/abhiksark/swage/blob/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results/segment-design-20261104-98b17f3/profile_public_call.py), tested 8,192 segments of length 16 with exact quarter-valued inputs. Fifty unprofiled synchronized calls had a **111.955 microsecond median**. One hundred cProfile-instrumented calls took 19.804 milliseconds. Across those 100 calls, offset/shape validation occupied 5.315 ms cumulatively, `torch.tensor` 2.981 ms, tensor CPU transfer 2.091 ms, and binding 2.512 ms cumulatively. Correctness assertions passed.
 
 Those spans overlap, include waits and suffer profiler overhead. They locate repeated work; they do not apportion a speedup. They argue against treating the host copy as the sole problem or rewriting the whole runtime in C++ without controlled ablations.
 
@@ -152,37 +152,24 @@ After that experiment, choose the next extension from observed need: aligned inp
 
 The unresolved product input is a concrete application and its layout-reuse pattern. That does not block the bounded experiment. It does prevent a defensible claim that reusable layouts, asynchronous validation or a particular split policy should dominate the final API.
 
-## Evidence and completion status
+## Evidence and review scope
 
-- Files created: this report, `showcase.html`, three reviewer notes, the diagnostic script/profile/JSON, native feasibility artifacts and browser verification artifacts in this directory. The original investigation ran under ignored `.benchmarks/`; this directory archives it for review with portable links and reproduction commands.
-- Compiler semantic behavior changed: no. No production file was edited. Pre-existing local planning and history files were excluded.
-- New execution: exactness assertions for the public-call profile passed on NVIDIA RTX A6000, `sm_86`; custom-program CPU oracle, PTX compilation and refusal checks passed. PTX compilation is not GPU execution.
-- Artifact verification: Ruff passed for all three archived Python reproducers. Chrome 148 exercised all 3 route choices, 4 program choices and 3 chart boundaries (23 cases); 18 local links/anchors passed. Desktop 1440x1000 and mobile 390x844 had no horizontal overflow or JavaScript exceptions, and their screenshots were inspected. See [browser results](showcase-check.json) and [checker](check_showcase.mjs). The PR changes only investigation and benchmark records.
-- Earlier in this same review session: 1,686 frontend tests, 124 lit tests, 93 C++ unit tests and 5,301 native Python/CUDA tests passed. The two opt-in racecheck tests passed separately. These counts describe the reviewed source, not validation of unimplemented designs.
-- Follow-up issue: proposed work above; no issue was filed and no redesign was committed. Implementation and issue filing remain separate follow-up work.
-- Skipped: implementation and performance testing of proposed APIs, new composed-program GPU benchmarks, whole-application tests and other architectures. The earlier local sanitizer attempt was blocked by the configured Clang wrapper; no sanitizer success is claimed.
+This PR keeps the design report, three independent reviews, the interactive showcase and the small native feasibility check with its results. It changes no compiler/runtime behavior and adopts no proposed API. The complete benchmark records, failure logs, profiles, screenshots and browser checker remain in the [evidence commit](https://github.com/abhiksark/swage/tree/e43af738844a8034c0d3650d314b278d2788ae32/benchmarks/results), outside the design-review diff. The measured source is still `98b17f3`; archiving a measurement does not qualify a later compiler revision.
 
-Main risk: a technically sound bounded language may still lack enough useful application compositions to justify its API and runtime cost. The held-out-program and matched-application experiments are intended to resolve that risk before a larger compiler redesign.
+The numerical and performance conclusions above retain their original limits. Fresh and prepared timings are separate; the prepared campaign failed after writing data, and recovered summaries are not a successful campaign gate. Raw evidence is linked rather than deleted from history.
 
-## Rechecking the archived evidence
+During the investigation, the CPU examples, four PTX compilations, expected split refusal and source-preservation assertions passed. The public-call diagnostic and artifact reproducer passed their assertions on NVIDIA RTX A6000, `sm_86`, driver 580.178.04. The original review also passed 1,686 frontend, 124 lit, 93 C++ unit and 5,301 native Python/CUDA tests, with the two opt-in racecheck tests passed separately. Those checks describe the existing implementation, not the proposed designs. Full suites and the complete campaign were not rerun to narrow this PR.
 
-The numerical and benchmark JSON retains the measured source revision and original paths. Reproduction scripts now require a new output directory so rechecks cannot replace these records. Build the recorded revision with the pinned LLVM toolchain to reproduce historical behavior; running the scripts against another revision is a new check. Native compilation needs the build-tree bindings and the qualification helpers on `PYTHONPATH`.
+Re-run the retained native feasibility check from the repository root with matching build-tree bindings:
 
 ```sh
 record=benchmarks/results/segment-design-20261104-98b17f3
 PYTHONPATH=build/python_packages:python:python/tests/mlir python \
   "$record/compiler-native-check.py" --output-dir /tmp/swage-native-recheck
-PYTHONPATH=build/python_packages:python python \
-  "$record/profile_public_call.py" --output-dir /tmp/swage-profile-recheck
-PYTHONPATH=build/python_packages:python python \
-  "$record/artifact-subgroup-repro.py"
-node "$record/check_showcase.mjs" /tmp/swage-showcase-recheck
 ```
 
-The first two output directories must not exist. The artifact reproducer creates its own temporary directory and needs an NVIDIA GPU compatible with `sm_86`. The browser checker uses `chromium` from PATH, or the executable named by `SWAGE_REVIEW_BROWSER`, and needs Node.js with the built-in WebSocket API (verified with Node 22). Its output directory must not exist; screenshots and verification JSON go there. Serve the repository with `python -m http.server 8000` and open this directory's `showcase.html` to use the interactive comparison. GitHub displays HTML source, not the live interactions.
+The output directory must not exist. Set `SWAGE_ORACLE_BUILD_DIR` when the native build is outside this checkout. This executes the CPU oracle and compiles `sm_86` PTX; it launches no GPU kernel. Its recorded results do not establish a public Python segment frontend.
 
-### PR preparation checks, 5 November 2026
+Serve the repository with `python -m http.server 8000` and open this directory's `showcase.html` to use the comparison. GitHub displays HTML source, not the live interactions. Supporting reproducers and original verification artifacts are available in the linked evidence commit.
 
-`make docs` and `python -m ruff check .` passed. The browser checker passed again after link relocation, and its archived screenshots show the relocated showcase. All 12 compressed raw process records decompress byte-for-byte to their original evidence; the nine unique records reproduce all three summaries exactly. The three original design measurements are byte-identical to the investigation outputs. Twenty-four local Markdown links resolve.
-
-Both CPU examples, four PTX compilations, the expected split refusal and source-preservation checks passed again using the original `98b17f3` native build through `SWAGE_ORACLE_BUILD_DIR` and `PYTHONPATH`. The public-call profiler's correctness assertions also passed, with recheck output kept outside this record. The artifact reproducer asserted both the intact eight-output result and the mutated four-output result. The device was NVIDIA RTX A6000, `sm_86`, driver 580.178.04. No compiler/runtime source changed; these rechecks validate the archived reproducers, not a newly built compiler or the proposed APIs. Full compiler suites and the benchmark campaign were not rerun for this records-only PR.
+Follow-up work remains the owner's decision; no issue was filed. The main unresolved risk is whether real application compositions justify the language and runtime cost. Implementation, arbitrary-program derivatives, proposed performance gains, whole-application behavior and other architectures remain unverified.
