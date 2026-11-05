@@ -184,10 +184,9 @@ not widen the admitted public kernel subset.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow runs public fixed vector add and private
-  segmented runtime qualification on a real NVIDIA device, on `main` only.
-  The public segmented calls are not on `main`, so it has not run their
-  tests; they ran on the development machine.
+- The trusted GPU workflow runs the public fixed vector add walkthrough and
+  private segmented runtime qualification, and qualifies the installed public
+  segmented calls, on a real NVIDIA device, on `main` only, weekly and by hand.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 
