@@ -179,7 +179,7 @@ DEBUG level, without cache paths, tensor contents, pointers, or PTX. Swage
 configures no handlers and prints nothing by default. Compiler dumps are
 separate and are not sanitized logs; treat them as trusted, potentially
 sensitive native artifacts under the
-[security policy](https://github.com/abhiksark/swage/blob/main/SECURITY.md).
+[security policy](https://github.com/abhiksark/swage/blob/main/.github/SECURITY.md).
 
 ## A launch refuses to compile
 

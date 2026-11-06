@@ -130,7 +130,7 @@ trusted publisher. Do not install on failed or mismatched verification.
 
 Swage compiles native code from trusted inputs and is **not a sandbox** for
 untrusted kernels or compiler artifacts. See the
-[security policy](https://github.com/abhiksark/swage/blob/main/SECURITY.md).
+[security policy](https://github.com/abhiksark/swage/blob/main/.github/SECURITY.md).
 
 ## Build from source
 

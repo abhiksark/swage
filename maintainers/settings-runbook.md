@@ -12,7 +12,7 @@ The commands use `gh api` only, so they work with an old GitHub CLI.
 ## Status
 
 Steps 1, 3, 4, and 5 were applied and checked on 2026-10-02. Step 2, runner
-isolation, is not done; the `SECURITY.md` sentence at the end of this page
+isolation, is not done; the `.github/SECURITY.md` sentence at the end of this page
 waits for it. The four required checks in step 3 are job names in
 `ci-python.yml` and `ci-cpp.yml`; renaming one of those jobs blocks every
 pull request until the protection is updated.
@@ -94,7 +94,7 @@ gh api repos/abhiksark/swage/branches/main/protection \
 
 ## 4. Enable private vulnerability reporting
 
-`SECURITY.md` and the issue template send reporters to the private advisory
+`.github/SECURITY.md` and the issue template send reporters to the private advisory
 form. The form only accepts reports when this setting is on.
 
 ```bash
@@ -130,5 +130,5 @@ gh api repos/abhiksark/swage/automated-security-fixes
 
 ## After the settings are applied
 
-Add one sentence to the threat model in `SECURITY.md` stating how the
+Add one sentence to the threat model in `.github/SECURITY.md` stating how the
 self-hosted runner is isolated. Do not add it before step 2 is done.

@@ -132,7 +132,7 @@ not the private status of segmented APIs or their research gates.
   and reviewed OIDC publication.
 
 See [Verification](../internals/verification.md) for gate/evidence boundaries
-and [Contributing](https://github.com/abhiksark/swage/blob/main/CONTRIBUTING.md)
+and [Contributing](https://github.com/abhiksark/swage/blob/main/.github/CONTRIBUTING.md)
 for operator prerequisites and the immutable yank-and-patch policy.
 
 ## Consequences

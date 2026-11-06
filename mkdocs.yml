@@ -80,6 +80,7 @@ nav:
       - Benchmarking: reference/benchmarking.md
   - Internals:
       - internals/index.md
+      - Design: internals/design.md
       - Compiler Pipeline: internals/compiler-pipeline.md
       - Swage Dialect: internals/swage-dialect.md
       - Textual Swage IR: language/swage-ir.md

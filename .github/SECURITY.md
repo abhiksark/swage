@@ -1,3 +1,5 @@
+<!-- .github/SECURITY.md -->
+
 # Security Policy
 
 ## Supported versions

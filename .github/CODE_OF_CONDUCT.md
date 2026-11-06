@@ -1,3 +1,5 @@
+<!-- .github/CODE_OF_CONDUCT.md -->
+
 # Contributor Covenant Code of Conduct
 
 ## Our Pledge

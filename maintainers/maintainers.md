@@ -1,3 +1,5 @@
+<!-- maintainers/maintainers.md -->
+
 # Maintainers
 
 | Name | GitHub | Areas |

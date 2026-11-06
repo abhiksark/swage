@@ -1,10 +1,13 @@
-<!-- CONTRIBUTING.md -->
+<!-- .github/CONTRIBUTING.md -->
 
 # Contributing to Swage
 
 Swage is pre-alpha. Useful contributions are bounded, tested, and explicit
 about whether they affect public behavior, private qualification, or planned
 work.
+
+See [Governance](../maintainers/governance.md) and
+[Maintainers](../maintainers/maintainers.md) for project responsibilities.
 
 ## Ground rules
 
@@ -38,7 +41,7 @@ ruff check .
 
 `-Cwheel.cmake=false` installs the frontend without a native build, so the
 first two commands need no LLVM. See
-[`docs/getting-started/installation.md`](docs/getting-started/installation.md)
+[`docs/getting-started/installation.md`](../docs/getting-started/installation.md)
 for prerequisites, build overrides, and the published-package boundary. The
 native build needs the MLIR Python binding requirements installed after
 `fetch_llvm.sh` and before `build_llvm.sh`; that page lists them and gives
@@ -59,7 +62,7 @@ the native runtime library. The source distribution and a frontend-only
 editable install stay CMake-free. The release on PyPI, 0.5.1, is pure
 Python; the native wheel of 0.5.2 is not released yet. A native build
 contains third-party code;
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists it and must go with
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) lists it and must go with
 any copy of the build that leaves the machine that built it.
 
 ```bash
@@ -117,9 +120,9 @@ manylinux_2_28 by `publish-pypi.yml`.
   processes), which writes to a directory outside the checkout, and commit
   raw evidence with the exact hardware and revision.
 
-Start with [Compiler Pipeline](docs/internals/compiler-pipeline.md), then
-use [Compiler Tools and Passes](docs/internals/compiler-tools.md) and
-[Verification](docs/internals/verification.md) for the affected
+Start with [Compiler Pipeline](../docs/internals/compiler-pipeline.md), then
+use [Compiler Tools and Passes](../docs/internals/compiler-tools.md) and
+[Verification](../docs/internals/verification.md) for the affected
 surface.
 
 ## Branch workflow
@@ -178,4 +181,4 @@ distribution, command, methodology, and raw measurements.
 
 ## License
 
-Contributions are licensed under the [MIT License](LICENSE).
+Contributions are licensed under the [MIT License](../LICENSE).
