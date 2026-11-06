@@ -115,7 +115,7 @@ jobs:
           python -m build --sdist --no-isolation --outdir "$RUNNER_TEMP/second-sdist"
           cmp dist/swage_compiler-0.5.2.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.2.tar.gz"
           python -m twine check --strict dist/*.tar.gz
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-sdist
           path: dist/*.tar.gz
@@ -207,12 +207,12 @@ jobs:
             env -u PYTHONPATH python {project}/scripts/smoke_installed_wheel.py
             --backend cpu --expected-revision "$SWAGE_SOURCE_REVISION"
             > "$SWAGE_EVIDENCE_DIR/cpu-smoke-$SWAGE_PYTHON_TAG.json"
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-wheel-${{ matrix.python }}
           path: wheelhouse/*.whl
           if-no-files-found: error
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-wheel-evidence-${{ matrix.python }}
@@ -334,12 +334,12 @@ jobs:
           expected = {path.name for path in pathlib.Path("dist").iterdir()}
           assert expected <= inventoried, f"SBOM omits distributions: {expected - inventoried}"
           PY
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-distributions
           path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-artifact-evidence
           path: release-evidence/*
@@ -430,7 +430,7 @@ jobs:
           unset PYTHONPATH
           "$RELEASE_WORK/venv/bin/python" -m swage.bench vector-add \
             --enforce --output "$RELEASE_WORK/evidence/fixed-runtime-slo.json"
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-gpu-evidence
@@ -474,7 +474,7 @@ jobs:
           cp "${{ steps.provenance.outputs.bundle-path }}" \
             attestations/build-provenance.json
           cp "${{ steps.sbom.outputs.bundle-path }}" attestations/sbom.json
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-attestations
           path: |
