@@ -43,8 +43,8 @@ through the M4 to M8 paths with default limits: the reductions over f32 or
 f64 values, and the softmax over f32 values. A reduction or a softmax over
 `[N, D]` rows of features runs the row-stripe tile, in which the stripes
 of a block combine per column and a reduction splits long segments
-(ADR-0022, ADR-0023). They belong to no phase gate above
-and are not part of a release yet. The same holds for the ahead-of-time
+(ADR-0022, ADR-0023). They belong to the v0.5.2 release scope rather than a
+phase gate above. The same holds for the ahead-of-time
 artifacts of those two calls, which let a process run them without the
 native package. Captured stages, split softmax, general
 cost inference, public segment syntax, and public execution of
@@ -54,7 +54,7 @@ caller-written segment programs remain follow-up work.
 
 The source tree implements self-contained native wheels, fixed-contract typing,
 stable backend errors, structured health checks, build provenance, and gated
-artifact/security/SLO workflows. v0.5.2 remains unreleased until the four-ABI
+artifact/security/SLO workflows. Publishing v0.5.2 requires the four-ABI
 CPU artifact checks, cp313 reproducibility check, and trusted installed-wheel
 A6000 performance gates pass, followed by the protected signed-tag process.
 No production-ready claim follows from implementation alone.

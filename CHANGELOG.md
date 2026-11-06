@@ -6,7 +6,7 @@ All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semantic versioning (`0.x`; anything may change).
 
-## [Unreleased]
+## [0.5.2] - 2026-11-07
 
 ### Added
 

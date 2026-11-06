@@ -21,11 +21,11 @@ change or go away.
 
 ## Current capability boundary
 
-The latest tagged release is `v0.5.1`, a pure Python wheel on PyPI. The
-`v0.5.2` source tree implements the native-wheel contract below. It is not
-published: publication and production qualification wait on the
-installed-wheel release gates, and source changes alone are not release
-qualification.
+Version `v0.5.2` introduces the native-wheel contract below, replacing the
+pure Python packaging of `v0.5.1`. Check the
+[release page](https://github.com/abhiksark/swage/releases) for published
+artifacts. Release qualification requires the installed-wheel gates;
+source changes alone do not establish it.
 
 ### Public today
 
@@ -150,7 +150,7 @@ bindings, no CPU backend, no multiply or low-precision dtypes, no segmented
 calls, and no artifact path.
 [Installation](docs/getting-started/installation.md) lists the differences.
 
-After `v0.5.2` passes its publication gates:
+To install `v0.5.2` once it appears on the release page:
 
 ```bash
 python -m pip install --only-binary=swage-compiler "swage-compiler[pytorch]==0.5.2"

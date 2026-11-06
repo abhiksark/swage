@@ -16,14 +16,14 @@ CUDA backend, and two segmented calls, `swage.segment_reduce` and
 `swage.segment_softmax`, which run fixed programs over segments on one CUDA
 device. The wider segment compiler is private research or planned work.
 
-!!! warning "Release boundary"
+!!! note "Release boundary"
 
     These pages describe the `v0.5.2` source tree and its native-wheel
-    contract. That release is not published: publication and production
-    qualification are pending, and the latest released tag is `v0.5.1`, a
-    pure Python wheel that lacks most of what these pages describe.
+    contract. Check the [release page](https://github.com/abhiksark/swage/releases)
+    for published artifacts. Version `v0.5.1` uses pure Python packaging
+    and lacks the bundled compiler and most of these interfaces.
     [Installation](getting-started/installation.md) lists the differences.
-    Public denotes application API, not evidence that a pending release has
+    Public denotes application API, not evidence that a release artifact has
     passed its gates. Private qualification is tested contributor
     machinery, and planned work has not passed a public gate.
 

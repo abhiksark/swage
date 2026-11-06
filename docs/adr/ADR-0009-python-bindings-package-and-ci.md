@@ -68,9 +68,9 @@ remain out of scope.
 ## Accepted extension: fixed-vector native wheels
 
 The v0.5.2 implementation extends this accepted decision rather than
-introducing another packaging architecture. It is **unreleased pending
-artifact, security, CPU, and trusted CUDA gates**; v0.5.1 remains the latest
-tagged release. This extension overrides the original wheel/stub deferrals,
+introducing another packaging architecture. Publication requires
+**artifact, security, CPU, and trusted CUDA gates**. This extension overrides
+the original wheel/stub deferrals,
 not the private status of segmented APIs or their research gates.
 
 - `scikit-build-core==1.0.3` and `nanobind==2.15.0` build native wheels.

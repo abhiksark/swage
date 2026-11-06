@@ -2,11 +2,12 @@
 
 # v0.5.2 release preparation
 
-This document records the candidate scope, local verification, and remaining
-publication gates for the maintainer. Preparation starts from local `dev`
-at `760196c`; the package already reports version `0.5.2`. The release is
-not published. The latest published version is
-[v0.5.1](https://github.com/abhiksark/swage/releases/tag/v0.5.1).
+This document records the candidate scope, local verification, and
+publication gates for the maintainer. Preparation began from local `dev`
+at `760196c`; the package already reported version `0.5.2`. Publication
+requires the gates below. Check the
+[release page](https://github.com/abhiksark/swage/releases) for published
+artifacts.
 
 ## Draft release notes
 
@@ -101,36 +102,37 @@ They do not replace the release workflow's checks on the exact distributions
 it will publish. In particular, a local CPython 3.13 Linux wheel does not
 establish the manylinux policy, the other three ABIs, or reproducibility.
 
-## Remaining release gates
+## Release integration and publication gates
 
-1. Synchronize `dev` with current `main`, preserving its history: the earlier
-   [promotion PR #96](https://github.com/abhiksark/swage/pull/96) was merged
-   as `5bdd256`, and the remote branches now diverge. Review and integrate
-   the preparation changes into `dev`, including the local test-directory
-   cleanup, then push the reviewed branch. Open a new promotion PR for the
-   remaining release changes.
-2. At release freeze, move the changelog's Unreleased entries under v0.5.2
-   with the approved release date. Keep the published-version statements
-   accurate until publication succeeds. Run the required Python, docs, and
-   native checks on the frozen head.
-3. Obtain explicit authorization to merge `dev` into `main` with a merge
-   commit, then synchronize `dev`. The release source must be on `main`'s
-   first-parent history, including for a manual workflow run.
-4. Configure and verify protection for `v*` tags with operator approval.
-   The repository rulesets API returned no rulesets during this preparation.
-   The publication guard requires `GITHUB_REF_PROTECTED=true`. `main` has
-   required checks and the `pypi` environment has a required reviewer;
-   the current PyPI trusted-publisher mapping still needs verification.
-5. Run `gh workflow run publish-pypi.yml --ref main`. Require the Python and
+The release request authorizes integration and publication after the required
+checks. Remote `dev` was synchronized with `main` at `5bdd256` through merge
+commit `52f7fe4`, preserving the earlier
+[promotion PR #96](https://github.com/abhiksark/swage/pull/96) and the
+test-directory cleanup. The release branch integrates the reviewed fixes
+from `62b2c7a` and dates the changelog for 2026-11-07.
+
+The operator separately approved protection for `v*` tags.
+[Ruleset 26719329](https://github.com/abhiksark/swage/rules/26719329) is active
+and blocks updates and deletion with no bypass actors. `main` has required
+checks and the `pypi` environment has a required reviewer. GitHub signing-key
+registration and the PyPI trusted-publisher mapping still need verification.
+
+1. Run the required Python, docs, and native checks on the frozen release
+   branch, then integrate it into `dev`.
+2. Merge `dev` into `main` with a merge commit, then synchronize `dev`.
+   The release source must be on `main`'s first-parent history, including
+   for a manual workflow run. The full instrumented-LLVM sanitizer workflow
+   must also pass with the CMake fix.
+3. Run `gh workflow run publish-pypi.yml --ref main`. Require the Python and
    native security jobs, four CPython manylinux wheels and CPU checks,
    byte-identical CPython 3.13 rebuild, SBOM and artifact checks, and
    installed-wheel A6000 correctness and runtime SLO checks to pass.
    Retain the sdist, four wheels, and evidence from that exact source SHA.
-6. After release authorization, create and push a signed annotated
+4. Create and push a signed annotated
    `v0.5.2` tag for the verified `main` merge commit. GitHub must verify its
    signature. The tag workflow rebuilds and qualifies the distributions,
    then attests and publishes through the `pypi` environment approval.
-7. Verify the published PyPI artifact set and installation, then publish the
+5. Verify the published PyPI artifact set and installation, then publish the
    GitHub release notes for the same tag.
 
 The fresh [A6000 run](https://github.com/abhiksark/swage/actions/runs/42275465830)
