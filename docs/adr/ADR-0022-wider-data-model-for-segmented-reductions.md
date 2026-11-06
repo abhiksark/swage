@@ -325,8 +325,9 @@ Step 3. float64 reductions, rank one. Implemented.
 What the first runs on a device showed, on the RTX A6000 (`sm_86`):
 
 - An f64 sum stays within `k * eps64 * sum(|x|)` of the exactly rounded
-  sum, with the `k` of the f32 trees, on every static schedule and on the
-  one-CTA path. The largest error the committed test measures is
+  sum for finite inputs with no intermediate overflow, with the `k` of the
+  f32 trees, on every static schedule and on the one-CTA path. The largest
+  error the committed test measures is
   `0.35 * eps64 * sum(|x|)`. The bits differ between the schedules and
   repeat between launches.
 - A maximum and a minimum equal the reference bit for bit, on values that
@@ -390,10 +391,10 @@ What was built against what was proposed for step 4:
   the three operations after the consumers of a region that takes an
   extent, in any number.
 - The proposal stated the bound of a mean without a condition. A mean lies
-  within `(k + 1) * eps * sum(|x|) / n` of the exact mean when its sum does
-  not overflow and the mean is not subnormal: a sum that overflows gives an
-  infinite mean, and a quotient in the subnormal range is rounded to a
-  subnormal. The user guide states both conditions.
+  within `(k + 1) * eps * sum(|x|) / n` of the exact mean for finite inputs
+  with no intermediate overflow and a mean outside the subnormal range.
+  Intermediate overflow can produce an infinite or NaN sum and mean, even
+  when the exact mean is finite. The user guide states these conditions.
 - On the device a mean equals the sum of the same schedule divided by the
   length, bit for bit, on every static schedule and on the one-CTA path in
   both element types. The PTX holds one `cvt.rn` from i32 and one `div.rn`

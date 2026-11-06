@@ -527,20 +527,17 @@ def test_an_artifact_gives_the_runner_its_block_widths_and_limits(
     assert sys.modules["mlir_swage"] is None
 
 
-def test_the_subgroup_width_of_the_runner_is_the_one_of_the_manifest(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("width", [-32, 1, 2, 4, 8, 16, 64, 128])
+def test_an_artifact_refuses_a_subgroup_width_the_kernels_do_not_use(
+    width, tmp_path, monkeypatch
 ):
-    """Read the width the build host compiled the fused kernel for.
-
-    The fused kernel serves one warp task per subgroup, and the runner
-    computes its grid from that width. No kernel of the table is launched
-    one subgroup wide, so the width comes from the manifest.
-    """
+    """A different width miscounts warp tasks even when it divides a block."""
     manifest = _manifest()
-    manifest["target_description"]["subgroup_width"] = 16
+    manifest["target_description"]["subgroup_width"] = width
     _select(monkeypatch, _write(tmp_path / "artifact", manifest))
 
-    assert _execution._target_description().subgroup_width == 16
+    with pytest.raises(RuntimeError, match="NVIDIA kernels require 32"):
+        _execution._target_description()
 
 
 def test_a_selected_artifact_is_read_and_verified_once(
@@ -884,17 +881,15 @@ def _set(manifest, path, value):
             lambda manifest: _set(
                 manifest, ["target_description", "subgroup_width"], 48
             ),
-            "the artifact at {root} was written for subgroup_width=48, "
-            "which does not divide its cta_block_threads=128 into whole "
-            "subgroups",
+            "the artifact at {root} was written for subgroup_width=48; "
+            "NVIDIA kernels require 32 threads per subgroup",
         ),
         (
             lambda manifest: _set(
                 manifest, ["target_description", "subgroup_width"], 0
             ),
-            "the artifact at {root} was written for subgroup_width=0, "
-            "which does not divide its cta_block_threads=128 into whole "
-            "subgroups",
+            "the artifact at {root} was written for subgroup_width=0; "
+            "NVIDIA kernels require 32 threads per subgroup",
         ),
         (
             lambda manifest: _drop(manifest, "target"),

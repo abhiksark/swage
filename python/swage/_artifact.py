@@ -524,13 +524,13 @@ class _Artifact:
         The widths are the ones the build host compiled the kernels for,
         which the manifest records, and the planning defaults are the limits
         it admitted the programs under. The two block widths must be the
-        ones of the kernel table. The subgroup width is in no kernel of the
-        table: the fused kernel serves one warp task per subgroup of a
-        block, and the runner computes its grid from that width.
+        ones of the kernel table. NVIDIA subgroups have 32 threads: the
+        fused kernel serves one warp task per subgroup of a block, and the
+        runner computes its grid from that width.
 
         Raises:
-            RuntimeError: A width is missing, is not the one this `swage`
-                launches with, or does not divide a block into subgroups.
+            RuntimeError: A width is missing or differs from the one the
+                NVIDIA kernels use.
         """
         recorded = self._field(self.manifest, "target_description", dict)
         widths = {
@@ -545,11 +545,11 @@ class _Artifact:
                     "threads per block"
                 )
         subgroup_width = widths["subgroup_width"]
-        if subgroup_width <= 0 or _CTA_BLOCK % subgroup_width:
+        if subgroup_width != 32:
             raise RuntimeError(
                 f"{self._where} was written for subgroup_width="
-                f"{subgroup_width}, which does not divide its "
-                f"cta_block_threads={_CTA_BLOCK} into whole subgroups"
+                f"{subgroup_width}; NVIDIA kernels require 32 threads "
+                "per subgroup"
             )
         warp_max_elements, cta_chunk_elements = self._planning
         return types.SimpleNamespace(
