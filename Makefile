@@ -1,5 +1,7 @@
+# Makefile
+
 # Convenience wrappers around the real commands. Advanced users can run the
-# underlying scripts and tools directly; see CONTRIBUTING.md.
+# underlying scripts and tools directly; see .github/CONTRIBUTING.md.
 
 .PHONY: setup build test test-cpu lint diagrams figures docs
 

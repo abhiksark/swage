@@ -30,7 +30,6 @@ _SKIP_PARTS = {
 }
 _PLANNING_DIRECTORY = "maintainers"
 _EXEMPT_FILES = {
-    Path("ROADMAP.md"),
     Path("scripts/mkdocs_redirect_pages.py"),
     Path("tests/python/test_mkdocs_redirect_pages.py"),
 }

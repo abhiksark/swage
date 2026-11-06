@@ -324,7 +324,7 @@ The digests detect damage and a partial copy. They do not authenticate an
 artifact, because the manifest is not signed: whoever can write the
 directory can replace all of it. The loader does not check the parent
 directories and does not read access control lists.
-[SECURITY.md](https://github.com/abhiksark/swage/blob/main/SECURITY.md)
+[SECURITY.md](https://github.com/abhiksark/swage/blob/main/.github/SECURITY.md)
 states the rule with the rest of the threat model.
 
 ## The runtime library

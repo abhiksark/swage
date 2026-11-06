@@ -249,8 +249,8 @@ PyTorch, driver, and GPU combinations are tested.
 - [Compiler Pipeline](docs/internals/compiler-pipeline.md)
 - [Internals](docs/internals/index.md)
 - [Verification](docs/internals/verification.md)
-- [DESIGN.md](DESIGN.md), [ROADMAP.md](ROADMAP.md), and
-  [CONTRIBUTING.md](CONTRIBUTING.md)
+- [Design](docs/internals/design.md), [Roadmap](maintainers/roadmap.md), and
+  [Contributing](.github/CONTRIBUTING.md)
 
 ## License
 

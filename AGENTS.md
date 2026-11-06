@@ -16,12 +16,13 @@ tasks; read only the sections needed for the change.
 - MLIR, C++, TableGen, and compiler tools: [lib/AGENTS.md](lib/AGENTS.md).
 - lit and FileCheck work: [test/AGENTS.md](test/AGENTS.md).
 - Current or planned status claims: [README.md](README.md) and
-  [ROADMAP.md](ROADMAP.md).
-- Architecture or lowering changes: [DESIGN.md](DESIGN.md) plus the relevant
+  [roadmap](maintainers/roadmap.md).
+- Architecture or lowering changes: [design](docs/internals/design.md) plus
+  the relevant
   [execution model](docs/user-guide/execution-model.md) or
   [compiler pipeline](docs/internals/compiler-pipeline.md).
 - Commands, contribution workflow, and completion reporting:
-  [CONTRIBUTING.md](CONTRIBUTING.md). For claim-specific evidence, use
+  [CONTRIBUTING.md](.github/CONTRIBUTING.md). For claim-specific evidence, use
   [verification.md](docs/internals/verification.md).
 
 ## Non-negotiable rules
@@ -30,8 +31,8 @@ tasks; read only the sections needed for the change.
 - Inspect the worktree before editing and preserve all unrelated changes.
 - Do not claim planned features are implemented, in code, docs, or
   reports. Tests and executable examples are the source of truth.
-- Keep internal milestone codenames in `ROADMAP.md`, maintainer planning, and
-  compatibility redirects. Use capability names everywhere else.
+- Keep internal milestone codenames in `maintainers/roadmap.md`, maintainer
+  planning, and compatibility redirects. Use capability names everywhere else.
 - Do not add Triton as a dependency or copy Triton implementation code.
 - Do not introduce a second production IR between Python and MLIR
   (ADR-0001).

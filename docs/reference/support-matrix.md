@@ -205,7 +205,7 @@ Versions follow semantic versioning in the `0.x` range, where any release
 may change public behavior. The
 [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
 records each change, and the
-[security policy](https://github.com/abhiksark/swage/blob/main/SECURITY.md)
+[security policy](https://github.com/abhiksark/swage/blob/main/.github/SECURITY.md)
 states that only the latest `main` receives fixes.
 
 Continue with [Installation](../getting-started/installation.md) for the

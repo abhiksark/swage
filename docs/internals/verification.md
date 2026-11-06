@@ -439,5 +439,5 @@ above measures later wheels on the same host.
 
 Continue with [Benchmarks](benchmarks.md) for the recorded measurements. For
 historical planning and release mapping, use
-[`ROADMAP.md`](https://github.com/abhiksark/swage/blob/main/ROADMAP.md). For
+[roadmap](https://github.com/abhiksark/swage/blob/main/maintainers/roadmap.md). For
 why the boundaries were chosen, use the [ADR Index](../decisions/index.md).

@@ -1,11 +1,12 @@
-<!-- DESIGN.md -->
+<!-- docs/internals/design.md -->
 
 # Swage design
 
 This document records stable architecture and invariants. Current interfaces
 live under `docs/reference/`, implemented data flow lives in the compiler
-pipeline page, milestone gates live in `ROADMAP.md`, and alternatives live in
-the ADRs.
+pipeline page, milestone gates live in the
+[roadmap](https://github.com/abhiksark/swage/blob/main/maintainers/roadmap.md),
+and alternatives live in the ADRs.
 
 ## Problem
 
@@ -35,7 +36,7 @@ segment.
 
 The logical grid identifies semantic program instances. The physical grid
 contains launched GPU work. See
-[`docs/user-guide/execution-model.md`](docs/user-guide/execution-model.md)
+[`docs/user-guide/execution-model.md`](../user-guide/execution-model.md)
 for the current and planned boundary.
 
 ## Compiler architecture
@@ -73,7 +74,7 @@ surface, and two public calls, `swage.segment_reduce` and
 maximum, a minimum, and a mean over f32 and f64 values of rank one and of
 rank two, and a softmax over f32 values of each rank. The canonical
 pipeline and links to exact references live in
-[`docs/internals/compiler-pipeline.md`](docs/internals/compiler-pipeline.md).
+[`docs/internals/compiler-pipeline.md`](compiler-pipeline.md).
 
 ## Semantic invariants
 
@@ -107,7 +108,7 @@ a plan function, whose signature is the parameter list of a kernel and whose
 launch width is an attribute, and a task operation that takes every buffer
 and every device bound as an operand. Every segmented kernel, and the
 sequential CPU oracle, is planned and then converted
-([ADR-0020](docs/adr/ADR-0020-planned-per-function-lowering.md)). The
+([ADR-0020](../adr/ADR-0020-planned-per-function-lowering.md)). The
 planning limits steer host classification only and are not part of plan IR.
 Static emitters reuse element programs and map chains; split merges combine
 scalar partials without reapplying element expressions.
@@ -118,7 +119,7 @@ Split-CTA execution is task decomposition under the CTA policy, not a new
 policy. A function over rank-two values has the column policy, with no
 task buffer, and the row-stripe tile of `policy<cta>` over a task buffer
 and of the split partial and merge kernels, described in
-[`docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md`](docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md).
+[`docs/adr/ADR-0023-row-stripe-tile-for-rank-two-values.md`](../adr/ADR-0023-row-stripe-tile-for-rank-two-values.md).
 
 One private experimental identity-sum path now consumes the existing host
 classification through device claim counters and publishes split completion
@@ -155,7 +156,7 @@ selection.
   CUDA graph, and it does not synchronize after the enqueue.
 
 Runtime and cache requirements live only in
-[`docs/reference/runtime-environment.md`](docs/reference/runtime-environment.md).
+[`docs/reference/runtime-environment.md`](../reference/runtime-environment.md).
 
 ## Package boundary
 
@@ -184,15 +185,14 @@ not widen the admitted public kernel subset.
 - C++ tests cover host task classification and descriptor invariants.
 - Sequential CPU lowering and PyTorch serve as correctness oracles for
   private segmented qualification.
-- The trusted GPU workflow runs public fixed vector add and private
-  segmented runtime qualification on a real NVIDIA device, on `main` only.
-  The public segmented calls are not on `main`, so it has not run their
-  tests; they ran on the development machine.
+- The trusted GPU workflow runs the public fixed vector add walkthrough and
+  private segmented runtime qualification, and qualifies the installed public
+  segmented calls, on a real NVIDIA device, on `main` only, weekly and by hand.
 - Frozen performance evidence separates preparation from timed launches and
   is not retuned after a failed gate.
 
 The claim-to-test mapping lives in
-[`docs/internals/verification.md`](docs/internals/verification.md).
+[`docs/internals/verification.md`](verification.md).
 
 ## Dependency policy
 
@@ -203,4 +203,4 @@ dependency, and the documentation and helper tooling do not introduce a
 second compiler stack.
 
 For rationale, continue with the
-[`docs/decisions/` index](docs/decisions/index.md).
+[`docs/decisions/` index](../decisions/index.md).

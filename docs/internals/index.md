@@ -15,6 +15,7 @@ find its content in the topic pages below.
 
 | Page | Covers |
 |---|---|
+| [Design](design.md) | Stable architecture and semantic, runtime, and package invariants |
 | [Compiler Pipeline](compiler-pipeline.md) | The spine, the admitted branches, and ownership |
 | [Swage Dialect](swage-dialect.md) | The semantic operations and types |
 | [Textual Swage IR](../language/swage-ir.md) | Textual syntax, SSA data flow, and one complete module |

@@ -1,0 +1,64 @@
+{
+  "source_revision": "98b17f38d7feccb8a31d7e45b10db510db5aeed1",
+  "values": [
+    1.0,
+    3.0,
+    2.0,
+    6.0
+  ],
+  "offsets": [
+    0,
+    2,
+    2,
+    4
+  ],
+  "ptx_target": "sm_86",
+  "gpu_kernels_launched": false,
+  "programs": [
+    {
+      "program": "caller_energy",
+      "cpu_result": [
+        10.0,
+        0.0,
+        40.0
+      ],
+      "compiled": [
+        {
+          "mode": "direct",
+          "ptx_bytes": 5081,
+          "contract_entry": "caller_energy"
+        },
+        {
+          "mode": "partial",
+          "ptx_bytes": 5261,
+          "contract_entry": "caller_energy__partial"
+        },
+        {
+          "mode": "merge",
+          "ptx_bytes": 5390,
+          "contract_entry": "caller_energy__merge"
+        }
+      ],
+      "split_rejected": null,
+      "source_preserved": true
+    },
+    {
+      "program": "caller_normalize",
+      "cpu_result": [
+        0.25,
+        0.75,
+        0.25,
+        0.75
+      ],
+      "compiled": [
+        {
+          "mode": "direct",
+          "ptx_bytes": 5321,
+          "contract_entry": "caller_normalize"
+        }
+      ],
+      "split_rejected": true,
+      "source_preserved": true
+    }
+  ]
+}
