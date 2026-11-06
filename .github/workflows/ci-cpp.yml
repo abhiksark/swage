@@ -109,7 +109,7 @@ jobs:
 
       - name: Initialize CodeQL C/C++
         id: codeql-init
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
         with:
           languages: c-cpp
           build-mode: manual
