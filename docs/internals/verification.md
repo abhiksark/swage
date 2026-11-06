@@ -75,6 +75,10 @@ bindings on `PYTHONPATH`, as `ninja -C build check-swage-python` sets them:
 The sequential CPU oracle transports each f32 or f64 result as its exact
 bit pattern, so oracle comparisons involve no decimal rounding.
 
+Sum and mean error bounds require finite inputs and no intermediate
+overflow. The public-call tests also cover finite cancellation whose
+intermediate overflow produces NaN, outside those bounds.
+
 Numerical claims have their own evidence in
 `python/tests/mlir/test_segmented_numerics.py`:
 

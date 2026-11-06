@@ -120,10 +120,10 @@ segment, leaves the counter of `out` alone. The counters of `values` and
 
 ## Results
 
-The results below are pinned by tests on the GPU. `torch.segment_reduce`
-returns the same value in every case but one on PyTorch 2.12, the version
-the GPU tests run with: the sign of a maximum or a minimum of zeros of both
-signs, which the two lists below state.
+The results below are pinned by tests on the GPU. Maxima and minima agree
+with `torch.segment_reduce` on PyTorch 2.12 except for the sign of zeros of
+both signs, which the lists below state. Sums and means can differ with
+reduction order, especially after intermediate overflow.
 
 A sum follows IEEE-754 addition:
 
@@ -131,8 +131,9 @@ A sum follows IEEE-754 addition:
 - A NaN element gives NaN.
 - One infinity among finite elements gives that infinity.
 - Infinities of both signs give NaN.
-- Finite elements whose sum exceeds the range of the dtype give positive
-  infinity.
+- Intermediate overflow can give infinity of either sign or NaN, even when
+  every input and the exact sum are finite. For example, adding two largest
+  finite values and two of their negatives can give NaN instead of zero.
 - Subnormal elements and results are kept and are not flushed to zero.
 
 A maximum propagates NaN:
@@ -163,8 +164,8 @@ A mean is the sum divided by the length of the segment:
 - An empty segment gives NaN, zero divided by zero. A mean has no identity
   to return instead.
 - A NaN element gives NaN, and an infinity gives what its sum gives.
-- A sum that overflows gives an infinite mean, also when the exact mean of
-  the values is finite.
+- An infinite sum gives an infinite mean; a NaN sum gives NaN. Intermediate
+  overflow can produce either even when the exact mean is finite.
 - The length is converted to the dtype of `values` once and divides the sum
   once. A float32 length above 16,777,216 is rounded to nearest by that
   conversion.
@@ -185,7 +186,8 @@ segment:
 - No segment affects the results of another.
 
 A maximum and a minimum involve no rounding and are exact. The other
-results are rounded:
+results are rounded. The sum and mean bounds below require finite inputs
+and no intermediate overflow in the reduction:
 
 - A sum lies within `k * eps * sum(|x|)` of the exact sum of its segment,
   where `eps` is `2**-23` for float32 values and `2**-52` for float64
@@ -196,9 +198,8 @@ results are rounded:
 - A mean lies within `(k + 1) * eps * sum(|x|) / n` of the exact mean of a
   segment of `n` elements, with the `k` of its sum, so `k + 1` is at most
   71. The extra unit covers the division and the conversion of the length.
-  The bound holds when the sum does not overflow and the mean is not
-  subnormal. A mean is the sum of the same call on the same batch divided
-  by the length, bit for bit.
+  The mean must also be outside the subnormal range. A mean is the sum of
+  the same call on the same batch divided by the length, bit for bit.
 - A softmax output has a relative error bound that grows with the distance
   of its logit below the segment maximum.
   [Ragged Softmax](../internals/ragged-softmax.md#accuracy) states it, for
@@ -296,7 +297,8 @@ That schedule has these consequences:
   `R = 128 / W` stripes of a column. A segment split into `P` chunks has
   `k = 6 + 2 log2(R) + ceil(P / R)`, for the `R = 512 / W` stripes of a
   split block. No path has more than `n - 1` additions of nonzero terms.
-  A sum lies within `k * eps * sum(|x|)` of the exact sum of its `n` rows,
+  Under the same finite-input and no-intermediate-overflow conditions, a
+  sum lies within `k * eps * sum(|x|)` of the exact sum of its `n` rows,
   with the `eps` of the dtype. A column mean divides that sum once and
   lies within `eps * sum(|x|)` of the exact mean, under the conditions of
   the rank-one mean. A maximum and a minimum are exact. A softmax of rows

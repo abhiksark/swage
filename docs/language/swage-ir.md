@@ -312,9 +312,11 @@ element type:
 - Floating-point `sum`: the result equals the exact sum only up to rounding,
   and the rounding depends on the order that the lowering and the schedule
   choose. Bitwise equality between two lowerings, or between two schedules
-  of one program, is not guaranteed. The difference is rounding error: it
-  is bounded relative to the sum of the absolute values of the elements, and
-  it can be large relative to the result when the elements cancel.
+  of one program, is not guaranteed. For finite inputs with no intermediate
+  overflow, the rounding error is bounded relative to the sum of the
+  absolute values of the elements and can be large relative to the result
+  when the elements cancel. Intermediate overflow can produce infinity or
+  NaN even when the exact sum is finite.
 - Integer `sum`: the overflow behavior is not defined, and no lowering
   admits an integer element type.
 
