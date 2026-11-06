@@ -18,10 +18,10 @@ the paths the calls run through.
 
 | Boundary | Status | Primary evidence | Applicable command |
 |---|---|---|---|
-| Source distribution: release metadata, the CMake build resources, the exclusion of generated and checkout files, a byte-identical rebuild, and one pinned version of the build backend and the bindings | Release gate; 0.5.2 is unreleased | `tests/python/test_packaging.py` | `python -m pytest tests/python/test_packaging.py -q` |
+| Source distribution: release metadata, the CMake build resources, the exclusion of generated and checkout files, a byte-identical rebuild, and one pinned version of the build backend and the bindings | Release gate; exact-artifact evidence required | `tests/python/test_packaging.py` | `python -m pytest tests/python/test_packaging.py -q` |
 | Environment report | Public today | `tests/python/test_env.py` | `python -m pytest tests/python/test_env.py -q` |
 | Build identity of the bindings, the check that pairs `swage` with them, and the content identity of the native libraries in the cache key | Public today | `tests/python/test_native_identity.py`, `python/tests/mlir/test_native_identity.py` | `python -m pytest tests/python/test_native_identity.py -q`; `ninja -C build check-swage-python` |
-| One native wheel per CPython 3.10 to 3.13: contents including the segmented modules, self-contained and relocatable libraries, license files, build identity, size, and reproducibility, and the refusal of a wheel that fails any of them | Release gate; 0.5.2 is unreleased | `tests/python/test_native_wheel.py`, `scripts/check_native_wheel.py`, `scripts/repair_native_wheel.py`, the `wheels` and `aggregate` jobs of `publish-pypi.yml` | `python -m pytest tests/python/test_native_wheel.py -q` |
+| One native wheel per CPython 3.10 to 3.13: contents including the segmented modules, self-contained and relocatable libraries, license files, build identity, size, and reproducibility, and the refusal of a wheel that fails any of them | Release gate; exact-artifact evidence required | `tests/python/test_native_wheel.py`, `scripts/check_native_wheel.py`, `scripts/repair_native_wheel.py`, the `wheels` and `aggregate` jobs of `publish-pypi.yml` | `python -m pytest tests/python/test_native_wheel.py -q` |
 | The local cp313 native wheel installed outside the checkout: CPU health, the Native CPU runtime suites, the CPU smoke, and the native suite with every CUDA test skipped | Hosted gate | The wheel steps of the `build-and-test` job of `ci-cpp.yml`, `scripts/smoke_installed_wheel.py` | The `build-and-test` job of `ci-cpp.yml` |
 | Restricted AST to verified native module, and the kernel-language check without the native package | Public today, compile-only | `tests/python/test_frontend.py`, `python/tests/mlir/test_frontend.py` | `python -m pytest tests/python -q`; `ninja -C build check-swage-python` |
 | Emit-only example without a GPU or PyTorch | Public today, compile-only | `python/tests/mlir/test_examples.py` | `ninja -C build check-swage-python` |
@@ -74,6 +74,10 @@ bindings on `PYTHONPATH`, as `ninja -C build check-swage-python` sets them:
 
 The sequential CPU oracle transports each f32 or f64 result as its exact
 bit pattern, so oracle comparisons involve no decimal rounding.
+
+Sum and mean error bounds require finite inputs and no intermediate
+overflow. The public-call tests also cover finite cancellation whose
+intermediate overflow produces NaN, outside those bounds.
 
 Numerical claims have their own evidence in
 `python/tests/mlir/test_segmented_numerics.py`:

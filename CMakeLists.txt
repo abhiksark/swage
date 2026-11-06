@@ -75,6 +75,10 @@ list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
+# LLVM must omit -z,defs when shared libraries use the ASan runtime.
+if(SWAGE_ENABLE_SANITIZERS)
+  set(LLVM_USE_SANITIZER "Address;Undefined")
+endif()
 include(HandleLLVMOptions)
 
 if(SWAGE_WHEEL_BUILD)

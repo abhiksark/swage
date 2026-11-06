@@ -9,8 +9,9 @@ workflow file, a test, or a committed record.
 
 Swage is experimental. A tested row reports what the workflows are
 configured to run on the current source tree. It is not a compatibility
-promise for a later release, and `v0.5.2`, the release these rows describe,
-is not yet published.
+promise for a later release. These rows describe `v0.5.2`; the
+[release page](https://github.com/abhiksark/swage/releases) identifies
+published artifacts.
 
 ## How to read the tables
 

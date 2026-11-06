@@ -59,8 +59,8 @@ gives the command that regenerates the file.
 The `swage-compiler` distribution is built as one native wheel per CPython
 version. The wheel holds the `swage` package, the `mlir_swage` bindings, and
 the native runtime library. The source distribution and a frontend-only
-editable install stay CMake-free. The release on PyPI, 0.5.1, is pure
-Python; the native wheel of 0.5.2 is not released yet. A native build
+editable install stay CMake-free. Version 0.5.1 uses pure Python packaging;
+the native-wheel contract starts with 0.5.2. A native build
 contains third-party code;
 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) lists it and must go with
 any copy of the build that leaves the machine that built it.

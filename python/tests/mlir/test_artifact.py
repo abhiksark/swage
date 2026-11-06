@@ -1563,6 +1563,31 @@ def test_an_artifact_without_sum_refuses_the_derivative_that_needs_it(
 
 
 @_needs_cuda
+@pytest.mark.parametrize("width", [16, 64])
+def test_an_incompatible_subgroup_width_is_refused_before_a_launch(
+    width, device_artifact, tmp_path, monkeypatch
+):
+    """Reject a changed warp width instead of leaving outputs unwritten."""
+    damaged = tmp_path / "damaged"
+    shutil.copytree(device_artifact, damaged)
+    manifest_path = damaged / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["target_description"]["subgroup_width"] = width
+    manifest_path.chmod(0o644)
+    manifest_path.write_text(json.dumps(manifest))
+    values = torch.ones(8, device="cuda")
+    offsets = torch.arange(9, dtype=torch.int32, device="cuda")
+    out = torch.full((8,), _SENTINEL, device="cuda")
+    _select(monkeypatch, damaged)
+
+    with pytest.raises(RuntimeError, match="NVIDIA kernels require 32"):
+        swage.segment_reduce(values, offsets, "sum", out=out)
+    torch.cuda.synchronize()
+
+    assert torch.all(out == _SENTINEL)
+
+
+@_needs_cuda
 def test_a_damaged_artifact_is_refused_before_the_offsets_are_copied(
     device_artifact, tmp_path, monkeypatch
 ):

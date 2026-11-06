@@ -2,16 +2,16 @@
 
 # Installation
 
-!!! warning "v0.5.2 publication pending"
+!!! note "Native wheels start with v0.5.2"
 
-    This page describes the implemented `v0.5.2` native-wheel contract, not
-    an already published or production-qualified release. The latest
-    released tag is `v0.5.1`, a pure Python wheel that does not provide this
-    contract; [What the released 0.5.1 wheel lacks](#what-the-released-051-wheel-lacks)
-    lists the differences. The version-pinned PyPI commands below apply
-    only after `v0.5.2` passes the release gates and is published. Until
-    then, [build a local native wheel](#build-a-local-native-wheel) or use
-    the [source build](#build-from-source).
+    This page describes the `v0.5.2` native-wheel contract. Version `v0.5.1`
+    uses pure Python packaging and lacks the bundled compiler;
+    [What the released 0.5.1 wheel lacks](#what-the-released-051-wheel-lacks)
+    lists the differences. Check the
+    [release page](https://github.com/abhiksark/swage/releases) for published
+    artifacts before using the version-pinned commands below. For a source
+    checkout, [build a local native wheel](#build-a-local-native-wheel) or
+    use the [source build](#build-from-source).
 
 The distribution `swage-compiler` is one native wheel per CPython version.
 Each wheel holds public `swage`, the private `mlir_swage` compiler bindings,
@@ -83,7 +83,7 @@ Python, and it predates most of these pages:
 - Its `sl.load` and `sl.store` declare their keywords with `None` defaults.
 
 The [changelog](https://github.com/abhiksark/swage/blob/main/CHANGELOG.md)
-lists every change since that release under Unreleased.
+lists the changes since that release under v0.5.2.
 
 ## Verify downloaded artifacts
 
