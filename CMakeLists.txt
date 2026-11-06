@@ -122,7 +122,7 @@ add_subdirectory(lib/CAPI)
 add_subdirectory(lib/Conversion)
 add_subdirectory(lib/Runtime)
 add_subdirectory(tools/swage-opt)
-add_subdirectory(test)
+add_subdirectory(tests/lit)
 add_subdirectory(unittests)
 
 # Python bindings: default to whatever the MLIR install supports; an

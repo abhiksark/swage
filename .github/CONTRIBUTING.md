@@ -103,7 +103,7 @@ manylinux_2_28 by `publish-pypi.yml`.
   public API adds two segmented calls with fixed programs. Run the Python tier and native binding
   integration when emission changes.
 - Native dialects and lowering: work under `include/swage/`, `lib/`, and
-  `test/`. Run `ninja -C build check-swage`; run C++ or binding targets when
+  `tests/lit/`. Run `ninja -C build check-swage`; run C++ or binding targets when
   their code changes.
 - Runtime: public execution is canonical fixed vector add and multiply on
   the Native CPU and CUDA backends, and the two segmented calls,

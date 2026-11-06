@@ -10,7 +10,7 @@ each lowering can be inspected and tested as text. As a first roundtrip,
 MLIR surface, which is broader than the public Python kernel language:
 
 ```bash
-./build/bin/swage-opt test/Dialect/Swage/roundtrip.mlir
+./build/bin/swage-opt tests/lit/Dialect/Swage/roundtrip.mlir
 ```
 
 ## `swage-opt`
@@ -168,7 +168,7 @@ is the source directory.
 
 The lit suite needs `swage-opt` from the build tree and `FileCheck`, `not`,
 and `count` from the LLVM install. Four tests under
-`test/Conversion/SwageToCPU` also execute lowered code. They declare
+`tests/lit/Conversion/SwageToCPU` also execute lowered code. They declare
 `REQUIRES: mlir-runner`, and lit reports them as unsupported unless the LLVM
 install holds all four of `mlir-opt`, `mlir-runner`, `libmlir_runner_utils`,
 and `libmlir_c_runner_utils`. A pinned install built by

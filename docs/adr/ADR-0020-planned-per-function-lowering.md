@@ -302,7 +302,7 @@ Verification:
 
 - `SwageDialect::verifyRegionArgAttribute` rejects a role on the wrong
   type and a duplicated role. The negative cases are in
-  `test/Dialect/Swage/invalid-roles.mlir`.
+  `tests/lit/Dialect/Swage/invalid-roles.mlir`.
 - Admission (`readSegmentABI` in `SegmentedReduction.cpp`) requires every
   argument to carry a role and each role exactly once. There is no
   positional default, and the argument order is free:
@@ -781,11 +781,11 @@ Private interface changes that are not kernel ABIs:
 Unchanged in RUN and CHECK lines through step 9, with only the input
 signature gaining role attributes in step 2:
 
-- All of `test/Conversion/SwageToGPU/`. This includes `persistent.mlir`
+- All of `tests/lit/Conversion/SwageToGPU/`. This includes `persistent.mlir`
   (308 `CHECK-NEXT` lines), `fused-mixed.mlir` (116), `split-partial.mlir`,
   `split-merge.mlir`, `segment-bounds.mlir`, `segment-id-bounds.mlir`, and
   `invalid-block-size.mlir`.
-- All positive and runner tests in `test/Conversion/SwageToCPU/`, plus
+- All positive and runner tests in `tests/lit/Conversion/SwageToCPU/`, plus
   `invalid-unverified.mlir`.
 - The fixed vector-add tests were not touched at all.
 
@@ -798,17 +798,17 @@ Changes, with the reason:
 
 | Step | Test | Reason |
 |---|---|---|
-| 2 | `test/Conversion/SwageToCPU/invalid-segmented-reduction.mlir`, case at line 48 | the five-argument signature message becomes role and type diagnostics |
+| 2 | `tests/lit/Conversion/SwageToCPU/invalid-segmented-reduction.mlir`, case at line 48 | the five-argument signature message becomes role and type diagnostics |
 | 2 | same file, cases at lines 283 and 293 | the function-count rule is gone; the two-function case becomes a positive test |
 | 2 | same file, case at line 415 | text kept; the check is then against the role-declared arguments |
 | 2 | `unittests/CodegenCAPITest.cpp:554` (`RejectsAModuleThatAlreadyHoldsAGPUModule`) | a `gpu.module` that already exists is no longer a count error; it becomes a symbol-clash case |
 | 2 | `unittests/CodegenCAPITest.cpp:478` (`RejectsAKernelNameThatIsNotTheCompiledKernel`) and `test_kernel_name_must_match_the_compiled_kernel` | selection by symbol changes the mechanism and the message |
-| 4 | all four files in `test/Conversion/SwageToPlan/`; `test/Dialect/SwagePlan/{roundtrip,invalid,effects}.mlir`; `APlanCallLoadsThePlanningDialect` | the planner output is plan functions, and `classify` is removed |
+| 4 | all four files in `tests/lit/Conversion/SwageToPlan/`; `tests/lit/Dialect/SwagePlan/{roundtrip,invalid,effects}.mlir`; `APlanCallLoadsThePlanningDialect` | the planner output is plan functions, and `classify` is removed |
 | 10 | RUN lines of the GPU tests; the option-combination prefixes in `persistent.mlir`, `fused-mixed.mlir`, `invalid-persistent.mlir` | legacy flags are deleted; `schedule=` makes those combinations inexpressible |
 
 New tests: role round trip and negatives, `fuse-maps.mlir`,
 `two-kernels.mlir`, `invalid-kernel-symbols.mlir`, one hand-written plan-IR
-file per operation under `test/Conversion/SwagePlanToGPU/`, plan operation
+file per operation under `tests/lit/Conversion/SwagePlanToGPU/`, plan operation
 round trip and negatives, and, through step 9, one pipeline test per
 schedule that compared the legacy flag with the planner and the conversion.
 Step 10 removed those comparisons with the flags; `nvvm-pipeline.mlir`
@@ -906,7 +906,7 @@ Each point is also stated where its subject is described:
   arguments in any order from step 2, because roles free the order, until
   step 4 removed it with `swage_plan.classify`.
 - Role tests. The negative cases of `swage.role` are in
-  `test/Dialect/Swage/invalid-roles.mlir`.
+  `tests/lit/Dialect/Swage/invalid-roles.mlir`.
 - Fusion driver. The lowerings and the planner apply the fusion rewrite to
   the admitted consumers directly instead of running the greedy driver,
   which would also delete a reduction that nothing reads.
@@ -958,7 +958,7 @@ Step 0. Gates. This step does not depend on the decision.
 
 - Files: `python/tests/mlir/test_ptx_digests.py` and its data file;
   `tools/swage-opt/swage-opt.cpp` (`registerAllExtensions`) and its CMake
-  file; `test/Conversion/SwageToGPU/nvvm-pipeline.mlir`, which runs the
+  file; `tests/lit/Conversion/SwageToGPU/nvvm-pipeline.mlir`, which runs the
   nested NVVM pipeline through `swage-opt`.
 - Emitted IR: none.
 - Gate: the digests pass at the commit that generated them, by

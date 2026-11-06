@@ -196,7 +196,7 @@ def test_multiply_codegen_preserves_source_and_launch_contract(backend, dtype):
 def _multiply_source():
     fixture = (
         Path(__file__).resolve().parents[3]
-        / "test/Conversion/SwageToCPU/fixed-vector-multiply.mlir"
+        / "tests/lit/Conversion/SwageToCPU/fixed-vector-multiply.mlir"
     )
     return fixture.read_text().split("// HOST-NOT:", 1)[0]
 

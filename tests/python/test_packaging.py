@@ -155,7 +155,7 @@ def test_sdist_preserves_source_build_resources(source_members):
         "lib": ("*.cpp", "*.h", "CMakeLists.txt"),
         "python": ("*.cpp", "*.td", "*.py", "*.pyi", "CMakeLists.txt"),
         "tools": ("*.cpp", "CMakeLists.txt"),
-        "test": ("*.mlir", "*.py", "*.in", "CMakeLists.txt"),
+        "tests/lit": ("*.mlir", "*.py", "*.in", "CMakeLists.txt"),
         "unittests": ("*.cpp", "CMakeLists.txt"),
         "tests": ("*.py",),
         "scripts": ("*.sh", "*.py"),

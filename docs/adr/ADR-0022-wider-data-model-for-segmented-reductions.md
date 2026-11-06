@@ -264,7 +264,7 @@ Step 1. `min`, and artifact format version 2. Implemented.
   each kind to its own identity, combine, and block reduction.
 - Admission admits `kind<min>`. The kind check is gone, because every kind
   of `swage.reduce` now has a lowering.
-- `test/Conversion/SwageToPlan/segmented-min.mlir` and the files of the
+- `tests/lit/Conversion/SwageToPlan/segmented-min.mlir` and the files of the
   same name under `SwageToCPU` and `SwageToGPU` pin the plan, the oracle,
   and every kernel schedule. The GPU file refuses a maximum in any of them.
 - `swage.segment_reduce` takes `kind="min"`.
@@ -298,10 +298,10 @@ Step 3. float64 reductions, rank one. Implemented.
   schedule is refused for f64 by the planner and by the conversion.
 - `identityFor` takes the element type, and `unittests/EmissionTest.cpp`
   holds the identity of each kind to each element type.
-- `test/Conversion/SwageToPlan/segmented-f64.mlir` and the files of the
+- `tests/lit/Conversion/SwageToPlan/segmented-f64.mlir` and the files of the
   same name under `SwageToCPU`, with a runner file, and `SwageToGPU` pin
   the plan, the oracle, and the kernel schedules.
-  `test/Conversion/SwageToGPU/nvvm-pipeline.mlir` holds an f64 maximum
+  `tests/lit/Conversion/SwageToGPU/nvvm-pipeline.mlir` holds an f64 maximum
   through the NVVM conversion.
 - `swage.segment_reduce` takes float64 values and returns float64, and
   `out` has the dtype of the values. `swage.segment_softmax` refuses
@@ -373,7 +373,7 @@ Step 4. `mean`, both dtypes, rank one. Implemented.
 - `swage.segment_reduce` takes `kind="mean"`. The runner passes the merge
   kernel of a mean the pointer of the range records, which it already
   uploads. The artifact holds `segmented_mean` and `segmented_mean_f64`.
-- `test/Conversion/SwageToPlan/segmented-mean.mlir` requires the division
+- `tests/lit/Conversion/SwageToPlan/segmented-mean.mlir` requires the division
   in the task, fused, and merge regions and refuses any arithmetic in the
   partial region. The files of the same name under `SwageToCPU`, with a
   runner file, and `SwageToGPU` pin the oracle and the kernels.
@@ -427,7 +427,7 @@ Step 5. Rank-two reductions. Implemented.
   `[N, 1]` values take the rank-one schedules through a view, and `[N, 0]`
   values launch nothing. The artifact holds eight more programs,
   `segmented_<kind>[_f64]_r2`, each with the one role `column`.
-- `test/Conversion/SwageToPlan/segmented-columns.mlir` and the files of the
+- `tests/lit/Conversion/SwageToPlan/segmented-columns.mlir` and the files of the
   same name under `SwageToCPU`, with a runner file, and `SwageToGPU` pin
   the plan, the oracle, and the kernel, which may hold no shuffle, block
   reduction, or barrier. `python/tests/mlir/test_segment_columns.py` holds
@@ -479,7 +479,7 @@ Step 6. Rank-two softmax, f32. Implemented.
   `[N, 0]` values launch nothing. float64 values stay refused. The
   artifact holds one more program, `ragged_softmax_r2`, with the one role
   `column`: eighteen programs and forty-two kernels.
-- `test/Conversion/SwageToPlan/ragged-softmax-columns.mlir` and the files
+- `tests/lit/Conversion/SwageToPlan/ragged-softmax-columns.mlir` and the files
   of the same name under `SwageToCPU`, with a runner file, and `SwageToGPU`
   pin the plan, the oracle, and the kernel.
   `python/tests/mlir/test_segment_columns.py` holds the public contract,
@@ -522,14 +522,14 @@ What was built against what was proposed for step 6:
 | A new kind falls into the branch of another kind | The switches without a default; `unittests/EmissionTest.cpp`; the `segmented-min.mlir` files; exact comparison with PyTorch |
 | An f32 identity in an f64 kernel | The f64 lit files; the verifier after the conversion; `unittests/EmissionTest.cpp`; the typed PTX scan; exact f64 results on values that are not f32 values |
 | f64 `exp2` reaches NVPTX and aborts the process | The admission rule; a negative lit case; a compile-only Python test |
-| A mean of partial means, or a wrong divisor | The plan check on `arith.divf` in `test/Conversion/SwageToPlan/segmented-mean.mlir`; the bitwise `sum / length` tests on split lengths |
-| The extent taken as the end minus the first element of a thread | `test/Conversion/SwageToGPU/segmented-mean.mlir`; the result alone cannot show it, because the thread that stores starts at the start of the segment |
+| A mean of partial means, or a wrong divisor | The plan check on `arith.divf` in `tests/lit/Conversion/SwageToPlan/segmented-mean.mlir`; the bitwise `sum / length` tests on split lengths |
+| The extent taken as the end minus the first element of a thread | `tests/lit/Conversion/SwageToGPU/segmented-mean.mlir`; the result alone cannot show it, because the thread that stores starts at the start of the segment |
 | The merge reads a range record out of bounds | The stray-record case of `python/tests/mlir/test_segmented_bounds.py`, with range records between guards |
 | int64 wraps on narrowing | The refusal of `[0, 2**32 + 3, 5]` |
 | The private offsets copy is freed early | A lifetime test |
-| A column reads a neighbor or writes past `[S, D]` | Values that depend on the row and on the column in `python/tests/mlir/test_segment_columns.py`; the driver-level launches of `python/tests/mlir/test_segmented_bounds.py` with guards around the values and canaries around the output; `test/Conversion/SwageToGPU/segmented-columns.mlir` |
+| A column reads a neighbor or writes past `[S, D]` | Values that depend on the row and on the column in `python/tests/mlir/test_segment_columns.py`; the driver-level launches of `python/tests/mlir/test_segmented_bounds.py` with guards around the values and canaries around the output; `tests/lit/Conversion/SwageToGPU/segmented-columns.mlir` |
 | A thread holds one accumulator per column | The same lit file, which pins one iteration argument of the row loop; `python/tests/mlir/test_segmented_codegen.py` |
-| A softmax column stores a row the host did not validate, or a column beyond the feature count | The driver-level launches of the softmax column kernel in `python/tests/mlir/test_segmented_bounds.py`, with canaries around the `[N, D]` output and an output of fewer rows than the values; `test/Conversion/SwageToGPU/ragged-softmax-columns.mlir`, which pins the store at the loaded index |
+| A softmax column stores a row the host did not validate, or a column beyond the feature count | The driver-level launches of the softmax column kernel in `python/tests/mlir/test_segmented_bounds.py`, with canaries around the `[N, D]` output and an output of fewer rows than the values; `tests/lit/Conversion/SwageToGPU/ragged-softmax-columns.mlir`, which pins the store at the loaded index |
 | The PTX scan passes arithmetic of the wrong type | The typed arithmetic scan |
 | An existing kernel's text moves | The 552 digest pairs |
 | f64 behaves differently on the device | The GPU tier, from step 3: the `eps64` bound against exactly rounded sums, the exact extremes, and the special values on every schedule |

@@ -28,7 +28,7 @@ register array, and constructing its handle does not materialize its data.
 
 The following module starts with the coordinate, segment construction, and
 extent forms in
-[`test/Dialect/Swage/roundtrip.mlir`](https://github.com/abhiksark/swage/blob/main/test/Dialect/Swage/roundtrip.mlir),
+[`tests/lit/Dialect/Swage/roundtrip.mlir`](https://github.com/abhiksark/swage/blob/main/tests/lit/Dialect/Swage/roundtrip.mlir),
 then adds a map, reduction, and terminal store. It uses every current Swage
 operation. The output buffer must not alias the values buffer.
 

@@ -1,9 +1,9 @@
 # tests/python/test_qualify_installed_segments.py
-"""Refusals of the installed-wheel segmented qualification script.
+"""Preflight and fixture staging for installed-wheel qualification.
 
 The qualification itself needs a CUDA GPU and an installed wheel, and runs
-in the release and GPU workflows. These tests pin what the script refuses
-before it copies or runs anything.
+in the release and GPU workflows. These tests cover early refusals and the
+fixture layout copied before qualification begins.
 """
 
 import pathlib
@@ -66,3 +66,21 @@ def test_an_existing_work_directory_is_refused(tmp_path):
     assert result.returncode == 2
     assert "exists" in result.stderr
     assert list(work.iterdir()) == []
+
+
+def test_lit_fixtures_keep_their_paths_in_the_qualification_copy(tmp_path):
+    """Stage the native test fixture, then stop at the CUDA health check."""
+    build = tmp_path / "build"
+    (build / "bin").mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text("")
+    (build / "bin" / "swage-opt").write_text("")
+    work = tmp_path / "work"
+
+    result = _run("false", str(build), str(work))
+
+    assert result.returncode == 1
+    assert (work / "environment.json").is_file()
+    fixture = "tests/lit/Conversion/SwageToCPU/fixed-vector-multiply.mlir"
+    assert (work / fixture).read_bytes() == (
+        _SCRIPT.parents[1] / fixture
+    ).read_bytes()
