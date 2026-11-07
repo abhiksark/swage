@@ -6,12 +6,17 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    groups:
+      codeql:
+        patterns: ["github/codeql-action/*"]
   # Covers pyproject.toml and requirements-ci.txt. The hosted workflows and
   # docs/requirements.txt, which Read the Docs installs, take every pin
   # from requirements-ci.txt.
   - package-ecosystem: pip
     directory: /
     target-branch: dev
+    # Keep supported minimums when the existing range allows the new version.
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
     ignore:
