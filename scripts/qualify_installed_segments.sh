@@ -46,9 +46,10 @@ if [ -e "$WORK" ]; then
 fi
 
 mkdir -p "$WORK/python/tests" "$WORK/cmake" "$WORK/docs/internals" \
-    "$WORK/benchmarks"
+    "$WORK/benchmarks" "$WORK/tests"
 cp -r "$REPO_ROOT/python/tests/mlir" "$WORK/python/tests/mlir"
-cp -r "$REPO_ROOT/examples" "$REPO_ROOT/test" "$WORK/"
+cp -r "$REPO_ROOT/examples" "$WORK/"
+cp -r "$REPO_ROOT/tests/lit" "$WORK/tests/"
 cp "$REPO_ROOT/cmake/llvm-version.txt" "$WORK/cmake/"
 cp "$REPO_ROOT/docs/internals/segmented-reductions.md" "$WORK/docs/internals/"
 cp "$REPO_ROOT/benchmarks/distributions.py" "$WORK/benchmarks/"

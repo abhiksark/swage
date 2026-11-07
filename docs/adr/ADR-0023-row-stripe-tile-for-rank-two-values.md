@@ -178,7 +178,7 @@ Step 1. The block tile through task-ids, including the softmax. Implemented.
   the `TaskIdsColumns` layout, the column-group combination in
   `Emission.cpp`, the item loop and the exchange buffer in
   `SwagePlanToGPU.cpp`, and the width rule of the conversion's pre-check.
-- `test/Conversion/SwagePlanToGPU/column-groups.mlir` pins the kernel;
+- `tests/lit/Conversion/SwagePlanToGPU/column-groups.mlir` pins the kernel;
   `python/tests/mlir/test_segmented_bounds.py` launches it below the Python
   validation and compares its bits with
   `python/tests/mlir/row_tile_model.py`; the racecheck runs it.
@@ -190,7 +190,7 @@ Step 2. The split. Implemented.
   `swage_plan.merge_tasks`, the three split layouts, the planner rule, and
   the row-stripe paths of the partial and merge patterns with the width
   rule of the pre-check.
-- `test/Conversion/SwagePlanToGPU/column-groups.mlir` pins both kernels;
+- `tests/lit/Conversion/SwagePlanToGPU/column-groups.mlir` pins both kernels;
   `python/tests/mlir/test_segmented_bounds.py` launches them below the
   Python validation, with stray merge records and ranges beyond the
   partial count, requires a mean to equal the merged sum divided by the

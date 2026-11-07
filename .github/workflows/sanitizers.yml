@@ -50,9 +50,9 @@ jobs:
           tag="$(cat cmake/llvm-version.txt)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sanitizer-matched LLVM install
+      - name: Restore sanitizer-matched LLVM install
         id: llvm-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: /home/runner/.swage/llvm-sanitizers/install-${{ steps.pin.outputs.tag }}
           key: llvm-ubuntu24-${{ steps.pin.outputs.tag }}-clang18-asan-ubsan-v1
@@ -82,6 +82,14 @@ jobs:
           rm -rf "$SWAGE_LLVM_HOME/src-${{ steps.pin.outputs.tag }}" \
                  "$SWAGE_LLVM_HOME/build-${{ steps.pin.outputs.tag }}" \
                  "$SWAGE_LLVM_HOME"/*.tar.xz
+
+      # Retain a successful LLVM build even if a later Swage test fails.
+      - name: Save sanitizer-matched LLVM install
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /home/runner/.swage/llvm-sanitizers/install-${{ steps.pin.outputs.tag }}
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
 
       - name: Configure bindings-off ASan and UBSan build
         run: |

@@ -120,16 +120,17 @@ The results follow from the composition:
 - An empty segment gives NaN, zero divided by zero. The tests compare it
   with `isnan`, because the sign and the payload of that NaN are not
   specified.
-- A NaN element gives NaN. A sum that overflows gives an infinite mean,
-  also when the exact mean is finite.
+- A NaN element gives NaN. An infinite sum gives an infinite mean; a NaN
+  sum gives NaN. Intermediate overflow can produce either even when the
+  exact mean is finite.
 - A mean lies within `(k + 1) * eps * sum(|x|) / n` of the exact mean, with
   the `k` and the `eps` of [Error bound](#error-bound) and `n` the length.
   The extra unit covers the division and the conversion of the length,
   which is exact up to 16,777,216 elements in f32 and always exact in f64.
-  The bound holds when the sum does not overflow and the mean is not
-  subnormal. For the public call `k + 1` is at most 71. The tests compare
-  the public mean with the exactly rounded mean, formed in rational
-  arithmetic.
+  The bound requires finite inputs, no intermediate overflow in the sum,
+  and a mean outside the subnormal range. For the public call `k + 1` is
+  at most 71. The tests compare the public mean with the exactly rounded
+  mean, formed in rational arithmetic.
 - The schedule of a mean is the schedule of its sum: the division adds no
   element work, so the selection rule treats both alike.
 
@@ -193,7 +194,8 @@ values that are not exactly summable, and the tests compare them that way.
 What follows from the column tile:
 
 - A column sum lies within `(n - 1) * eps * sum(|x|)` of the exact sum of
-  its `n` rows, the bound of a sequential sum. The bits of a column do not
+  its `n` rows when the inputs are finite and no intermediate addition
+  overflows, the bound of a sequential sum. The bits of a column do not
   depend on the batch, the block width, or the GPU model.
 - There is no split. A segment occupies one block for its whole length, so
   a batch with a heavy tail of long segments keeps few blocks busy for a
@@ -388,7 +390,8 @@ segment fewer than the device has SMs and a batch of as many.
 
 ### Error bound
 
-Every schedule returns a sum within
+For finite element-program results, provided no intermediate addition
+overflows, every schedule returns a sum within
 
 ```text
 k * eps * sum(|x|)
@@ -454,8 +457,10 @@ A sum follows IEEE-754 addition on every static schedule:
 - A NaN element gives NaN.
 - An infinity among finite elements gives that infinity.
 - Infinities of both signs give NaN.
-- Finite elements whose sum exceeds the range of the element type give
-  infinity.
+- Intermediate overflow can produce infinity of either sign or NaN even
+  when the inputs and their exact sum are finite. For example, the public
+  call on `[M, M, -M, -M]`, with `M` the largest finite value of the dtype,
+  returns NaN on the tested reduction tree despite an exact sum of zero.
 - Subnormal elements and results are kept and are not flushed to zero.
 
 The f64 tests use the values of f64: the largest finite f64, the smallest

@@ -6,7 +6,7 @@ All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semantic versioning (`0.x`; anything may change).
 
-## [Unreleased]
+## [0.5.2] - 2026-11-07
 
 ### Added
 
@@ -85,7 +85,8 @@ semantic versioning (`0.x`; anything may change).
   element gives NaN. A mean is the sum of the same call divided by the
   segment length, bit for bit (ADR-0008 amended).
 - `swage.segment_reduce` takes `torch.float64` values and returns float64
-  on every static schedule, with sums within `k * eps64 * sum(|x|)`.
+  on every static schedule, with sums within `k * eps64 * sum(|x|)` for
+  finite inputs with no intermediate overflow.
   `swage.segment_softmax` refuses float64 because the device has no 64-bit
   `exp2`. Persistent execution stays float32.
 - Both public calls take `torch.int64` offsets, validated by their 64-bit
@@ -610,6 +611,16 @@ semantic versioning (`0.x`; anything may change).
 
 ### Fixed
 
+- Clang ASan and UBSan builds inform LLVM's CMake helpers that sanitizers
+  are enabled, so the shared runtime links without incompatible `-z,defs`.
+- Artifact loading refuses subgroup widths other than NVIDIA's 32 threads.
+  A modified manifest can no longer change the fused launch grid and leave
+  segment outputs unwritten.
+- Sum and mean documentation limits error bounds to finite inputs with no
+  intermediate overflow and explains nonfinite results after cancellation.
+- The CI and documentation lock updates certifi and pytest to versions
+  that address their reported certificate-store and temporary-directory
+  vulnerabilities.
 - `--swage-plan-to-gpu` checks plan functions in nested modules before
   converting them, so an invalid one is refused with a diagnostic instead of
   being converted.

@@ -12,13 +12,12 @@ vector add or multiply that uses no segment, because there is no public
 segment syntax. The last page returns to the model and states which parts
 of it are public.
 
-This guide describes the `v0.5.2` native-wheel contract. Its publication and
-release qualification are pending, and `v0.5.1` remains the latest released
-tag. Read [Installation](../getting-started/installation.md) before using a
-version-pinned install command.
+This guide describes the `v0.5.2` native-wheel contract. Read
+[Installation](../getting-started/installation.md) for artifact availability,
+supported platforms, and version-pinned install commands.
 
 Status labels are load-bearing everywhere in this documentation. Public is
-the application surface, not a claim that an unreleased artifact is
+the application surface, not a claim that an artifact is
 qualified. Private qualification is tested contributor machinery, not
 public API. Planned work has not passed a public gate.
 

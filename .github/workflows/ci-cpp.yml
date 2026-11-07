@@ -185,9 +185,10 @@ jobs:
           python="$RUNNER_TEMP/wheel-venv/bin/python"
           proof="$RUNNER_TEMP/wheel-proof"
           mkdir -p "$proof/python/tests" "$proof/cmake" "$proof/docs/internals" \
-            "$proof/benchmarks"
+            "$proof/benchmarks" "$proof/tests"
           cp -r "$GITHUB_WORKSPACE/python/tests/mlir" "$proof/python/tests/mlir"
-          cp -r "$GITHUB_WORKSPACE/examples" "$GITHUB_WORKSPACE/test" "$proof/"
+          cp -r "$GITHUB_WORKSPACE/examples" "$proof/"
+          cp -r "$GITHUB_WORKSPACE/tests/lit" "$proof/tests/"
           cp "$GITHUB_WORKSPACE/cmake/llvm-version.txt" "$proof/cmake/"
           cp "$GITHUB_WORKSPACE/docs/internals/segmented-reductions.md" \
             "$proof/docs/internals/"

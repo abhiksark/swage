@@ -165,8 +165,8 @@ It is built as one native wheel per CPython version, which holds `swage`,
 the private `mlir_swage` bindings, the native runtime library, the
 segmented modules behind the two public segmented calls, the license files,
 and the build record. The source distribution and a frontend-only editable
-install stay CMake-free. The release on PyPI, 0.5.1, is pure Python; the
-native wheel of 0.5.2 is not released yet.
+install stay CMake-free. Version 0.5.1 uses pure Python packaging; the
+native-wheel contract starts with 0.5.2.
 
 `mlir_swage` embeds the pinned MLIR Python core and generated Swage
 bindings. It never layers onto an unrelated external `mlir` package. A

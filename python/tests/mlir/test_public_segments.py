@@ -1167,6 +1167,25 @@ def test_segment_reduce_sums_special_values_as_ieee_addition_does(case, dtype):
 
 @_needs_cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
+@pytest.mark.parametrize("kind", ["sum", "mean"])
+def test_finite_cancellation_can_overflow_before_the_reduction_ends(
+    kind, dtype
+):
+    """The reduction tree can overflow even when the exact result is zero."""
+    maximum = torch.finfo(dtype).max
+    values = torch.tensor(
+        [maximum, maximum, -maximum, -maximum], dtype=dtype
+    )
+    offsets = torch.tensor([0, 4], dtype=torch.int32)
+
+    actual = _reduce(kind, values, offsets)
+
+    assert values.isfinite().all()
+    assert actual.isnan().all()
+
+
+@_needs_cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_DTYPE_IDS)
 @pytest.mark.parametrize("length", SPECIAL_LENGTHS)
 def test_segment_reduce_max_propagates_nan_and_orders_infinities(length, dtype):
     """Return NaN for a segment that holds one, wherever it sits."""

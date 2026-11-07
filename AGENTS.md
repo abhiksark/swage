@@ -14,7 +14,7 @@ tasks; read only the sections needed for the change.
 - Python, frontend, bindings, and related tests:
   [python/AGENTS.md](python/AGENTS.md).
 - MLIR, C++, TableGen, and compiler tools: [lib/AGENTS.md](lib/AGENTS.md).
-- lit and FileCheck work: [test/AGENTS.md](test/AGENTS.md).
+- lit and FileCheck work: [tests/lit/AGENTS.md](tests/lit/AGENTS.md).
 - Current or planned status claims: [README.md](README.md) and
   [roadmap](maintainers/roadmap.md).
 - Architecture or lowering changes: [design](docs/internals/design.md) plus
