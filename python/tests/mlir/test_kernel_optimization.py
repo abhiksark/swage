@@ -368,7 +368,7 @@ $L__BB0_4:
 @pytest.mark.parametrize("target", _TARGETS)
 @pytest.mark.parametrize(
     ("text", "compiler", "kernel_name", "options", "expected"),
-    _segmented_kernels(),
+    list(_segmented_kernels()),
 )
 def test_segmented_kernels_keep_their_synchronization(
     text, compiler, kernel_name, options, expected, target
