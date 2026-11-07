@@ -389,8 +389,9 @@ module {
 // CHECK-NEXT: } else {
 // CHECK-NEXT:   scf.yield %[[ZERO_I32]] : i32
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[FIRST_WARP_WIDTH:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[FIRST_WARP_SOURCE:.*]] = arith.constant 0 : i32
+// LLVM may emit the independent shuffle constants in either order.
+// CHECK-DAG: %[[FIRST_WARP_WIDTH:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[FIRST_WARP_SOURCE:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[FIRST_WARP:[^,]+]], %{{.*}} = gpu.shuffle idx %[[FIRST_WARP_CLAIM]], %[[FIRST_WARP_SOURCE]], %[[FIRST_WARP_WIDTH]] : i32
 // CHECK-NEXT: %{{.*}} = scf.while (%[[WARP_HEAD:.*]] = %[[FIRST_WARP]]) : (i32) -> i32 {
 // CHECK-NEXT:   %[[HAS_WARP:.*]] = arith.cmpi ult, %[[WARP_HEAD]], %[[WARP_COUNT]] : i32
@@ -442,24 +443,24 @@ module {
 // CHECK-NEXT: }
 // Five shuffle stages fold the 32 lanes; each stage adds the running total to
 // its copy from the lane 1, 2, 4, 8, and 16 away.
-// CHECK-NEXT: %[[WARP_W1:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[WARP_D1:.*]] = arith.constant 1 : i32
+// CHECK-DAG: %[[WARP_W1:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[WARP_D1:.*]] = arith.constant 1 : i32
 // CHECK-NEXT: %[[WARP_S1:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_LOCAL]], %[[WARP_D1]], %[[WARP_W1]] : f32
 // CHECK-NEXT: %[[WARP_T1:.*]] = arith.addf %[[WARP_LOCAL]], %[[WARP_S1]] : f32
-// CHECK-NEXT: %[[WARP_W2:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[WARP_D2:.*]] = arith.constant 2 : i32
+// CHECK-DAG: %[[WARP_W2:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[WARP_D2:.*]] = arith.constant 2 : i32
 // CHECK-NEXT: %[[WARP_S2:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T1]], %[[WARP_D2]], %[[WARP_W2]] : f32
 // CHECK-NEXT: %[[WARP_T2:.*]] = arith.addf %[[WARP_T1]], %[[WARP_S2]] : f32
-// CHECK-NEXT: %[[WARP_W3:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[WARP_D3:.*]] = arith.constant 4 : i32
+// CHECK-DAG: %[[WARP_W3:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[WARP_D3:.*]] = arith.constant 4 : i32
 // CHECK-NEXT: %[[WARP_S3:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T2]], %[[WARP_D3]], %[[WARP_W3]] : f32
 // CHECK-NEXT: %[[WARP_T3:.*]] = arith.addf %[[WARP_T2]], %[[WARP_S3]] : f32
-// CHECK-NEXT: %[[WARP_W4:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[WARP_D4:.*]] = arith.constant 8 : i32
+// CHECK-DAG: %[[WARP_W4:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[WARP_D4:.*]] = arith.constant 8 : i32
 // CHECK-NEXT: %[[WARP_S4:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T3]], %[[WARP_D4]], %[[WARP_W4]] : f32
 // CHECK-NEXT: %[[WARP_T4:.*]] = arith.addf %[[WARP_T3]], %[[WARP_S4]] : f32
-// CHECK-NEXT: %[[WARP_W5:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[WARP_D5:.*]] = arith.constant 16 : i32
+// CHECK-DAG: %[[WARP_W5:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[WARP_D5:.*]] = arith.constant 16 : i32
 // CHECK-NEXT: %[[WARP_S5:[^,]+]], %{{.*}} = gpu.shuffle xor %[[WARP_T4]], %[[WARP_D5]], %[[WARP_W5]] : f32
 // CHECK-NEXT: %[[WARP_TOTAL:.*]] = arith.addf %[[WARP_T4]], %[[WARP_S5]] : f32
 // Lane zero of the warp is the only writer, and it stores the total at the
@@ -479,8 +480,8 @@ module {
 // CHECK-NEXT: } else {
 // CHECK-NEXT:   scf.yield %[[ZERO_I32]] : i32
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[NEXT_WARP_WIDTH:.*]] = arith.constant 32 : i32
-// CHECK-NEXT: %[[NEXT_WARP_SOURCE:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[NEXT_WARP_WIDTH:.*]] = arith.constant 32 : i32
+// CHECK-DAG: %[[NEXT_WARP_SOURCE:.*]] = arith.constant 0 : i32
 // CHECK-NEXT: %[[NEXT_WARP:[^,]+]], %{{.*}} = gpu.shuffle idx %[[NEXT_WARP_CLAIM]], %[[NEXT_WARP_SOURCE]], %[[NEXT_WARP_WIDTH]] : i32
 // CHECK-NEXT: scf.yield %[[NEXT_WARP]] : i32
 // CHECK-NEXT: }
