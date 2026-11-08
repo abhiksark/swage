@@ -25,6 +25,8 @@ semantic versioning (`0.x`; anything may change).
   repository manifest, so a stale gate cannot pass behind mocked metadata.
 - Materialize native test parameters to avoid pytest's generator
   parametrization deprecation.
+- Isolate installed-wheel qualification from unrelated pytest plugins in
+  the shared CUDA environment, including plugins incompatible with pytest 9.
 
 ### Release qualification
 
