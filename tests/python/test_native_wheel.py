@@ -562,9 +562,8 @@ def _sdist(tmp_path, *, extra=None):
     path = tmp_path / "swage_compiler-0.5.2.tar.gz"
     members = {
         "swage_compiler-0.5.2/pyproject.toml": (
-            '[build-system]\nrequires = ["scikit-build-core==1.0.3"]\n'
-            'build-backend = "scikit_build_core.build"\n'
-        ).encode()
+            _ROOT / "pyproject.toml"
+        ).read_bytes()
     }
     members.update(extra or {})
     with tarfile.open(path, "w:gz") as archive:
@@ -630,7 +629,6 @@ def _simulate_builds(repair, monkeypatch, *, leak=None, mismatch=False):
         _wheel(output, edits=edits)
 
     monkeypatch.setattr(repair, "_run", run)
-    monkeypatch.setattr(repair, "version", lambda name: "1.0.3")
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1704067200")
 
 

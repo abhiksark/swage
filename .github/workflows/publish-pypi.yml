@@ -115,7 +115,7 @@ jobs:
           python -m build --sdist --no-isolation --outdir "$RUNNER_TEMP/second-sdist"
           cmp dist/swage_compiler-0.5.2.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.2.tar.gz"
           python -m twine check --strict dist/*.tar.gz
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-sdist
           path: dist/*.tar.gz
@@ -154,7 +154,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-sdist
           path: release-source
@@ -163,7 +163,7 @@ jobs:
           mkdir release-evidence
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           df -h /
-      - uses: pypa/cibuildwheel@ee02a1537ce3071a004a6b08c41e72f0fdc42d9a
+      - uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299
         with:
           only: ${{ matrix.python }}-manylinux_x86_64
         env:
@@ -207,12 +207,12 @@ jobs:
             env -u PYTHONPATH python {project}/scripts/smoke_installed_wheel.py
             --backend cpu --expected-revision "$SWAGE_SOURCE_REVISION"
             > "$SWAGE_EVIDENCE_DIR/cpu-smoke-$SWAGE_PYTHON_TAG.json"
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-wheel-${{ matrix.python }}
           path: wheelhouse/*.whl
           if-no-files-found: error
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-wheel-evidence-${{ matrix.python }}
@@ -230,16 +230,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: release-wheel-cp*
           merge-multiple: true
           path: dist
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-sdist
           path: dist
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: release-wheel-evidence-*
           merge-multiple: true
@@ -299,7 +299,7 @@ jobs:
                       archive.extractall(destination, filter="data")
           PY
       - name: Generate one SPDX JSON SBOM for the aggregate
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
         env:
           SYFT_CHECK_FOR_APP_UPDATE: "false"
           SYFT_SOURCE_NAME: swage-compiler-release
@@ -334,12 +334,12 @@ jobs:
           expected = {path.name for path in pathlib.Path("dist").iterdir()}
           assert expected <= inventoried, f"SBOM omits distributions: {expected - inventoried}"
           PY
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-distributions
           path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-artifact-evidence
           path: release-evidence/*
@@ -354,7 +354,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-distributions
           path: release-dist
@@ -430,7 +430,7 @@ jobs:
           unset PYTHONPATH
           "$RELEASE_WORK/venv/bin/python" -m swage.bench vector-add \
             --enforce --output "$RELEASE_WORK/evidence/fixed-runtime-slo.json"
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-gpu-evidence
@@ -447,11 +447,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-distributions
           path: dist
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-artifact-evidence
           path: evidence
@@ -474,7 +474,7 @@ jobs:
           cp "${{ steps.provenance.outputs.bundle-path }}" \
             attestations/build-provenance.json
           cp "${{ steps.sbom.outputs.bundle-path }}" attestations/sbom.json
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-attestations
           path: |
@@ -494,7 +494,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: release-distributions
           path: dist

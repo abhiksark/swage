@@ -160,8 +160,8 @@ def _rebuild(sdist, work, summary, forbidden_prefixes):
         raise ValueError(
             "sdist rebuild must use the wheel's regular CPython ABI"
         )
-    if version("scikit-build-core") != "1.0.3":
-        raise ValueError("sdist rebuild requires scikit-build-core==1.0.3")
+    if version("scikit-build-core") != "1.1.1":
+        raise ValueError("sdist rebuild requires scikit-build-core==1.1.1")
     source = _extract_sdist(sdist, work / "source")
     if sys.version_info >= (3, 11):
         import tomllib
@@ -171,7 +171,7 @@ def _rebuild(sdist, work, summary, forbidden_prefixes):
     build_system = project.get("build-system", {})
     if (
         build_system.get("build-backend") != "scikit_build_core.build"
-        or "scikit-build-core==1.0.3" not in build_system.get("requires", [])
+        or "scikit-build-core==1.1.1" not in build_system.get("requires", [])
     ):
         raise ValueError("sdist must use the pinned scikit-build-core backend")
     build_dir = (work / "native-build").resolve()

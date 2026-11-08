@@ -283,7 +283,7 @@ python -m venv "$work/venv"
 ```
 
 The `dev` extra supplies the build tools that `--no-isolation` needs, at
-the pinned versions `scikit-build-core==1.0.3` and `nanobind==2.15.0`. A
+the pinned versions `scikit-build-core==1.1.1` and `nanobind==2.15.0`. A
 wheel build requires the `Release` build type, which `pyproject.toml` sets,
 a `SWAGE_SOURCE_REVISION` of 40 lowercase hexadecimal digits, and an
 explicit `SWAGE_SOURCE_CLEAN` of `true` or `false`; CMake stops without
