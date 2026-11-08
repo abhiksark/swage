@@ -29,7 +29,7 @@ _CACHE_VARIABLES = (
 # A valid schema 2 build record of the native package.
 _BUILD_INFO = {
     "schema_version": 2,
-    "package_version": "0.5.2",
+    "package_version": "0.5.3",
     "source_revision": "a" * 40,
     "source_clean": True,
     "frontend_digest": "b" * 64,

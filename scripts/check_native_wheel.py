@@ -411,7 +411,7 @@ def check_wheel(
     *,
     expected_revision,
     expected_python=None,
-    expected_version="0.5.2",
+    expected_version="0.5.3",
     allow_dirty=False,
     forbidden_prefixes=(),
 ):
@@ -503,7 +503,7 @@ def main(argv=None):
     parser.add_argument("wheel", type=Path)
     parser.add_argument("--expected-revision", required=True)
     parser.add_argument("--expected-python", choices=PYTHONS)
-    parser.add_argument("--expected-version", default="0.5.2")
+    parser.add_argument("--expected-version", default="0.5.3")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--forbid-prefix", action="append", default=[])
     args = parser.parse_args(argv)

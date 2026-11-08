@@ -73,7 +73,7 @@ jobs:
           assert not git("status", "--porcelain"), "release tree must be clean"
           source = pathlib.Path("python/swage/__init__.py").read_text()
           version = re.search(r'^__version__ = "([^"]+)"$', source, re.M).group(1)
-          assert version == "0.5.2", "this release policy is for v0.5.2"
+          assert version == "0.5.3", "this release policy is for v0.5.3"
           git("fetch", "--no-tags", "origin", "main:refs/remotes/origin/main")
           git("merge-base", "--is-ancestor", revision, "refs/remotes/origin/main")
           assert revision in git(
@@ -113,7 +113,7 @@ jobs:
           python -m pip install --require-hashes -r requirements-ci.txt
           python -m build --sdist --no-isolation --outdir dist
           python -m build --sdist --no-isolation --outdir "$RUNNER_TEMP/second-sdist"
-          cmp dist/swage_compiler-0.5.2.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.2.tar.gz"
+          cmp dist/swage_compiler-0.5.3.tar.gz "$RUNNER_TEMP/second-sdist/swage_compiler-0.5.3.tar.gz"
           python -m twine check --strict dist/*.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -149,7 +149,7 @@ jobs:
       SWAGE_SOURCE_REVISION: ${{ needs.source.outputs.revision }}
       SWAGE_PYTHON_TAG: ${{ matrix.python }}
       SWAGE_EVIDENCE_DIR: /host${{ github.workspace }}/release-evidence
-      SWAGE_REBUILD_SDIST: ${{ matrix.python == 'cp313' && '--rebuild-sdist /project/release-source/swage_compiler-0.5.2.tar.gz' || '' }}
+      SWAGE_REBUILD_SDIST: ${{ matrix.python == 'cp313' && '--rebuild-sdist /project/release-source/swage_compiler-0.5.3.tar.gz' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -260,8 +260,8 @@ jobs:
           dist = pathlib.Path("dist")
           evidence = pathlib.Path("release-evidence")
           abis = ("cp310", "cp311", "cp312", "cp313")
-          wheels = {abi: f"swage_compiler-0.5.2-{abi}-{abi}-manylinux_2_28_x86_64.whl" for abi in abis}
-          expected = {*wheels.values(), "swage_compiler-0.5.2.tar.gz"}
+          wheels = {abi: f"swage_compiler-0.5.3-{abi}-{abi}-manylinux_2_28_x86_64.whl" for abi in abis}
+          expected = {*wheels.values(), "swage_compiler-0.5.3.tar.gz"}
           assert {path.name for path in dist.iterdir()} == expected, "unexpected release artifact set"
           for abi, filename in wheels.items():
               first = json.loads((evidence / f"repair-{abi}.json").read_text())
@@ -303,7 +303,7 @@ jobs:
         env:
           SYFT_CHECK_FOR_APP_UPDATE: "false"
           SYFT_SOURCE_NAME: swage-compiler-release
-          SYFT_SOURCE_VERSION: "0.5.2"
+          SYFT_SOURCE_VERSION: "0.5.3"
           SYFT_SELECT_CATALOGERS: +file-metadata-cataloger,+file-digest-cataloger
           SYFT_FILE_METADATA_SELECTION: all
         with:
@@ -323,7 +323,7 @@ jobs:
           sbom = json.loads(pathlib.Path("release-evidence/sbom.spdx.json").read_text())
           assert sbom["spdxVersion"] == "SPDX-2.3"
           assert any(package["name"] == "swage-compiler" and
-                     package.get("versionInfo") == "0.5.2"
+                     package.get("versionInfo") == "0.5.3"
                      for package in sbom["packages"]), "SBOM omits Swage"
           inventoried = set()
           for item in sbom.get("files", []):
@@ -364,7 +364,7 @@ jobs:
           python3.13 -m venv --system-site-packages "$work/venv"
           "$work/venv/bin/python" -m pip install --require-hashes -r requirements-ci.txt
           "$work/venv/bin/python" -m pip install --no-deps --ignore-installed \
-            release-dist/swage_compiler-0.5.2-cp313-cp313-manylinux_2_28_x86_64.whl
+            release-dist/swage_compiler-0.5.3-cp313-cp313-manylinux_2_28_x86_64.whl
           mkdir "$work/evidence"
           echo "RELEASE_WORK=$work" >> "$GITHUB_ENV"
       # SWAGE_REQUIRE_PERSISTENT_CACHE_TEST=1 makes the persistent cache
@@ -438,7 +438,7 @@ jobs:
 
   attest:
     name: Attest qualified signed-tag artifacts
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.2'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.3'
     needs: [aggregate, gpu]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -484,7 +484,7 @@ jobs:
 
   publish:
     name: Publish qualified immutable native release
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.2'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.5.3'
     needs: attest
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -21,8 +21,9 @@ change or go away.
 
 ## Current capability boundary
 
-Version `v0.5.2` introduces the native-wheel contract below, replacing the
-pure Python packaging of `v0.5.1`. Check the
+Version `v0.5.2` introduced the native-wheel contract below, replacing the
+pure Python packaging of `v0.5.1`. The `v0.5.3` candidate updates build and
+CI dependencies without changing compiler or runtime behavior. Check the
 [release page](https://github.com/abhiksark/swage/releases) for published
 artifacts. Release qualification requires the installed-wheel gates;
 source changes alone do not establish it.
@@ -150,7 +151,7 @@ bindings, no CPU backend, no multiply or low-precision dtypes, no segmented
 calls, and no artifact path.
 [Installation](docs/getting-started/installation.md) lists the differences.
 
-To install `v0.5.2` once it appears on the release page:
+To install the published `v0.5.2` release:
 
 ```bash
 python -m pip install --only-binary=swage-compiler "swage-compiler[pytorch]==0.5.2"
