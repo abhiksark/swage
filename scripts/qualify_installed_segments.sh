@@ -58,6 +58,8 @@ find "$WORK" -name __pycache__ -prune -exec rm -rf {} +
 cd "$WORK"
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
+# Shared CUDA Torch environments may also expose unrelated pytest plugins.
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 export SWAGE_ORACLE_BUILD_DIR="$ORACLE_BUILD"
 
 # The installed package and bindings, with CUDA, or nothing is qualified.
