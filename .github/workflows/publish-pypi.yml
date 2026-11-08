@@ -350,6 +350,9 @@ jobs:
     needs: [source, aggregate]
     runs-on: [self-hosted, linux, x64, swage-gpu]
     timeout-minutes: 60
+    env:
+      # Retain runner CUDA Torch without loading its unrelated pytest plugins.
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
