@@ -73,7 +73,7 @@ introducing another packaging architecture. Publication requires
 the original wheel/stub deferrals,
 not the private status of segmented APIs or their research gates.
 
-- `scikit-build-core==1.0.3` and `nanobind==2.15.0` build native wheels.
+- `scikit-build-core==1.1.1` and `nanobind==2.15.0` build native wheels.
   CMake requires exactly LLVM/MLIR 22.1.8 (`llvmorg-22.1.8`). Normal source
   builds keep `build/python_packages/mlir_swage`; `SWAGE_WHEEL_BUILD=ON`
   changes the install prefix to site-packages-root `mlir_swage` under the

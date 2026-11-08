@@ -6,6 +6,34 @@ All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semantic versioning (`0.x`; anything may change).
 
+## [0.5.3] - Unreleased
+
+### Changed
+
+- Update the hash-locked build and CI tools to scikit-build-core 1.1.1,
+  pytest 9.2.0, cffi 2.1.1, nh3 0.3.7, and pyproject-hooks 1.3.3.
+- Update the artifact upload/download, cibuildwheel, SBOM, and CodeQL
+  actions, keeping CodeQL initialization and analysis on one revision.
+- Preserve supported dependency ranges during routine Dependabot updates
+  and group related CodeQL action updates. Optional PyTorch support remains
+  `>=2.6,<3`; the compiler and runtime behavior are unchanged.
+
+### Fixed
+
+- Keep the wheel reproducibility gate and packaging documentation aligned
+  with the build-backend pin. Its tests now use the installed backend and
+  repository manifest, so a stale gate cannot pass behind mocked metadata.
+- Materialize native test parameters to avoid pytest's generator
+  parametrization deprecation.
+
+### Release qualification
+
+Qualification is pending for the v0.5.3 candidate. Publication requires the
+four-ABI manylinux artifact set, byte-identical cp313 source/sdist wheels,
+security and SBOM checks, and installed-wheel A6000 correctness and runtime
+SLO checks on the candidate's reviewed `main` commit. A manual workflow
+run produces qualification evidence without publishing or attesting a tag.
+
 ## [0.5.2] - 2026-11-07
 
 ### Added
@@ -664,10 +692,11 @@ semantic versioning (`0.x`; anything may change).
 
 ### Release qualification
 
-The v0.5.2 changes above are unreleased. Publication requires the repaired
-four-ABI artifact set, byte-identical cp313 source/sdist wheels, security gates,
-and trusted installed-wheel A6000 correctness and performance evidence,
-including the installed-wheel qualification of the public segmented calls.
+Version v0.5.2 was published on 2026-11-07. Its
+[signed-tag qualification run](https://github.com/abhiksark/swage/actions/runs/42362666646)
+validated the repaired four-ABI artifact set, byte-identical cp313
+source/sdist wheels, security gates, and trusted installed-wheel A6000
+correctness and performance evidence, including the public segmented calls.
 FP32 behavior and the canonical kernel shape are unchanged; the newly
 supported storage formats expand the public dtype contract. Existing frozen
 FP32 performance evidence does not qualify low-precision performance.
