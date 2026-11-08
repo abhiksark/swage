@@ -21,7 +21,7 @@ _REVISION = "a" * 40
 _PYTHON = f"cp{sys.version_info.major}{sys.version_info.minor}"
 _PLATFORM = "manylinux_2_28_x86_64"
 _TAG = f"{_PYTHON}-{_PYTHON}-{_PLATFORM}"
-_DIST = "swage_compiler-0.5.2.dist-info"
+_DIST = "swage_compiler-0.5.3.dist-info"
 _LIBDIR = "mlir_swage/_mlir_libs"
 _EXTENSION = f"{_LIBDIR}/_mlir.cpython-{_PYTHON[2:]}-x86_64-linux-gnu.so"
 _SWAGE_EXTENSION = (
@@ -39,7 +39,7 @@ _LICENSE_EXPRESSION = (
 )
 _INFO = {
     "schema_version": 2,
-    "package_version": "0.5.2",
+    "package_version": "0.5.3",
     "source_revision": _REVISION,
     "source_clean": True,
     "frontend_digest": "c" * 64,
@@ -159,14 +159,14 @@ def _wheel(
     corrupt_record=False,
 ):
     metadata = (
-        "Metadata-Version: 2.4\nName: swage-compiler\nVersion: 0.5.2\n"
+        "Metadata-Version: 2.4\nName: swage-compiler\nVersion: 0.5.3\n"
         "Requires-Python: >=3.10,<3.14\n"
         f"License-Expression: {_LICENSE_EXPRESSION}\n"
         "License-File: LICENSE\nLicense-File: LICENSES/LLVM.txt\n"
         "License-File: THIRD_PARTY_NOTICES.md\n\n"
     )
     members = {
-        "swage/__init__.py": b'__version__ = "0.5.2"\n',
+        "swage/__init__.py": b'__version__ = "0.5.3"\n',
         "swage/_segments.py": b"",
         "swage/_autograd.py": b"",
         "swage/_segmented_qualification.py": b"",
@@ -213,7 +213,7 @@ def _wheel(
     members[f"{_DIST}/RECORD"] = record.getvalue().encode()
     if corrupt_record:
         members["swage/language.py"] += b"# modified after RECORD generation\n"
-    output = tmp_path / f"swage_compiler-0.5.2-{tag}.whl"
+    output = tmp_path / f"swage_compiler-0.5.3-{tag}.whl"
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(
         output, "w", compression=zipfile.ZIP_DEFLATED
@@ -559,9 +559,9 @@ def test_checker_cli_json_and_failure_status(checker, tmp_path, capsys):
 
 
 def _sdist(tmp_path, *, extra=None):
-    path = tmp_path / "swage_compiler-0.5.2.tar.gz"
+    path = tmp_path / "swage_compiler-0.5.3.tar.gz"
     members = {
-        "swage_compiler-0.5.2/pyproject.toml": (
+        "swage_compiler-0.5.3/pyproject.toml": (
             _ROOT / "pyproject.toml"
         ).read_bytes()
     }

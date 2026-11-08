@@ -15,7 +15,7 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_VERSION = "0.5.2"
+_VERSION = "0.5.3"
 _SOURCE_DATE_EPOCH = "1700000000"
 # The native wheel embeds LLVM, MLIR, the code LLVM Support carries under
 # terms of its own, nanobind, and robin-map; THIRD_PARTY_NOTICES.md holds

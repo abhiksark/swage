@@ -4110,7 +4110,7 @@ def _packaged_build_info():
     """Return a valid build record of a packaged native compiler."""
     return {
         "schema_version": 2,
-        "package_version": "0.5.2",
+        "package_version": "0.5.3",
         "source_revision": "a" * 40,
         "source_clean": True,
         "frontend_digest": "d" * 64,

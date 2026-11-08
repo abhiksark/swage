@@ -6,7 +6,7 @@ from ._errors import BackendUnavailableError, CompilationError, SwageError
 from ._frontend import jit
 from ._segments import segment_reduce, segment_softmax
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 __all__ = [
     "BackendUnavailableError",
