@@ -109,7 +109,7 @@ jobs:
 
       - name: Initialize CodeQL C/C++
         id: codeql-init
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066
         with:
           languages: c-cpp
           build-mode: manual
@@ -220,7 +220,7 @@ jobs:
 
       - name: Analyze CodeQL C/C++
         if: ${{ !cancelled() && steps.codeql-init.outcome == 'success' }}
-        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066
         with:
           category: /language:c-cpp
 
