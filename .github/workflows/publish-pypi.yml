@@ -163,7 +163,7 @@ jobs:
           mkdir release-evidence
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           df -h /
-      - uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299
+      - uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e
         with:
           only: ${{ matrix.python }}-manylinux_x86_64
         env:
