@@ -105,7 +105,13 @@ def _fake_torch(monkeypatch, version="2.6.0", grad_enabled=True):
     torch.int32 = _Dtype("torch.int32")
     torch.Tensor = _Tensor
     torch.autograd = types.SimpleNamespace(
-        graph=types.SimpleNamespace(increment_version=lambda tensor: None)
+        graph=types.SimpleNamespace(increment_version=lambda tensor: None),
+        # A test gives a tensor a `tangent` to stand for a dual tensor.
+        forward_ad=types.SimpleNamespace(
+            unpack_dual=lambda tensor: types.SimpleNamespace(
+                tangent=getattr(tensor, "tangent", None)
+            )
+        ),
     )
     # The calls wrap their bodies against `torch.compile`; nothing compiles.
     torch.compiler = types.SimpleNamespace(disable=lambda function: function)
@@ -390,6 +396,26 @@ def test_recording_reads_the_grad_mode_only_for_values_that_need_grad(
 
     with pytest.raises(RuntimeError, match="requires the mlir_swage"):
         _call(function, values, offsets, out=out)
+
+
+@pytest.mark.parametrize("function", FUNCTIONS)
+@pytest.mark.parametrize("grad_enabled", [True, False])
+def test_values_with_a_forward_mode_tangent_are_refused(
+    function, grad_enabled, monkeypatch
+):
+    """Refuse a dual tensor, whose tangent the result would silently drop."""
+    torch = _fake_torch(monkeypatch, grad_enabled=grad_enabled)
+    values, offsets = _inputs(torch)
+    values.tangent = object()
+
+    with pytest.raises(
+        NotImplementedError,
+        match=(
+            "^values must not carry a forward-mode tangent: the segmented "
+            "calls record reverse-mode gradients only"
+        ),
+    ):
+        _call(function, values, offsets)
 
 
 def _wrong_out(torch, case, count):

@@ -35,9 +35,8 @@ command saw:
   current device and `qualified` says whether it is the qualified NVIDIA
   RTX A6000 (`sm_86`).
 
-These pages describe the implemented `v0.5.2` contract, whose publication
-and production qualification remain pending. The latest released tag is
-`v0.5.1`, a pure Python wheel;
+These pages describe the native-wheel contract that `v0.5.2` introduced.
+The earlier `v0.5.1` release is a pure Python wheel;
 [Installation](installation.md#what-the-released-051-wheel-lacks) lists
 what it lacks.
 

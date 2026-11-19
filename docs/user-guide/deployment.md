@@ -150,7 +150,9 @@ With an artifact selected, a call behaves as
 - The offsets are classified by the runtime library of the artifact, which
   produces the task records that the compiler's classifier produces.
 - The variable is read at every call. Naming another directory loads that
-  artifact, and unsetting it returns the process to compiling.
+  artifact, and unsetting it returns the process to compiling. Naming a
+  directory again uses the artifact the process already holds for it, so
+  switching between directories loads each of them once.
 
 If `mlir_swage` is importable in a process that has an artifact selected,
 the kernels and the classification still come from the artifact, and so

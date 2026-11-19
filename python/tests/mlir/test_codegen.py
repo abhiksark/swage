@@ -66,7 +66,10 @@ def test_compiles_fixed_vector_add_to_deterministic_ptx():
     assert module.operation.get_asm(enable_debug_info=False) == original
 
 
-@pytest.mark.parametrize("target", ["sm_8", "compute_80", "sm_79", "sm_999"])
+@pytest.mark.parametrize(
+    "target",
+    ["sm_8", "compute_80", "sm_79", "sm_999", "sm_080", "sm_090"],
+)
 def test_rejects_invalid_nvptx_targets(target):
     """Fail closed instead of silently choosing another architecture."""
     with pytest.raises(
@@ -147,6 +150,26 @@ def test_rejects_function_symbols_ptx_cannot_represent():
             native_swage._compile_ptx(
                 module,
                 kernel_name="añadir",
+                block_size=128,
+                target="sm_80",
+            )
+
+
+@pytest.mark.parametrize("name", ["_", "$"])
+def test_rejects_a_lone_prefix_character_as_a_kernel_name(name):
+    """Refuse a name the driver cannot load: PTX needs more after `_`."""
+    from mlir_swage import ir
+    from mlir_swage.dialects import swage as swage_dialect
+
+    source = _emit().operation.get_asm(enable_debug_info=False)
+    renamed = source.replace("@add_kernel", f'@"{name}"')
+    with ir.Context() as context:
+        swage_dialect.register_dialects(context)
+        module = ir.Module.parse(renamed)
+        with pytest.raises(ValueError, match="not a valid PTX identifier"):
+            native_swage._compile_ptx(
+                module,
+                kernel_name=name,
                 block_size=128,
                 target="sm_80",
             )

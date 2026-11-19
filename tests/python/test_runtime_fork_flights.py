@@ -242,6 +242,56 @@ print("child exited", os.waitstatus_to_exitcode(status))
 """
 
 
+_FORK_DURING_IDENTITY_SCRIPT = """
+import os
+import signal
+import threading
+import warnings
+
+from swage import _runtime
+
+signal.alarm(10)
+warnings.simplefilter("ignore", DeprecationWarning)
+parent = os.getpid()
+deriving = threading.Event()
+release = threading.Event()
+
+
+def identity():
+    # Only the parent's derivation waits, with the identity lock held.
+    if os.getpid() == parent:
+        deriving.set()
+        assert release.wait(8), "parent derivation was never released"
+    return {"process": os.getpid()}
+
+
+_runtime._compiler_identity = identity
+first = threading.Thread(target=_runtime._cached_identity, daemon=True)
+first.start()
+assert deriving.wait(5), "parent did not start deriving the identity"
+
+child = os.fork()
+if child == 0:
+    # The thread that holds the inherited lock does not exist here.
+    signal.alarm(3)
+    try:
+        assert _runtime._cached_identity() == {"process": os.getpid()}
+    except BaseException:
+        os._exit(2)
+    os._exit(0)
+
+_, status = os.waitpid(child, 0)
+release.set()
+first.join(5)
+assert not first.is_alive(), "parent derivation did not finish"
+assert _runtime._cached_identity() == {"process": parent}
+if os.WIFSIGNALED(status):
+    print("child ended by signal", os.WTERMSIG(status))
+else:
+    print("child exited", os.WEXITSTATUS(status))
+"""
+
+
 def _run_fork_script(script, *arguments):
     """Run a fork regression with a bound outside the child alarm too."""
     environment = dict(
@@ -286,6 +336,15 @@ def test_child_retries_same_key_across_flight_publication_gaps(mode, gap):
 def test_forking_builder_does_not_finish_a_new_child_flight(mode):
     """Let the inherited builder unwind without retiring its successor."""
     completed = _run_fork_script(_FORK_IN_BUILDER_SCRIPT, mode)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "child exited 0\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_child_forked_during_the_first_identity_derivation_derives_its_own():
+    """Do not leave the child waiting for a lock no thread of it holds."""
+    completed = _run_fork_script(_FORK_DURING_IDENTITY_SCRIPT)
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "child exited 0\n"

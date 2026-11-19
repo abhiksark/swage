@@ -681,7 +681,7 @@ def test_a_runtime_library_of_another_machine_is_refused_at_load(
         tmp_path / "artifact", "sm_87", "--runtime-library", foreign
     )
     monkeypatch.setenv("SWAGE_ARTIFACT_DIR", str(output))
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
 
     with pytest.raises(
         RuntimeError,
@@ -728,7 +728,7 @@ def test_the_command_refuses_a_file_that_is_not_a_library(contents, tmp_path):
 def selected(written, monkeypatch):
     """Select the `sm_87` artifact and return it loaded."""
     monkeypatch.setenv("SWAGE_ARTIFACT_DIR", str(written))
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
     return _artifact.selected()
 
 
@@ -772,7 +772,7 @@ def test_a_written_artifact_survives_a_copy_that_keeps_its_modes(
     copied = tmp_path / "copied"
     shutil.copytree(written, copied)
     monkeypatch.setenv("SWAGE_ARTIFACT_DIR", str(copied))
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
 
     assert _artifact.selected().directory == copied
 
@@ -1325,7 +1325,7 @@ def _select(monkeypatch, directory):
     """
     _cuda_backend._get_driver()
     monkeypatch.setenv("SWAGE_ARTIFACT_DIR", str(directory))
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
     monkeypatch.setattr(
         _execution,
         "_ptx_memo",

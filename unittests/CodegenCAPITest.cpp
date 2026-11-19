@@ -643,8 +643,10 @@ TEST(CodegenCAPITest, ANullModuleFailsWithoutACrash) {
 
 TEST(CodegenCAPITest, RejectsTargetsOutsideTheAdmittedProcessors) {
   // Targets the syntax refuses, then processors the pinned LLVM lacks.
-  const char *const malformed[] = {"",       "sm_8",       "sm_79",
-                                   "sm_130", "compute_86", "sm_8x"};
+  // A zero-padded number names no processor: LLVM would warn about it and
+  // select code for another subtarget.
+  const char *const malformed[] = {"",           "sm_8",  "sm_79",  "sm_130",
+                                   "compute_86", "sm_8x", "sm_080", "sm_090"};
   const char *const unpinned[] = {"sm_85", "sm_99", "sm_129"};
   std::vector<std::pair<std::string, std::string>> cases;
   for (const char *target : malformed)
@@ -805,6 +807,25 @@ TEST(CodegenCAPITest, RejectsFunctionNamesPTXCannotPrint) {
 
   expectRejected(compiled, session,
                  "function name 'add.kernel' is not a valid PTX identifier");
+}
+
+TEST(CodegenCAPITest, RejectsALonePrefixCharacterAsAFunctionName) {
+  // PTX takes `_` and `$` as the first character of a longer name only, so
+  // the driver refuses a module whose entry is one of them alone.
+  for (const char *name : {"_", "$"}) {
+    SCOPED_TRACE(name);
+    Session session;
+    std::string program = fixedVectorAdd;
+    program.replace(program.find("@add_kernel"), std::strlen("@add_kernel"),
+                    std::string("@\"") + name + "\"");
+
+    Compiled compiled = session.compile(entryPoints().front().compile,
+                                        session.parse(program), name, "sm_86");
+
+    expectRejected(compiled, session,
+                   std::string("function name '") + name +
+                       "' is not a valid PTX identifier");
+  }
 }
 
 TEST(CodegenCAPITest, RejectsAModuleThatFailsVerification) {

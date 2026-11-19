@@ -287,6 +287,9 @@ Raises
     graph, a kernel that the process does not hold while
     `SWAGE_NO_COMPILE=1` is set and no artifact is selected, or a runtime
     driver failure.
+:   `NotImplementedError`: `values` that carry a forward-mode tangent, as
+    inside `torch.autograd.forward_ad.dual_level()` or `torch.func.jvp`.
+    The call records reverse-mode gradients only.
 
 The checks run in this order: the PyTorch check, `kind`, the tensor type of
 `values` and `offsets` and the grad state of `values`, `out`, the selected

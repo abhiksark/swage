@@ -22,7 +22,7 @@ change or go away.
 ## Current capability boundary
 
 Version `v0.5.2` introduced the native-wheel contract below, replacing the
-pure Python packaging of `v0.5.1`. The `v0.5.3` candidate updates build and
+pure Python packaging of `v0.5.1`. Version `v0.5.3` updates build and
 CI dependencies without changing compiler or runtime behavior. Check the
 [release page](https://github.com/abhiksark/swage/releases) for published
 artifacts. Release qualification requires the installed-wheel gates;
@@ -170,7 +170,7 @@ defines the build identity and the environment report, and
 [Troubleshooting](docs/getting-started/troubleshooting.md) lists the error
 codes.
 
-Until then, a native wheel is built from a clean checkout against the
+A native wheel can also be built from a clean checkout against the
 pinned LLVM, as the GPU workflow builds it.
 [Installation](docs/getting-started/installation.md#build-a-local-native-wheel)
 gives the full command:

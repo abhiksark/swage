@@ -222,10 +222,12 @@ _PROGRAMS = {
     "ragged_softmax_r2": _row_kernels("float")[:1],
 }
 
-# The directory `SWAGE_ARTIFACT_DIR` named when an artifact was last loaded,
-# and that artifact. One slot is enough: a process normally names one
-# directory for its whole life.
-_selected = (None, None)
+# The verified artifact of every directory `SWAGE_ARTIFACT_DIR` has named, by
+# the value of the variable. A process normally names one directory for its
+# whole life. One that returns to a directory must find its artifact here:
+# loading it again would load its runtime library again, and a loaded
+# library and its memory file are never released.
+_selected = {}
 
 
 def selected():
@@ -241,18 +243,16 @@ def selected():
             unsafe, damaged, or written for another manifest format, host,
             or `swage`. Nothing is loaded from it.
     """
-    global _selected
     named = os.environ.get(_ENVIRONMENT)
     if not named:
         return None
-    directory, artifact = _selected
-    if directory == named:
-        return artifact
-    with _runtime._compile_lock:
-        directory, artifact = _selected
-        if directory != named:
-            artifact = _Artifact(pathlib.Path(os.path.abspath(named)))
-            _selected = (named, artifact)
+    artifact = _selected.get(named)
+    if artifact is None:
+        with _runtime._compile_lock:
+            artifact = _selected.get(named)
+            if artifact is None:
+                artifact = _Artifact(pathlib.Path(os.path.abspath(named)))
+                _selected[named] = artifact
     return artifact
 
 

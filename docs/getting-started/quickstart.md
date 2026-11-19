@@ -5,9 +5,9 @@
 This tutorial takes a canonical fixed vector-add kernel from source capture
 to a verified result on an explicitly selected CPU or CUDA backend, and then
 reduces a ragged batch with the two segmented calls on CUDA. It uses the
-`v0.5.2` native-wheel contract, whose publication and release qualification
-are still pending; see [Installation](installation.md) for a local wheel
-build and the source build. Four committed scripts follow the same steps:
+native-wheel contract that `v0.5.2` introduced; see
+[Installation](installation.md) for the published wheel, a local wheel
+build, and the source build. Four committed scripts follow the same steps:
 
 - `examples/emit_fixed_vector_add.py` stops after emission, so it needs no
   GPU and no PyTorch.

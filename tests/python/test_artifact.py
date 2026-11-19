@@ -98,7 +98,7 @@ def _isolated(monkeypatch):
     """
     monkeypatch.setitem(sys.modules, "mlir_swage", None)
     monkeypatch.delenv("SWAGE_ARTIFACT_DIR", raising=False)
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
     monkeypatch.setattr(ctypes, "PyDLL", _FakeLibrary)
     driver = types.SimpleNamespace(_native_launch=None, _split_launch=None)
     monkeypatch.setattr(_cuda_backend, "_get_driver", lambda: driver)
@@ -652,6 +652,24 @@ def test_selecting_another_directory_loads_another_artifact(
     )
 
 
+def test_returning_to_a_directory_reuses_the_artifact_the_process_holds(
+    tmp_path, monkeypatch
+):
+    """Load each directory once, however often the variable returns to it."""
+    first_root = _write(tmp_path / "a", _manifest())
+    second_root = _write(tmp_path / "b", _manifest(target="sm_87"))
+    held = len(_artifact._LOADED_LIBRARIES)
+    first = _load(monkeypatch, first_root)
+    second = _load(monkeypatch, second_root)
+
+    for _ in range(3):
+        assert _load(monkeypatch, first_root) is first
+        assert _load(monkeypatch, second_root) is second
+
+    # One memory file per directory: a library is never loaded again.
+    assert len(_artifact._LOADED_LIBRARIES) == held + 2
+
+
 def test_a_kernel_lends_the_launcher_to_a_driver_without_one(
     artifact_dir, monkeypatch
 ):
@@ -804,7 +822,7 @@ def test_a_damaged_artifact_is_refused(
         _artifact.selected()
 
     assert str(error.value).startswith(message.format(root=artifact_dir))
-    assert _artifact._selected == (None, None)
+    assert _artifact._selected == {}
 
 
 def _remove_tree(root):
@@ -1259,7 +1277,7 @@ def test_a_library_whose_glibc_the_host_has_loads(tmp_path, monkeypatch):
 
     for host in ("glibc 2.34", "glibc 2.39"):
         monkeypatch.setattr(_artifact, "_host_glibc", lambda: host)
-        monkeypatch.setattr(_artifact, "_selected", (None, None))
+        monkeypatch.setattr(_artifact, "_selected", {})
         assert _load(monkeypatch, root).directory == root
 
 
@@ -1345,7 +1363,7 @@ def test_symbolic_links_are_followed_and_judged_by_their_target(
     assert artifact.kernel(*_request()) == _served()
 
     stored.chmod(0o664)
-    monkeypatch.setattr(_artifact, "_selected", (None, None))
+    monkeypatch.setattr(_artifact, "_selected", {})
     with pytest.raises(RuntimeError, match="is writable by its group"):
         _artifact.selected()
 
@@ -1734,7 +1752,11 @@ def _fake_torch(monkeypatch):
     torch.int32 = object()
     torch.Tensor = _Tensor
     torch.autograd = types.SimpleNamespace(
-        graph=types.SimpleNamespace(increment_version=lambda tensor: None)
+        graph=types.SimpleNamespace(increment_version=lambda tensor: None),
+        # No stand-in tensor is a dual tensor of forward-mode autograd.
+        forward_ad=types.SimpleNamespace(
+            unpack_dual=lambda tensor: types.SimpleNamespace(tangent=None)
+        ),
     )
     # The calls wrap their bodies against `torch.compile`; nothing compiles.
     torch.compiler = types.SimpleNamespace(disable=lambda function: function)

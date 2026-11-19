@@ -3908,6 +3908,31 @@ def test_cache_path_defaults_to_user_cache(monkeypatch):
     assert _runtime._cache_dir() == pathlib.Path("/tmp/user-cache/swage")
 
 
+def test_cache_path_needs_no_home_directory_under_xdg_cache_home(monkeypatch):
+    """Take `XDG_CACHE_HOME` for a user that has no home directory."""
+    from swage import _runtime
+
+    def no_home(cls):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.delenv("SWAGE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/user-cache")
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(no_home))
+    assert _runtime._cache_dir() == pathlib.Path("/tmp/user-cache/swage")
+
+
+def test_cache_path_reads_an_empty_xdg_cache_home_as_unset(
+    monkeypatch, tmp_path
+):
+    """Follow the XDG rule: an empty value means the default directory."""
+    from swage import _runtime
+
+    monkeypatch.delenv("SWAGE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "")
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+    assert _runtime._cache_dir() == tmp_path / ".cache" / "swage"
+
+
 def _ctypes_launch(arguments, values, grid, block=128):
     """Launch one contract through the ctypes path and decode the call.
 

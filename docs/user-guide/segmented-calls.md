@@ -408,7 +408,10 @@ Offsets created inside `torch.inference_mode()` are kept as a copy.
 Inside a function compiled by `torch.compile` a call that records a
 gradient is the same graph break, and its backward runs eagerly in the
 autograd engine. Not supported: an `out` while recording, forward-mode
-differentiation, `torch.func` transforms, and compiled autograd.
+differentiation, `torch.func` transforms, and compiled autograd. Values
+that carry a forward-mode tangent, as inside
+`torch.autograd.forward_ad.dual_level()` or `torch.func.jvp`, raise a
+`NotImplementedError` instead of returning a result without the tangent.
 [ADR-0024](../adr/ADR-0024-gradients-of-the-segmented-calls.md) records the
 decision.
 

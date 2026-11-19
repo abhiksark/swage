@@ -404,6 +404,36 @@ def test_segmented_calls_reject_values_of_another_dtype(case):
         swage.segment_softmax(values, offsets)
 
 
+@pytest.mark.parametrize("call", ["reduce", "softmax"])
+@pytest.mark.parametrize("transform", ["dual_level", "no_grad", "func_jvp"])
+def test_forward_mode_values_are_refused_instead_of_losing_the_tangent(
+    call, transform
+):
+    """Raise for a dual tensor: its result would carry no tangent."""
+    values, offsets = _host_segments()
+    tangent = torch.ones_like(values)
+
+    def run(tensor):
+        if call == "reduce":
+            return swage.segment_reduce(tensor, offsets, "sum")
+        return swage.segment_softmax(tensor, offsets)
+
+    with pytest.raises(
+        NotImplementedError,
+        match="^values must not carry a forward-mode tangent",
+    ):
+        if transform == "func_jvp":
+            torch.func.jvp(run, (values,), (tangent,))
+        else:
+            with torch.autograd.forward_ad.dual_level():
+                dual = torch.autograd.forward_ad.make_dual(values, tangent)
+                if transform == "no_grad":
+                    with torch.no_grad():
+                        run(dual)
+                else:
+                    run(dual)
+
+
 def test_segment_softmax_refuses_float64_values_with_the_reason():
     """Say why there is no float64 softmax instead of naming a dtype only."""
     values, offsets = _host_segments()

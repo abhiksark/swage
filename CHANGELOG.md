@@ -6,7 +6,35 @@ All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semantic versioning (`0.x`; anything may change).
 
-## [0.5.3] - Unreleased
+## [Unreleased]
+
+### Fixed
+
+- Raise `NotImplementedError` from `swage.segment_reduce` and
+  `swage.segment_softmax` for values that carry a forward-mode tangent, as
+  inside `torch.autograd.forward_ad.dual_level()` or `torch.func.jvp`. A
+  dual tensor used to return a result without its tangent, so the
+  forward-mode derivative was silently zero, and `torch.func.jvp` failed
+  with a storage error.
+- Refuse the kernel names `_` and `$` when compiling for CUDA, with the PTX
+  identifier diagnostic. PTX takes those characters only before another
+  one, so such a kernel used to fail at module load with
+  `CUDA_ERROR_INVALID_PTX`. The CPU backend still launches a kernel named
+  `_`.
+- Refuse zero-padded processor names such as `sm_080` with the target
+  diagnostic. They used to pass admission, after which LLVM selected another
+  subtarget: `python -m swage.compile --target sm_080` aborted the process.
+- Reset the compiler identity lock in a forked child. A child forked while
+  another thread derived the identity for the first time waited forever at
+  its first launch, emission, or environment report.
+- Read the home directory for the persistent cache only when it is needed,
+  so `XDG_CACHE_HOME` serves a user without one, and read an empty
+  `XDG_CACHE_HOME` as unset instead of caching under the working directory.
+- Keep the artifact of every directory `SWAGE_ARTIFACT_DIR` has named.
+  Returning to a directory used to load its runtime library again and keep
+  one more memory file each time.
+
+## [0.5.3] - 2026-11-08
 
 ### Changed
 
@@ -30,11 +58,12 @@ semantic versioning (`0.x`; anything may change).
 
 ### Release qualification
 
-Qualification is pending for the v0.5.3 candidate. Publication requires the
-four-ABI manylinux artifact set, byte-identical cp313 source/sdist wheels,
-security and SBOM checks, and installed-wheel A6000 correctness and runtime
-SLO checks on the candidate's reviewed `main` commit. A manual workflow
-run produces qualification evidence without publishing or attesting a tag.
+Version v0.5.3 was published on 2026-11-08. Its
+[signed-tag qualification run](https://github.com/abhiksark/swage/actions/runs/42469286672)
+validated the four-ABI manylinux artifact set, byte-identical cp313
+source/sdist wheels, security and SBOM checks, and installed-wheel A6000
+correctness and runtime SLO checks. Compiler and runtime behavior are
+unchanged from v0.5.2.
 
 ## [0.5.2] - 2026-11-07
 

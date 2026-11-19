@@ -260,12 +260,16 @@ def _single_flight(flights, key, lookup, build):
 
 def _after_fork_in_child():
     """Reset fixed compile synchronization in the forked child."""
-    global _flights_lock
+    global _flights_lock, _identity_lock
     # A flight can be published before its compile place is taken, or stay
     # published after that place is returned. Waiting for places therefore
     # cannot make the flight registry or its mutex safe to inherit.
     _flights_lock = threading.Lock()
     _compile_flights.clear()
+    # The first identity derivation holds its lock outside any compile
+    # place, so the fork does not wait for it. A child forked meanwhile
+    # derives the identity itself: the cache is still empty there.
+    _identity_lock = threading.Lock()
     _compile_lock.after_fork()
 
 
@@ -2077,10 +2081,11 @@ def _cache_dir():
     configured = os.environ.get("SWAGE_CACHE_DIR")
     if configured:
         return pathlib.Path(configured)
-    base = pathlib.Path(
-        os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")
-    )
-    return base / "swage"
+    # The home directory is read only when it is needed: a user without one
+    # can still name a cache through XDG_CACHE_HOME. An empty value means
+    # the default, as the XDG base directory specification says.
+    base = os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache"
+    return pathlib.Path(base) / "swage"
 
 
 def _check_safe(path):
