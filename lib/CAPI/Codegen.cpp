@@ -88,14 +88,19 @@ bool isPTXIdentifier(llvm::StringRef name) {
   auto isFollowing = [](char character) {
     return llvm::isAlnum(character) || character == '_' || character == '$';
   };
+  // PTX takes a letter alone, and `_` or `$` only before another character:
+  // the driver refuses a module whose entry is named `_`.
   return !name.empty() && !llvm::isDigit(name.front()) &&
+         (llvm::isAlpha(name.front()) || name.size() > 1) &&
          llvm::all_of(name, isFollowing);
 }
 
 bool isSupportedTarget(llvm::StringRef target, unsigned &value) {
   llvm::StringRef digits =
       target.consume_front(swage::nvidiaTarget().processorPrefix) ? target : "";
-  if (digits.size() < 2 || digits.size() > 3 ||
+  // A leading zero is refused: `sm_080` reads as 80 and names no processor,
+  // so LLVM would select another subtarget for it.
+  if (digits.size() < 2 || digits.size() > 3 || digits.front() == '0' ||
       !llvm::all_of(digits, llvm::isDigit))
     return false;
   return !digits.getAsInteger(10, value) && value >= 80 && value <= 129;

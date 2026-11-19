@@ -25,6 +25,11 @@ _OUT_WHILE_RECORDING = (
     "gradient allocates its result; call without out, or under "
     "torch.no_grad()"
 )
+_FORWARD_MODE = (
+    "values must not carry a forward-mode tangent: the segmented calls "
+    "record reverse-mode gradients only, and the result would drop the "
+    "tangent; differentiate with backward() or torch.autograd.grad"
+)
 
 
 def segment_reduce(values, offsets, kind, *, out=None):
@@ -104,6 +109,9 @@ def segment_reduce(values, offsets, kind, *, out=None):
             missing; CUDA is unavailable; the current stream is capturing
             a CUDA graph; or a kernel would have to be compiled while
             `SWAGE_NO_COMPILE=1` is set.
+        NotImplementedError: `values` carry a forward-mode tangent, as
+            inside `torch.autograd.forward_ad.dual_level()` or
+            `torch.func.jvp`.
     """
     return _untraced(_segment_reduce)(values, offsets, kind, out=out)
 
@@ -233,6 +241,9 @@ def segment_softmax(values, offsets, *, out=None):
             unavailable; the current stream is capturing a CUDA graph; or
             the kernel would have to be compiled while `SWAGE_NO_COMPILE=1`
             is set.
+        NotImplementedError: `values` carry a forward-mode tangent, as
+            inside `torch.autograd.forward_ad.dual_level()` or
+            `torch.func.jvp`.
     """
     return _untraced(_segment_softmax)(values, offsets, out=out)
 
@@ -376,10 +387,15 @@ def _records_gradient(torch, values, out):
         ValueError: The call records a gradient and `out` is given. The
             result of such a call is the output of an autograd node, which
             the call allocates.
+        NotImplementedError: `values` carry a forward-mode tangent. A dual
+            tensor does not require grad, so the call would take the path
+            that records nothing and return a result without the tangent.
     """
     recording = values.requires_grad and torch.is_grad_enabled()
     if recording and out is not None:
         raise ValueError(_OUT_WHILE_RECORDING)
+    if torch.autograd.forward_ad.unpack_dual(values).tangent is not None:
+        raise NotImplementedError(_FORWARD_MODE)
     return recording
 
 
