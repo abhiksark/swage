@@ -21,8 +21,8 @@ Install a native `swage-compiler` wheel containing the self-contained private
 `mlir_swage` compiler, alongside CUDA-enabled PyTorch and an accessible NVIDIA
 GPU and driver. Follow [Installation](../getting-started/installation.md) and
 the [support matrix](support-matrix.md). A
-frontend-only editable installation is not sufficient. The v0.5.2 source
-contract remains pending publication and release qualification.
+frontend-only editable installation is not sufficient, and neither is the
+pure Python v0.5.1 wheel: native wheels start with v0.5.2.
 
 Run measurements outside the checkout, with `PYTHONPATH` unset, so `swage`
 resolves from the installed wheel. The benchmark rejects a nonempty

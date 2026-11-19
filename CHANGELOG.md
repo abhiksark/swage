@@ -6,7 +6,7 @@ All notable changes to Swage are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 semantic versioning (`0.x`; anything may change).
 
-## [0.5.3] - Unreleased
+## [0.5.3] - 2026-11-08
 
 ### Changed
 
@@ -30,11 +30,12 @@ semantic versioning (`0.x`; anything may change).
 
 ### Release qualification
 
-Qualification is pending for the v0.5.3 candidate. Publication requires the
-four-ABI manylinux artifact set, byte-identical cp313 source/sdist wheels,
-security and SBOM checks, and installed-wheel A6000 correctness and runtime
-SLO checks on the candidate's reviewed `main` commit. A manual workflow
-run produces qualification evidence without publishing or attesting a tag.
+Version v0.5.3 was published on 2026-11-08. Its
+[signed-tag qualification run](https://github.com/abhiksark/swage/actions/runs/42469286672)
+validated the four-ABI manylinux artifact set, byte-identical cp313
+source/sdist wheels, security and SBOM checks, and installed-wheel A6000
+correctness and runtime SLO checks. Compiler and runtime behavior are
+unchanged from v0.5.2.
 
 ## [0.5.2] - 2026-11-07
 
